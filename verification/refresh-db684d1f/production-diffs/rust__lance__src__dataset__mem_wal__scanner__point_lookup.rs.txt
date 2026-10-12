@@ -1,0 +1,125 @@
+@@ -36,7 +36,7 @@ use crate::dataset::mem_wal::{TOMBSTONE, relax_non_pk_nullability};
+   36  use super::collector::LsmDataSourceCollector;
+   37  use super::data_source::LsmDataSource;
+   38  use super::exec::{BloomFilterGuardExec, CoalesceFirstExec, compute_pk_hash_from_scalars};
+   39 -use super::generation_read::GenerationRead;
+   39 +use super::generation_read::{GenerationRead, memtable_matches_table};
+   40  use super::projection::{
+   41      DISTANCE_COLUMN, build_scanner_projection, canonical_output_schema, force_schema, null_columns,
+   42      project_to_canonical, validate_projection_names, wants_row_address, wants_row_id,
+
+@@ -116,6 +116,18 @@ pub struct LsmPointLookupPlanner {
+  116      /// generation's columns to the table's. Defaults to `base_schema`, which
+  117      /// carries them when the caller built it from a Lance schema.
+  118      identity_schema: SchemaRef,
+  119 +    /// Whether every in-memory memtable uses the table's current schema. The
+  120 +    /// fast paths read columns by the table's names, so if any memtable was
+  121 +    /// created before a schema change, lookups take the slower plan path.
+  122 +    in_memory_matches_table: bool,
+  123 +}
+  124 +
+  125 +/// Whether every in-memory memtable `collector` holds matches `table_schema`.
+  126 +fn in_memory_matches_table(collector: &LsmDataSourceCollector, table_schema: &Schema) -> bool {
+  127 +    collector
+  128 +        .in_memory_refs_newest_first()
+  129 +        .iter()
+  130 +        .all(|m| memtable_matches_table(&m.schema, table_schema))
+  131  }
+  132  
+  133  impl LsmPointLookupPlanner {
+
+@@ -132,6 +144,7 @@ impl LsmPointLookupPlanner {
+  144          base_schema: SchemaRef,
+  145      ) -> Result<Self> {
+  146          let none_target = canonical_output_schema(None, &base_schema, &pk_columns, false)?;
+  147 +        let in_memory_matches_table = in_memory_matches_table(&collector, &base_schema);
+  148          Ok(Self {
+  149              collector,
+  150              pk_columns,
+
+@@ -145,11 +158,13 @@ impl LsmPointLookupPlanner {
+  158              task_ctx: SessionContext::new().task_ctx(),
+  159              visibility: MemTableVisibility::Published,
+  160              identity_schema: base_schema,
+  161 +            in_memory_matches_table,
+  162          })
+  163      }
+  164  
+  165      /// Supply the table's field ids, when `base_schema` was built without them.
+  166      pub fn with_identity_schema(mut self, identity_schema: SchemaRef) -> Self {
+  167 +        self.in_memory_matches_table = in_memory_matches_table(&self.collector, &identity_schema);
+  168          self.identity_schema = identity_schema;
+  169          self
+  170      }
+
+@@ -396,7 +411,8 @@ impl LsmPointLookupPlanner {
+  411          // requirement avoids the `OrderableScalarValue` panic on comparing
+  412          // mismatched variants — the plan path coerces, so a coercible-but-
+  413          // different literal (e.g. `Int64` for an `Int32` PK) falls back.
+  399 -        let fast_eligible = pk_values.len() == 1
+  414 +        let fast_eligible = self.in_memory_matches_table
+  415 +            && pk_values.len() == 1
+  416              && self.pk_columns.len() == 1
+  417              && self
+  418                  .base_schema
+
+@@ -521,7 +537,8 @@ impl LsmPointLookupPlanner {
+  537              .first()
+  538              .and_then(|c| self.base_schema.field_with_name(c).ok())
+  539              .map(|f| f.data_type().clone());
+  524 -        let fast_eligible = self.pk_columns.len() == 1
+  540 +        let fast_eligible = self.in_memory_matches_table
+  541 +            && self.pk_columns.len() == 1
+  542              && !target.fields().iter().any(|f| is_system_column(f.name()))
+  543              && pk_type
+  544                  .as_ref()
+
+@@ -757,8 +774,33 @@ impl LsmPointLookupPlanner {
+  774                  // Carry `_tombstone` through so the post-coalesce filter can drop
+  775                  // a deleted key; it survives the sort below.
+  776                  let cols = cols_with_tombstone(&cols, schema.column_with_name(TOMBSTONE).is_some());
+  760 -                scanner.project(&cols.iter().map(|s| s.as_str()).collect::<Vec<_>>())?;
+  761 -                scanner.filter_expr(filter.clone());
+  777 +                // A memtable created before a schema change still uses the old
+  778 +                // column names, so read it like a flushed generation of that age.
+  779 +                let generation =
+  780 +                    (!memtable_matches_table(schema, &self.identity_schema)).then(|| {
+  781 +                        GenerationRead::for_memtable(
+  782 +                            schema,
+  783 +                            &self.identity_schema,
+  784 +                            &self.pk_columns,
+  785 +                            cols.clone(),
+  786 +                        )
+  787 +                    });
+  788 +                match &generation {
+  789 +                    None => {
+  790 +                        scanner.project(&cols.iter().map(|s| s.as_str()).collect::<Vec<_>>())?;
+  791 +                        scanner.filter_expr(filter.clone());
+  792 +                    }
+  793 +                    Some(generation) => {
+  794 +                        let stored_filter = generation.to_stored(filter).ok_or_else(|| {
+  795 +                            lance_core::Error::internal(format!(
+  796 +                                "point lookup: `{filter}` names a column memtable {} does not store",
+  797 +                                source.generation()
+  798 +                            ))
+  799 +                        })?;
+  800 +                        scanner.project(&generation.stored_projection())?;
+  801 +                        scanner.filter_expr(stored_filter);
+  802 +                    }
+  803 +                }
+  804                  // Expose `_rowid` (the BatchStore row offset, monotonic with
+  805                  // insert order) so we can pick the most recently inserted
+  806                  // duplicate below. Without this, a `FilterExec → LIMIT 1`
+
+@@ -766,6 +808,11 @@ impl LsmPointLookupPlanner {
+  808                  // multiple rows sharing the target primary key.
+  809                  scanner.with_row_id();
+  810                  let raw = Box::pin(scanner.create_plan()).await?;
+  811 +                // `_rowid` is not a table column; it passes through unchanged.
+  812 +                let raw = match &generation {
+  813 +                    None => raw,
+  814 +                    Some(generation) => generation.reconcile(raw)?,
+  815 +                };
+  816                  // The filter already restricts to the exact PK value, so the
+  817                  // scan yields that key's insert history. Within the active
+  818                  // memtable larger `_rowid` = newer insert, so sorting `_rowid`

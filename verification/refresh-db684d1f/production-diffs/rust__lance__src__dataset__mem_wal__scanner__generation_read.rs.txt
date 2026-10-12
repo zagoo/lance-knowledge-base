@@ -1,0 +1,410 @@
+@@ -10,7 +10,7 @@
+   10  //! scan, point lookup, vector search, full-text search — goes through
+   11  //! [`GenerationRead`] so they resolve a generation the same way.
+   12  
+   13 -use std::collections::HashMap;
+   13 +use std::collections::{HashMap, HashSet};
+   14  use std::sync::Arc;
+   15  
+   16  use arrow_schema::{DataType, Field, Fields, Schema, SchemaRef};
+
+@@ -21,10 +21,12 @@ use datafusion::physical_plan::ExecutionPlan;
+   21  use datafusion::physical_plan::filter::FilterExec;
+   22  use datafusion::prelude::Expr;
+   23  use datafusion_physical_expr::create_physical_expr;
+   24 +use lance_core::datatypes::format_field_path_minimal;
+   25  use lance_core::is_system_column;
+   26  use lance_core::{Error, Result};
+   27  
+   28  use super::exec::ReconcileExec;
+   29 +use super::projection::{is_auto_managed, resolve_data_fields_or_drop};
+   30  use crate::dataset::mem_wal::reconcile::{Plan, field_id_of, without_field_id};
+   31  use crate::dataset::mem_wal::{TOMBSTONE, arrow_schema_with_field_ids};
+   32  
+
+@@ -45,12 +47,15 @@ use crate::dataset::mem_wal::{TOMBSTONE, arrow_schema_with_field_ids};
+   47  pub(super) struct GenerationRead {
+   48      /// The generation's own schema, carrying its field ids.
+   49      stored_schema: Schema,
+   48 -    /// The generation's name for a column → the table's name for it, matched
+   49 -    /// by field id. Carried as names because everything downstream is
+   50 -    /// name-addressed: a scan projection takes names, and so do the column
+   51 -    /// references in a DataFusion predicate. Columns the table no longer has
+   52 -    /// are absent.
+   50 +    /// The table's name for a column → the name this generation stores it
+   51 +    /// under, matched by field id. Kept as names because scan projections and
+   52 +    /// predicates refer to columns by name. Columns the table no longer has are
+   53 +    /// absent.
+   54      names: HashMap<String, String>,
+   55 +    /// The stored names that belong to one of the table's columns.
+   56 +    stored_columns: HashSet<String>,
+   57 +    /// Like `names`, but for full-text paths.
+   58 +    fts_names: HashMap<String, String>,
+   59      /// The table's schema, also carrying field ids.
+   60      table_schema: SchemaRef,
+   61      pk_columns: Vec<String>,
+
+@@ -68,12 +73,53 @@ impl GenerationRead {
+   73          pk_columns: &[String],
+   74          projection: Vec<String>,
+   75      ) -> Self {
+   71 -        let stored_schema = arrow_schema_with_field_ids(dataset_schema);
+   72 -        let names = stored_names(&stored_schema, table_schema);
+   76 +        Self::from_stored(
+   77 +            arrow_schema_with_field_ids(dataset_schema),
+   78 +            table_schema,
+   79 +            pk_columns,
+   80 +            projection,
+   81 +        )
+   82 +    }
+   83 +
+   84 +    /// Read a memtable under the table's schema.
+   85 +    ///
+   86 +    /// A memtable keeps the schema it was created with, so one created before a
+   87 +    /// schema change resolves like a flushed generation does.
+   88 +    pub(super) fn for_memtable(
+   89 +        memtable_schema: &Schema,
+   90 +        table_schema: &SchemaRef,
+   91 +        pk_columns: &[String],
+   92 +        projection: Vec<String>,
+   93 +    ) -> Self {
+   94 +        Self::from_stored(
+   95 +            memtable_schema.clone(),
+   96 +            table_schema,
+   97 +            pk_columns,
+   98 +            projection,
+   99 +        )
+  100 +    }
+  101 +
+  102 +    fn from_stored(
+  103 +        stored_schema: Schema,
+  104 +        table_schema: &SchemaRef,
+  105 +        pk_columns: &[String],
+  106 +        projection: Vec<String>,
+  107 +    ) -> Self {
+  108 +        let (names, fts_names) = stored_names(&stored_schema, table_schema);
+  109 +        let stored_columns = names.keys().cloned().collect::<HashSet<_>>();
+  110 +        // Invert once so a lookup is a map get, not a scan.
+  111 +        let invert = |m: HashMap<String, String>| {
+  112 +            m.into_iter()
+  113 +                .map(|(stored, in_table)| (in_table, stored))
+  114 +                .collect::<HashMap<_, _>>()
+  115 +        };
+  116 +        let (names, fts_names) = (invert(names), invert(fts_names));
+  117          let (table_schema, pk_columns) = (Arc::clone(table_schema), pk_columns.to_vec());
+  118          Self {
+  119              stored_schema,
+  120              names,
+  121 +            fts_names,
+  122 +            stored_columns,
+  123              table_schema,
+  124              pk_columns,
+  125              projection,
+
+@@ -82,10 +128,31 @@ impl GenerationRead {
+  128  
+  129      /// The generation's name for `column`. `column` is the table's name for it.
+  130      pub(super) fn stored_name(&self, column: &str) -> Option<&str> {
+   85 -        self.names
+  131 +        self.names.get(column).map(String::as_str)
+  132 +    }
+  133 +
+  134 +    /// [`Self::stored_name`] for a full-text path, which leaves out a list's
+  135 +    /// element name. A separate map because a struct child named `item` inside
+  136 +    /// a list has the same path as the list element.
+  137 +    pub(super) fn stored_fts_name(&self, column: &str) -> Option<&str> {
+  138 +        self.fts_names.get(column).map(String::as_str)
+  139 +    }
+  140 +
+  141 +    /// The primary key columns under this generation's names.
+  142 +    ///
+  143 +    /// Primary key columns cannot be added or dropped, so a missing one is an
+  144 +    /// error.
+  145 +    pub(super) fn stored_pk_columns(&self) -> Result<Vec<String>> {
+  146 +        self.pk_columns
+  147              .iter()
+   87 -            .find(|(_, in_table)| *in_table == column)
+   88 -            .map(|(in_generation, _)| in_generation.as_str())
+  148 +            .map(|pk| {
+  149 +                self.stored_name(pk).map(str::to_string).ok_or_else(|| {
+  150 +                    Error::internal(format!(
+  151 +                        "primary key column `{pk}` is not stored by a generation of this table"
+  152 +                    ))
+  153 +                })
+  154 +            })
+  155 +            .collect()
+  156      }
+  157  
+  158      /// Also produce `column`, which the caller needs even though it did not ask
+
+@@ -194,6 +261,20 @@ impl GenerationRead {
+  261          stored_field.data_type() == declared.data_type()
+  262      }
+  263  
+  264 +    /// [`Self::reconcile`], then apply a filter that could only run once rows
+  265 +    /// carry the table's names.
+  266 +    pub(super) fn reconcile_above(
+  267 +        &self,
+  268 +        scan: Arc<dyn ExecutionPlan>,
+  269 +        above: &Option<Expr>,
+  270 +    ) -> Result<Arc<dyn ExecutionPlan>> {
+  271 +        let reconciled = self.reconcile(scan)?;
+  272 +        match above {
+  273 +            Some(expr) => filter_above(reconciled, expr),
+  274 +            None => Ok(reconciled),
+  275 +        }
+  276 +    }
+  277 +
+  278      /// Bring the scan's output back to the table's names and shapes: renames
+  279      /// followed, columns the generation never stored filled with nulls, nested
+  280      /// columns rebuilt to the shape the table declares.
+
+@@ -204,7 +285,7 @@ impl GenerationRead {
+  285      pub(super) fn reconcile(&self, scan: Arc<dyn ExecutionPlan>) -> Result<Arc<dyn ExecutionPlan>> {
+  286          let source =
+  287              self.with_only_table_field_ids(with_ids_from(&scan.schema(), &self.stored_schema));
+  207 -        let target = self.target(&source);
+  288 +        let target = self.target(&source)?;
+  289          let plan = Plan::resolve(&source, &target, &self.pk_columns)?.emitting_plain_schema();
+  290          if plan.is_identity() {
+  291              return Ok(scan);
+
+@@ -224,7 +305,7 @@ impl GenerationRead {
+  305          let fields: Vec<Field> = source
+  306              .fields()
+  307              .iter()
+  227 -            .map(|field| match self.names.contains_key(field.name()) {
+  308 +            .map(|field| match self.stored_columns.contains(field.name()) {
+  309                  true => field.as_ref().clone(),
+  310                  false => without_field_id(field),
+  311              })
+
+@@ -239,38 +320,79 @@ impl GenerationRead {
+  320      /// store non-key columns as nullable so a strict table can hold a tombstone.
+  321      /// Each arm's canonical projection restores the table's nullability once
+  322      /// tombstones are dropped.
+  242 -    fn target(&self, source: &Schema) -> SchemaRef {
+  243 -        let mut fields: Vec<Field> = self
+  323 +    fn target(&self, source: &Schema) -> Result<SchemaRef> {
+  324 +        // Resolve like the canonical projection so both produce the same shape.
+  325 +        // Unknown names are dropped, not refused: a memtable can predate them.
+  326 +        let data_names: Vec<String> = self
+  327              .projection
+  328              .iter()
+  246 -            .filter_map(|name| {
+  247 -                let declared = self.table_schema.field_with_name(name).ok()?;
+  329 +            .filter(|name| !is_auto_managed(name))
+  330 +            .cloned()
+  331 +            .collect();
+  332 +        let resolved = resolve_data_fields_or_drop(&data_names, &self.table_schema)?;
+  333 +        // The resolver renumbers field ids, and `Plan::resolve` matches by id,
+  334 +        // so put the table's ids back.
+  335 +        let resolved = with_ids_from(
+  336 +            &Schema::new(
+  337 +                resolved
+  338 +                    .iter()
+  339 +                    .map(|f| f.as_ref().clone())
+  340 +                    .collect::<Vec<_>>(),
+  341 +            ),
+  342 +            &self.table_schema,
+  343 +        );
+  344 +        let mut fields: Vec<Field> = resolved
+  345 +            .fields()
+  346 +            .iter()
+  347 +            .map(|field| {
+  348                  // Absent from the source means synthesized, so nullable.
+  349                  let nullable = self
+  250 -                    .stored_name(name)
+  350 +                    .stored_name(field.name())
+  351                      .and_then(|stored_column| source.field_with_name(stored_column).ok())
+  352                      .is_none_or(|f| f.is_nullable());
+  253 -                Some(declared.clone().with_nullable(nullable))
+  353 +                field.as_ref().clone().with_nullable(nullable)
+  354              })
+  355              .collect();
+  356          // A generation's own columns are not the table's, so they pass through
+  357          // as the generation has them.
+  358          for field in source.fields() {
+  259 -            let is_the_tables = self.names.contains_key(field.name());
+  359 +            let is_the_tables = self.stored_columns.contains(field.name());
+  360              if !is_the_tables && fields.iter().all(|f| f.name() != field.name()) {
+  361                  fields.push(field.as_ref().clone());
+  362              }
+  363          }
+  264 -        Arc::new(Schema::new(fields))
+  364 +        Ok(Arc::new(Schema::new(fields)))
+  365      }
+  366  }
+  367  
+  368 +/// Whether a memtable stores the table's columns exactly as the table declares
+  369 +/// them, so it can skip [`GenerationRead`].
+  370 +///
+  371 +/// Compared by position: same columns in the same order, then only `_tombstone`.
+  372 +pub(super) fn memtable_matches_table(memtable_schema: &Schema, table_schema: &Schema) -> bool {
+  373 +    let stored = memtable_schema.fields();
+  374 +    let declared = table_schema.fields();
+  375 +    let extra = &stored[declared.len().min(stored.len())..];
+  376 +    stored.len() >= declared.len()
+  377 +        && extra.iter().all(|f| f.name() == TOMBSTONE)
+  378 +        && stored
+  379 +            .iter()
+  380 +            .zip(declared.iter())
+  381 +            .all(|(stored, declared)| {
+  382 +                stored.name() == declared.name()
+  383 +                    && match (field_id_of(stored), field_id_of(declared)) {
+  384 +                        (Some(stored_id), Some(declared_id)) => {
+  385 +                            stored_id == declared_id && stored.data_type() == declared.data_type()
+  386 +                        }
+  387 +                        // Without ids on both sides, compare types ignoring nested ids.
+  388 +                        _ => stored.data_type().equals_datatype(declared.data_type()),
+  389 +                    }
+  390 +            })
+  391 +}
+  392 +
+  393  /// Run `expr` above `plan`, for a predicate that could not be pushed into the
+  394  /// generation's own scan.
+  270 -pub(super) fn filter_above(
+  271 -    plan: Arc<dyn ExecutionPlan>,
+  272 -    expr: &Expr,
+  273 -) -> Result<Arc<dyn ExecutionPlan>> {
+  395 +fn filter_above(plan: Arc<dyn ExecutionPlan>, expr: &Expr) -> Result<Arc<dyn ExecutionPlan>> {
+  396      let schema = plan.schema();
+  397      let df_schema = DFSchema::try_from(schema.as_ref().clone())
+  398          .map_err(|e| Error::internal(format!("build a filter schema for `{expr}`: {e}")))?;
+
+@@ -285,36 +407,112 @@ pub(super) fn filter_above(
+  407  /// Each column the generation stores, keyed by the name it stores it under,
+  408  /// mapped to the table's name for it. Paired by field id, since a rename
+  409  /// changes the name and keeps the id.
+  288 -fn stored_names(stored_schema: &Schema, table_schema: &Schema) -> HashMap<String, String> {
+  289 -    let by_id: HashMap<i32, &str> = table_schema
+  290 -        .fields()
+  410 +fn stored_names(
+  411 +    stored_schema: &Schema,
+  412 +    table_schema: &Schema,
+  413 +) -> (HashMap<String, String>, HashMap<String, String>) {
+  414 +    let table = field_paths(table_schema);
+  415 +    // Keyed by id and path style: a list element has a projection path and a
+  416 +    // full-text path, and mixing them would give the index a path it lacks.
+  417 +    let by_id: HashMap<(i32, bool), &String> = table
+  418          .iter()
+  292 -        .filter_map(|f| field_id_of(f).map(|id| (id, f.name().as_str())))
+  419 +        .filter_map(|(id, elided, path)| id.map(|id| ((id, *elided), path)))
+  420          .collect();
+  294 -    // A caller that supplies no ids leaves only names to match on.
+  421 +    // Without ids, match by name: a path maps to itself if the table has it.
+  422      if by_id.is_empty() {
+  296 -        return stored_schema
+  297 -            .fields()
+  298 -            .iter()
+  299 -            .filter(|f| f.name() != TOMBSTONE && !is_system_column(f.name()))
+  300 -            .filter(|f| table_schema.field_with_name(f.name()).is_ok())
+  301 -            .map(|f| (f.name().clone(), f.name().clone()))
+  302 -            .collect();
+  423 +        let known: std::collections::HashSet<&String> =
+  424 +            table.iter().map(|(_, _, path)| path).collect();
+  425 +        let mut physical = HashMap::new();
+  426 +        let mut fts = HashMap::new();
+  427 +        for (_, elided, path) in field_paths(stored_schema) {
+  428 +            if !known.contains(&path) {
+  429 +                continue;
+  430 +            }
+  431 +            let into = if elided { &mut fts } else { &mut physical };
+  432 +            into.insert(path.clone(), path);
+  433 +        }
+  434 +        return (physical, fts);
+  435 +    }
+  436 +    let mut physical = HashMap::new();
+  437 +    let mut fts = HashMap::new();
+  438 +    for (id, elided, stored_path) in field_paths(stored_schema) {
+  439 +        let Some(id) = id else { continue };
+  440 +        let Some(table_path) = by_id.get(&(id, elided)) else {
+  441 +            continue;
+  442 +        };
+  443 +        let into = if elided { &mut fts } else { &mut physical };
+  444 +        into.insert(stored_path, (*table_path).clone());
+  445 +    }
+  446 +    (physical, fts)
+  447 +}
+  448 +
+  449 +/// The fields nested inside `data_type`, each with its own field id.
+  450 +fn nested_children(data_type: &DataType) -> Vec<&Arc<Field>> {
+  451 +    match data_type {
+  452 +        DataType::Struct(children) => children.iter().collect(),
+  453 +        DataType::List(element)
+  454 +        | DataType::LargeList(element)
+  455 +        | DataType::FixedSizeList(element, _)
+  456 +        | DataType::Map(element, _) => vec![element],
+  457 +        _ => Vec::new(),
+  458 +    }
+  459 +}
+  460 +
+  461 +/// Every field in the schema, nested ones included, as (field id, is full-text
+  462 +/// path, dotted path).
+  463 +///
+  464 +/// Fields inside a list get both paths: a projection writes `tags.item.body`,
+  465 +/// full-text search writes `tags.body`. `_tombstone` and system columns are
+  466 +/// skipped because their ids collide with the table's.
+  467 +fn field_paths(schema: &Schema) -> Vec<(Option<i32>, bool, String)> {
+  468 +    /// `elided` is `physical` without the list element names.
+  469 +    fn walk(
+  470 +        field: &Field,
+  471 +        physical: &mut Vec<String>,
+  472 +        elided: &mut Vec<String>,
+  473 +        in_list: bool,
+  474 +        out: &mut Vec<(Option<i32>, bool, String)>,
+  475 +    ) {
+  476 +        physical.push(field.name().clone());
+  477 +        if !in_list {
+  478 +            elided.push(field.name().clone());
+  479 +        }
+  480 +        // Not the SQL form: its backtick quoting would stop matching the names
+  481 +        // used by index metadata and projections.
+  482 +        let id = field_id_of(field);
+  483 +        let as_path = |segments: &[String]| {
+  484 +            format_field_path_minimal(&segments.iter().map(String::as_str).collect::<Vec<_>>())
+  485 +        };
+  486 +        let physical_path = as_path(physical);
+  487 +        // Every field gets a full-text path, so full-text lookups never need the
+  488 +        // projection map, where another field can have the same path.
+  489 +        if !in_list {
+  490 +            out.push((id, true, as_path(elided)));
+  491 +        }
+  492 +        out.push((id, false, physical_path));
+  493 +        let list = matches!(
+  494 +            field.data_type(),
+  495 +            DataType::List(_) | DataType::LargeList(_) | DataType::FixedSizeList(..)
+  496 +        );
+  497 +        for child in nested_children(field.data_type()) {
+  498 +            walk(child, physical, elided, list, out);
+  499 +        }
+  500 +        physical.pop();
+  501 +        if !in_list {
+  502 +            elided.pop();
+  503 +        }
+  504      }
+  304 -    stored_schema
+  505 +
+  506 +    let mut out = Vec::new();
+  507 +    let (mut physical, mut elided) = (Vec::new(), Vec::new());
+  508 +    for field in schema
+  509          .fields()
+  510          .iter()
+  307 -        // A generation's own columns are numbered in its own schema, so their
+  308 -        // ids collide with whatever the table gave those numbers. They are not
+  309 -        // the table's columns and are never resolved to one.
+  511          .filter(|f| f.name() != TOMBSTONE && !is_system_column(f.name()))
+  311 -        .filter_map(|f| {
+  312 -            let id = field_id_of(f)?;
+  313 -            by_id
+  314 -                .get(&id)
+  315 -                .map(|name| (f.name().clone(), name.to_string()))
+  316 -        })
+  317 -        .collect()
+  512 +    {
+  513 +        walk(field, &mut physical, &mut elided, false, &mut out);
+  514 +    }
+  515 +    out
+  516  }
+  517  
+  518  /// Put back the field ids a scan's output schema drops, so the reconciliation

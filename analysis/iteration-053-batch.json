@@ -1,0 +1,498 @@
+{
+  "iteration": 53,
+  "previous_goal_turn_classification": "progress",
+  "files": [
+    {
+      "path": "rust/lance-file/src/versions/v2_0/mod.rs",
+      "module": "L1-modules/rust-lance-file-composition.md",
+      "reviewed": true,
+      "role": "Public V2_0 composition module: header-inclusive physical column mapping, external-metadata structural-header normalization, original array field strategy and concrete writer factories.",
+      "ranges": [
+        [
+          1,
+          23,
+          "SPDX/module documentation and imports bind BTreeMap/Arc, Bytes, core Field/Schema/Result, PageInfo and encoder traits, object Writer and local ReadProjection/options. Private reader/writer children own concrete mechanisms. No IO is executed by module initialization."
+        ],
+        [
+          24,
+          37,
+          "cfg(test) exposes test_projection_length pub(crate); metadata decoding/finalization/global-buffer validation are pub(crate) reexports. Three projection constructors and Writer are public reexports. Crate-internal read_projection returns the exact V2_0 reader projection Arc, without additional validation."
+        ],
+        [
+          38,
+          49,
+          "Public physical_column_count returns one for Blob or packed-struct field (suppress descendants); otherwise one plus recursive children sum. Ordinary structs/lists contribute their own header column and their descendants. Counts use unchecked usize arithmetic and recursion proportional to field depth; invalid schema/type consistency is not checked."
+        ],
+        [
+          50,
+          67,
+          "Public data_file_columns allocates parallel Vec<i32> field IDs/column indices and traverses from signed counter0. pub(super) field_id_to_column_index consumes zipped vectors, casts both IDs and indices to u32 and collects BTreeMap; duplicate IDs keep the later entry, negative IDs are not rejected. This map is a projection lookup, not schema validation."
+        ],
+        [
+          68,
+          83,
+          "Private append_physical_fields appends each field before descendants, increments signed i32 column counter, recurses except for Blob/packed struct. Root and sibling order are preserved; empty schema gives empty vectors. No checked overflow, ID assignment, capacity estimate or cycle/depth guard is added."
+        ],
+        [
+          84,
+          104,
+          "Private is_external_metadata_structural_header walks the same physical traversal until target column. At the match return logical_type.is_struct() && !is_packed_struct(); there is no explicit !is_blob() in the match classification. Otherwise increment usize cursor and recurse only for non-Blob/nonpacked fields. Out-of-range target returns None. The search mutates only its local cursor and returns immediately on match."
+        ],
+        [
+          105,
+          116,
+          "pub(super) should_copy_external_metadata_column defaults missing target classification to false; return !is_header || !has_existing_pages. Thus a recognized ordinary structural header with existing pages is skipped; first header and every nonheader or unknown column is copied. Repeated calls rescan schema; no column bounds error is emitted."
+        ],
+        [
+          117,
+          133,
+          "pub(super) finalize_external_metadata_column rescans classification. If header and pages nonempty, replace only first page num_rows with supplied u64 and priority with0, then truncate to one page. Encoding and buffer descriptors of first page survive; later page metadata drops. Empty pages/nonheader/out-of-range target stay unchanged. It returns unit, does not validate row count, fetch/copy data, or rollback prior writes."
+        ],
+        [
+          134,
+          147,
+          "Public encoding_strategy allocates ArrayFieldEncodingStrategy::new behind Arc<dyn FieldEncodingStrategy>, without CompressionParams. create_writer consumes object writer/schema/options and directly propagates Writer::try_new result; concrete validation and ownership cleanup are delegated."
+        ],
+        [
+          148,
+          155,
+          "Public create_lazy_writer consumes object writer/options and returns Writer::new_lazy without Result. Documentation says first batch supplies schema; no inference is performed in this wrapper."
+        ],
+        [
+          156,
+          164,
+          "Public encode_self_described_batch and encode_mini_batch borrow EncodedBatch and delegate writer::concat_lance_footer with true/false respectively, returning Result<Bytes>. They do not locally validate EncodedBatch, inspect file version or write an object. No inline tests or unsafe code occur in this module."
+        ]
+      ],
+      "limits": "Every physical line was read in ANALYZE53. No source execution/build/test was performed. Exact version reader/writer bodies and compression/encoder helper internals remain separately pending; delegated calls are not evidence of their full behavior. "
+    },
+    {
+      "path": "rust/lance-file/src/versions/v2_1/mod.rs",
+      "module": "L1-modules/rust-lance-file-composition.md",
+      "reviewed": true,
+      "role": "Public V2_1 composition module. It selects an ordered field-encoder and page-mechanism policy, reexports its exact reader/writer surface, and delegates physical column mapping to shared structural code.",
+      "ranges": [
+        [
+          1,
+          34,
+          "SPDX/version docs and imports connect CompressionParams, field strategy/context/encoder traits, primitive page mechanisms, binary Blob/list/struct helpers, core error/schema and object Writer. compression/reader/writer are private child modules. Shared structural reader is imported for leaf mapping."
+        ],
+        [
+          35,
+          49,
+          "Public projection constructor and Writer reexports; cfg(test) test_projection_length and metadata decode/finish/global-buffer methods are pub(crate). read_projection constructs shared structural ReadProjection with exact reader::decode_column function pointer; shared projection mechanics do not select a more recent grammar."
+        ],
+        [
+          50,
+          63,
+          "physical_column_count and data_file_columns are public leaf-layout forwards; pub(super) field_id_to_column_index forwards the map construction. These add no validation and inherit shared Blob/packed/leaf handling and signed counter/cast behavior."
+        ],
+        [
+          64,
+          80,
+          "Private Debug FieldStrategy owns PrimitiveFieldEncoding. Its trait create_field_encoder borrows field/context and mutable ColumnIndexSequence, first tries binary Blob; helper Err aborts, Some returns immediately, None continues. No speculative rollback of index state is implemented here."
+        ],
+        [
+          81,
+          93,
+          "If unhandled field is_blob, return InvalidInput source naming field and Arrow datatype. Otherwise try primitive and return success immediately. Primitive helper errors propagate before the explicit compound-type guards."
+        ],
+        [
+          94,
+          107,
+          "After primitive declines, direct FixedSizeList whose item datatype is Struct returns NotSupported with selected-format message; Map likewise returns NotSupported. The guard only pattern-matches immediate FSL<Struct>, not every possible nested list shape; overall acceptance also depends on primitive/helper recognition."
+        ],
+        [
+          108,
+          124,
+          "Try list then struct; each error propagates and first Some wins. If neither recognizes field, return NotSupported naming Lance v2.1, field and datatype. Strategy dispatch itself neither encodes data nor performs async IO."
+        ],
+        [
+          125,
+          135,
+          "encoding_strategy consumes CompressionParams into Arc<compression::Strategy>, builds PrimitiveFieldEncoding with ordered reject_sparse then dense_u16 mechanisms, wraps private FieldStrategy in Arc<dyn FieldEncodingStrategy>. There is no constant-page mechanism in this list. Actual page applicability and byte encoding are delegated."
+        ],
+        [
+          136,
+          154,
+          "Public create_writer calls Writer::try_new; create_writer_with_compression passes explicit CompressionParams to try_new_with_compression. Both consume object writer, Schema/options and return Result<Writer>; no default compression values or validation are supplied locally."
+        ],
+        [
+          155,
+          171,
+          "Public create_lazy_writer and create_lazy_writer_with_compression delegate corresponding infallible new_lazy constructors with options and optional explicit tuning. Schema inference from first batch is documented, not implemented at this layer."
+        ],
+        [
+          172,
+          180,
+          "encode_self_described_batch and encode_mini_batch call this exact version writer concat_lance_footer with true/false. Result<Bytes> propagates; no local version/metadata validation and no inline tests/unsafe code."
+        ]
+      ],
+      "limits": "Every physical line was read in ANALYZE53. No source execution/build/test was performed. Exact version reader/writer bodies and compression/encoder helper internals remain separately pending; delegated calls are not evidence of their full behavior. "
+    },
+    {
+      "path": "rust/lance-file/src/versions/v2_2/mod.rs",
+      "module": "L1-modules/rust-lance-file-composition.md",
+      "reviewed": true,
+      "role": "Public V2_2 composition module. It selects an ordered field-encoder and page-mechanism policy, reexports its exact reader/writer surface, and delegates physical column mapping to shared structural code.",
+      "ranges": [
+        [
+          1,
+          35,
+          "SPDX/version docs/imports include structural Blob, Map and structural fixed-size-list helpers in addition to binary Blob, primitive, list and struct mechanisms. Compression, reader and writer child modules remain private; core Result/Error and object Writer provide factory boundaries."
+        ],
+        [
+          36,
+          47,
+          "Metadata decode/finish/index/global-buffer reexports are pub(crate); projection constructors and Writer are public. read_projection is crate-internal shared structural projection composed with exact V2_2 reader::decode_column. No cfg(test) test_projection_length reexport appears here."
+        ],
+        [
+          48,
+          61,
+          "Public physical_column_count/data_file_columns and parent-visible field_id_to_column_index directly use shared leaf mapping. Exact V2_2 reader grammar stays distinct from the shared mapping algorithm."
+        ],
+        [
+          62,
+          83,
+          "Private Debug FieldStrategy contains primitive strategy. create_field_encoder tries binary Blob then structural Blob, returning first Some and propagating each Result error. Both use the primitive policy and shared mutable ColumnIndexSequence/context."
+        ],
+        [
+          84,
+          103,
+          "If still Blob, InvalidInput names field/type. Then try Map, structural fixed-size-list, and primitive, in that order; unlike V2_1 there are no unconditional Map/FSL<Struct> rejection guards. Presence of a helper is not proof that every nested/type combination is supported; helpers may decline or error."
+        ],
+        [
+          104,
+          120,
+          "Try list then struct; propagate first error, return first match. Final NotSupported names Lance v2.2 plus field/datatype. No transactional restoration of mutable column-index state on a helper error is provided in this dispatcher."
+        ],
+        [
+          121,
+          132,
+          "Public encoding_strategy consumes CompressionParams into shared Arc compression strategy and selects ordered reject_sparse, constant, dense_u32 page mechanisms. Constant comes before dense; sparse is explicitly rejected by a mechanism. Exact eligibility and serialized bytes live in encoder dependencies."
+        ],
+        [
+          133,
+          151,
+          "Public eager create_writer and create_writer_with_compression move object/schema/options and optional explicit CompressionParams to concrete try_new methods and propagate Result. They do not compute defaults or validate independently."
+        ],
+        [
+          152,
+          168,
+          "Public lazy factories move object/options and optional explicit tuning to infallible concrete new_lazy constructors. Documentation says schema inferred from first batch; wrapper has no inference or IO logic."
+        ],
+        [
+          169,
+          177,
+          "Public self-described/mini EncodedBatch helpers select true/false on exact V2_2 concat_lance_footer and return Result<Bytes>. No inline tests, format warning or unsafe code."
+        ]
+      ],
+      "limits": "Every physical line was read in ANALYZE53. No source execution/build/test was performed. Exact version reader/writer bodies and compression/encoder helper internals remain separately pending; delegated calls are not evidence of their full behavior. "
+    },
+    {
+      "path": "rust/lance-file/src/versions/v2_3/mod.rs",
+      "module": "L1-modules/rust-lance-file-composition.md",
+      "reviewed": true,
+      "role": "Public V2_3 composition module. It selects an ordered field-encoder and page-mechanism policy, reexports its exact reader/writer surface, and delegates physical column mapping to shared structural code.",
+      "ranges": [
+        [
+          1,
+          41,
+          "SPDX/version docs/imports mirror structural V2_2 selection plus AtomicBool/Ordering. Private compression/reader/writer own exact mechanisms. Arc shares policies and ReadProjection; object Writer is consumed only by factory calls."
+        ],
+        [
+          42,
+          55,
+          "Metadata decode/finish/index/global-buffer reexports are pub(crate); projection constructors and Writer public. read_projection composes shared structural engine with V2_3 reader::decode_column. Private process static WARNED_ON_UNSTABLE_FORMAT starts false; it is not per-writer, per-file or persistent configuration."
+        ],
+        [
+          56,
+          69,
+          "Public physical_column_count/data_file_columns and pub(super) field_id_to_column_index directly delegate shared leaf mapping. This module adds no separate column numbering or checked arithmetic."
+        ],
+        [
+          70,
+          91,
+          "Private Debug FieldStrategy owns primitive. Trait create_field_encoder tries binary Blob then structural Blob, propagating errors and returning first Some. Mutable column-index state is shared across candidates; no rollback is added here."
+        ],
+        [
+          92,
+          111,
+          "Unhandled Blob returns InvalidInput with name/datatype. Map then structural fixed-size-list then primitive are tried in that exact order, each short-circuiting. These helper names identify delegation, not universal type support."
+        ],
+        [
+          112,
+          128,
+          "Try list then struct, finally NotSupported identifying Lance v2.3/field/datatype. No data compression or asynchronous work is performed in this dispatcher itself."
+        ],
+        [
+          129,
+          140,
+          "encoding_strategy consumes tuning into Arc<compression::Strategy>, gives an Arc clone to sparse mechanism, then constant and dense_u32 share original compression Arc. Ordered page choices are sparse, constant, dense_u32; no reject_sparse mechanism. Construction does not emit instability warning."
+        ],
+        [
+          141,
+          151,
+          "warn_unstable_format compare_exchange(false,true,Relaxed,Relaxed) makes at most one caller execute log::warn per process static lifetime; failed exchanges are ignored. Relaxed ordering is adequate for warning deduplication and publishes no other state. Warning says development/experimentation only and future unreadability; static becomes true even if logs filtered or later writer creation fails."
+        ],
+        [
+          152,
+          172,
+          "Eager create_writer and create_writer_with_compression call warning before corresponding fallible Writer factory. Warning is neither a format rejection nor evidence of successful file creation. Inputs moved, errors propagate. Direct use of public Writer or footer helpers is not guarded by these wrapper calls."
+        ],
+        [
+          173,
+          191,
+          "Lazy create_writer variants also warn before concrete infallible new_lazy methods, with/without explicit tuning. They can log before any batch/schema/file output exists."
+        ],
+        [
+          192,
+          200,
+          "Self-described and mini batch helpers call exact concat_lance_footer true/false and do not call warn_unstable_format. Both return Result<Bytes>; no inline tests or unsafe code."
+        ]
+      ],
+      "limits": "Every physical line was read in ANALYZE53. No source execution/build/test was performed. Exact version reader/writer bodies and compression/encoder helper internals remain separately pending; delegated calls are not evidence of their full behavior. "
+    },
+    {
+      "path": "rust/lance-file/src/versions/v2_1/compression.rs",
+      "module": "L1-modules/rust-lance-file-composition.md",
+      "reviewed": true,
+      "role": "Private version-specific compression Strategy, exposed only to its parent module and implementing CompressionStrategy; policy ordering for V2_1.",
+      "ranges": [
+        [
+          1,
+          18,
+          "SPDX/imports wire core error/Field, compression helpers, CompressionParams/FieldParams, DataBlock and three compressor traits. No general block/RLE block or packed-struct per-value creation helper is imported; packed per-value uses a rejecting helper."
+        ],
+        [
+          19,
+          28,
+          "pub(super) Debug+Clone Strategy owns CompressionParams privately; parent-visible new stores it unchanged, performs no validation and returns Self. Cloning Strategy clones tuning maps/values, not just an Arc handle."
+        ],
+        [
+          29,
+          47,
+          "field_params starts with self.params.get_field_params(field.name, field.data_type()), then merges parsed field metadata. Contextual implementation gives type params first, exact column params or first HashMap-iteration matching pattern next; each non-None field metadata value overrides that effective value (rust/lance-encoding/src/compression_config.rs:85-113; rust/lance-encoding/src/compression_config.rs:122-140). It uses local field name, not a constructed nested path. Pattern collision order is not made deterministic here. Metadata parsing/codec validity is delegated. V2_1 additionally examines only parsed metadata.minichunk_size: >=32*1024 (32768) logs value and clears that metadata override. The guarded unwrap is protected by is_some_and. Negative/zero/smaller metadata values and an oversized value already in CompressionParams are not rejected here. Clearing override preserves any configured base value, so log wording using default need not mean library default. No once-only log gate."
+        ],
+        [
+          48,
+          84,
+          "Compute effective field params once. Ordered first-match miniblock choice is explicit uncompressed fixed width, byte-stream split, RLE candidate, bitpacking, raw fixed width, variable width (fallible), fixed packed struct (fallible), raw fixed-size-list. Every None falls through; a helper Err stops selection. If no candidate returns a compressor, NotSupported names data.name(). Successful choice always passes finalize_miniblock_compressor(data, compressor, params), which may itself fail; this is selection, not execution of compression. The RLE slot specifically calls try_fixed_u8_rle_miniblock; fixed-u8 grammar is the selected helper, not a general child RLE grammar."
+        ],
+        [
+          85,
+          108,
+          "create_per_value computes field params, tries raw per-value first, then fallible reject_packed_struct_per_value, then fallible variable-width per-value. A returned Some is accepted even for the helper named reject; exact helper behavior is delegated. Remaining types return NotSupported with block name. No finalize_miniblock step runs for per-value selection."
+        ],
+        [
+          109,
+          129,
+          "create_block_compressor computes field params into unused _params (metadata parsing and warnings can still occur), then tries bitpacking followed by raw block. Neither call receives params. Unsupported block names produce NotSupported. No general or RLE block helper is invoked. No inline tests, async functions or unsafe code."
+        ]
+      ],
+      "limits": "Every physical line was read in ANALYZE53. No source execution/build/test was performed. Exact version reader/writer bodies and compression/encoder helper internals remain separately pending; delegated calls are not evidence of their full behavior. "
+    },
+    {
+      "path": "rust/lance-file/src/versions/v2_2/compression.rs",
+      "module": "L1-modules/rust-lance-file-composition.md",
+      "reviewed": true,
+      "role": "Parent-visible V2_2 Strategy with tuning ownership, variable packed-struct per-value handling and richer whole-block selection.",
+      "ranges": [
+        [
+          1,
+          21,
+          "SPDX/imports include Arc, shared compressor traits, fixed-u8 RLE miniblock/block helpers, general block and variable packed-struct per-value. They are mechanism functions in lance-encoding; this module owns order/version choice."
+        ],
+        [
+          22,
+          31,
+          "Debug+Clone parent-visible Strategy stores private CompressionParams; new stores unchanged without validation. Clone duplicates tuning content; Arc wrapping happens at use sites."
+        ],
+        [
+          32,
+          40,
+          "field_params starts with self.params.get_field_params(field.name, field.data_type()), then merges parsed field metadata. Contextual implementation gives type params first, exact column params or first HashMap-iteration matching pattern next; each non-None field metadata value overrides that effective value (rust/lance-encoding/src/compression_config.rs:85-113; rust/lance-encoding/src/compression_config.rs:122-140). It uses local field name, not a constructed nested path. Pattern collision order is not made deterministic here. Metadata parsing/codec validity is delegated. No V2_1 32768 metadata minichunk guard is present; actual supported size and codec validation belongs to downstream helpers."
+        ],
+        [
+          41,
+          76,
+          "Compute effective field params once. Ordered first-match miniblock choice is explicit uncompressed fixed width, byte-stream split, RLE candidate, bitpacking, raw fixed width, variable width (fallible), fixed packed struct (fallible), raw fixed-size-list. Every None falls through; a helper Err stops selection. If no candidate returns a compressor, NotSupported names data.name(). Successful choice always passes finalize_miniblock_compressor(data, compressor, params), which may itself fail; this is selection, not execution of compression. RLE slot is try_fixed_u8_rle_miniblock. Contextual finalizer only wraps FixedWidth data with requested general compression, returning other compressors unchanged (rust/lance-encoding/src/compression.rs:587-598)."
+        ],
+        [
+          77,
+          102,
+          "create_per_value computes params, tries raw then fallible try_variable_packed_struct_per_value(Arc::new(self.clone()),field,data), then variable-width helper with effective params. The new Arc/Strategy clone is evaluated whenever raw declines, even if packed helper declines. This allows nested compressor policy ownership; shared self is not mutated. First Some succeeds, first Err propagates; otherwise NotSupported names block."
+        ],
+        [
+          103,
+          129,
+          "create_block_compressor computes params; try fixed-u8 RLE block (fallible), bitpacking, general block (fallible), raw block, in order. Earlier match wins and errors do not fall back. Both RLE/general receive effective params; bitpacking/raw do not. Unsupported types return NotSupported with block name. No inline tests, async or unsafe code."
+        ]
+      ],
+      "limits": "Every physical line was read in ANALYZE53. No source execution/build/test was performed. Exact version reader/writer bodies and compression/encoder helper internals remain separately pending; delegated calls are not evidence of their full behavior. "
+    },
+    {
+      "path": "rust/lance-file/src/versions/v2_3/compression.rs",
+      "module": "L1-modules/rust-lance-file-composition.md",
+      "reviewed": true,
+      "role": "Parent-visible unstable V2_3 compression Strategy: child RLE miniblocks, packed-struct per-value and variable RLE blocks.",
+      "ranges": [
+        [
+          1,
+          21,
+          "SPDX/imports bring Arc and core types; packed-struct per-value imported separately. Compared with V2_2, child RLE miniblock and variable RLE block helpers replace fixed-u8 RLE helpers. Common encoder traits/config/DataBlock remain shared."
+        ],
+        [
+          22,
+          31,
+          "Debug+Clone parent-visible Strategy owns private CompressionParams; new stores unchanged without validation or warning. Clone duplicates tuning; no mutable shared policy state is introduced."
+        ],
+        [
+          32,
+          40,
+          "field_params starts with self.params.get_field_params(field.name, field.data_type()), then merges parsed field metadata. Contextual implementation gives type params first, exact column params or first HashMap-iteration matching pattern next; each non-None field metadata value overrides that effective value (rust/lance-encoding/src/compression_config.rs:85-113; rust/lance-encoding/src/compression_config.rs:122-140). It uses local field name, not a constructed nested path. Pattern collision order is not made deterministic here. Metadata parsing/codec validity is delegated. No minichunk range guard is present in this version wrapper."
+        ],
+        [
+          41,
+          76,
+          "Compute effective field params once. Ordered first-match miniblock choice is explicit uncompressed fixed width, byte-stream split, RLE candidate, bitpacking, raw fixed width, variable width (fallible), fixed packed struct (fallible), raw fixed-size-list. Every None falls through; a helper Err stops selection. If no candidate returns a compressor, NotSupported names data.name(). Successful choice always passes finalize_miniblock_compressor(data, compressor, params), which may itself fail; this is selection, not execution of compression. The RLE candidate is try_child_rle_miniblock, enabling the helper-selected child grammar; eligibility and threshold details require its implementation."
+        ],
+        [
+          77,
+          101,
+          "create_per_value computes params then tries raw, fallible try_packed_struct_per_value(Arc::new(self.clone()),field,data), fallible variable-width helper with params. Clone/Arc allocated whenever raw declines, before packed helper recognition. Unlike V2_2 this calls the general packed helper, not try_variable_packed_struct_per_value. First match/error stops; unsupported block gives NotSupported."
+        ],
+        [
+          102,
+          128,
+          "create_block_compressor orders fallible variable RLE block, bitpacking, fallible general block, raw block. Effective params flow only to RLE/general. No match gives NotSupported block name. This Strategy emits no instability warning; outer writer factory owns that concern. No inline tests, async or unsafe code."
+        ]
+      ],
+      "limits": "Every physical line was read in ANALYZE53. No source execution/build/test was performed. Exact version reader/writer bodies and compression/encoder helper internals remain separately pending; delegated calls are not evidence of their full behavior. "
+    },
+    {
+      "path": "rust/lance-file/src/reader/structural.rs",
+      "module": "L1-modules/rust-lance-file-composition.md",
+      "reviewed": true,
+      "role": "Shared structural metadata syntax, alignment, leaf-column mapping and projection length/preparation for exact V2_1+ readers. Helpers are public within crate-internal reader::structural; exact grammar remains supplied by per-version DecodeColumn.",
+      "ranges": [
+        [
+          1,
+          28,
+          "SPDX/imports connect BTreeMap/Arc, async_trait, Bytes, LanceCache/Field/Schema/errors, EncodingsIo/ColumnInfo/PageInfo/PageEncoding, legacy column and structural page protobufs, prost Name/Message, file protobuf and read-provider/projection helpers. PAGE_BUFFER_ALIGNMENT comes from writer (64 bytes)."
+        ],
+        [
+          29,
+          55,
+          "Private generic fetch_encoding<M:Default+Name+Sized> matches file encoding location. Indirect is InvalidInput unsupported; Direct clones payload Vec into Bytes, decodes Any envelope then to_msg<M>, mapping both errors to InvalidInput with M::NAME and original display. Explicit None encoding and absent location have distinct Missing description/location errors. It never follows external buffers; type URL/message validation is delegated to prost Any conversion."
+        ],
+        [
+          56,
+          72,
+          "decode_page_layout requires page.encoding or InvalidInput naming column/page, then uses fetch_encoding to decode pb21::PageLayout syntax. It does not examine layout variant, version, required subfields or buffer grammar; exact reader must validate those before building normalized page info."
+        ],
+        [
+          73,
+          92,
+          "build_page_info accepts already-supplied PageLayout. Before pairing offsets/sizes, reject unequal vector lengths with column/page and both counts. A caller can supply a layout not decoded from this page; no cross-check is performed here."
+        ],
+        [
+          93,
+          117,
+          "Zip page buffers, reject every offset not divisible by PAGE_BUFFER_ALIGNMENT=64, collect fallibly and Arc-own descriptor slice. Empty pairs pass; zero size does not waive alignment. Construct Structural encoding with provided layout, page.length as num_rows and page.priority. No offset+size overflow, file bounds, overlap, buffer-size or row-count validation here. Temporary Vec drops on first error."
+        ],
+        [
+          118,
+          143,
+          "build_column_info rejects unequal column buffer offset/size counts then copies pairs into Arc slice. Unlike page/global helpers, this column-level pairing performs no alignment check. page_infos is supplied by caller and is not compared against metadata.pages count or content."
+        ],
+        [
+          144,
+          156,
+          "Require metadata.encoding (column-specific InvalidInput) and fetch pb::ColumnEncoding. Arc<ColumnInfo> records caller-supplied column_index, Arc page_infos, descriptor slice and encoding. Column encoding grammar/version is not validated here; descriptor allocation occurs before encoding decode and drops on error."
+        ],
+        [
+          157,
+          172,
+          "validate_global_buffers iterates positions and rejects first unaligned position with zero-based buffer index/position/alignment. Empty buffers succeeds. Size, overlap, offset+size overflow and total file bounds are not inspected. No IO."
+        ],
+        [
+          173,
+          188,
+          "Private field_column_shape returns contributes=true,recurse=false for Blob/packed, otherwise children-empty versus nonempty. Public physical_column_count mirrors this: one for Blob/packed/leaf (including an empty struct), otherwise sum descendants without a parent header. Child shape, not only logical type, drives physical mapping. Recursion and unchecked usize sums have no local bound."
+        ],
+        [
+          189,
+          213,
+          "append_physical_fields recursively emits only leaves or opaque Blob/packed fields in source order, records existing i32 field ID and successive i32 counter then increments. Containers with children get no map entry. Public data_file_columns begins two empty vectors/counter0. Empty schema returns empty pair, no IDs assigned or validated; signed overflow not checked."
+        ],
+        [
+          214,
+          225,
+          "field_id_to_column_index zips owned mappings, filters negative column_index (not negative field ID), casts to u32 and collects BTreeMap. Duplicate field IDs overwrite earlier entries; negative field IDs cast. Normal nonoverflowed numbering is nonnegative, but no schema validation is added."
+        ],
+        [
+          226,
+          243,
+          "append_field_ids walks same shape, looks up contributing field.id as u32 and pushes found column index; absent IDs are silently omitted. Recursion is suppressed for opaque fields. It preserves schema traversal order and does not sort or deduplicate mapped columns."
+        ],
+        [
+          244,
+          260,
+          "projection_from_field_ids is infallible: collect mapped columns and Arc-own a complete schema clone. Missing mappings do not remove corresponding schema fields, so later projection length validation can fail or mismap if caller supplied inconsistent mapping. It does not prune schema or verify rectangularity."
+        ],
+        [
+          261,
+          277,
+          "projection_from_column_names first core schema.project(names)? then uses caller mapping with that schema. Errors from name projection propagate; no independent mapping validation. Private children_share_parent_length returns only logical_type.is_struct(); list-like children are intentionally not assumed to share parent row count."
+        ],
+        [
+          278,
+          296,
+          "validate_field_length accepts comparable flag, index list, shared mutable cursor and fallible column-length closure. For a contributing field consume next index or InvalidInput naming the field; increment cursor before invoking column_len(index as usize). Leaf/Blob/packed lengths come from that physical column; first error returns immediately."
+        ],
+        [
+          297,
+          318,
+          "For a recursing container, enforce_children = comparable && logical struct. Recurse with this flag and common cursor; first returned child length initializes field_rows. If enforced, any later child mismatch errors naming parent, child, actual and expected rows. Once a nonstruct ancestor makes comparable false, descendant structs do not reenable comparison. Container reports first child length; it does not multiply/divide list sizes or compute offsets. No resulting length gives maps-to-no-columns InvalidInput. Recursive depth unbounded locally."
+        ],
+        [
+          319,
+          337,
+          "prepared_read_length closure indexes prepared.column_infos by supplied decoder index, errors with index/available count if out of range, then calls normalized_column_num_rows. Contextual helper uses checked u64 sums and sparse first structural layer num_slots when present, otherwise page.num_rows (rust/lance-file/src/reader.rs:539-561). Pass decoder schema and indices to projection_length; no I/O in this path."
+        ],
+        [
+          338,
+          358,
+          "projection_length starts cursor0, reserves top-level length pairs, validates every field with comparable=true and stores borrowed name/length. After traversal reject surplus indices with supplied/required counts. Then verify_uniform_lengths enforces equal top-level lengths (empty schema+emptyindices =>0), contextual helper lists mismatching names/lengths (rust/lance-file/src/reader.rs:563-577). It does not independently reject duplicate column indices or zero fields."
+        ],
+        [
+          359,
+          370,
+          "DecodeColumn is a plain fn(u32,&pbfile::ColumnMetadata)->Result<Arc<ColumnInfo>> type alias; capturing closures cannot be stored. Private Debug StructuralReadProjection owns that function pointer. read_projection wraps it in Arc<dyn ReadProjection>; exact grammar selection is injected without a version enum in this struct."
+        ],
+        [
+          371,
+          392,
+          "async_trait ReadProjection impl: validate_indexed first calls provider structural validator, then requires projection_matches_indexed_metadata, else returns provider indexed_projection_error. read_length directly calls prepared_read_length. No metadata is fetched by these two methods."
+        ],
+        [
+          393,
+          408,
+          "Async prepare Full branch validates projection against metadata and clones column_infos plus ReaderProjection. Shared metadata/schema allocations may remain Arc-shared; it does not decode/revalidate each column here or read disk. Validation errors abort before preparation."
+        ],
+        [
+          409,
+          432,
+          "Indexed branch validates projection, awaits load_indexed_column_infos with exact decode fn, IO/cache and original column indices, then builds decoder projection with same schema Arc but dense 0..N indices cast to u32 in requested order. Metadata loader must return correspondingly ordered infos. After either branch, calculate read_length and return tuple; length failure can occur after indexed IO/cache work. No rollback/cancellation guard/spawn here; loader cache/concurrency/IO lifecycle remains delegated."
+        ],
+        [
+          433,
+          445,
+          "cfg(test) public test_projection_length calls private length engine using synthetic lengths indexed by column number; missing synthetic index returns InvalidInput identifying column. It is a helper, not an executing test, and supplies no local fixtures/assertions. This file has no unsafe blocks or inline test cases."
+        ]
+      ],
+      "limits": "Every physical line was read in ANALYZE53. No source execution/build/test was performed. Exact version reader/writer bodies and compression/encoder helper internals remain separately pending; delegated calls are not evidence of their full behavior. "
+    }
+  ]
+}

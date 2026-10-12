@@ -1,0 +1,251 @@
+@@ -44,7 +44,11 @@ use lance_table::io::commit::{
+   44      CommitConfig, CommitError, CommitHandler, ManifestLocation, ManifestNamingScheme,
+   45  };
+   46  use lance_table::io::manifest::read_manifest;
+   47 -use lance_table::transaction::{FragReuseUpdate, PreparedIndices, has_writer_placed_lineage};
+   47 +use lance_table::transaction::{
+   48 +    FragReuseUpdate, PreparedIndices, canonicalize_non_reusable_field_ids,
+   49 +    has_writer_placed_lineage, validate_detached_non_reusable_field_ids,
+   50 +    validate_non_reusable_field_id_transition, validate_operation,
+   51 +};
+   52  use rand::{Rng, rng};
+   53  use roaring::RoaringBitmap;
+   54  
+
+@@ -432,6 +436,10 @@ async fn do_commit_new_dataset(
+  436      metadata_cache: &DSMetadataCache,
+  437      session: Arc<Session>,
+  438  ) -> Result<(Manifest, ManifestLocation)> {
+  439 +    let mut transaction = transaction.clone();
+  440 +    canonicalize_non_reusable_field_ids(None, &mut transaction.operation, None)?;
+  441 +    let transaction = &transaction;
+  442 +    validate_operation(None, &transaction.operation)?;
+  443      let pb_transaction = pb::Transaction::try_from(transaction)?;
+  444      let inline_transaction = pb_transaction.encoded_len() <= MAX_INLINE_TRANSACTION_BYTES;
+  445      // Classified from the operation itself. Reading it back off the inline
+
+@@ -623,6 +631,10 @@ async fn do_commit_new_dataset(
+  631          (manifest, indices)
+  632      };
+  633  
+  634 +    if !manifest.uses_non_reusable_field_ids() {
+  635 +        fix_schema(&mut manifest)?;
+  636 +    }
+  637 +
+  638      let result = write_manifest_file(
+  639          object_store,
+  640          commit_handler.as_ref(),
+
+@@ -864,7 +876,7 @@ fn check_column_indices(manifest: &Manifest) -> Result<()> {
+  876  /// Fix schema in case of duplicate field ids.
+  877  ///
+  878  /// See test dataset v0.10.5/corrupt_schema
+  867 -fn fix_schema(manifest: &mut Manifest) -> Result<()> {
+  879 +pub(crate) fn fix_schema(manifest: &mut Manifest) -> Result<()> {
+  880      // We can short-circuit if there is only one file per fragment or no fragments.
+  881      if manifest.fragments.iter().all(|f| f.files.len() <= 1) {
+  882          return Ok(());
+
+@@ -887,13 +899,24 @@ fn fix_schema(manifest: &mut Manifest) -> Result<()> {
+  899          return Ok(());
+  900      }
+  901  
+  902 +    if manifest.uses_non_reusable_field_ids() {
+  903 +        return Err(Error::invalid_input(
+  904 +            "Cannot repair duplicate field IDs after non-reusable field identity is activated; repair would change an existing identity",
+  905 +        ));
+  906 +    }
+  907 +
+  908      // Now, we need to remap the field ids to be unique.
+  909      let mut old_field_id_mapping: HashMap<i32, i32> = HashMap::new();
+  910      let mut fields_with_duplicate_ids = fields_with_duplicate_ids.into_iter().collect::<Vec<_>>();
+  911      fields_with_duplicate_ids.sort_unstable();
+  894 -    for (field_id_seed, field_id) in (manifest.max_field_id() + 1..).zip(fields_with_duplicate_ids)
+  895 -    {
+  896 -        old_field_id_mapping.insert(field_id, field_id_seed);
+  912 +    let next_field_ids = i64::from(manifest.max_field_id()) + 1..;
+  913 +    for (next_field_id, field_id) in next_field_ids.zip(fields_with_duplicate_ids) {
+  914 +        let assigned_field_id = i32::try_from(next_field_id).map_err(|_| {
+  915 +            Error::invalid_input(
+  916 +                "Cannot repair duplicate field IDs because the field-ID space is exhausted",
+  917 +            )
+  918 +        })?;
+  919 +        old_field_id_mapping.insert(field_id, assigned_field_id);
+  920      }
+  921  
+  922      let mut fragments = manifest.fragments.as_ref().clone();
+
+@@ -1266,6 +1289,11 @@ pub(crate) async fn do_commit_detached_transaction(
+ 1289      retry_timeout: Duration,
+ 1290  ) -> Result<(Manifest, ManifestLocation)> {
+ 1291      ensure_can_write_manifest(&dataset.manifest)?;
+ 1292 +    let mut transaction = transaction.clone();
+ 1293 +    canonicalize_non_reusable_field_ids(Some(&dataset.manifest), &mut transaction.operation, None)?;
+ 1294 +    let transaction = &transaction;
+ 1295 +    validate_detached_non_reusable_field_ids(&dataset.manifest, &transaction.operation)?;
+ 1296 +    validate_operation(Some(&dataset.manifest), &transaction.operation)?;
+ 1297      // Detached commits skip the rebase pipeline, so a rewrite's transition
+ 1298      // intent would never be assembled or validated (a dummy intent plus a
+ 1299      // hand-built entry would satisfy the manifest chokepoint unvalidated).
+
+@@ -1348,6 +1376,11 @@ pub(crate) async fn do_commit_detached_transaction(
+ 1376          // Validate before the fragment-id check to preserve legacy migration
+ 1377          // diagnostics. Finalization repeats this at the manifest write boundary.
+ 1378          fix_schema(&mut manifest)?;
+ 1379 +        validate_non_reusable_field_id_transition(
+ 1380 +            &dataset.manifest,
+ 1381 +            &manifest,
+ 1382 +            &transaction.operation,
+ 1383 +        )?;
+ 1384          crate::dataset::versions::check_manifest_storage_version_for_commit(&mut manifest)?;
+ 1385          check_fragment_ids(&manifest)?;
+ 1386          // Runs after the coverage derivation and can replace a fragment bitmap
+
+@@ -1723,6 +1756,7 @@ pub(crate) async fn commit_transaction(
+ 1756          // for users. So we always check for other transactions.
+ 1757          // We skip this for strict overwrites, because strict overwrites can't be rebased.
+ 1758          if !strict_overwrite {
+ 1759 +            let checked_since = dataset.manifest.version;
+ 1760              (dataset, other_transactions) = load_and_sort_new_transactions(&dataset).await?;
+ 1761  
+ 1762              ensure_can_write_manifest(&dataset.manifest)?;
+
+@@ -1735,6 +1769,23 @@ pub(crate) async fn commit_transaction(
+ 1769              let mut rebase =
+ 1770                  TransactionRebase::try_new(&original_dataset, transaction, affected_rows).await?;
+ 1771              rebase.load_current_lineage(&dataset).await?;
+ 1772 +            let seen = other_transactions
+ 1773 +                .iter()
+ 1774 +                .map(|(version, _)| *version)
+ 1775 +                .collect::<HashSet<_>>();
+ 1776 +            let missing = (checked_since + 1..=dataset.manifest.version)
+ 1777 +                .filter(|version| !seen.contains(version))
+ 1778 +                .collect::<Vec<_>>();
+ 1779 +            if rebase.needs_versions(&missing) {
+ 1780 +                return Err(Error::retryable_commit_conflict_source(
+ 1781 +                    dataset.manifest.version,
+ 1782 +                    format!(
+ 1783 +                        "versions {missing:?} were cleaned up, so this index cannot be carried \
+ 1784 +                         through the deferred compaction it covers; rebuild it"
+ 1785 +                    )
+ 1786 +                    .into(),
+ 1787 +                ));
+ 1788 +            }
+ 1789  
+ 1790              for (other_version, other_transaction) in other_transactions.iter() {
+ 1791                  rebase.check_txn(other_transaction, *other_version)?;
+
+@@ -1749,9 +1800,23 @@ pub(crate) async fn commit_transaction(
+ 1800          let attempt_start = Instant::now();
+ 1801          let retry_start = *retry_start.get_or_insert(attempt_start);
+ 1802  
+ 1803 +        // Merge preserves fields from the read version; Overwrite replaces all
+ 1804 +        // fields. Allocate new IDs above the latest high-water mark.
+ 1805 +        // Each attempt remaps its own copy of the
+ 1806 +        // staged files, so a retry never mistakes a provisional ID for a field
+ 1807 +        // introduced by a concurrent commit.
+ 1808 +        // Keep the per-attempt copy out of the commit future's inline state.
+ 1809 +        let mut attempt_transaction = Box::new(transaction.clone());
+ 1810 +        canonicalize_non_reusable_field_ids(
+ 1811 +            Some(&dataset.manifest),
+ 1812 +            &mut attempt_transaction.operation,
+ 1813 +            Some(read_version_dataset.schema()),
+ 1814 +        )?;
+ 1815 +        validate_operation(Some(&dataset.manifest), &attempt_transaction.operation)?;
+ 1816 +
+ 1817          // Recomputed every attempt: the rebase above may have rewritten the
+ 1818          // transaction.
+ 1754 -        let pb_transaction = pb::Transaction::try_from(&transaction)?;
+ 1819 +        let pb_transaction = pb::Transaction::try_from(attempt_transaction.as_ref())?;
+ 1820          let inline_transaction = pb_transaction.encoded_len() <= MAX_INLINE_TRANSACTION_BYTES;
+ 1821          // Classified from the operation itself. Reading it back off the inline
+ 1822          // copy would tie the verdict to the payload size instead.
+
+@@ -1773,8 +1838,9 @@ pub(crate) async fn commit_transaction(
+ 1838          // Build an up-to-date manifest from the transaction and current
+ 1839          // manifest: prepare the index list against this attempt's manifest
+ 1840          // first, then build from the prepared result.
+ 1776 -        let build_config = build_config_for_attempt(&dataset, &transaction, write_config).await?;
+ 1777 -        let (mut manifest, mut indices) = match transaction.operation {
+ 1841 +        let build_config =
+ 1842 +            build_config_for_attempt(&dataset, &attempt_transaction, write_config).await?;
+ 1843 +        let (mut manifest, mut indices) = match attempt_transaction.operation {
+ 1844              Operation::Restore { version } => {
+ 1845                  // A restore reinstates its snapshot's index list and entry
+ 1846                  // whole; nothing is prepared or withdrawn a second time.
+
+@@ -1796,8 +1862,9 @@ pub(crate) async fn commit_transaction(
+ 1862                      None => FragReuseUpdate::None,
+ 1863                  };
+ 1864                  let prepared =
+ 1799 -                    prepare_attempt(&dataset, &transaction, &build_config, frag_reuse).await?;
+ 1800 -                transaction.build_manifest_prepared(
+ 1865 +                    prepare_attempt(&dataset, &attempt_transaction, &build_config, frag_reuse)
+ 1866 +                        .await?;
+ 1867 +                attempt_transaction.build_manifest_prepared(
+ 1868                      Some(dataset.manifest.as_ref()),
+ 1869                      prepared,
+ 1870                      transaction_file,
+
+@@ -1819,6 +1886,11 @@ pub(crate) async fn commit_transaction(
+ 1886          migrate_manifest(&dataset, &mut manifest, recompute_stats).await?;
+ 1887  
+ 1888          fix_schema(&mut manifest)?;
+ 1889 +        validate_non_reusable_field_id_transition(
+ 1890 +            &dataset.manifest,
+ 1891 +            &manifest,
+ 1892 +            &attempt_transaction.operation,
+ 1893 +        )?;
+ 1894  
+ 1895          crate::dataset::versions::check_manifest_storage_version_for_commit(&mut manifest)?;
+ 1896          check_fragment_ids(&manifest)?;
+
+@@ -1854,7 +1926,7 @@ pub(crate) async fn commit_transaction(
+ 1926              Ok(manifest_location) => {
+ 1927                  record_successful_commit(
+ 1928                      &dataset,
+ 1857 -                    &transaction,
+ 1929 +                    &attempt_transaction,
+ 1930                      &manifest,
+ 1931                      &manifest_location,
+ 1932                      indices,
+
+@@ -1875,7 +1947,7 @@ pub(crate) async fn commit_transaction(
+ 1947                      commit_handler,
+ 1948                      &dataset.base,
+ 1949                      target_version,
+ 1878 -                    &transaction,
+ 1950 +                    &attempt_transaction,
+ 1951                  )
+ 1952                  .await
+ 1953                  {
+
+@@ -1886,7 +1958,7 @@ pub(crate) async fn commit_transaction(
+ 1958                          let committed_manifest = *committed_manifest;
+ 1959                          record_successful_commit(
+ 1960                              &dataset,
+ 1889 -                            &transaction,
+ 1961 +                            &attempt_transaction,
+ 1962                              &committed_manifest,
+ 1963                              &location,
+ 1964                              indices,
+
+@@ -1948,7 +2020,7 @@ pub(crate) async fn commit_transaction(
+ 2020                      commit_handler,
+ 2021                      &dataset.base,
+ 2022                      target_version,
+ 1951 -                    &transaction,
+ 2023 +                    &attempt_transaction,
+ 2024                  )
+ 2025                  .await
+ 2026                  {
+
+@@ -1959,7 +2031,7 @@ pub(crate) async fn commit_transaction(
+ 2031                          let committed_manifest = *committed_manifest;
+ 2032                          record_successful_commit(
+ 2033                              &dataset,
+ 1962 -                            &transaction,
+ 2034 +                            &attempt_transaction,
+ 2035                              &committed_manifest,
+ 2036                              &location,
+ 2037                              indices,

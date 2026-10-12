@@ -1,0 +1,81 @@
+@@ -41,6 +41,9 @@ use tracing::{instrument, warn};
+   41  use uuid::Uuid;
+   42  
+   43  use arrow_array::RecordBatchReader;
+   44 +use datafusion::physical_plan::SendableRecordBatchStream;
+   45 +use lance_datafusion::utils::reader_to_stream;
+   46 +use lance_index::scalar::registry::{TrainingCriteria, TrainingOrdering};
+   47  /// Generate default index name from field path.
+   48  ///
+   49  /// Joins field names with `.` to create the base index name.
+
+@@ -80,7 +83,7 @@ pub struct CreateIndexBuilder<'a> {
+   83      train: bool,
+   84      fragments: Option<Vec<u32>>,
+   85      index_uuid: Option<Uuid>,
+   83 -    preprocessed_data: Option<Box<dyn RecordBatchReader + Send + 'static>>,
+   86 +    preprocessed_data: Option<(SendableRecordBatchStream, TrainingCriteria)>,
+   87      progress: Arc<dyn IndexBuildProgress>,
+   88      /// Transaction properties to store with this commit.
+   89      transaction_properties: Option<Arc<HashMap<String, String>>>,
+
+@@ -134,11 +137,14 @@ impl<'a> CreateIndexBuilder<'a> {
+  137          self
+  138      }
+  139  
+  140 +    /// Train from rows already in the B-tree's shape: sorted by value, each
+  141 +    /// with its row id. An index that trains from another shape is refused.
+  142      pub fn preprocessed_data(
+  143          mut self,
+  139 -        stream: Box<dyn RecordBatchReader + Send + 'static>,
+  144 +        reader: Box<dyn RecordBatchReader + Send + 'static>,
+  145      ) -> Self {
+  141 -        self.preprocessed_data = Some(stream);
+  146 +        let criteria = TrainingCriteria::new(TrainingOrdering::Values).with_row_id();
+  147 +        self.preprocessed_data = Some((reader_to_stream(reader), criteria));
+  148          self
+  149      }
+  150  
+
+@@ -402,10 +408,6 @@ impl<'a> CreateIndexBuilder<'a> {
+  408                  | IndexType::MinHashLsh,
+  409                  LANCE_SCALAR_INDEX,
+  410              ) => {
+  405 -                assert!(
+  406 -                    self.preprocessed_data.is_none() || self.index_type.eq(&IndexType::BTree),
+  407 -                    "Preprocessed data stream can only be provided for B-Tree index type at the moment."
+  408 -                );
+  411                  let base_params = ScalarIndexParams::for_builtin(self.index_type.try_into()?);
+  412  
+  413                  // If custom params were provided, extract the params JSON and apply it
+
+@@ -431,17 +433,14 @@ impl<'a> CreateIndexBuilder<'a> {
+  433                      params = scalar_params_from_inverted(inverted_params)?;
+  434                  }
+  435  
+  434 -                let preprocesssed_data = self
+  435 -                    .preprocessed_data
+  436 -                    .take()
+  437 -                    .map(|reader| lance_datafusion::utils::reader_to_stream(Box::new(reader)));
+  436 +                let preprocessed_data = self.preprocessed_data.take();
+  437                  if self.index_type == IndexType::Bitmap && self.fragments.is_some() {
+  438                      if !train {
+  439                          return Err(Error::invalid_input(
+  440                              "canonical bitmap segment build requires train=true".to_string(),
+  441                          ));
+  442                      }
+  444 -                    if preprocesssed_data.is_some() {
+  443 +                    if preprocessed_data.is_some() {
+  444                          return Err(Error::invalid_input(
+  445                              "canonical bitmap segment build does not accept preprocessed data"
+  446                                  .to_string(),
+
+@@ -468,7 +467,7 @@ impl<'a> CreateIndexBuilder<'a> {
+  467                          &params,
+  468                          train,
+  469                          self.fragments.clone(),
+  471 -                        preprocesssed_data,
+  470 +                        preprocessed_data,
+  471                          self.progress.clone(),
+  472                      )
+  473                      .await?

@@ -1,0 +1,333 @@
+@@ -10,7 +10,7 @@ use arrow::datatypes::DataType;
+   10  use arrow_array::new_empty_array;
+   11  use arrow_array::{Array, ArrayRef, FixedSizeListArray, RecordBatch, cast::AsArray};
+   12  use arrow_buffer::{Buffer, MutableBuffer};
+   13 -use futures::{Stream, StreamExt, stream};
+   13 +use futures::{Stream, StreamExt, TryStreamExt, stream};
+   14  use lance_arrow::DataTypeExt;
+   15  use lance_core::datatypes::Schema;
+   16  use lance_linalg::distance::DistanceType;
+
+@@ -24,6 +24,35 @@ use tokio::sync::Mutex;
+   24  use crate::dataset::{Dataset, ProjectionRequest, TakeBuilder, row_offsets_to_row_addresses};
+   25  use crate::{Error, Result};
+   26  
+   27 +// Target the vector payload size, independently of the storage block size.
+   28 +const TRAINING_SAMPLE_BATCH_BYTES: usize = 64 * 1024 * 1024;
+   29 +
+   30 +/// Bound each training read to about 64 MiB of fixed-width vector values.
+   31 +/// A vector wider than the target still needs one complete row per batch.
+   32 +fn training_sample_batch_rows(byte_width: usize) -> Result<usize> {
+   33 +    if byte_width == 0 {
+   34 +        return Err(Error::invalid_input(
+   35 +            "Training vector byte width must be greater than zero, got 0".to_string(),
+   36 +        ));
+   37 +    }
+   38 +    Ok((TRAINING_SAMPLE_BATCH_BYTES / byte_width).max(1))
+   39 +}
+   40 +
+   41 +/// Budget prefetched vector values to one output sample, separately from the
+   42 +/// output buffer itself. A sample smaller than 64 MiB reads one partial batch.
+   43 +fn training_sample_readahead(
+   44 +    sample_size: usize,
+   45 +    byte_width: usize,
+   46 +    io_parallelism: usize,
+   47 +) -> Result<usize> {
+   48 +    let prefetch_budget = sample_size.checked_mul(byte_width).ok_or_else(|| {
+   49 +        Error::invalid_input(format!(
+   50 +            "Training sample byte size overflows usize: sample_size={sample_size}, byte_width={byte_width}"
+   51 +        ))
+   52 +    })?;
+   53 +    Ok(io_parallelism.min((prefetch_budget / TRAINING_SAMPLE_BATCH_BYTES).max(1)))
+   54 +}
+   55 +
+   56  /// Helper function to extract a column from a RecordBatch, supporting nested field paths.
+   57  ///
+   58  /// This function handles:
+
+@@ -428,7 +457,7 @@ async fn scan_all_training_data(
+  457  ///
+  458  /// Dispatches to the most efficient strategy based on column type and nullability:
+  459  /// - Non-nullable FSL: [`sample_fsl_uniform`] — true uniform random row indices via chunked `take`.
+  431 -/// - Nullable FSL: [`sample_nullable_fsl`] — streaming range-based reads with null filtering.
+  460 +/// - Nullable FSL: [`sample_nullable_fsl`] — batched random row reads with null filtering.
+  461  /// - Non-FSL (multivector): [`sample_nullable_fallback`] — streaming range-based reads.
+  462  async fn sample_training_data(
+  463      dataset: &Dataset,
+
+@@ -443,6 +472,12 @@ async fn sample_training_data(
+  472          .data_type()
+  473          .byte_width_opt()
+  474          .unwrap_or(4 * 1024);
+  475 +    let batch_rows = training_sample_batch_rows(byte_width)?;
+  476 +    let batch_readahead = training_sample_readahead(
+  477 +        sample_size_hint,
+  478 +        byte_width,
+  479 +        dataset.object_store.io_parallelism(),
+  480 +    )?;
+  481  
+  482      if let Some(fragment_ids) = fragment_ids {
+  483          if !is_nullable {
+
+@@ -460,11 +495,13 @@ async fn sample_training_data(
+  495          // prefetch round to this outstanding demand, keeping reads bounded by
+  496          // the requested sample size.
+  497          let still_needed = Arc::new(AtomicUsize::new(sample_size_hint));
+  463 -        let scan = sample_training_data_scan_from_fragments(
+  498 +        let scan = sample_training_data_scan_by_indices(
+  499              dataset,
+  500              column,
+  501              num_rows,
+  467 -            fragment_ids,
+  502 +            batch_rows,
+  503 +            batch_readahead,
+  504 +            Some(fragment_ids),
+  505              still_needed.clone(),
+  506          )?;
+  507          return match vector_field.data_type() {
+
+@@ -505,15 +542,23 @@ async fn sample_training_data(
+  542              .await
+  543          }
+  544          DataType::FixedSizeList(_, _) => {
+  508 -            let scan =
+  509 -                sample_training_data_scan(dataset, column, sample_size_hint, num_rows, byte_width)?;
+  545 +            let still_needed = Arc::new(AtomicUsize::new(sample_size_hint));
+  546 +            let scan = sample_training_data_scan_by_indices(
+  547 +                dataset,
+  548 +                column,
+  549 +                num_rows,
+  550 +                batch_rows,
+  551 +                batch_readahead,
+  552 +                None,
+  553 +                still_needed.clone(),
+  554 +            )?;
+  555              sample_nullable_fsl(
+  556                  column,
+  557                  sample_size_hint,
+  558                  byte_width,
+  559                  vector_field,
+  560                  scan,
+  516 -                None,
+  561 +                Some(still_needed),
+  562              )
+  563              .await
+  564          }
+
+@@ -542,34 +587,36 @@ fn sample_training_data_scan(
+  587      ))
+  588  }
+  589  
+  545 -/// Build a batch stream over fragment-limited random samples.
+  546 -///
+  547 -/// This is the only extra sampling helper we keep for ENT-1099. The existing
+  548 -/// range-based scan only works for dataset-wide offsets, while fragment-limited
+  549 -/// sampling must first map random offsets within the selected fragments to row
+  550 -/// addresses and then `take` those rows. Both nullable FSL and multivector
+  551 -/// paths reuse this stream to avoid duplicating fragment sampling logic.
+  590 +/// Build a batch stream over uniform random rows, optionally within fragments.
+  591  ///
+  592  /// Each round is sized to `still_needed` (the consumer's outstanding demand),
+  554 -/// so a low-null column reads at most the requested sample. Visited offsets
+  593 +/// sorted, then read in bounded concurrent chunks so storage can coalesce nearby rows.
+  594 +/// A round must be consumed before the next one is planned: prefetching another
+  595 +/// round would use stale demand and read beyond the sample's memory budget.
+  596 +/// Null filtering can request another round without repeating rows. Visited offsets
+  597  /// are tracked in a [`RoaringTreemap`] because sparse or all-null columns
+  598  /// force the stream to visit most selected rows before it can terminate, and
+  599  /// a compressed bitmap keeps that persistent state near `num_rows / 8` bytes
+  600  /// even when fully populated.
+  559 -fn sample_training_data_scan_from_fragments(
+  601 +fn sample_training_data_scan_by_indices(
+  602      dataset: &Dataset,
+  603      column: &str,
+  604      num_rows: usize,
+  563 -    fragment_ids: &[u32],
+  605 +    batch_rows: usize,
+  606 +    batch_readahead: usize,
+  607 +    fragment_ids: Option<&[u32]>,
+  608      still_needed: Arc<AtomicUsize>,
+  609  ) -> Result<Pin<Box<dyn Stream<Item = Result<RecordBatch>> + Send>>> {
+  566 -    if fragment_ids.is_empty() {
+  610 +    if fragment_ids.is_some_and(|ids| ids.is_empty()) {
+  611          return Err(Error::invalid_input(
+  612              "Training fragment filter must not be empty".to_string(),
+  613          ));
+  614      }
+  615  
+  572 -    let selected_fragments = dataset.get_fragments_from_ids(fragment_ids)?;
+  616 +    let selected_fragments = Arc::new(match fragment_ids {
+  617 +        Some(ids) => dataset.get_fragments_from_ids(ids)?,
+  618 +        None => dataset.get_fragments(),
+  619 +    });
+  620      let dataset = Arc::new(dataset.clone());
+  621      let projection = Arc::new(
+  622          ProjectionRequest::from(dataset.schema().project(&[column])?)
+
+@@ -593,18 +640,12 @@ fn sample_training_data_scan_from_fragments(
+  640              mut rng,
+  641              still_needed,
+  642          )| async move {
+  596 -            if seen_offsets.len() as usize >= num_rows {
+  597 -                return Ok(None);
+  598 -            }
+  643              let still = still_needed.load(Ordering::Relaxed);
+  600 -            if still == 0 {
+  644 +            if still == 0 || seen_offsets.len() as usize >= num_rows {
+  645                  return Ok(None);
+  646              }
+  647  
+  648              let remaining = num_rows.saturating_sub(seen_offsets.len() as usize);
+  605 -            // Sizing the round to the outstanding demand keeps a low-null
+  606 -            // column's reads bounded by the requested sample, matching the
+  607 -            // non-nullable path.
+  649              let target = still.min(remaining);
+  650              let mut sampled_offsets = if remaining <= target.saturating_mul(4) {
+  651                  // Few offsets remain unseen, so shuffling the unseen set is
+
+@@ -626,24 +667,34 @@ fn sample_training_data_scan_from_fragments(
+  667                  }
+  668                  sampled_offsets
+  669              };
+  629 -            if sampled_offsets.is_empty() {
+  630 -                return Ok(None);
+  631 -            }
+  670              sampled_offsets.sort_unstable();
+  671  
+  634 -            let mut row_addrs =
+  635 -                row_offsets_to_row_addresses(&selected_fragments, &sampled_offsets).await?;
+  636 -            row_addrs.sort_unstable();
+  672 +            let chunks =
+  673 +                stream::unfold(sampled_offsets.into_iter(), move |mut offsets| async move {
+  674 +                    let chunk = offsets.by_ref().take(batch_rows).collect::<Vec<_>>();
+  675 +                    (!chunk.is_empty()).then_some((chunk, offsets))
+  676 +                });
+  677 +            let read_dataset = dataset.clone();
+  678 +            let read_projection = projection.clone();
+  679 +            let read_fragments = selected_fragments.clone();
+  680 +            let batches = chunks
+  681 +                .map(move |offsets| {
+  682 +                    let dataset = read_dataset.clone();
+  683 +                    let projection = read_projection.clone();
+  684 +                    let fragments = read_fragments.clone();
+  685 +                    async move {
+  686 +                        let mut row_addrs =
+  687 +                            row_offsets_to_row_addresses(&fragments, &offsets).await?;
+  688 +                        row_addrs.sort_unstable();
+  689 +                        TakeBuilder::try_new_from_addresses(dataset, row_addrs, projection)?
+  690 +                            .execute()
+  691 +                            .await
+  692 +                    }
+  693 +                })
+  694 +                .buffered(batch_readahead);
+  695  
+  638 -            let batch = TakeBuilder::try_new_from_addresses(
+  639 -                dataset.clone(),
+  640 -                row_addrs,
+  641 -                projection.clone(),
+  642 -            )?
+  643 -            .execute()
+  644 -            .await?;
+  645 -            Ok(Some((
+  646 -                batch,
+  696 +            Ok::<_, Error>(Some((
+  697 +                batches,
+  698                  (
+  699                      dataset,
+  700                      projection,
+
+@@ -655,7 +706,7 @@ fn sample_training_data_scan_from_fragments(
+  706              )))
+  707          },
+  708      );
+  658 -    Ok(Box::pin(stream))
+  709 +    Ok(Box::pin(stream.try_flatten()))
+  710  }
+  711  
+  712  fn resolve_scan_fragments(
+
+@@ -709,6 +760,23 @@ fn fsl_values_to_array(
+  760      )?)
+  761  }
+  762  
+  763 +/// Shuffle whole vectors without allocating a second training buffer.
+  764 +fn shuffle_training_rows(
+  765 +    values: &mut [u8],
+  766 +    num_rows: usize,
+  767 +    byte_width: usize,
+  768 +    rng: &mut impl Rng,
+  769 +) {
+  770 +    debug_assert_eq!(values.len(), num_rows * byte_width);
+  771 +    for i in (1..num_rows).rev() {
+  772 +        let j = rng.random_range(0..=i);
+  773 +        if i != j {
+  774 +            let (left, right) = values.split_at_mut(i * byte_width);
+  775 +            left[j * byte_width..(j + 1) * byte_width].swap_with_slice(&mut right[..byte_width]);
+  776 +        }
+  777 +    }
+  778 +}
+  779 +
+  780  /// Stream-and-compact sampling for nullable FixedSizeList vector columns.
+  781  ///
+  782  /// Unlike [`sample_nullable_fallback`], which must collect all source batches
+
+@@ -734,8 +802,7 @@ where
+  802  
+  803      while num_non_null < sample_size_hint {
+  804          let remaining_rows = sample_size_hint - num_non_null;
+  737 -        // A fragment-limited producer sizes its next prefetch round to this
+  738 -        // outstanding demand.
+  805 +        // The producer sizes each sampling round to this outstanding demand.
+  806          if let Some(still_needed) = &still_needed {
+  807              still_needed.store(remaining_rows, Ordering::Relaxed);
+  808          }
+
+@@ -787,6 +854,15 @@ where
+  854      let num_rows_out = num_non_null.min(sample_size_hint);
+  855      values_buf.truncate(num_rows_out * byte_width);
+  856  
+  857 +    // Reads are sorted for locality, but hierarchical k-means trains on a
+  858 +    // prefix. Randomize the output so that prefix represents the whole sample.
+  859 +    shuffle_training_rows(
+  860 +        values_buf.as_slice_mut(),
+  861 +        num_rows_out,
+  862 +        byte_width,
+  863 +        &mut SmallRng::from_os_rng(),
+  864 +    );
+  865 +
+  866      info!(
+  867          "Sample training data: retrieved {} rows by sampling after filtering out nulls",
+  868          num_rows_out
+
+@@ -811,13 +887,27 @@ async fn sample_fsl_uniform(
+  887      let indices = generate_random_indices(num_rows, sample_size_hint);
+  888      let projection = Arc::new(dataset.schema().project(&[column])?);
+  889  
+  890 +    let batch_rows = training_sample_batch_rows(byte_width)?;
+  891 +    let batch_readahead = training_sample_readahead(
+  892 +        sample_size_hint,
+  893 +        byte_width,
+  894 +        dataset.object_store.io_parallelism(),
+  895 +    )?;
+  896      let mut values_buf = MutableBuffer::with_capacity(sample_size_hint * byte_width);
+  897      let mut total_rows: usize = 0;
+  898  
+  817 -    const TAKE_CHUNK_SIZE: usize = 8192;
+  818 -    let total_chunks = indices.len().div_ceil(TAKE_CHUNK_SIZE);
+  819 -    for (chunk_idx, chunk) in indices.chunks(TAKE_CHUNK_SIZE).enumerate() {
+  820 -        let batch = dataset.take(chunk, projection.clone()).await?;
+  899 +    let total_chunks = indices.len().div_ceil(batch_rows);
+  900 +    let dataset = Arc::new(dataset.clone());
+  901 +    let mut batches = stream::iter(indices.chunks(batch_rows).map(<[u64]>::to_vec))
+  902 +        .map(move |chunk| {
+  903 +            let dataset = dataset.clone();
+  904 +            let projection = projection.clone();
+  905 +            async move { dataset.take(&chunk, projection).await }
+  906 +        })
+  907 +        .buffered(batch_readahead)
+  908 +        .enumerate();
+  909 +    while let Some((chunk_idx, batch)) = batches.next().await {
+  910 +        let batch = batch?;
+  911          let array = get_column_from_batch(&batch, column)?;
+  912          accumulate_fsl_values(
+  913              &mut values_buf,

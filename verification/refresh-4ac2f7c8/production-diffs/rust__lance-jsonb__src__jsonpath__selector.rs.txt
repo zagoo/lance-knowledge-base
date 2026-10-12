@@ -1,0 +1,894 @@
+@@ -0,0 +1,893 @@
+    1 +// SPDX-License-Identifier: Apache-2.0
+    2 +// SPDX-FileCopyrightText: Copyright The Lance Authors
+    3 +// SPDX-FileCopyrightText: Copyright 2023 Datafuse Labs
+    4 +// Adapted from databendlabs/jsonb at commit fba895c5ebe77ce2539e187f9c652f51cbf195c3.
+    5 +
+    6 +use std::borrow::Cow;
+    7 +use std::cmp::Ordering;
+    8 +use std::collections::VecDeque;
+    9 +
+   10 +use crate::Error;
+   11 +use crate::OwnedJsonb;
+   12 +use crate::RawJsonb;
+   13 +use crate::core::ArrayBuilder;
+   14 +use crate::core::ArrayIterator;
+   15 +use crate::core::JsonbItem;
+   16 +use crate::core::JsonbItemType;
+   17 +use crate::core::ObjectValueIterator;
+   18 +use crate::error::Result;
+   19 +use crate::jsonpath::ArrayIndex;
+   20 +use crate::jsonpath::BinaryOperator;
+   21 +use crate::jsonpath::Expr;
+   22 +use crate::jsonpath::JsonPath;
+   23 +use crate::jsonpath::Path;
+   24 +use crate::jsonpath::PathValue;
+   25 +use crate::jsonpath::RecursiveLevel;
+   26 +use crate::jsonpath::UnaryOperator;
+   27 +use crate::number::Number;
+   28 +use crate::value::Value;
+   29 +
+   30 +#[derive(Debug)]
+   31 +enum ExprValue<'a> {
+   32 +    Values(Vec<PathValue<'a>>),
+   33 +    Value(Box<PathValue<'a>>),
+   34 +}
+   35 +
+   36 +impl ExprValue<'_> {
+   37 +    fn convert_to_number(self) -> Result<Number> {
+   38 +        match self {
+   39 +            ExprValue::Values(mut vals) => {
+   40 +                if vals.len() != 1 {
+   41 +                    return Err(Error::InvalidJsonPath);
+   42 +                }
+   43 +                let val = vals.pop().unwrap();
+   44 +                match val {
+   45 +                    PathValue::Number(num) => Ok(num),
+   46 +                    _ => Err(Error::InvalidJsonPath),
+   47 +                }
+   48 +            }
+   49 +            ExprValue::Value(val) => match *val {
+   50 +                PathValue::Number(num) => Ok(num),
+   51 +                _ => Err(Error::InvalidJsonPath),
+   52 +            },
+   53 +        }
+   54 +    }
+   55 +
+   56 +    fn convert_to_numbers(self) -> Result<Vec<Number>> {
+   57 +        match self {
+   58 +            ExprValue::Values(vals) => {
+   59 +                let mut nums = Vec::with_capacity(vals.len());
+   60 +                for val in vals {
+   61 +                    if let PathValue::Number(num) = val {
+   62 +                        nums.push(num);
+   63 +                    } else {
+   64 +                        return Err(Error::InvalidJsonPath);
+   65 +                    }
+   66 +                }
+   67 +                Ok(nums)
+   68 +            }
+   69 +            ExprValue::Value(val) => match *val {
+   70 +                PathValue::Number(num) => Ok(vec![num]),
+   71 +                _ => Err(Error::InvalidJsonPath),
+   72 +            },
+   73 +        }
+   74 +    }
+   75 +}
+   76 +
+   77 +/// Represents the state of a JSON Path selection process.
+   78 +///
+   79 +/// It holds the root JSONB value and the intermediate results (items) found during
+   80 +/// the execution of a `JsonPath`.
+   81 +pub struct Selector<'a> {
+   82 +    /// The root JSONB value against which the path is executed.
+   83 +    root_jsonb: RawJsonb<'a>,
+   84 +    /// A queue holding the JSONB items that match the path criteria during execution.
+   85 +    items: VecDeque<JsonbItem<'a>>,
+   86 +}
+   87 +
+   88 +impl<'a> Selector<'a> {
+   89 +    /// Creates a new `Selector` for the given root `RawJsonb`.
+   90 +    ///
+   91 +    /// # Arguments
+   92 +    ///
+   93 +    /// * `root_jsonb` - The `RawJsonb` data to select from.
+   94 +    pub fn new(root_jsonb: RawJsonb<'a>) -> Self {
+   95 +        Self {
+   96 +            root_jsonb,
+   97 +            items: VecDeque::new(),
+   98 +        }
+   99 +    }
+  100 +
+  101 +    /// Executes the `JsonPath` and collects all matching items into a `Vec<OwnedJsonb>`.
+  102 +    ///
+  103 +    /// This function returns all matching elements as a `Vec<OwnedJsonb>`.
+  104 +    ///
+  105 +    /// # Arguments
+  106 +    ///
+  107 +    /// * `self` - The JSONPath selector.
+  108 +    /// * `json_path` - The JSONPath expression.
+  109 +    ///
+  110 +    /// # Returns
+  111 +    ///
+  112 +    /// * `Ok(Vec<OwnedJsonb>)` - A vector containing the selected `OwnedJsonb` values.
+  113 +    /// * `Err(Error)` - If the JSONB data is invalid or if an error occurs during path evaluation.
+  114 +    ///
+  115 +    /// # Examples
+  116 +    ///
+  117 +    /// ```
+  118 +    /// use lance_jsonb::jsonpath::parse_json_path;
+  119 +    /// use lance_jsonb::jsonpath::Selector;
+  120 +    /// use lance_jsonb::OwnedJsonb;
+  121 +    ///
+  122 +    /// let jsonb_value = r#"{"a": {"b": [1, 2, 3]}, "c": 4}"#.parse::<OwnedJsonb>().unwrap();
+  123 +    /// let raw_jsonb = jsonb_value.as_raw();
+  124 +    /// let mut selector = Selector::new(raw_jsonb);
+  125 +    ///
+  126 +    /// let path = parse_json_path("$.a.b[*]".as_bytes()).unwrap();
+  127 +    /// let result = selector.select_values(&path).unwrap();
+  128 +    /// assert_eq!(result.len(), 3);
+  129 +    /// assert_eq!(result[0].to_string(), "1");
+  130 +    /// assert_eq!(result[1].to_string(), "2");
+  131 +    /// assert_eq!(result[2].to_string(), "3");
+  132 +    /// ```
+  133 +    ///
+  134 +    /// # See Also
+  135 +    ///
+  136 +    /// * `RawJsonb::select_by_path`.
+  137 +    pub fn select_values(&mut self, json_path: &'a JsonPath<'a>) -> Result<Vec<OwnedJsonb>> {
+  138 +        self.execute(json_path)?;
+  139 +        let mut values = Vec::with_capacity(self.items.len());
+  140 +        while let Some(item) = self.items.pop_front() {
+  141 +            let value = OwnedJsonb::from_item(item)?;
+  142 +            values.push(value);
+  143 +        }
+  144 +        Ok(values)
+  145 +    }
+  146 +
+  147 +    /// Executes the `JsonPath` and returns a single value or an array of values.
+  148 +    ///
+  149 +    /// If exactly one element matches, it is returned directly (wrapped in `Some`).
+  150 +    /// If multiple elements match, they are returned as a JSON array (wrapped in `Some`).
+  151 +    /// If no elements match, `None` is returned.
+  152 +    ///
+  153 +    /// # Arguments
+  154 +    ///
+  155 +    /// * `self` - The JSONPath selector.
+  156 +    /// * `json_path` - The JSONPath expression.
+  157 +    ///
+  158 +    /// # Returns
+  159 +    ///
+  160 +    /// * `Ok(Some(OwnedJsonb))` - A single `OwnedJsonb` containing the matched values.
+  161 +    /// * `Ok(None)` - The path does not match any values.
+  162 +    /// * `Err(Error)` - If the JSONB data is invalid or if an error occurs during path evaluation.
+  163 +    ///
+  164 +    /// # Examples
+  165 +    ///
+  166 +    /// ```rust
+  167 +    /// use lance_jsonb::jsonpath::parse_json_path;
+  168 +    /// use lance_jsonb::jsonpath::Selector;
+  169 +    /// use lance_jsonb::OwnedJsonb;
+  170 +    ///
+  171 +    /// let jsonb_value = r#"{"a": [{"b": 1}, {"b": 2}], "c": 3}"#.parse::<OwnedJsonb>().unwrap();
+  172 +    /// let raw_jsonb = jsonb_value.as_raw();
+  173 +    /// let mut selector = Selector::new(raw_jsonb);
+  174 +    ///
+  175 +    /// let path = parse_json_path("$.c".as_bytes()).unwrap(); // Matches a single value.
+  176 +    /// let result = selector.select_value(&path).unwrap();
+  177 +    /// assert_eq!(result.unwrap().to_string(), "3");
+  178 +    ///
+  179 +    /// let path = parse_json_path("$.a[*].b".as_bytes()).unwrap(); // Matches multiple values.
+  180 +    /// let result = selector.select_value(&path).unwrap();
+  181 +    /// assert_eq!(result.unwrap().to_string(), "[1,2]");
+  182 +    ///
+  183 +    /// let path = parse_json_path("$.x".as_bytes()).unwrap(); // No match.
+  184 +    /// let result = selector.select_value(&path).unwrap();
+  185 +    /// assert!(result.is_none());
+  186 +    /// ```
+  187 +    ///
+  188 +    /// # See Also
+  189 +    ///
+  190 +    /// * `RawJsonb::select_value_by_path`.
+  191 +    pub fn select_value(&mut self, json_path: &'a JsonPath<'a>) -> Result<Option<OwnedJsonb>> {
+  192 +        self.execute(json_path)?;
+  193 +        if self.items.len() > 1 {
+  194 +            let mut builder = ArrayBuilder::with_capacity(self.items.len());
+  195 +            while let Some(item) = self.items.pop_front() {
+  196 +                builder.push_jsonb_item(item);
+  197 +            }
+  198 +            let array = builder.build()?;
+  199 +            Ok(Some(array))
+  200 +        } else if let Some(item) = self.items.pop_front() {
+  201 +            let value = OwnedJsonb::from_item(item)?;
+  202 +            Ok(Some(value))
+  203 +        } else {
+  204 +            Ok(None)
+  205 +        }
+  206 +    }
+  207 +
+  208 +    /// Executes the `JsonPath` and checks if any item matches.
+  209 +    ///
+  210 +    /// # Arguments
+  211 +    ///
+  212 +    /// * `self` - The JSONPath selector.
+  213 +    /// * `json_path` - The JSONPath expression.
+  214 +    ///
+  215 +    /// # Returns
+  216 +    ///
+  217 +    /// * `Ok(true)` - If the JSON path exists.
+  218 +    /// * `Ok(false)` - If the JSON path does not exist.
+  219 +    /// * `Err(Error)` - If the JSONB data is invalid or if an error occurs during path evaluation.
+  220 +    ///   This could also indicate issues with the `json_path` itself.
+  221 +    ///
+  222 +    /// # Examples
+  223 +    ///
+  224 +    /// ```rust
+  225 +    /// use lance_jsonb::jsonpath::parse_json_path;
+  226 +    /// use lance_jsonb::jsonpath::Selector;
+  227 +    /// use lance_jsonb::OwnedJsonb;
+  228 +    ///
+  229 +    /// let jsonb_value = r#"{"a": {"b": [1, 2, 3]}, "c": 4}"#.parse::<OwnedJsonb>().unwrap();
+  230 +    /// let raw_jsonb = jsonb_value.as_raw();
+  231 +    /// let mut selector = Selector::new(raw_jsonb);
+  232 +    ///
+  233 +    /// // Valid paths
+  234 +    /// let path1 = parse_json_path("$.a.b[1]".as_bytes()).unwrap();
+  235 +    /// assert!(selector.exists(&path1).unwrap());
+  236 +    ///
+  237 +    /// let path2 = parse_json_path("$.c".as_bytes()).unwrap();
+  238 +    /// assert!(selector.exists(&path2).unwrap());
+  239 +    ///
+  240 +    /// // Invalid paths
+  241 +    /// let path3 = parse_json_path("$.a.x".as_bytes()).unwrap(); // "x" does not exist
+  242 +    /// assert!(!selector.exists(&path3).unwrap());
+  243 +    /// ```
+  244 +    ///
+  245 +    /// # See Also
+  246 +    ///
+  247 +    /// * `RawJsonb::path_exists`.
+  248 +    pub fn exists(&mut self, json_path: &'a JsonPath<'a>) -> Result<bool> {
+  249 +        self.execute(json_path)?;
+  250 +        Ok(!self.items.is_empty())
+  251 +    }
+  252 +
+  253 +    fn execute(&mut self, json_path: &'a JsonPath<'a>) -> Result<()> {
+  254 +        // add root jsonb
+  255 +        let root_item = JsonbItem::Raw(self.root_jsonb);
+  256 +        self.items.clear();
+  257 +        self.items.push_front(root_item);
+  258 +
+  259 +        if json_path.paths.len() == 1
+  260 +            && let Path::Expr(expr) = &json_path.paths[0]
+  261 +        {
+  262 +            let root_item = self.items.pop_front().unwrap();
+  263 +            self.eval_expr(root_item, expr)?;
+  264 +            return Ok(());
+  265 +        }
+  266 +        self.select_by_paths(&json_path.paths)?;
+  267 +
+  268 +        Ok(())
+  269 +    }
+  270 +
+  271 +    fn select_by_paths(&mut self, paths: &'a [Path<'a>]) -> Result<()> {
+  272 +        if let Some(Path::Current) = paths.first() {
+  273 +            return Err(Error::InvalidJsonPath);
+  274 +        }
+  275 +
+  276 +        for path in paths.iter() {
+  277 +            match path {
+  278 +                &Path::Root | &Path::Current => {
+  279 +                    continue;
+  280 +                }
+  281 +                Path::FilterExpr(expr) | Path::Expr(expr) => {
+  282 +                    let len = self.items.len();
+  283 +                    for _ in 0..len {
+  284 +                        let item = self.items.pop_front().unwrap();
+  285 +                        let res = self.eval_filter_expr(item.clone(), expr)?.unwrap_or(false);
+  286 +                        if res {
+  287 +                            self.items.push_back(item);
+  288 +                        }
+  289 +                    }
+  290 +                }
+  291 +                _ => {
+  292 +                    self.select_by_path(path)?;
+  293 +                }
+  294 +            }
+  295 +        }
+  296 +        Ok(())
+  297 +    }
+  298 +
+  299 +    fn select_by_path(&mut self, path: &'a Path<'a>) -> Result<bool> {
+  300 +        if self.items.is_empty() {
+  301 +            return Ok(false);
+  302 +        }
+  303 +
+  304 +        let len = self.items.len();
+  305 +        for _ in 0..len {
+  306 +            let item = self.items.pop_front().unwrap();
+  307 +
+  308 +            match path {
+  309 +                Path::DotWildcard => {
+  310 +                    self.select_object_values(item)?;
+  311 +                }
+  312 +                Path::RecursiveDotWildcard(index_opt) => {
+  313 +                    self.recursive_select_values(item, 0, index_opt)?;
+  314 +                }
+  315 +                Path::BracketWildcard => {
+  316 +                    self.select_array_values(item)?;
+  317 +                }
+  318 +                Path::ColonField(name) | Path::DotField(name) | Path::ObjectField(name) => {
+  319 +                    self.select_object_values_by_name(item, name)?;
+  320 +                }
+  321 +                Path::ArrayIndices(array_indices) => {
+  322 +                    self.select_array_values_by_indices(item, array_indices)?;
+  323 +                }
+  324 +                _ => todo!(),
+  325 +            }
+  326 +        }
+  327 +        Ok(true)
+  328 +    }
+  329 +
+  330 +    fn select_object_values(&mut self, parent_item: JsonbItem<'a>) -> Result<()> {
+  331 +        let jsonb_item_type = parent_item.jsonb_item_type()?;
+  332 +        if !matches!(jsonb_item_type, JsonbItemType::Object(_)) {
+  333 +            return Ok(());
+  334 +        };
+  335 +
+  336 +        match parent_item {
+  337 +            JsonbItem::Raw(raw) => {
+  338 +                let object_val_iter_opt = ObjectValueIterator::new(raw)?;
+  339 +                if let Some(mut object_val_iter) = object_val_iter_opt {
+  340 +                    for result in &mut object_val_iter {
+  341 +                        let val_item = result?;
+  342 +                        self.items.push_back(val_item);
+  343 +                    }
+  344 +                }
+  345 +            }
+  346 +            JsonbItem::Owned(ref owned) => {
+  347 +                let object_val_iter_opt = ObjectValueIterator::new(owned.as_raw())?;
+  348 +                if let Some(mut object_val_iter) = object_val_iter_opt {
+  349 +                    for result in &mut object_val_iter {
+  350 +                        let val_item = result?;
+  351 +                        let owned_item = OwnedJsonb::from_item(val_item)?;
+  352 +                        self.items.push_back(JsonbItem::Owned(owned_item));
+  353 +                    }
+  354 +                }
+  355 +            }
+  356 +            _ => {}
+  357 +        }
+  358 +
+  359 +        Ok(())
+  360 +    }
+  361 +
+  362 +    fn recursive_select_values(
+  363 +        &mut self,
+  364 +        parent_item: JsonbItem<'a>,
+  365 +        curr_level: u8,
+  366 +        recursive_level_opt: &Option<RecursiveLevel>,
+  367 +    ) -> Result<()> {
+  368 +        let (is_match, should_continue) = if let Some(recursive_level) = recursive_level_opt {
+  369 +            recursive_level.check_recursive_level(curr_level)
+  370 +        } else {
+  371 +            (true, true)
+  372 +        };
+  373 +        if is_match {
+  374 +            self.items.push_back(parent_item.clone());
+  375 +        }
+  376 +        if !should_continue {
+  377 +            return Ok(());
+  378 +        }
+  379 +
+  380 +        match parent_item {
+  381 +            JsonbItem::Raw(raw) => {
+  382 +                let object_val_iter_opt = ObjectValueIterator::new(raw)?;
+  383 +                if let Some(mut object_val_iter) = object_val_iter_opt {
+  384 +                    for result in &mut object_val_iter {
+  385 +                        let val_item = result?;
+  386 +                        self.recursive_select_values(
+  387 +                            val_item,
+  388 +                            curr_level + 1,
+  389 +                            recursive_level_opt,
+  390 +                        )?;
+  391 +                    }
+  392 +                }
+  393 +                let array_iter_opt = ArrayIterator::new(raw)?;
+  394 +                if let Some(mut array_iter) = array_iter_opt {
+  395 +                    for item_result in &mut array_iter {
+  396 +                        let item = item_result?;
+  397 +                        self.recursive_select_values(item, curr_level + 1, recursive_level_opt)?;
+  398 +                    }
+  399 +                }
+  400 +            }
+  401 +            JsonbItem::Owned(ref owned) => {
+  402 +                let object_val_iter_opt = ObjectValueIterator::new(owned.as_raw())?;
+  403 +                if let Some(mut object_val_iter) = object_val_iter_opt {
+  404 +                    for result in &mut object_val_iter {
+  405 +                        let val_item = result?;
+  406 +                        let owned_item = OwnedJsonb::from_item(val_item)?;
+  407 +                        self.recursive_select_values(
+  408 +                            JsonbItem::Owned(owned_item),
+  409 +                            curr_level + 1,
+  410 +                            recursive_level_opt,
+  411 +                        )?;
+  412 +                    }
+  413 +                }
+  414 +                let array_iter_opt = ArrayIterator::new(owned.as_raw())?;
+  415 +                if let Some(mut array_iter) = array_iter_opt {
+  416 +                    for item_result in &mut array_iter {
+  417 +                        let item = item_result?;
+  418 +                        let owned_item = OwnedJsonb::from_item(item)?;
+  419 +                        self.recursive_select_values(
+  420 +                            JsonbItem::Owned(owned_item),
+  421 +                            curr_level + 1,
+  422 +                            recursive_level_opt,
+  423 +                        )?;
+  424 +                    }
+  425 +                }
+  426 +            }
+  427 +            _ => {}
+  428 +        }
+  429 +        Ok(())
+  430 +    }
+  431 +
+  432 +    fn select_object_values_by_name(
+  433 +        &mut self,
+  434 +        parent_item: JsonbItem<'a>,
+  435 +        name: &'a str,
+  436 +    ) -> Result<()> {
+  437 +        let jsonb_item_type = parent_item.jsonb_item_type()?;
+  438 +        if !matches!(jsonb_item_type, JsonbItemType::Object(_)) {
+  439 +            return Ok(());
+  440 +        };
+  441 +
+  442 +        let key_name = Cow::Borrowed(name);
+  443 +        match parent_item {
+  444 +            JsonbItem::Raw(raw) => {
+  445 +                if let Some(val_item) =
+  446 +                    raw.get_object_value_by_key_name(&key_name, |name, key| key.eq(name))?
+  447 +                {
+  448 +                    self.items.push_back(val_item);
+  449 +                }
+  450 +            }
+  451 +            JsonbItem::Owned(ref owned) => {
+  452 +                let raw = owned.as_raw();
+  453 +                if let Some(val_item) =
+  454 +                    raw.get_object_value_by_key_name(&key_name, |name, key| key.eq(name))?
+  455 +                {
+  456 +                    let owned_item = OwnedJsonb::from_item(val_item)?;
+  457 +                    self.items.push_back(JsonbItem::Owned(owned_item));
+  458 +                }
+  459 +            }
+  460 +            _ => {}
+  461 +        }
+  462 +        Ok(())
+  463 +    }
+  464 +
+  465 +    fn select_array_values(&mut self, parent_item: JsonbItem<'a>) -> Result<()> {
+  466 +        let jsonb_item_type = parent_item.jsonb_item_type()?;
+  467 +        if !matches!(jsonb_item_type, JsonbItemType::Array(_)) {
+  468 +            // In lax mode, bracket wildcard allow Scalar and Object value.
+  469 +            self.items.push_back(parent_item);
+  470 +            return Ok(());
+  471 +        };
+  472 +
+  473 +        match parent_item {
+  474 +            JsonbItem::Raw(raw) => {
+  475 +                let array_iter_opt = ArrayIterator::new(raw)?;
+  476 +                if let Some(mut array_iter) = array_iter_opt {
+  477 +                    for item_result in &mut array_iter {
+  478 +                        let item = item_result?;
+  479 +                        self.items.push_back(item);
+  480 +                    }
+  481 +                }
+  482 +            }
+  483 +            JsonbItem::Owned(ref owned) => {
+  484 +                let array_iter_opt = ArrayIterator::new(owned.as_raw())?;
+  485 +                if let Some(mut array_iter) = array_iter_opt {
+  486 +                    for item_result in &mut array_iter {
+  487 +                        let item = item_result?;
+  488 +                        let owned_item = OwnedJsonb::from_item(item)?;
+  489 +                        self.items.push_back(JsonbItem::Owned(owned_item));
+  490 +                    }
+  491 +                }
+  492 +            }
+  493 +            _ => {}
+  494 +        }
+  495 +        Ok(())
+  496 +    }
+  497 +
+  498 +    fn select_array_values_by_indices(
+  499 +        &mut self,
+  500 +        parent_item: JsonbItem<'a>,
+  501 +        array_indices: &Vec<ArrayIndex>,
+  502 +    ) -> Result<()> {
+  503 +        let jsonb_item_type = parent_item.jsonb_item_type()?;
+  504 +        let JsonbItemType::Array(arr_len) = jsonb_item_type else {
+  505 +            return Ok(());
+  506 +        };
+  507 +        for array_index in array_indices {
+  508 +            let indices = array_index.to_indices(arr_len);
+  509 +            if indices.is_empty() {
+  510 +                continue;
+  511 +            }
+  512 +            match parent_item {
+  513 +                JsonbItem::Raw(raw) => {
+  514 +                    let array_iter_opt = ArrayIterator::new(raw)?;
+  515 +                    if let Some(array_iter) = array_iter_opt {
+  516 +                        for (i, item_result) in &mut array_iter.enumerate() {
+  517 +                            let item = item_result?;
+  518 +                            if indices.contains(&i) {
+  519 +                                self.items.push_back(item);
+  520 +                            }
+  521 +                        }
+  522 +                    }
+  523 +                }
+  524 +                JsonbItem::Owned(ref owned) => {
+  525 +                    let array_iter_opt = ArrayIterator::new(owned.as_raw())?;
+  526 +                    if let Some(array_iter) = array_iter_opt {
+  527 +                        for (i, item_result) in &mut array_iter.enumerate() {
+  528 +                            let item = item_result?;
+  529 +                            if indices.contains(&i) {
+  530 +                                let owned_item = OwnedJsonb::from_item(item)?;
+  531 +                                self.items.push_back(JsonbItem::Owned(owned_item));
+  532 +                            }
+  533 +                        }
+  534 +                    }
+  535 +                }
+  536 +                _ => {}
+  537 +            }
+  538 +        }
+  539 +        Ok(())
+  540 +    }
+  541 +
+  542 +    fn eval_expr(&mut self, item: JsonbItem<'a>, expr: &'a Expr<'a>) -> Result<()> {
+  543 +        match expr {
+  544 +            Expr::UnaryOp { op, operand } => {
+  545 +                let res_items = self.eval_unary_arithmetic_func(item.clone(), op, operand)?;
+  546 +                for res_item in res_items {
+  547 +                    self.items.push_back(res_item);
+  548 +                }
+  549 +            }
+  550 +            Expr::BinaryOp { op, left, right } => match op {
+  551 +                BinaryOperator::Add
+  552 +                | BinaryOperator::Subtract
+  553 +                | BinaryOperator::Multiply
+  554 +                | BinaryOperator::Divide
+  555 +                | BinaryOperator::Modulo => {
+  556 +                    let res_items =
+  557 +                        self.eval_binary_arithmetic_func(item.clone(), op, left, right)?;
+  558 +                    for res_item in res_items {
+  559 +                        self.items.push_back(res_item);
+  560 +                    }
+  561 +                }
+  562 +                _ => {
+  563 +                    let res = self.eval_filter_expr(item, expr)?;
+  564 +                    let res_item = if let Some(res) = res {
+  565 +                        JsonbItem::Boolean(res)
+  566 +                    } else {
+  567 +                        JsonbItem::Null
+  568 +                    };
+  569 +                    self.items.push_back(res_item);
+  570 +                }
+  571 +            },
+  572 +            Expr::ExistsFunc(_) => {
+  573 +                let res = self.eval_filter_expr(item, expr)?;
+  574 +                let res_item = if let Some(res) = res {
+  575 +                    JsonbItem::Boolean(res)
+  576 +                } else {
+  577 +                    JsonbItem::Null
+  578 +                };
+  579 +                self.items.push_back(res_item);
+  580 +            }
+  581 +            Expr::Value(val) => {
+  582 +                let res_item = self.eval_value(val)?;
+  583 +                self.items.push_back(res_item);
+  584 +            }
+  585 +            Expr::Paths(_) => {
+  586 +                return Err(Error::InvalidJsonPath);
+  587 +            }
+  588 +        }
+  589 +        Ok(())
+  590 +    }
+  591 +
+  592 +    fn eval_unary_arithmetic_func(
+  593 +        &mut self,
+  594 +        item: JsonbItem<'a>,
+  595 +        op: &UnaryOperator,
+  596 +        operand: &'a Expr<'a>,
+  597 +    ) -> Result<Vec<JsonbItem<'a>>> {
+  598 +        let operand = self.convert_expr_val(item, operand)?;
+  599 +        let Ok(nums) = operand.convert_to_numbers() else {
+  600 +            return Err(Error::InvalidJsonPath);
+  601 +        };
+  602 +        let mut num_vals = Vec::with_capacity(nums.len());
+  603 +        match op {
+  604 +            UnaryOperator::Add => {
+  605 +                for num in nums {
+  606 +                    let owned_num = OwnedJsonb::new(Value::Number(num).to_vec());
+  607 +                    num_vals.push(JsonbItem::Owned(owned_num));
+  608 +                }
+  609 +            }
+  610 +            UnaryOperator::Subtract => {
+  611 +                for num in nums {
+  612 +                    let neg_num = num.neg()?;
+  613 +                    let owned_num = OwnedJsonb::new(Value::Number(neg_num).to_vec());
+  614 +                    num_vals.push(JsonbItem::Owned(owned_num));
+  615 +                }
+  616 +            }
+  617 +        };
+  618 +        Ok(num_vals)
+  619 +    }
+  620 +
+  621 +    fn eval_binary_arithmetic_func(
+  622 +        &mut self,
+  623 +        item: JsonbItem<'a>,
+  624 +        op: &BinaryOperator,
+  625 +        left: &'a Expr<'a>,
+  626 +        right: &'a Expr<'a>,
+  627 +    ) -> Result<Vec<JsonbItem<'a>>> {
+  628 +        let lhs = self.convert_expr_val(item.clone(), left)?;
+  629 +        let rhs = self.convert_expr_val(item.clone(), right)?;
+  630 +        let Ok(lnum) = lhs.convert_to_number() else {
+  631 +            return Err(Error::InvalidJsonPath);
+  632 +        };
+  633 +        let Ok(rnum) = rhs.convert_to_number() else {
+  634 +            return Err(Error::InvalidJsonPath);
+  635 +        };
+  636 +
+  637 +        let num_val = match op {
+  638 +            BinaryOperator::Add => lnum.add(rnum)?,
+  639 +            BinaryOperator::Subtract => lnum.sub(rnum)?,
+  640 +            BinaryOperator::Multiply => lnum.mul(rnum)?,
+  641 +            BinaryOperator::Divide => lnum.div(rnum)?,
+  642 +            BinaryOperator::Modulo => lnum.rem(rnum)?,
+  643 +            _ => return Ok(vec![]),
+  644 +        };
+  645 +        let owned_num = OwnedJsonb::new(Value::Number(num_val).to_vec());
+  646 +        Ok(vec![JsonbItem::Owned(owned_num)])
+  647 +    }
+  648 +
+  649 +    fn eval_value(&mut self, val: &PathValue<'a>) -> Result<JsonbItem<'a>> {
+  650 +        let value = match val {
+  651 +            PathValue::Null => Value::Null,
+  652 +            PathValue::Boolean(v) => Value::Bool(*v),
+  653 +            PathValue::Number(v) => Value::Number(v.clone()),
+  654 +            PathValue::String(v) => Value::String(v.clone()),
+  655 +            PathValue::Raw(v) => {
+  656 +                return Ok(JsonbItem::Raw(*v));
+  657 +            }
+  658 +        };
+  659 +        // Literals are wrapped in a single-element array so they compare like
+  660 +        // the array of values selected by the other side of the expression.
+  661 +        let owned_val = OwnedJsonb::new(Value::Array(vec![value]).to_vec());
+  662 +        Ok(JsonbItem::Owned(owned_val))
+  663 +    }
+  664 +
+  665 +    fn eval_filter_expr(
+  666 +        &mut self,
+  667 +        item: JsonbItem<'a>,
+  668 +        expr: &'a Expr<'a>,
+  669 +    ) -> Result<Option<bool>> {
+  670 +        match expr {
+  671 +            Expr::BinaryOp { op, left, right } => match op {
+  672 +                BinaryOperator::Or => {
+  673 +                    let lhs = self.eval_filter_expr(item.clone(), left)?;
+  674 +                    let rhs = self.eval_filter_expr(item.clone(), right)?;
+  675 +                    match (lhs, rhs) {
+  676 +                        (Some(lhs), Some(rhs)) => Ok(Some(lhs || rhs)),
+  677 +                        (_, _) => Ok(None),
+  678 +                    }
+  679 +                }
+  680 +                BinaryOperator::And => {
+  681 +                    let lhs = self.eval_filter_expr(item.clone(), left)?;
+  682 +                    let rhs = self.eval_filter_expr(item.clone(), right)?;
+  683 +                    match (lhs, rhs) {
+  684 +                        (Some(lhs), Some(rhs)) => Ok(Some(lhs && rhs)),
+  685 +                        (_, _) => Ok(None),
+  686 +                    }
+  687 +                }
+  688 +                BinaryOperator::Eq
+  689 +                | BinaryOperator::NotEq
+  690 +                | BinaryOperator::Lt
+  691 +                | BinaryOperator::Lte
+  692 +                | BinaryOperator::Gt
+  693 +                | BinaryOperator::Gte
+  694 +                | BinaryOperator::StartsWith => {
+  695 +                    let lhs = self.convert_expr_val(item.clone(), left)?;
+  696 +                    let rhs = self.convert_expr_val(item.clone(), right)?;
+  697 +                    let res = self.eval_compare(op, &lhs, &rhs);
+  698 +                    Ok(res)
+  699 +                }
+  700 +                _ => Ok(None),
+  701 +            },
+  702 +            Expr::ExistsFunc(paths) => {
+  703 +                let res = self.eval_exists(item, paths)?;
+  704 +                Ok(Some(res))
+  705 +            }
+  706 +            _ => Err(Error::InvalidJsonPath),
+  707 +        }
+  708 +    }
+  709 +
+  710 +    fn eval_exists(&mut self, item: JsonbItem<'a>, paths: &'a [Path<'a>]) -> Result<bool> {
+  711 +        let filter_items = self.select_by_filter_paths(item, paths)?;
+  712 +        let res = !filter_items.is_empty();
+  713 +        Ok(res)
+  714 +    }
+  715 +
+  716 +    fn select_by_filter_paths(
+  717 +        &mut self,
+  718 +        item: JsonbItem<'a>,
+  719 +        paths: &'a [Path<'a>],
+  720 +    ) -> Result<VecDeque<JsonbItem<'a>>> {
+  721 +        let mut items = VecDeque::new();
+  722 +        if let Some(Path::Current) = paths.first() {
+  723 +            items.push_front(item.clone());
+  724 +        } else {
+  725 +            let root_item = JsonbItem::Raw(self.root_jsonb);
+  726 +            items.push_front(root_item);
+  727 +        }
+  728 +        std::mem::swap(&mut self.items, &mut items);
+  729 +
+  730 +        for path in paths.iter() {
+  731 +            match path {
+  732 +                &Path::Root | &Path::Current => {
+  733 +                    continue;
+  734 +                }
+  735 +                Path::FilterExpr(expr) => {
+  736 +                    let len = self.items.len();
+  737 +                    for _ in 0..len {
+  738 +                        let item = self.items.pop_front().unwrap();
+  739 +                        let res = self.eval_filter_expr(item.clone(), expr)?.unwrap_or(false);
+  740 +                        if res {
+  741 +                            self.items.push_back(item);
+  742 +                        }
+  743 +                    }
+  744 +                }
+  745 +                _ => {
+  746 +                    self.select_by_path(path)?;
+  747 +                }
+  748 +            }
+  749 +        }
+  750 +        std::mem::swap(&mut self.items, &mut items);
+  751 +        Ok(items)
+  752 +    }
+  753 +
+  754 +    fn convert_expr_val(
+  755 +        &mut self,
+  756 +        item: JsonbItem<'a>,
+  757 +        expr: &'a Expr<'a>,
+  758 +    ) -> Result<ExprValue<'a>> {
+  759 +        match expr {
+  760 +            Expr::Value(value) => Ok(ExprValue::Value(value.clone())),
+  761 +            Expr::Paths(paths) => {
+  762 +                let mut filter_items = self.select_by_filter_paths(item, paths)?;
+  763 +
+  764 +                let mut values = Vec::with_capacity(filter_items.len());
+  765 +                while let Some(item) = filter_items.pop_front() {
+  766 +                    let value = match item {
+  767 +                        JsonbItem::Null => PathValue::Null,
+  768 +                        JsonbItem::Boolean(v) => PathValue::Boolean(v),
+  769 +                        JsonbItem::Number(num) => {
+  770 +                            let n = num.as_number()?;
+  771 +                            PathValue::Number(n)
+  772 +                        }
+  773 +                        JsonbItem::String(s) => PathValue::String(s),
+  774 +                        JsonbItem::Raw(raw) => {
+  775 +                            // collect values in the array.
+  776 +                            let array_iter_opt = ArrayIterator::new(raw)?;
+  777 +                            if let Some(mut array_iter) = array_iter_opt {
+  778 +                                for item_result in &mut array_iter {
+  779 +                                    let item = item_result?;
+  780 +                                    let value = match item {
+  781 +                                        JsonbItem::Null => PathValue::Null,
+  782 +                                        JsonbItem::Boolean(v) => PathValue::Boolean(v),
+  783 +                                        JsonbItem::Number(num) => {
+  784 +                                            let n = num.as_number()?;
+  785 +                                            PathValue::Number(n)
+  786 +                                        }
+  787 +                                        JsonbItem::String(s) => PathValue::String(s),
+  788 +                                        JsonbItem::Raw(raw) => PathValue::Raw(raw),
+  789 +                                        _ => {
+  790 +                                            continue;
+  791 +                                        }
+  792 +                                    };
+  793 +                                    values.push(value);
+  794 +                                }
+  795 +                            } else {
+  796 +                                let jsonb_item = JsonbItem::from_raw_jsonb(raw)?;
+  797 +                                let value = match jsonb_item {
+  798 +                                    JsonbItem::Null => PathValue::Null,
+  799 +                                    JsonbItem::Boolean(v) => PathValue::Boolean(v),
+  800 +                                    JsonbItem::Number(num) => {
+  801 +                                        let n = num.as_number()?;
+  802 +                                        PathValue::Number(n)
+  803 +                                    }
+  804 +                                    JsonbItem::String(s) => PathValue::String(s),
+  805 +                                    JsonbItem::Raw(raw) => PathValue::Raw(raw),
+  806 +                                    _ => {
+  807 +                                        continue;
+  808 +                                    }
+  809 +                                };
+  810 +                                values.push(value);
+  811 +                            }
+  812 +                            continue;
+  813 +                        }
+  814 +                        _ => {
+  815 +                            continue;
+  816 +                        }
+  817 +                    };
+  818 +                    values.push(value);
+  819 +                }
+  820 +                Ok(ExprValue::Values(values))
+  821 +            }
+  822 +            _ => unreachable!(),
+  823 +        }
+  824 +    }
+  825 +
+  826 +    fn eval_compare(
+  827 +        &mut self,
+  828 +        op: &BinaryOperator,
+  829 +        lhs: &ExprValue<'a>,
+  830 +        rhs: &ExprValue<'a>,
+  831 +    ) -> Option<bool> {
+  832 +        let (lvals, rvals) = match (lhs, rhs) {
+  833 +            (ExprValue::Value(lhs), ExprValue::Value(rhs)) => {
+  834 +                (vec![*lhs.clone()], vec![*rhs.clone()])
+  835 +            }
+  836 +            (ExprValue::Values(lhses), ExprValue::Value(rhs)) => {
+  837 +                (lhses.clone(), vec![*rhs.clone()])
+  838 +            }
+  839 +            (ExprValue::Value(lhs), ExprValue::Values(rhses)) => {
+  840 +                (vec![*lhs.clone()], rhses.clone())
+  841 +            }
+  842 +            (ExprValue::Values(lhses), ExprValue::Values(rhses)) => (lhses.clone(), rhses.clone()),
+  843 +        };
+  844 +
+  845 +        for lval in lvals.iter() {
+  846 +            for rval in rvals.iter() {
+  847 +                let res = self.compare_value(op, lval.clone(), rval.clone())?;
+  848 +                if res {
+  849 +                    return Some(true);
+  850 +                }
+  851 +            }
+  852 +        }
+  853 +        Some(false)
+  854 +    }
+  855 +
+  856 +    fn compare_value(
+  857 +        &mut self,
+  858 +        op: &BinaryOperator,
+  859 +        lhs: PathValue<'a>,
+  860 +        rhs: PathValue<'a>,
+  861 +    ) -> Option<bool> {
+  862 +        // container value can't compare values.
+  863 +        if matches!(lhs, PathValue::Raw(_)) || matches!(rhs, PathValue::Raw(_)) {
+  864 +            return None;
+  865 +        }
+  866 +        if op == &BinaryOperator::StartsWith {
+  867 +            let res = match (lhs, rhs) {
+  868 +                (PathValue::String(lhs), PathValue::String(rhs)) => Some(lhs.starts_with(&*rhs)),
+  869 +                (_, _) => None,
+  870 +            };
+  871 +            return res;
+  872 +        }
+  873 +        let order = lhs.partial_cmp(&rhs);
+  874 +        if let Some(order) = order {
+  875 +            let res = match op {
+  876 +                BinaryOperator::Eq => order == Ordering::Equal,
+  877 +                BinaryOperator::NotEq => order != Ordering::Equal,
+  878 +                BinaryOperator::Lt => order == Ordering::Less,
+  879 +                BinaryOperator::Lte => order == Ordering::Equal || order == Ordering::Less,
+  880 +                BinaryOperator::Gt => order == Ordering::Greater,
+  881 +                BinaryOperator::Gte => order == Ordering::Equal || order == Ordering::Greater,
+  882 +                _ => {
+  883 +                    return None;
+  884 +                }
+  885 +            };
+  886 +            Some(res)
+  887 +        } else if matches!(op, BinaryOperator::NotEq) {
+  888 +            Some(true)
+  889 +        } else {
+  890 +            None
+  891 +        }
+  892 +    }
+  893 +}

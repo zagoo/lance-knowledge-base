@@ -1,0 +1,267 @@
+@@ -0,0 +1,368 @@
+    1 +// SPDX-License-Identifier: Apache-2.0
+    2 +// SPDX-FileCopyrightText: Copyright The Lance Authors
+    3 +// SPDX-FileCopyrightText: Copyright 2023 Datafuse Labs
+    4 +// Adapted from databendlabs/jsonb at commit fba895c5ebe77ce2539e187f9c652f51cbf195c3.
+    5 +
+    6 +use std::ops::Range;
+    7 +
+    8 +use super::constants::*;
+    9 +use crate::RawJsonb;
+   10 +use crate::core::JsonbItem;
+   11 +use crate::core::util::jentry_to_jsonb_item;
+   12 +use crate::error::Result;
+   13 +
+   14 +pub struct ArrayIterator<'a> {
+   15 +    raw_jsonb: RawJsonb<'a>,
+   16 +    jentry_offset: usize,
+   17 +    item_offset: usize,
+   18 +    length: usize,
+   19 +    index: usize,
+   20 +}
+   21 +
+   22 +impl<'a> ArrayIterator<'a> {
+   23 +    pub(crate) fn new(raw_jsonb: RawJsonb<'a>) -> Result<Option<Self>> {
+   24 +        let (header_type, header_len) = raw_jsonb.read_header(0)?;
+   25 +        if header_type == ARRAY_CONTAINER_TAG {
+   26 +            Ok(Some(Self::new_with_len(raw_jsonb, header_len)))
+   27 +        } else {
+   28 +            Ok(None)
+   29 +        }
+   30 +    }
+   31 +
+   32 +    pub(crate) fn new_with_len(raw_jsonb: RawJsonb<'a>, length: usize) -> Self {
+   33 +        Self {
+   34 +            raw_jsonb,
+   35 +            jentry_offset: 4,
+   36 +            item_offset: 4 + 4 * length,
+   37 +            length,
+   38 +            index: 0,
+   39 +        }
+   40 +    }
+   41 +
+   42 +    fn remaining(&self) -> usize {
+   43 +        self.length - self.index
+   44 +    }
+   45 +}
+   46 +
+   47 +impl<'a> Iterator for ArrayIterator<'a> {
+   48 +    type Item = Result<JsonbItem<'a>>;
+   49 +
+   50 +    fn next(&mut self) -> Option<Self::Item> {
+   51 +        if self.index >= self.length {
+   52 +            return None;
+   53 +        }
+   54 +        let jentry = match self.raw_jsonb.read_jentry(self.jentry_offset) {
+   55 +            Ok(jentry) => jentry,
+   56 +            Err(err) => return Some(Err(err)),
+   57 +        };
+   58 +
+   59 +        let item_length = jentry.length as usize;
+   60 +        let item_range = Range {
+   61 +            start: self.item_offset,
+   62 +            end: self.item_offset + item_length,
+   63 +        };
+   64 +        let data = match self.raw_jsonb.slice(item_range) {
+   65 +            Ok(data) => data,
+   66 +            Err(err) => return Some(Err(err)),
+   67 +        };
+   68 +        let item = jentry_to_jsonb_item(jentry, data);
+   69 +
+   70 +        self.index += 1;
+   71 +        self.jentry_offset += 4;
+   72 +        self.item_offset += item_length;
+   73 +
+   74 +        Some(Ok(item))
+   75 +    }
+   76 +
+   77 +    fn size_hint(&self) -> (usize, Option<usize>) {
+   78 +        let remaining = self.remaining();
+   79 +        (remaining, Some(remaining))
+   80 +    }
+   81 +}
+   82 +
+   83 +impl ExactSizeIterator for ArrayIterator<'_> {}
+   84 +
+   85 +pub struct ObjectValueIterator<'a> {
+   86 +    raw_jsonb: RawJsonb<'a>,
+   87 +    jentry_offset: usize,
+   88 +    item_offset: usize,
+   89 +    length: usize,
+   90 +    index: usize,
+   91 +}
+   92 +
+   93 +impl<'a> ObjectValueIterator<'a> {
+   94 +    pub(crate) fn new(raw_jsonb: RawJsonb<'a>) -> Result<Option<Self>> {
+   95 +        let (header_type, header_len) = raw_jsonb.read_header(0)?;
+   96 +        if header_type == OBJECT_CONTAINER_TAG {
+   97 +            let mut jentry_offset = 4;
+   98 +            let mut item_offset = 4 + 8 * header_len;
+   99 +            for _ in 0..header_len {
+  100 +                let key_jentry = raw_jsonb.read_jentry(jentry_offset)?;
+  101 +                jentry_offset += 4;
+  102 +                item_offset += key_jentry.length as usize;
+  103 +            }
+  104 +
+  105 +            Ok(Some(Self {
+  106 +                raw_jsonb,
+  107 +                jentry_offset,
+  108 +                item_offset,
+  109 +                length: header_len,
+  110 +                index: 0,
+  111 +            }))
+  112 +        } else {
+  113 +            Ok(None)
+  114 +        }
+  115 +    }
+  116 +
+  117 +    #[allow(dead_code)]
+  118 +    pub(crate) fn len(&self) -> usize {
+  119 +        self.length
+  120 +    }
+  121 +
+  122 +    fn remaining(&self) -> usize {
+  123 +        self.length - self.index
+  124 +    }
+  125 +}
+  126 +
+  127 +impl<'a> Iterator for ObjectValueIterator<'a> {
+  128 +    type Item = Result<JsonbItem<'a>>;
+  129 +
+  130 +    fn next(&mut self) -> Option<Self::Item> {
+  131 +        if self.index >= self.length {
+  132 +            return None;
+  133 +        }
+  134 +        let jentry = match self.raw_jsonb.read_jentry(self.jentry_offset) {
+  135 +            Ok(jentry) => jentry,
+  136 +            Err(err) => return Some(Err(err)),
+  137 +        };
+  138 +
+  139 +        let val_length = jentry.length as usize;
+  140 +        let val_range = Range {
+  141 +            start: self.item_offset,
+  142 +            end: self.item_offset + val_length,
+  143 +        };
+  144 +        let data = match self.raw_jsonb.slice(val_range) {
+  145 +            Ok(data) => data,
+  146 +            Err(err) => return Some(Err(err)),
+  147 +        };
+  148 +        let val_item = jentry_to_jsonb_item(jentry, data);
+  149 +
+  150 +        self.index += 1;
+  151 +        self.jentry_offset += 4;
+  152 +        self.item_offset += val_length;
+  153 +
+  154 +        Some(Ok(val_item))
+  155 +    }
+  156 +
+  157 +    fn size_hint(&self) -> (usize, Option<usize>) {
+  158 +        let remaining = self.remaining();
+  159 +        (remaining, Some(remaining))
+  160 +    }
+  161 +}
+  162 +
+  163 +impl ExactSizeIterator for ObjectValueIterator<'_> {}
+  164 +
+  165 +pub struct ObjectIterator<'a> {
+  166 +    raw_jsonb: RawJsonb<'a>,
+  167 +    key_jentry_offset: usize,
+  168 +    val_jentry_offset: usize,
+  169 +    key_offset: usize,
+  170 +    val_offset: usize,
+  171 +    length: usize,
+  172 +    index: usize,
+  173 +}
+  174 +
+  175 +impl<'a> ObjectIterator<'a> {
+  176 +    pub(crate) fn new(raw_jsonb: RawJsonb<'a>) -> Result<Option<Self>> {
+  177 +        let (header_type, header_len) = raw_jsonb.read_header(0)?;
+  178 +        if header_type == OBJECT_CONTAINER_TAG {
+  179 +            Ok(Some(Self::new_with_len(raw_jsonb, header_len)?))
+  180 +        } else {
+  181 +            Ok(None)
+  182 +        }
+  183 +    }
+  184 +
+  185 +    pub(crate) fn new_with_len(raw_jsonb: RawJsonb<'a>, length: usize) -> Result<Self> {
+  186 +        let mut key_jentry_offset = 4;
+  187 +        let mut key_length = 0;
+  188 +        for _ in 0..length {
+  189 +            let key_jentry = raw_jsonb.read_jentry(key_jentry_offset)?;
+  190 +            key_jentry_offset += 4;
+  191 +            key_length += key_jentry.length as usize;
+  192 +        }
+  193 +
+  194 +        let key_offset = 4 + 8 * length;
+  195 +        Ok(Self {
+  196 +            raw_jsonb,
+  197 +            key_jentry_offset: 4,
+  198 +            val_jentry_offset: 4 + 4 * length,
+  199 +            key_offset,
+  200 +            val_offset: key_offset + key_length,
+  201 +            length,
+  202 +            index: 0,
+  203 +        })
+  204 +    }
+  205 +
+  206 +    fn remaining(&self) -> usize {
+  207 +        self.length - self.index
+  208 +    }
+  209 +}
+  210 +
+  211 +impl<'a> Iterator for ObjectIterator<'a> {
+  212 +    type Item = Result<(&'a str, JsonbItem<'a>)>;
+  213 +
+  214 +    fn next(&mut self) -> Option<Self::Item> {
+  215 +        if self.index >= self.length {
+  216 +            return None;
+  217 +        }
+  218 +
+  219 +        let key_jentry = match self.raw_jsonb.read_jentry(self.key_jentry_offset) {
+  220 +            Ok(jentry) => jentry,
+  221 +            Err(err) => return Some(Err(err)),
+  222 +        };
+  223 +        let val_jentry = match self.raw_jsonb.read_jentry(self.val_jentry_offset) {
+  224 +            Ok(jentry) => jentry,
+  225 +            Err(err) => return Some(Err(err)),
+  226 +        };
+  227 +        let key_length = key_jentry.length as usize;
+  228 +        let val_length = val_jentry.length as usize;
+  229 +
+  230 +        let key_range = Range {
+  231 +            start: self.key_offset,
+  232 +            end: self.key_offset + key_length,
+  233 +        };
+  234 +        let key_data = match self.raw_jsonb.slice(key_range) {
+  235 +            Ok(data) => data,
+  236 +            Err(err) => return Some(Err(err)),
+  237 +        };
+  238 +        let key = unsafe { std::str::from_utf8_unchecked(key_data) };
+  239 +
+  240 +        let val_range = Range {
+  241 +            start: self.val_offset,
+  242 +            end: self.val_offset + val_length,
+  243 +        };
+  244 +        let val_data = match self.raw_jsonb.slice(val_range) {
+  245 +            Ok(data) => data,
+  246 +            Err(err) => return Some(Err(err)),
+  247 +        };
+  248 +        let val_item = jentry_to_jsonb_item(val_jentry, val_data);
+  249 +
+  250 +        self.index += 1;
+  251 +        self.key_jentry_offset += 4;
+  252 +        self.val_jentry_offset += 4;
+  253 +        self.key_offset += key_length;
+  254 +        self.val_offset += val_length;
+  255 +
+  256 +        Some(Ok((key, val_item)))
+  257 +    }
+  258 +
+  259 +    fn size_hint(&self) -> (usize, Option<usize>) {
+  260 +        let remaining = self.remaining();
+  261 +        (remaining, Some(remaining))
+  262 +    }
+  263 +}
+  264 +
+  265 +impl ExactSizeIterator for ObjectIterator<'_> {}
+  266 +

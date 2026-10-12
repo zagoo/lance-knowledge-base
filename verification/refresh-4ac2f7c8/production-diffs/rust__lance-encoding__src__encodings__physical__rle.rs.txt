@@ -1,0 +1,464 @@
+@@ -1633,6 +1633,10 @@ impl RleDecompressor {
+ 1633  }
+ 1634  
+ 1635  impl MiniBlockDecompressor for RleDecompressor {
+ 1636 +    fn num_buffers(&self) -> usize {
+ 1637 +        2
+ 1638 +    }
+ 1639 +
+ 1640      fn decompress(&self, data: Vec<LanceBuffer>, num_values: u64) -> Result<DataBlock> {
+ 1641          self.decode_data(data, num_values, true)
+ 1642      }
+
+@@ -1942,6 +1946,454 @@ impl RleDecompressor {
+ 1946      }
+ 1947  }
+ 1948  
+ 1949 +// Generic block RLE uses the same outer frame as the stable block codec while
+ 1950 +// allowing each child to be any concrete block codec.
+ 1951 +pub(crate) const GENERIC_BLOCK_RLE_HEADER_BYTES: usize = 8;
+ 1952 +
+ 1953 +/// Block RLE compressor with concrete value and run-length children.
+ 1954 +#[derive(Debug)]
+ 1955 +pub struct BlockRleEncoder {
+ 1956 +    bits_per_value: u64,
+ 1957 +    values: Box<dyn BlockCompressor>,
+ 1958 +    run_lengths: Box<dyn BlockCompressor>,
+ 1959 +}
+ 1960 +
+ 1961 +impl BlockRleEncoder {
+ 1962 +    pub fn try_new(
+ 1963 +        bits_per_value: u64,
+ 1964 +        values: Box<dyn BlockCompressor>,
+ 1965 +        run_lengths: Box<dyn BlockCompressor>,
+ 1966 +    ) -> Result<Self> {
+ 1967 +        if !matches!(bits_per_value, 32 | 64) {
+ 1968 +            return Err(Error::invalid_input(format!(
+ 1969 +                "Generic block RLE only supports 32 or 64-bit values, got {bits_per_value}"
+ 1970 +            )));
+ 1971 +        }
+ 1972 +        Ok(Self {
+ 1973 +            bits_per_value,
+ 1974 +            values,
+ 1975 +            run_lengths,
+ 1976 +        })
+ 1977 +    }
+ 1978 +}
+ 1979 +
+ 1980 +impl BlockCompressor for BlockRleEncoder {
+ 1981 +    fn compress(&self, data: DataBlock) -> Result<(Option<LanceBuffer>, CompressiveEncoding)> {
+ 1982 +        let DataBlock::FixedWidth(data) = data else {
+ 1983 +            return Err(Error::invalid_input(
+ 1984 +                "Generic block RLE requires fixed-width data",
+ 1985 +            ));
+ 1986 +        };
+ 1987 +        let (run_values, run_lengths) = materialize_generic_runs(&data, self.bits_per_value)?;
+ 1988 +        let (values_payload, values_encoding) =
+ 1989 +            self.values.compress(DataBlock::FixedWidth(run_values))?;
+ 1990 +        let (lengths_payload, lengths_encoding) = self
+ 1991 +            .run_lengths
+ 1992 +            .compress(DataBlock::FixedWidth(run_lengths))?;
+ 1993 +        let encoding = ProtobufUtils21::rle(values_encoding, lengths_encoding);
+ 1994 +        if values_payload.is_none() && lengths_payload.is_none() {
+ 1995 +            return Ok((None, encoding));
+ 1996 +        }
+ 1997 +
+ 1998 +        let values_payload = values_payload.unwrap_or_else(LanceBuffer::empty);
+ 1999 +        let lengths_payload = lengths_payload.unwrap_or_else(LanceBuffer::empty);
+ 2000 +        let capacity = GENERIC_BLOCK_RLE_HEADER_BYTES
+ 2001 +            .checked_add(values_payload.len())
+ 2002 +            .and_then(|capacity| capacity.checked_add(lengths_payload.len()))
+ 2003 +            .ok_or_else(|| {
+ 2004 +                Error::invalid_input("Generic block RLE frame length overflows usize")
+ 2005 +            })?;
+ 2006 +        let mut output = Vec::new();
+ 2007 +        output.try_reserve_exact(capacity).map_err(|error| {
+ 2008 +            Error::invalid_input(format!(
+ 2009 +                "Generic block RLE could not reserve {capacity} frame bytes: {error}"
+ 2010 +            ))
+ 2011 +        })?;
+ 2012 +        output.extend_from_slice(&(values_payload.len() as u64).to_le_bytes());
+ 2013 +        output.extend_from_slice(&values_payload);
+ 2014 +        output.extend_from_slice(&lengths_payload);
+ 2015 +        Ok((Some(LanceBuffer::from(output)), encoding))
+ 2016 +    }
+ 2017 +}
+ 2018 +
+ 2019 +fn materialize_generic_runs(
+ 2020 +    data: &FixedWidthDataBlock,
+ 2021 +    bits_per_value: u64,
+ 2022 +) -> Result<(FixedWidthDataBlock, FixedWidthDataBlock)> {
+ 2023 +    if data.bits_per_value != bits_per_value {
+ 2024 +        return Err(Error::invalid_input(format!(
+ 2025 +            "Generic block RLE expects {bits_per_value}-bit values, got {}",
+ 2026 +            data.bits_per_value
+ 2027 +        )));
+ 2028 +    }
+ 2029 +    if data.num_values == 0 {
+ 2030 +        return Err(Error::invalid_input(
+ 2031 +            "Generic block RLE cannot encode an empty sequence",
+ 2032 +        ));
+ 2033 +    }
+ 2034 +
+ 2035 +    fn collect<T: ArrowNativeType + Copy + Eq>(values: &[T]) -> (Vec<T>, Vec<u32>) {
+ 2036 +        let mut run_values = Vec::new();
+ 2037 +        let mut run_lengths = Vec::new();
+ 2038 +        let mut current = values[0];
+ 2039 +        let mut length = 1_u32;
+ 2040 +        for value in values.iter().copied().skip(1) {
+ 2041 +            if value == current && length < u32::MAX {
+ 2042 +                length += 1;
+ 2043 +            } else {
+ 2044 +                run_values.push(current);
+ 2045 +                run_lengths.push(length);
+ 2046 +                current = value;
+ 2047 +                length = 1;
+ 2048 +            }
+ 2049 +        }
+ 2050 +        run_values.push(current);
+ 2051 +        run_lengths.push(length);
+ 2052 +        (run_values, run_lengths)
+ 2053 +    }
+ 2054 +
+ 2055 +    let (values, lengths, num_runs) = match bits_per_value {
+ 2056 +        32 => {
+ 2057 +            let input = crate::encodings::physical::checked_fixed_values::<u32>(
+ 2058 +                data,
+ 2059 +                "Generic block RLE input",
+ 2060 +            )?;
+ 2061 +            let (values, lengths) = collect(&input);
+ 2062 +            let num_runs = values.len() as u64;
+ 2063 +            (LanceBuffer::reinterpret_vec(values), lengths, num_runs)
+ 2064 +        }
+ 2065 +        64 => {
+ 2066 +            let input = crate::encodings::physical::checked_fixed_values::<u64>(
+ 2067 +                data,
+ 2068 +                "Generic block RLE input",
+ 2069 +            )?;
+ 2070 +            let (values, lengths) = collect(&input);
+ 2071 +            let num_runs = values.len() as u64;
+ 2072 +            (LanceBuffer::reinterpret_vec(values), lengths, num_runs)
+ 2073 +        }
+ 2074 +        _ => unreachable!("generic block RLE width was validated at construction"),
+ 2075 +    };
+ 2076 +    Ok((
+ 2077 +        FixedWidthDataBlock {
+ 2078 +            bits_per_value,
+ 2079 +            data: values,
+ 2080 +            num_values: num_runs,
+ 2081 +            block_info: BlockInfo::default(),
+ 2082 +        },
+ 2083 +        FixedWidthDataBlock {
+ 2084 +            bits_per_value: 32,
+ 2085 +            data: LanceBuffer::reinterpret_vec(lengths),
+ 2086 +            num_values: num_runs,
+ 2087 +            block_info: BlockInfo::default(),
+ 2088 +        },
+ 2089 +    ))
+ 2090 +}
+ 2091 +
+ 2092 +/// Descriptor-derived source used to recover the RLE child cardinality.
+ 2093 +#[derive(Debug, Clone, Copy)]
+ 2094 +pub(crate) enum BlockRleRunCount {
+ 2095 +    ConstantRunLength(u64),
+ 2096 +    RangeRunLengths { start: u64, step: u64 },
+ 2097 +    FlatValues,
+ 2098 +    FlatRunLengths,
+ 2099 +}
+ 2100 +
+ 2101 +/// Block RLE decompressor with concrete value and run-length children.
+ 2102 +#[derive(Debug)]
+ 2103 +pub(crate) struct BlockRleDecompressor {
+ 2104 +    bits_per_value: u64,
+ 2105 +    values: Box<dyn BlockDecompressor>,
+ 2106 +    run_lengths: Box<dyn BlockDecompressor>,
+ 2107 +    run_count: BlockRleRunCount,
+ 2108 +}
+ 2109 +
+ 2110 +impl BlockRleDecompressor {
+ 2111 +    pub(crate) fn try_new(
+ 2112 +        bits_per_value: u64,
+ 2113 +        values: Box<dyn BlockDecompressor>,
+ 2114 +        run_lengths: Box<dyn BlockDecompressor>,
+ 2115 +        run_count: BlockRleRunCount,
+ 2116 +    ) -> Result<Self> {
+ 2117 +        if !matches!(bits_per_value, 32 | 64) {
+ 2118 +            return Err(Error::invalid_input(format!(
+ 2119 +                "Generic block RLE only supports 32 or 64-bit values, got {bits_per_value}"
+ 2120 +            )));
+ 2121 +        }
+ 2122 +        Ok(Self {
+ 2123 +            bits_per_value,
+ 2124 +            values,
+ 2125 +            run_lengths,
+ 2126 +            run_count,
+ 2127 +        })
+ 2128 +    }
+ 2129 +}
+ 2130 +
+ 2131 +impl BlockDecompressor for BlockRleDecompressor {
+ 2132 +    fn decompress(&self, data: Option<LanceBuffer>, num_values: u64) -> Result<DataBlock> {
+ 2133 +        if num_values == 0 {
+ 2134 +            return Err(Error::invalid_input(
+ 2135 +                "Generic block RLE cannot decode an empty sequence",
+ 2136 +            ));
+ 2137 +        }
+ 2138 +        let values_have_payload = self.values.requires_payload();
+ 2139 +        let lengths_have_payload = self.run_lengths.requires_payload();
+ 2140 +        let (values_payload, lengths_payload) =
+ 2141 +            split_generic_rle_payload(data, values_have_payload, lengths_have_payload)?;
+ 2142 +        let run_count = infer_generic_run_count(
+ 2143 +            self.run_count,
+ 2144 +            values_payload.as_ref(),
+ 2145 +            lengths_payload.as_ref(),
+ 2146 +            self.bits_per_value,
+ 2147 +            num_values,
+ 2148 +        )?;
+ 2149 +        let values = self.values.decompress(values_payload, run_count)?;
+ 2150 +        let lengths = self.run_lengths.decompress(lengths_payload, run_count)?;
+ 2151 +        expand_generic_runs(values, lengths, self.bits_per_value, num_values, run_count)
+ 2152 +    }
+ 2153 +
+ 2154 +    fn requires_payload(&self) -> bool {
+ 2155 +        self.values.requires_payload() || self.run_lengths.requires_payload()
+ 2156 +    }
+ 2157 +}
+ 2158 +
+ 2159 +fn split_generic_rle_payload(
+ 2160 +    data: Option<LanceBuffer>,
+ 2161 +    values_have_payload: bool,
+ 2162 +    lengths_have_payload: bool,
+ 2163 +) -> Result<(Option<LanceBuffer>, Option<LanceBuffer>)> {
+ 2164 +    if !values_have_payload && !lengths_have_payload {
+ 2165 +        if data.is_some() {
+ 2166 +            return Err(Error::invalid_input(
+ 2167 +                "Metadata-only generic block RLE expects no payload",
+ 2168 +            ));
+ 2169 +        }
+ 2170 +        return Ok((None, None));
+ 2171 +    }
+ 2172 +    let data = require_block_payload(data, "Generic block RLE")?;
+ 2173 +    if data.len() < GENERIC_BLOCK_RLE_HEADER_BYTES {
+ 2174 +        return Err(Error::invalid_input(format!(
+ 2175 +            "Generic block RLE payload has {} bytes, shorter than its {GENERIC_BLOCK_RLE_HEADER_BYTES}-byte header",
+ 2176 +            data.len()
+ 2177 +        )));
+ 2178 +    }
+ 2179 +    let values_size = u64::from_le_bytes(
+ 2180 +        data[..GENERIC_BLOCK_RLE_HEADER_BYTES]
+ 2181 +            .try_into()
+ 2182 +            .expect("generic block RLE header length was checked"),
+ 2183 +    );
+ 2184 +    let values_size = usize::try_from(values_size).map_err(|_| {
+ 2185 +        Error::invalid_input("Generic block RLE values payload length does not fit usize")
+ 2186 +    })?;
+ 2187 +    let lengths_start = GENERIC_BLOCK_RLE_HEADER_BYTES
+ 2188 +        .checked_add(values_size)
+ 2189 +        .ok_or_else(|| Error::invalid_input("Generic block RLE values payload end overflows"))?;
+ 2190 +    if lengths_start > data.len() {
+ 2191 +        return Err(Error::invalid_input(format!(
+ 2192 +            "Generic block RLE values payload ends at {lengths_start}, beyond {} bytes",
+ 2193 +            data.len()
+ 2194 +        )));
+ 2195 +    }
+ 2196 +    if !values_have_payload && values_size != 0 {
+ 2197 +        return Err(Error::invalid_input(format!(
+ 2198 +            "Metadata-only RLE values child has {values_size} framed payload bytes"
+ 2199 +        )));
+ 2200 +    }
+ 2201 +    if !lengths_have_payload && lengths_start != data.len() {
+ 2202 +        return Err(Error::invalid_input(format!(
+ 2203 +            "Metadata-only RLE run-length child has {} framed payload bytes",
+ 2204 +            data.len() - lengths_start
+ 2205 +        )));
+ 2206 +    }
+ 2207 +    Ok((
+ 2208 +        values_have_payload
+ 2209 +            .then(|| data.slice_with_length(GENERIC_BLOCK_RLE_HEADER_BYTES, values_size)),
+ 2210 +        lengths_have_payload
+ 2211 +            .then(|| data.slice_with_length(lengths_start, data.len() - lengths_start)),
+ 2212 +    ))
+ 2213 +}
+ 2214 +
+ 2215 +fn infer_generic_run_count(
+ 2216 +    source: BlockRleRunCount,
+ 2217 +    values_payload: Option<&LanceBuffer>,
+ 2218 +    lengths_payload: Option<&LanceBuffer>,
+ 2219 +    bits_per_value: u64,
+ 2220 +    num_values: u64,
+ 2221 +) -> Result<u64> {
+ 2222 +    let run_count = match source {
+ 2223 +        BlockRleRunCount::ConstantRunLength(length) => {
+ 2224 +            if length == 0 || !num_values.is_multiple_of(length) {
+ 2225 +                return Err(Error::invalid_input(format!(
+ 2226 +                    "RLE constant run length {length} does not divide {num_values} values"
+ 2227 +                )));
+ 2228 +            }
+ 2229 +            num_values / length
+ 2230 +        }
+ 2231 +        BlockRleRunCount::RangeRunLengths { start, step } => {
+ 2232 +            if start == 0 || step == 0 {
+ 2233 +                return Err(Error::invalid_input(
+ 2234 +                    "RLE range run lengths must be positive",
+ 2235 +                ));
+ 2236 +            }
+ 2237 +            let target = u128::from(num_values);
+ 2238 +            let mut low = 1_u64;
+ 2239 +            let mut high = num_values;
+ 2240 +            let mut found = None;
+ 2241 +            while low <= high {
+ 2242 +                let count = low + (high - low) / 2;
+ 2243 +                let count128 = u128::from(count);
+ 2244 +                let sum = count128
+ 2245 +                    .checked_mul(
+ 2246 +                        u128::from(start)
+ 2247 +                            .checked_mul(2)
+ 2248 +                            .and_then(|start| {
+ 2249 +                                u128::from(count - 1)
+ 2250 +                                    .checked_mul(u128::from(step))
+ 2251 +                                    .and_then(|tail| start.checked_add(tail))
+ 2252 +                            })
+ 2253 +                            .unwrap_or(u128::MAX),
+ 2254 +                    )
+ 2255 +                    .map(|sum| sum / 2)
+ 2256 +                    .unwrap_or(u128::MAX);
+ 2257 +                match sum.cmp(&target) {
+ 2258 +                    std::cmp::Ordering::Less => low = count + 1,
+ 2259 +                    std::cmp::Ordering::Greater => high = count - 1,
+ 2260 +                    std::cmp::Ordering::Equal => {
+ 2261 +                        found = Some(count);
+ 2262 +                        break;
+ 2263 +                    }
+ 2264 +                }
+ 2265 +            }
+ 2266 +            found.ok_or_else(|| {
+ 2267 +                Error::invalid_input(format!(
+ 2268 +                    "RLE range run lengths start={start} step={step} do not sum to {num_values}"
+ 2269 +                ))
+ 2270 +            })?
+ 2271 +        }
+ 2272 +        BlockRleRunCount::FlatValues => flat_generic_run_count(
+ 2273 +            values_payload.ok_or_else(|| {
+ 2274 +                Error::invalid_input("RLE values payload is required to infer the run count")
+ 2275 +            })?,
+ 2276 +            bits_per_value,
+ 2277 +            num_values,
+ 2278 +            "values",
+ 2279 +        )?,
+ 2280 +        BlockRleRunCount::FlatRunLengths => flat_generic_run_count(
+ 2281 +            lengths_payload.ok_or_else(|| {
+ 2282 +                Error::invalid_input("RLE run-length payload is required to infer the run count")
+ 2283 +            })?,
+ 2284 +            32,
+ 2285 +            num_values,
+ 2286 +            "run lengths",
+ 2287 +        )?,
+ 2288 +    };
+ 2289 +    if run_count == 0 {
+ 2290 +        return Err(Error::invalid_input(
+ 2291 +            "Generic block RLE describes zero runs",
+ 2292 +        ));
+ 2293 +    }
+ 2294 +    Ok(run_count)
+ 2295 +}
+ 2296 +
+ 2297 +fn flat_generic_run_count(
+ 2298 +    payload: &LanceBuffer,
+ 2299 +    bits_per_value: u64,
+ 2300 +    max_runs: u64,
+ 2301 +    label: &str,
+ 2302 +) -> Result<u64> {
+ 2303 +    let bytes_per_value = usize::try_from(bits_per_value / 8)
+ 2304 +        .map_err(|_| Error::invalid_input("RLE child width does not fit usize"))?;
+ 2305 +    if bytes_per_value == 0 || !payload.len().is_multiple_of(bytes_per_value) {
+ 2306 +        return Err(Error::invalid_input(format!(
+ 2307 +            "RLE {label} payload has {} bytes, not divisible by {bytes_per_value}",
+ 2308 +            payload.len()
+ 2309 +        )));
+ 2310 +    }
+ 2311 +    let run_count = (payload.len() / bytes_per_value) as u64;
+ 2312 +    if run_count > max_runs {
+ 2313 +        return Err(Error::invalid_input(format!(
+ 2314 +            "RLE {label} payload contains {run_count} runs, exceeding {max_runs}"
+ 2315 +        )));
+ 2316 +    }
+ 2317 +    Ok(run_count)
+ 2318 +}
+ 2319 +
+ 2320 +fn expand_generic_runs(
+ 2321 +    values: DataBlock,
+ 2322 +    lengths: DataBlock,
+ 2323 +    bits_per_value: u64,
+ 2324 +    num_values: u64,
+ 2325 +    run_count: u64,
+ 2326 +) -> Result<DataBlock> {
+ 2327 +    let DataBlock::FixedWidth(values) = values else {
+ 2328 +        return Err(Error::invalid_input(
+ 2329 +            "RLE values decoded to a non fixed-width block",
+ 2330 +        ));
+ 2331 +    };
+ 2332 +    let DataBlock::FixedWidth(lengths) = lengths else {
+ 2333 +        return Err(Error::invalid_input(
+ 2334 +            "RLE run lengths decoded to a non fixed-width block",
+ 2335 +        ));
+ 2336 +    };
+ 2337 +    if values.bits_per_value != bits_per_value
+ 2338 +        || values.num_values != run_count
+ 2339 +        || lengths.bits_per_value != 32
+ 2340 +        || lengths.num_values != run_count
+ 2341 +    {
+ 2342 +        return Err(Error::invalid_input(
+ 2343 +            "RLE child cardinality or bit width does not match its descriptor",
+ 2344 +        ));
+ 2345 +    }
+ 2346 +    let lengths =
+ 2347 +        crate::encodings::physical::checked_fixed_values::<u32>(&lengths, "RLE run lengths")?;
+ 2348 +    let total = lengths
+ 2349 +        .iter()
+ 2350 +        .enumerate()
+ 2351 +        .try_fold(0_u64, |total, (index, length)| {
+ 2352 +            if *length == 0 {
+ 2353 +                return Err(Error::invalid_input(format!(
+ 2354 +                    "RLE run length at index {index} is zero"
+ 2355 +                )));
+ 2356 +            }
+ 2357 +            total.checked_add(u64::from(*length)).ok_or_else(|| {
+ 2358 +                Error::invalid_input(format!("RLE run length sum overflows at index {index}"))
+ 2359 +            })
+ 2360 +        })?;
+ 2361 +    if total != num_values {
+ 2362 +        return Err(Error::invalid_input(format!(
+ 2363 +            "RLE run lengths sum to {total}, expected {num_values}"
+ 2364 +        )));
+ 2365 +    }
+ 2366 +    let output = match bits_per_value {
+ 2367 +        32 => {
+ 2368 +            let values =
+ 2369 +                crate::encodings::physical::checked_fixed_values::<u32>(&values, "RLE values")?;
+ 2370 +            let mut output =
+ 2371 +                crate::encodings::physical::try_vec_with_capacity::<u32>(num_values, "RLE output")?;
+ 2372 +            for (value, length) in values.iter().zip(lengths.iter()) {
+ 2373 +                output.extend(std::iter::repeat_n(*value, *length as usize));
+ 2374 +            }
+ 2375 +            LanceBuffer::reinterpret_vec(output)
+ 2376 +        }
+ 2377 +        64 => {
+ 2378 +            let values =
+ 2379 +                crate::encodings::physical::checked_fixed_values::<u64>(&values, "RLE values")?;
+ 2380 +            let mut output =
+ 2381 +                crate::encodings::physical::try_vec_with_capacity::<u64>(num_values, "RLE output")?;
+ 2382 +            for (value, length) in values.iter().zip(lengths.iter()) {
+ 2383 +                output.extend(std::iter::repeat_n(*value, *length as usize));
+ 2384 +            }
+ 2385 +            LanceBuffer::reinterpret_vec(output)
+ 2386 +        }
+ 2387 +        _ => unreachable!("generic block RLE width was validated at construction"),
+ 2388 +    };
+ 2389 +    Ok(DataBlock::FixedWidth(FixedWidthDataBlock {
+ 2390 +        bits_per_value,
+ 2391 +        data: output,
+ 2392 +        num_values,
+ 2393 +        block_info: BlockInfo::default(),
+ 2394 +    }))
+ 2395 +}
+ 2396 +

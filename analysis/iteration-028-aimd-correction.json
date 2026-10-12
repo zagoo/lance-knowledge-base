@@ -1,0 +1,144 @@
+{
+  "iteration": 28,
+  "files": [
+    {
+      "path": "rust/lance-core/src/utils/aimd.rs",
+      "module": "L1-modules/rust-lance-core-control-testing.md",
+      "reviewed": true,
+      "role": "Public validated configuration and thread-safe additive-increase/multiplicative-decrease rate estimator. The controller aggregates request outcomes in lazy time windows and returns a rate; it does not acquire tokens, delay requests, perform IO or classify external errors. Private state and deterministic-time unit helpers implement the update policy.",
+      "limits": "All679 lines were read; tests were not executed. Actual object-store integration, token-bucket behavior mentioned by comments, external classification of throttling and callers remain pending. Public current_rate does not expire windows. Mutex poison handling, u64 counter overflow, unlimited f64 growth overflow, threshold equality and multiple idle-window catch-up are not explicitly tested locally. (rust/lance-core/src/utils/aimd.rs:102-184; rust/lance-core/src/utils/aimd.rs:187-290; rust/lance-core/src/utils/aimd.rs:292-679)",
+      "ranges": [
+        [
+          1,
+          19,
+          "SPDX/module docs define discrete-window AIMD: strict throttle_ratio>threshold decreases with a minimum floor; at/below increases with an optional maximum ceiling. Imports are std Mutex/Duration and core Result. Documentation describes rate adjustment, not an implemented request-admission mechanism."
+        ],
+        [
+          20,
+          57,
+          "Public AimdConfig derives Debug/Clone and exposes seven mutable fields. Default is initial2000,min1,max5000 requests/second,decrease0.5,additive300 per successful window,window1second,threshold0. The about40%-of-max and10seconds ramp comments assume active successful windows reaching evaluation boundaries; elapsed time alone does not update the rate (rust/lance-core/src/utils/aimd.rs:238-289)."
+        ],
+        [
+          58,
+          101,
+          "Seven consuming with_* builders replace exactly one field using struct update, returning Self without validation: initial/min/max rates, decrease factor, increment, duration and threshold. Invalid intermediate or directly constructed configs are possible; explicit validate or controller new establishes legality."
+        ],
+        [
+          102,
+          123,
+          "validate first rejects every nonfinite f64 field, in order initial,min,max,decrease,increment,threshold, with InvalidInput naming field/value. Comments explain that NaN evades comparisons and can disable a downstream token bucket or panic duration conversion; those downstream behaviors are rationale, not code implemented here. NaN and infinities are rejected even for the optional maximum ceiling; finite zero disables it."
+        ],
+        [
+          124,
+          147,
+          "Validation requires initial_rate>0, min_rate>0, max_rate>=0, and when max>0 requires min<=max. Each failure returns descriptive InvalidInput. Both signed floating zero values satisfy max>=0 and max>0 is false, so either represents no ceiling; initial/min zero fail. No clamping occurs during validation."
+        ],
+        [
+          148,
+          170,
+          "decrease_factor must be strictly between0 and1, additive_increment strictly positive, window_duration nonzero, and throttle_threshold within inclusive[0,1]. Errors identify invalid values except the fixed zero-duration message. Finiteness has already been checked."
+        ],
+        [
+          171,
+          185,
+          "Finally require initial<=max if the ceiling is enabled and initial>=min, then return Ok. This ordering selects which error appears for multiply invalid configs; controller construction delegates rather than repairing values."
+        ],
+        [
+          186,
+          203,
+          "Public RequestOutcome derives Debug/Clone/Copy/PartialEq/Eq with Success and Throttled. Docs instruct callers to map non-throttle errors such as404/timeouts to Success because they do not indicate capacity trouble; no classifier is implemented. Private AimdState holds rate f64, window_start std::time::Instant and separate u64 success/throttle counts."
+        ],
+        [
+          204,
+          221,
+          "Public AimdController owns private config and Mutex<AimdState>. Docs promise thread-safe short critical sections; no measured latency is established. Custom Debug formats config and current_rate, which acquires the same mutex and unwraps poisoning. No Clone implementation, mutable config accessor or async lock appears."
+        ],
+        [
+          222,
+          237,
+          "new validates the entire config, starts rate at initial_rate, stores config immutably within the controller, initializes window_start to Instant::now and zeroes both counters. Invalid config returns before state construction. Mutex protects only state, while config can be read through shared self."
+        ],
+        [
+          238,
+          252,
+          "record_outcome locks the mutex with unwrap and invokes private record_outcome_inner using Instant::now after the lock is acquired. Private helper receives explicit mutable state/outcome/time so tests advance windows without sleeping. Poisoned mutex therefore panics in the public method rather than returning Result. The lock covers time comparison, arithmetic and count update."
+        ],
+        [
+          253,
+          270,
+          "On elapsed>=window_duration, compute total=success_count+throttle_count with ordinary u64 arithmetic. If nonzero, ratio=throttles as f64/total as f64. Strict ratio>threshold sets max(rate*decrease_factor,min_rate); equality/below adds increment and, only when max_rate>0, caps via min(max_rate). Threshold1 never decreases for ordinary nonoverflowed counts, even for an all-throttle window. Finite validated settings can still overflow unlimited additive growth to infinity; no runtime finiteness recheck occurs."
+        ],
+        [
+          271,
+          290,
+          "An expired window resets its start to now and both counters to zero, even if it contained no outcomes; only one adjustment occurs regardless of how many durations elapsed. Then increment the incoming outcome in the fresh/current window and return the rate. The boundary-triggering outcome does not affect the window just evaluated. current_rate only reads under mutex and does not advance time or adjust rate. Counter increments/sums use unchecked-in-source u64 arithmetic. There is no background timer or sleep."
+        ],
+        [
+          291,
+          349,
+          "The private cfg(test) module imports rstest. Named invalid-config cases cover zero initial,negative min/max,min>max,decrease0/1/>1,zero increment,zero duration,threshold>1/<0,initial>max andinitial<min. Each parameter changes defaults through the same nonvalidating builders. Error-category/text assertions appear after the remaining cases (rust/lance-core/src/utils/aimd.rs:382-398)."
+        ],
+        [
+          350,
+          399,
+          "Additional invalid-config cases supply NaN to every floating field and positive infinity to initial/max. The parameterized test calls validate, asserts InvalidInput and requires the expected message substring. It does not enumerate negative infinity or positive infinity for every field, although the common finiteness loop handles them."
+        ],
+        [
+          400,
+          409,
+          "Two tests accept the unchanged defaults and max_rate0 unlimited configuration. They verify validation success only, not sustained throughput or rate enforcement."
+        ],
+        [
+          410,
+          435,
+          "Additive test uses initial100,increment10,window100ms. It records one success at a captured start through the private helper, then another150ms later and asserts current_rate110. New outcome triggers evaluation of the previous success window. No real sleep occurs."
+        ],
+        [
+          436,
+          459,
+          "Decrease test starts100,factor0.5,window100ms, records one throttle then a success150ms later and expects50. The success is placed in the new window rather than canceling the prior throttle."
+        ],
+        [
+          460,
+          491,
+          "Floor test starts2,min1,factor0.5. Two successive closed throttle windows move2→1 and stay1; a success at the second boundary triggers evaluation of the second throttle window. Each helper call occurs under the controller state mutex with explicit simulated time."
+        ],
+        [
+          492,
+          515,
+          "Ceiling fixture starts4990,max5000,increment20. A closed success window computes5010 then caps to5000. This tests rate-update clamping with a valid config, not silent adjustment of invalid input configuration."
+        ],
+        [
+          516,
+          545,
+          "Unlimited fixture starts100,max0,increment50. It records five successes at150ms intervals, then a sixth success triggers the final pending window evaluation: five nonempty windows are evaluated in total, yielding100+5*50=350. This demonstrates no finite configured ceiling for these small values, not safe infinite-duration or f64-maximum growth."
+        ],
+        [
+          546,
+          564,
+          "Empty-window test advances150ms before the first outcome, leaving the expired window total zero. Rate remains100; the incoming success seeds the new window. This explicitly confirms idle elapsed time alone does not add an increment."
+        ],
+        [
+          565,
+          594,
+          "Threshold0.5 fixture records two successes and one throttle in a100ms window. A later success closes it and rate100 becomes110 because1/3<=0.5. The test does not use exact threshold equality."
+        ],
+        [
+          595,
+          622,
+          "A second threshold0.5 fixture records one success/two throttles and expects100→50 after a boundary trigger. The leading comment says >=50%, but actual algorithm uses strict > and this fixture has2/3, so it does not support decrease at equality. Keep the implementation rule rather than repeating the overbroad comment."
+        ],
+        [
+          623,
+          663,
+          "Recovery fixture begins100,halves after a throttle window to50, then adds10 for each of two success windows, ultimately70. Comments name the window to be evaluated by the following call; only the final current_rate70 is asserted."
+        ],
+        [
+          664,
+          679,
+          "Within-window test calls the public record_outcome100 times with Throttled and a10second window, then expects unchanged100. This assumes the test completes before the real window expires; unlike prior tests it uses actual Instant::now per call. It proves intended within-window holding, not concurrent fairness, poisoned-lock behavior or rate enforcement. Module ends."
+        ]
+      ]
+    }
+  ]
+}

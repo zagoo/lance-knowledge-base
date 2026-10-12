@@ -1,0 +1,53 @@
+@@ -238,6 +238,8 @@ pub struct LsmScanner {
+  238      /// Over-fetch multiple for block-listed sources in search plans
+  239      /// (see [`super::LsmFtsSearchPlanner::with_overfetch_factor`]).
+  240      overfetch_factor: Option<f64>,
+  241 +    /// See [`Self::with_memtable_filter_indexes`].
+  242 +    memtable_filter_indexes: bool,
+  243  }
+  244  
+  245  impl LsmScanner {
+
+@@ -285,6 +287,7 @@ impl LsmScanner {
+  287              sstable_cache: None,
+  288              warmer: None,
+  289              overfetch_factor: None,
+  290 +            memtable_filter_indexes: false,
+  291          }
+  292      }
+  293  
+
+@@ -331,6 +334,7 @@ impl LsmScanner {
+  334              sstable_cache: None,
+  335              warmer: None,
+  336              overfetch_factor: None,
+  337 +            memtable_filter_indexes: false,
+  338          }
+  339      }
+  340  
+
+@@ -413,6 +417,15 @@ impl LsmScanner {
+  417          self
+  418      }
+  419  
+  420 +    /// Answer a filtered scan of in-memory memtables from their filter indexes,
+  421 +    /// keeping a match only when it is its key's newest visible version. A
+  422 +    /// filter matching too many rows to check one by one reads every in-memory
+  423 +    /// row instead. Off by default: every in-memory row is read.
+  424 +    pub fn with_memtable_filter_indexes(mut self, enabled: bool) -> Self {
+  425 +        self.memtable_filter_indexes = enabled;
+  426 +        self
+  427 +    }
+  428 +
+  429      /// Set the over-fetch multiple block-listed sources use in search plans
+  430      /// so they still yield `k` live rows after cross-generation dedup.
+  431      /// Threaded into the LSM search planners; values below `1.0` are rejected
+
+@@ -775,6 +788,7 @@ impl LsmScanner {
+  788              base_schema,
+  789              Arc::clone(&self.identity_schema),
+  790          );
+  791 +        planner = planner.with_memtable_filter_indexes(self.memtable_filter_indexes);
+  792          if let Some(session) = &self.session {
+  793              planner = planner.with_session(session.clone());
+  794          }

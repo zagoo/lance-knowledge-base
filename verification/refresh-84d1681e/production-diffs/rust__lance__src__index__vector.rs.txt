@@ -1,0 +1,36 @@
+@@ -4,7 +4,7 @@
+    4  //! Vector Index for Fast Approximate Nearest Neighbor (ANN) Search
+    5  //!
+    6  
+    7 -use lance_core::utils::row_addr_remap::RowAddrRemap;
+    7 +use lance_index::scalar::RowAddrTranslator;
+    8  use std::sync::Arc;
+    9  use std::{any::Any, collections::HashMap};
+   10  
+
+@@ -1221,6 +1221,15 @@ async fn build_vector_index_impl(
+ 1221          .await?;
+ 1222      let stages = &params.stages;
+ 1223  
+ 1224 +    // RaBitQ encodes against L2 or dot residuals, and its transform rejects
+ 1225 +    // anything else, but only after the IVF model has been trained on a sample.
+ 1226 +    if index_type == IndexType::IvfRq && params.metric_type == DistanceType::Hamming {
+ 1227 +        return Err(Error::index(format!(
+ 1228 +            "Build Vector Index: {} does not support the {} metric",
+ 1229 +            index_type, params.metric_type
+ 1230 +        )));
+ 1231 +    }
+ 1232 +
+ 1233      match index_type {
+ 1234          IndexType::IvfFlat => match element_type {
+ 1235              DataType::Float16 | DataType::Float32 | DataType::Float64 => {
+
+@@ -1765,7 +1774,7 @@ pub(crate) async fn remap_vector_index(
+ 1774      old_uuid: &Uuid,
+ 1775      new_uuid: &Uuid,
+ 1776      old_metadata: &IndexMetadata,
+ 1768 -    mapping: &RowAddrRemap,
+ 1777 +    mapping: &RowAddrTranslator,
+ 1778  ) -> Result<Vec<IndexFile>> {
+ 1779      let old_index = dataset
+ 1780          .open_vector_index(column, old_uuid, &NoOpMetricsCollector)

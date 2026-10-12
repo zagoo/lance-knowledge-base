@@ -1,0 +1,69 @@
+@@ -21,8 +21,8 @@ use uuid::Uuid;
+   21  
+   22  use crate::{Dataset, Error, Result, dataset::index::LanceIndexStoreExt};
+   23  
+   24 -/// Build a row-empty `new_data` stream for the BTree merge API.
+   25 -fn empty_btree_update_stream(
+   24 +/// Build a row-empty `new_data` stream for the segment-merge APIs.
+   25 +pub(super) fn empty_value_row_id_stream(
+   26      dataset: &Dataset,
+   27      field_id: i32,
+   28  ) -> Result<SendableRecordBatchStream> {
+
+@@ -64,11 +64,19 @@ pub(crate) async fn open_and_merge_segments(
+   64      new_data: SendableRecordBatchStream,
+   65      new_store: &LanceIndexStore,
+   66      old_data_filters: &[Option<OldIndexDataFilter>],
+   67 +    staged: Option<&crate::index::frag_reuse::StagedRemappingPlans>,
+   68  ) -> Result<CreatedIndex> {
+   69      let mut source_indices = Vec::with_capacity(segments.len());
+   70      for &segment in segments {
+   70 -        let scalar_index =
+   71 -            super::open_scalar_index(dataset, field_path, segment, &NoOpMetricsCollector).await?;
+   71 +        let scalar_index = super::open_scalar_index_with_plan(
+   72 +            dataset,
+   73 +            field_path,
+   74 +            segment,
+   75 +            staged.and_then(|plans| plans.get(&segment.uuid)),
+   76 +            crate::index::frag_reuse::OpenPurpose::Maintenance,
+   77 +            &NoOpMetricsCollector,
+   78 +        )
+   79 +        .await?;
+   80          let btree = scalar_index
+   81              .as_any()
+   82              .downcast_ref::<BTreeIndex>()
+
+@@ -89,6 +97,7 @@ pub(crate) async fn open_and_merge_segments(
+   97  pub(crate) async fn merge_segments(
+   98      dataset: &Dataset,
+   99      segments: Vec<IndexMetadata>,
+  100 +    staged: Option<&crate::index::frag_reuse::StagedRemappingPlans>,
+  101  ) -> Result<IndexMetadata> {
+  102      if segments.is_empty() {
+  103          return Err(Error::index("No segment metadata was provided".to_string()));
+
+@@ -119,13 +128,13 @@ pub(crate) async fn merge_segments(
+  128  
+  129      let segment_refs: Vec<&IndexMetadata> = segments.iter().collect();
+  130      let (fragment_bitmap, old_data_filters) =
+  122 -        crate::index::append::build_per_segment_filters(dataset, &segment_refs).await?;
+  131 +        crate::index::append::build_per_segment_filters(dataset, &segment_refs, staged).await?;
+  132  
+  133      let output_uuid = Uuid::new_v4();
+  134      let new_store = LanceIndexStore::from_dataset_for_new(dataset, &output_uuid)?;
+  135      // Pure segment consolidation: no dataset scan, so `new_data` is an empty
+  136      // stream and the merge is driven entirely by the source page data.
+  128 -    let empty_new_data = empty_btree_update_stream(dataset, field_id)?;
+  137 +    let empty_new_data = empty_value_row_id_stream(dataset, field_id)?;
+  138      let created_index = open_and_merge_segments(
+  139          dataset,
+  140          &field_path,
+
+@@ -133,6 +142,7 @@ pub(crate) async fn merge_segments(
+  142          empty_new_data,
+  143          &new_store,
+  144          &old_data_filters,
+  145 +        staged,
+  146      )
+  147      .await?;
+  148  

@@ -1,0 +1,417 @@
+@@ -0,0 +1,430 @@
+    1 +// SPDX-License-Identifier: Apache-2.0
+    2 +// SPDX-FileCopyrightText: Copyright The Lance Authors
+    3 +
+    4 +//! Compact per-bit counters for Hamming coreset summaries.
+    5 +
+    6 +use lance_core::{Error, Result};
+    7 +
+    8 +#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    9 +pub(super) enum CounterWidth {
+   10 +    U8,
+   11 +    U16,
+   12 +    U32,
+   13 +    U64,
+   14 +}
+   15 +
+   16 +impl CounterWidth {
+   17 +    fn for_count(count: u64) -> Self {
+   18 +        if u8::try_from(count).is_ok() {
+   19 +            Self::U8
+   20 +        } else if u16::try_from(count).is_ok() {
+   21 +            Self::U16
+   22 +        } else if u32::try_from(count).is_ok() {
+   23 +            Self::U32
+   24 +        } else {
+   25 +            Self::U64
+   26 +        }
+   27 +    }
+   28 +}
+   29 +
+   30 +pub(super) trait CompactCounter: Copy {
+   31 +    fn from_u64(value: u64) -> Option<Self>;
+   32 +
+   33 +    fn to_u64(self) -> u64;
+   34 +}
+   35 +
+   36 +macro_rules! impl_compact_counter {
+   37 +    ($type:ty) => {
+   38 +        impl CompactCounter for $type {
+   39 +            fn from_u64(value: u64) -> Option<Self> {
+   40 +                Self::try_from(value).ok()
+   41 +            }
+   42 +
+   43 +            fn to_u64(self) -> u64 {
+   44 +                u64::from(self)
+   45 +            }
+   46 +        }
+   47 +    };
+   48 +}
+   49 +
+   50 +impl_compact_counter!(u8);
+   51 +impl_compact_counter!(u16);
+   52 +impl_compact_counter!(u32);
+   53 +
+   54 +impl CompactCounter for u64 {
+   55 +    fn from_u64(value: u64) -> Option<Self> {
+   56 +        Some(value)
+   57 +    }
+   58 +
+   59 +    fn to_u64(self) -> u64 {
+   60 +        self
+   61 +    }
+   62 +}
+   63 +
+   64 +fn widen_vec<T, U>(values: Vec<T>, convert: impl Fn(T) -> U) -> Vec<U> {
+   65 +    let mut widened = Vec::with_capacity(values.capacity());
+   66 +    widened.extend(values.into_iter().map(convert));
+   67 +    widened
+   68 +}
+   69 +
+   70 +fn add_counter_slices<T: CompactCounter, U: CompactCounter>(
+   71 +    destination: &mut [T],
+   72 +    source: &[U],
+   73 +) -> Result<()> {
+   74 +    debug_assert_eq!(destination.len(), source.len());
+   75 +    for (bit_index, (sum, value)) in destination.iter_mut().zip(source).enumerate() {
+   76 +        let next = sum.to_u64().checked_add(value.to_u64()).ok_or_else(|| {
+   77 +            Error::invalid_input(format!(
+   78 +                "Hamming one-count overflow while merging bit {bit_index}"
+   79 +            ))
+   80 +        })?;
+   81 +        *sum = T::from_u64(next).ok_or_else(|| {
+   82 +            Error::invalid_input(format!(
+   83 +                "Hamming one-count {next} does not fit destination counter at bit {bit_index}"
+   84 +            ))
+   85 +        })?;
+   86 +    }
+   87 +    Ok(())
+   88 +}
+   89 +
+   90 +fn extend_counter_slice<T: CompactCounter, U: CompactCounter>(
+   91 +    destination: &mut Vec<T>,
+   92 +    source: &[U],
+   93 +) -> Result<()> {
+   94 +    for (bit_index, value) in source.iter().copied().enumerate() {
+   95 +        let value = value.to_u64();
+   96 +        destination.push(T::from_u64(value).ok_or_else(|| {
+   97 +            Error::invalid_input(format!(
+   98 +                "Hamming one-count {value} does not fit destination counter at bit {bit_index}"
+   99 +            ))
+  100 +        })?);
+  101 +    }
+  102 +    Ok(())
+  103 +}
+  104 +
+  105 +pub(super) fn add_vector_bits<T: CompactCounter>(ones: &mut [T], vector: &[u8]) -> Result<()> {
+  106 +    debug_assert_eq!(ones.len(), vector.len() * 8);
+  107 +    for (byte_index, byte) in vector.iter().copied().enumerate() {
+  108 +        for bit in 0..8 {
+  109 +            if byte & (1 << bit) != 0 {
+  110 +                let bit_index = byte_index * 8 + bit;
+  111 +                let next = ones[bit_index].to_u64().checked_add(1).ok_or_else(|| {
+  112 +                    Error::invalid_input(format!("Hamming one-count overflow at bit {bit_index}"))
+  113 +                })?;
+  114 +                ones[bit_index] = T::from_u64(next).ok_or_else(|| {
+  115 +                    Error::invalid_input(format!(
+  116 +                        "Hamming one-count {next} does not fit counter at bit {bit_index}"
+  117 +                    ))
+  118 +                })?;
+  119 +            }
+  120 +        }
+  121 +    }
+  122 +    Ok(())
+  123 +}
+  124 +
+  125 +pub(super) fn mode_from_counts<T: CompactCounter>(
+  126 +    count: u64,
+  127 +    ones: &[T],
+  128 +    dimension: usize,
+  129 +) -> Vec<u8> {
+  130 +    let mut mode = vec![0_u8; dimension];
+  131 +    for (bit_index, one_count) in ones.iter().copied().enumerate() {
+  132 +        let one_count = one_count.to_u64();
+  133 +        if one_count > count - one_count {
+  134 +            mode[bit_index / 8] |= 1 << (bit_index % 8);
+  135 +        }
+  136 +    }
+  137 +    mode
+  138 +}
+  139 +
+  140 +pub(super) fn summary_cost<T: CompactCounter>(
+  141 +    count: u64,
+  142 +    ones: &[T],
+  143 +    centroid: &[u8],
+  144 +    dimension: usize,
+  145 +) -> Result<u64> {
+  146 +    if centroid.len() != dimension || ones.len() != dimension * 8 {
+  147 +        return Err(Error::invalid_input(format!(
+  148 +            "invalid Hamming summary dimensions: centroid={}, bit_counts={}, dimension={dimension}",
+  149 +            centroid.len(),
+  150 +            ones.len()
+  151 +        )));
+  152 +    }
+  153 +    let mut cost = 0_u64;
+  154 +    for (bit_index, one_count) in ones.iter().copied().enumerate() {
+  155 +        let one_count = one_count.to_u64();
+  156 +        let mismatch = if centroid[bit_index / 8] & (1 << (bit_index % 8)) == 0 {
+  157 +            one_count
+  158 +        } else {
+  159 +            count - one_count
+  160 +        };
+  161 +        cost = cost.checked_add(mismatch).ok_or_else(|| {
+  162 +            Error::invalid_input("Hamming coreset distance overflow during assignment")
+  163 +        })?;
+  164 +    }
+  165 +    Ok(cost)
+  166 +}
+  167 +
+  168 +/// Contiguous per-bit counters that use the narrowest exact integer width.
+  169 +///
+  170 +/// One width is shared by the whole buffer so hot loops dispatch once instead
+  171 +/// of storing and inspecting a tag for every counter.
+  172 +#[derive(Clone, Debug, PartialEq, Eq)]
+  173 +pub(super) enum CompactCounters {
+  174 +    U8(Vec<u8>),
+  175 +    U16(Vec<u16>),
+  176 +    U32(Vec<u32>),
+  177 +    U64(Vec<u64>),
+  178 +}
+  179 +
+  180 +impl CompactCounters {
+  181 +    pub(super) fn with_capacity(capacity: usize) -> Self {
+  182 +        Self::U8(Vec::with_capacity(capacity))
+  183 +    }
+  184 +
+  185 +    pub(super) fn zeros(len: usize) -> Self {
+  186 +        Self::U8(vec![0; len])
+  187 +    }
+  188 +
+  189 +    pub(super) fn len(&self) -> usize {
+  190 +        match self {
+  191 +            Self::U8(values) => values.len(),
+  192 +            Self::U16(values) => values.len(),
+  193 +            Self::U32(values) => values.len(),
+  194 +            Self::U64(values) => values.len(),
+  195 +        }
+  196 +    }
+  197 +
+  198 +    pub(super) fn width(&self) -> CounterWidth {
+  199 +        match self {
+  200 +            Self::U8(_) => CounterWidth::U8,
+  201 +            Self::U16(_) => CounterWidth::U16,
+  202 +            Self::U32(_) => CounterWidth::U32,
+  203 +            Self::U64(_) => CounterWidth::U64,
+  204 +        }
+  205 +    }
+  206 +
+  207 +    pub(super) fn ensure_width_for(&mut self, count: u64) {
+  208 +        self.promote_to(CounterWidth::for_count(count));
+  209 +    }
+  210 +
+  211 +    pub(super) fn promote_to(&mut self, width: CounterWidth) {
+  212 +        while self.width() < width {
+  213 +            let current = std::mem::replace(self, Self::U8(Vec::new()));
+  214 +            *self = match current {
+  215 +                Self::U8(values) => Self::U16(widen_vec(values, u16::from)),
+  216 +                Self::U16(values) => Self::U32(widen_vec(values, u32::from)),
+  217 +                Self::U32(values) => Self::U64(widen_vec(values, u64::from)),
+  218 +                Self::U64(values) => Self::U64(values),
+  219 +            };
+  220 +        }
+  221 +    }
+  222 +
+  223 +    pub(super) fn value(&self, index: usize) -> u64 {
+  224 +        match self {
+  225 +            Self::U8(values) => u64::from(values[index]),
+  226 +            Self::U16(values) => u64::from(values[index]),
+  227 +            Self::U32(values) => u64::from(values[index]),
+  228 +            Self::U64(values) => values[index],
+  229 +        }
+  230 +    }
+  231 +
+  242 +
+  243 +    pub(super) fn extend_from(
+  244 +        &mut self,
+  245 +        source: &Self,
+  246 +        source_start: usize,
+  247 +        len: usize,
+  248 +        max_count: u64,
+  249 +    ) -> Result<()> {
+  250 +        self.ensure_width_for(max_count);
+  251 +        let source_end = source_start.checked_add(len).ok_or_else(|| {
+  252 +            Error::invalid_input("Hamming counter source range overflow while appending")
+  253 +        })?;
+  254 +        if source_end > source.len() {
+  255 +            return Err(Error::invalid_input(format!(
+  256 +                "Hamming counter source range {source_start}..{source_end} exceeds length {}",
+  257 +                source.len()
+  258 +            )));
+  259 +        }
+  260 +
+  261 +        macro_rules! extend {
+  262 +            ($destination:expr, $source:expr) => {
+  263 +                extend_counter_slice($destination, &$source[source_start..source_end])
+  264 +            };
+  265 +        }
+  266 +        match (self, source) {
+  267 +            (Self::U8(destination), Self::U8(source)) => extend!(destination, source),
+  268 +            (Self::U8(destination), Self::U16(source)) => extend!(destination, source),
+  269 +            (Self::U8(destination), Self::U32(source)) => extend!(destination, source),
+  270 +            (Self::U8(destination), Self::U64(source)) => extend!(destination, source),
+  271 +            (Self::U16(destination), Self::U8(source)) => extend!(destination, source),
+  272 +            (Self::U16(destination), Self::U16(source)) => extend!(destination, source),
+  273 +            (Self::U16(destination), Self::U32(source)) => extend!(destination, source),
+  274 +            (Self::U16(destination), Self::U64(source)) => extend!(destination, source),
+  275 +            (Self::U32(destination), Self::U8(source)) => extend!(destination, source),
+  276 +            (Self::U32(destination), Self::U16(source)) => extend!(destination, source),
+  277 +            (Self::U32(destination), Self::U32(source)) => extend!(destination, source),
+  278 +            (Self::U32(destination), Self::U64(source)) => extend!(destination, source),
+  279 +            (Self::U64(destination), Self::U8(source)) => extend!(destination, source),
+  280 +            (Self::U64(destination), Self::U16(source)) => extend!(destination, source),
+  281 +            (Self::U64(destination), Self::U32(source)) => extend!(destination, source),
+  282 +            (Self::U64(destination), Self::U64(source)) => extend!(destination, source),
+  283 +        }
+  284 +    }
+  285 +
+  286 +    pub(super) fn append(&mut self, mut other: Self) -> Result<()> {
+  287 +        let width = self.width().max(other.width());
+  288 +        self.promote_to(width);
+  289 +        other.promote_to(width);
+  290 +        match (self, other) {
+  291 +            (Self::U8(destination), Self::U8(mut source)) => destination.append(&mut source),
+  292 +            (Self::U16(destination), Self::U16(mut source)) => destination.append(&mut source),
+  293 +            (Self::U32(destination), Self::U32(mut source)) => destination.append(&mut source),
+  294 +            (Self::U64(destination), Self::U64(mut source)) => destination.append(&mut source),
+  295 +            _ => {
+  296 +                return Err(Error::invalid_input(
+  297 +                    "Hamming counter widths differ after promotion",
+  298 +                ));
+  299 +            }
+  300 +        }
+  301 +        Ok(())
+  302 +    }
+  303 +
+  304 +    pub(super) fn add_from(
+  305 +        &mut self,
+  306 +        destination_start: usize,
+  307 +        source: &Self,
+  308 +        source_start: usize,
+  309 +        len: usize,
+  310 +        max_count: u64,
+  311 +    ) -> Result<()> {
+  312 +        self.ensure_width_for(max_count);
+  313 +        let destination_end = destination_start.checked_add(len).ok_or_else(|| {
+  314 +            Error::invalid_input("Hamming counter destination range overflow while merging")
+  315 +        })?;
+  316 +        let source_end = source_start.checked_add(len).ok_or_else(|| {
+  317 +            Error::invalid_input("Hamming counter source range overflow while merging")
+  318 +        })?;
+  319 +        if destination_end > self.len() || source_end > source.len() {
+  320 +            return Err(Error::invalid_input(format!(
+  321 +                "invalid Hamming counter merge ranges: destination={destination_start}..{destination_end} of {}, source={source_start}..{source_end} of {}",
+  322 +                self.len(),
+  323 +                source.len()
+  324 +            )));
+  325 +        }
+  326 +
+  327 +        macro_rules! add {
+  328 +            ($destination:expr, $source:expr) => {
+  329 +                add_counter_slices(
+  330 +                    &mut $destination[destination_start..destination_end],
+  331 +                    &$source[source_start..source_end],
+  332 +                )
+  333 +            };
+  334 +        }
+  335 +        match (self, source) {
+  336 +            (Self::U8(destination), Self::U8(source)) => add!(destination, source),
+  337 +            (Self::U8(destination), Self::U16(source)) => add!(destination, source),
+  338 +            (Self::U8(destination), Self::U32(source)) => add!(destination, source),
+  339 +            (Self::U8(destination), Self::U64(source)) => add!(destination, source),
+  340 +            (Self::U16(destination), Self::U8(source)) => add!(destination, source),
+  341 +            (Self::U16(destination), Self::U16(source)) => add!(destination, source),
+  342 +            (Self::U16(destination), Self::U32(source)) => add!(destination, source),
+  343 +            (Self::U16(destination), Self::U64(source)) => add!(destination, source),
+  344 +            (Self::U32(destination), Self::U8(source)) => add!(destination, source),
+  345 +            (Self::U32(destination), Self::U16(source)) => add!(destination, source),
+  346 +            (Self::U32(destination), Self::U32(source)) => add!(destination, source),
+  347 +            (Self::U32(destination), Self::U64(source)) => add!(destination, source),
+  348 +            (Self::U64(destination), Self::U8(source)) => add!(destination, source),
+  349 +            (Self::U64(destination), Self::U16(source)) => add!(destination, source),
+  350 +            (Self::U64(destination), Self::U32(source)) => add!(destination, source),
+  351 +            (Self::U64(destination), Self::U64(source)) => add!(destination, source),
+  352 +        }
+  353 +    }
+  354 +
+  355 +    pub(super) fn add_vector(
+  356 +        &mut self,
+  357 +        destination_start: usize,
+  358 +        vector: &[u8],
+  359 +        max_count: u64,
+  360 +    ) -> Result<()> {
+  361 +        self.ensure_width_for(max_count);
+  362 +        let len = vector.len().checked_mul(8).ok_or_else(|| {
+  363 +            Error::invalid_input("Hamming vector bit dimension overflow while accumulating")
+  364 +        })?;
+  365 +        let destination_end = destination_start.checked_add(len).ok_or_else(|| {
+  366 +            Error::invalid_input("Hamming counter destination range overflow while accumulating")
+  367 +        })?;
+  368 +        if destination_end > self.len() {
+  369 +            return Err(Error::invalid_input(format!(
+  370 +                "Hamming vector counter range {destination_start}..{destination_end} exceeds length {}",
+  371 +                self.len()
+  372 +            )));
+  373 +        }
+  374 +        match self {
+  375 +            Self::U8(values) => {
+  376 +                add_vector_bits(&mut values[destination_start..destination_end], vector)
+  377 +            }
+  378 +            Self::U16(values) => {
+  379 +                add_vector_bits(&mut values[destination_start..destination_end], vector)
+  380 +            }
+  381 +            Self::U32(values) => {
+  382 +                add_vector_bits(&mut values[destination_start..destination_end], vector)
+  383 +            }
+  384 +            Self::U64(values) => {
+  385 +                add_vector_bits(&mut values[destination_start..destination_end], vector)
+  386 +            }
+  387 +        }
+  388 +    }
+  389 +
+  390 +    pub(super) fn mode(&self, start: usize, count: u64, dimension: usize) -> Vec<u8> {
+  391 +        let end = start + dimension * 8;
+  392 +        match self {
+  393 +            Self::U8(values) => mode_from_counts(count, &values[start..end], dimension),
+  394 +            Self::U16(values) => mode_from_counts(count, &values[start..end], dimension),
+  395 +            Self::U32(values) => mode_from_counts(count, &values[start..end], dimension),
+  396 +            Self::U64(values) => mode_from_counts(count, &values[start..end], dimension),
+  397 +        }
+  398 +    }
+  399 +
+  400 +    pub(super) fn cost(
+  401 +        &self,
+  402 +        start: usize,
+  403 +        count: u64,
+  404 +        centroid: &[u8],
+  405 +        dimension: usize,
+  406 +    ) -> Result<u64> {
+  407 +        let end = start
+  408 +            .checked_add(dimension.saturating_mul(8))
+  409 +            .ok_or_else(|| {
+  410 +                Error::invalid_input("Hamming counter range overflow while computing cost")
+  411 +            })?;
+  412 +        if end > self.len() {
+  413 +            return Err(Error::invalid_input(format!(
+  414 +                "Hamming counter cost range {start}..{end} exceeds length {}",
+  415 +                self.len()
+  416 +            )));
+  417 +        }
+  418 +        match self {
+  419 +            Self::U8(values) => summary_cost(count, &values[start..end], centroid, dimension),
+  420 +            Self::U16(values) => summary_cost(count, &values[start..end], centroid, dimension),
+  421 +            Self::U32(values) => summary_cost(count, &values[start..end], centroid, dimension),
+  422 +            Self::U64(values) => summary_cost(count, &values[start..end], centroid, dimension),
+  423 +        }
+  424 +    }
+  425 +
+  430 +}

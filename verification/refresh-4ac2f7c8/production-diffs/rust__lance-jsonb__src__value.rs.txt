@@ -1,0 +1,258 @@
+@@ -0,0 +1,257 @@
+    1 +// SPDX-License-Identifier: Apache-2.0
+    2 +// SPDX-FileCopyrightText: Copyright The Lance Authors
+    3 +// SPDX-FileCopyrightText: Copyright 2023 Datafuse Labs
+    4 +// Adapted from databendlabs/jsonb at commit fba895c5ebe77ce2539e187f9c652f51cbf195c3.
+    5 +
+    6 +use crate::core::JsonbItemType;
+    7 +use std::borrow::Cow;
+    8 +use std::cmp::Ordering;
+    9 +use std::collections::BTreeMap;
+   10 +use std::fmt::Debug;
+   11 +use std::fmt::Display;
+   12 +use std::fmt::Formatter;
+   13 +
+   14 +use crate::extension::ExtensionValue;
+   15 +
+   16 +use crate::Date;
+   17 +use crate::Interval;
+   18 +use crate::Number;
+   19 +use crate::Timestamp;
+   20 +use crate::TimestampTz;
+   21 +use crate::core::Encoder;
+   22 +
+   23 +pub type Object<'a> = BTreeMap<String, Value<'a>>;
+   24 +
+   25 +/// Represents a JSON or extended JSON value.
+   26 +///
+   27 +/// This enum supports both standard JSON types (Null, Bool, String, Number, Array, Object)
+   28 +/// and extended types for specialized data representation (Binary, Date, Timestamp, etc.).
+   29 +/// The extended types provide additional functionality beyond the JSON specification,
+   30 +/// making this implementation more suitable for database applications and other
+   31 +/// systems requiring richer data type support.
+   32 +#[derive(Clone, Default)]
+   33 +pub enum Value<'a> {
+   34 +    /// Represents a JSON null value
+   35 +    #[default]
+   36 +    Null,
+   37 +    /// Represents a JSON boolean value (true or false)
+   38 +    Bool(bool),
+   39 +    /// Represents a JSON string value
+   40 +    String(Cow<'a, str>),
+   41 +    /// Represents a JSON number value with various internal representations
+   42 +    Number(Number),
+   43 +    /// Extended type: Represents binary data not supported in standard JSON
+   44 +    /// Useful for storing raw bytes, images, or other binary content
+   45 +    Binary(&'a [u8]),
+   46 +    /// Extended type: Represents a calendar date (year, month, day)
+   47 +    /// Stored as days since epoch for efficient comparison and manipulation
+   48 +    Date(Date),
+   49 +    /// Extended type: Represents a timestamp without timezone information
+   50 +    /// Stored as microseconds since epoch
+   51 +    Timestamp(Timestamp),
+   52 +    /// Extended type: Represents a timestamp with timezone information
+   53 +    /// Includes both timestamp and timezone offset
+   54 +    TimestampTz(TimestampTz),
+   55 +    /// Extended type: Represents a time interval or duration
+   56 +    /// Useful for time difference calculations and scheduling
+   57 +    Interval(Interval),
+   58 +    /// Represents a JSON array of values
+   59 +    Array(Vec<Self>),
+   60 +    /// Represents a JSON object as key-value pairs
+   61 +    Object(Object<'a>),
+   62 +}
+   63 +
+   64 +impl Eq for Value<'_> {}
+   65 +
+   66 +impl PartialEq for Value<'_> {
+   67 +    fn eq(&self, other: &Self) -> bool {
+   68 +        let result = self.cmp(other);
+   69 +        result == Ordering::Equal
+   70 +    }
+   71 +}
+   72 +
+   73 +impl PartialOrd for Value<'_> {
+   74 +    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+   75 +        Some(self.cmp(other))
+   76 +    }
+   77 +}
+   78 +
+   79 +impl Ord for Value<'_> {
+   80 +    fn cmp(&self, other: &Self) -> Ordering {
+   81 +        let self_type = self.jsonb_item_type();
+   82 +        let other_type = other.jsonb_item_type();
+   83 +
+   84 +        if let Some(ord) = self_type.partial_cmp(&other_type) {
+   85 +            return ord;
+   86 +        }
+   87 +
+   88 +        match (self, other) {
+   89 +            (Value::Null, Value::Null) => Ordering::Equal,
+   90 +            (Value::Bool(v1), Value::Bool(v2)) => v1.cmp(v2),
+   91 +            (Value::Number(v1), Value::Number(v2)) => v1.cmp(v2),
+   92 +            (Value::String(v1), Value::String(v2)) => v1.cmp(v2),
+   93 +            (Value::Array(arr1), Value::Array(arr2)) => {
+   94 +                for (v1, v2) in arr1.iter().zip(arr2.iter()) {
+   95 +                    let ord = v1.cmp(v2);
+   96 +                    if ord != Ordering::Equal {
+   97 +                        return ord;
+   98 +                    }
+   99 +                }
+  100 +                arr1.len().cmp(&arr2.len())
+  101 +            }
+  102 +            (Value::Object(obj1), Value::Object(obj2)) => {
+  103 +                for ((k1, v1), (k2, v2)) in obj1.iter().zip(obj2.iter()) {
+  104 +                    let ord = k1.cmp(k2);
+  105 +                    if ord != Ordering::Equal {
+  106 +                        return ord;
+  107 +                    }
+  108 +                    let ord = v1.cmp(v2);
+  109 +                    if ord != Ordering::Equal {
+  110 +                        return ord;
+  111 +                    }
+  112 +                }
+  113 +                obj1.len().cmp(&obj2.len())
+  114 +            }
+  115 +            (_, _) => match (self.as_extension_value(), other.as_extension_value()) {
+  116 +                (Some(self_ext), Some(other_ext)) => {
+  117 +                    if let Some(ord) = self_ext.partial_cmp(&other_ext) {
+  118 +                        return ord;
+  119 +                    }
+  120 +                    Ordering::Equal
+  121 +                }
+  122 +                (_, _) => Ordering::Equal,
+  123 +            },
+  124 +        }
+  125 +    }
+  126 +}
+  127 +
+  128 +impl Debug for Value<'_> {
+  129 +    fn fmt(&self, formatter: &mut Formatter) -> std::fmt::Result {
+  130 +        match *self {
+  131 +            Value::Null => formatter.debug_tuple("Null").finish(),
+  132 +            Value::Bool(v) => formatter.debug_tuple("Bool").field(&v).finish(),
+  133 +            Value::Number(ref v) => Debug::fmt(v, formatter),
+  134 +            Value::String(ref v) => formatter.debug_tuple("String").field(v).finish(),
+  135 +            Value::Binary(ref v) => formatter.debug_tuple("Binary").field(v).finish(),
+  136 +            Value::Date(ref v) => formatter.debug_tuple("Date").field(v).finish(),
+  137 +            Value::Timestamp(ref v) => formatter.debug_tuple("Timestamp").field(v).finish(),
+  138 +            Value::TimestampTz(ref v) => formatter.debug_tuple("TimestampTz").field(v).finish(),
+  139 +            Value::Interval(ref v) => formatter.debug_tuple("Interval").field(v).finish(),
+  140 +            Value::Array(ref v) => {
+  141 +                formatter.write_str("Array(")?;
+  142 +                Debug::fmt(v, formatter)?;
+  143 +                formatter.write_str(")")
+  144 +            }
+  145 +            Value::Object(ref v) => {
+  146 +                formatter.write_str("Object(")?;
+  147 +                Debug::fmt(v, formatter)?;
+  148 +                formatter.write_str(")")
+  149 +            }
+  150 +        }
+  151 +    }
+  152 +}
+  153 +
+  154 +impl Display for Value<'_> {
+  155 +    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+  156 +        match self {
+  157 +            Value::Null => write!(f, "null"),
+  158 +            Value::Bool(v) => {
+  159 +                if *v {
+  160 +                    write!(f, "true")
+  161 +                } else {
+  162 +                    write!(f, "false")
+  163 +                }
+  164 +            }
+  165 +            Value::Number(v) => write!(f, "{}", v),
+  166 +            Value::String(v) => {
+  167 +                write!(f, "{:?}", v)
+  168 +            }
+  169 +            Value::Binary(v) => {
+  170 +                write!(f, "\"")?;
+  171 +                for c in *v {
+  172 +                    write!(f, "{c:02X}")?;
+  173 +                }
+  174 +                write!(f, "\"")?;
+  175 +                Ok(())
+  176 +            }
+  177 +            Value::Date(v) => {
+  178 +                write!(f, "\"{}\"", v)
+  179 +            }
+  180 +            Value::Timestamp(v) => {
+  181 +                write!(f, "\"{}\"", v)
+  182 +            }
+  183 +            Value::TimestampTz(v) => {
+  184 +                write!(f, "\"{}\"", v)
+  185 +            }
+  186 +            Value::Interval(v) => {
+  187 +                write!(f, "\"{}\"", v)
+  188 +            }
+  189 +            Value::Array(vs) => {
+  190 +                write!(f, "[")?;
+  191 +                for (i, v) in vs.iter().enumerate() {
+  192 +                    if i > 0 {
+  193 +                        write!(f, ",")?;
+  194 +                    }
+  195 +                    write!(f, "{v}")?;
+  196 +                }
+  197 +                write!(f, "]")
+  198 +            }
+  199 +            Value::Object(vs) => {
+  200 +                write!(f, "{{")?;
+  201 +                for (i, (k, v)) in vs.iter().enumerate() {
+  202 +                    if i > 0 {
+  203 +                        write!(f, ",")?;
+  204 +                    }
+  205 +                    write!(f, "\"")?;
+  206 +                    write!(f, "{k}")?;
+  207 +                    write!(f, "\"")?;
+  208 +                    write!(f, ":")?;
+  209 +                    write!(f, "{v}")?;
+  210 +                }
+  211 +                write!(f, "}}")
+  212 +            }
+  213 +        }
+  214 +    }
+  215 +}
+  216 +
+  217 +impl<'a> Value<'a> {
+  218 +    /// Serializes this value into JSONB bytes, appending to `buf`.
+  219 +    pub(crate) fn write_to_vec(&self, buf: &mut Vec<u8>) {
+  220 +        let mut encoder = Encoder::new(buf);
+  221 +        encoder.encode(self);
+  222 +    }
+  223 +
+  224 +    /// Serializes this value into JSONB bytes and returns the buffer.
+  225 +    pub fn to_vec(&self) -> Vec<u8> {
+  226 +        let mut buf = Vec::new();
+  227 +        self.write_to_vec(&mut buf);
+  228 +        buf
+  229 +    }
+  230 +
+  231 +    fn jsonb_item_type(&self) -> JsonbItemType {
+  232 +        match self {
+  233 +            Value::Null => JsonbItemType::Null,
+  234 +            Value::Bool(_) => JsonbItemType::Boolean,
+  235 +            Value::Number(_) => JsonbItemType::Number,
+  236 +            Value::String(_) => JsonbItemType::String,
+  237 +            Value::Binary(_) => JsonbItemType::Extension,
+  238 +            Value::Date(_) => JsonbItemType::Extension,
+  239 +            Value::Timestamp(_) => JsonbItemType::Extension,
+  240 +            Value::TimestampTz(_) => JsonbItemType::Extension,
+  241 +            Value::Interval(_) => JsonbItemType::Extension,
+  242 +            Value::Array(arr) => JsonbItemType::Array(arr.len()),
+  243 +            Value::Object(obj) => JsonbItemType::Object(obj.len()),
+  244 +        }
+  245 +    }
+  246 +
+  247 +    fn as_extension_value(&self) -> Option<ExtensionValue<'_>> {
+  248 +        match self {
+  249 +            Value::Binary(v) => Some(ExtensionValue::Binary(v)),
+  250 +            Value::Date(v) => Some(ExtensionValue::Date(v.clone())),
+  251 +            Value::Timestamp(v) => Some(ExtensionValue::Timestamp(v.clone())),
+  252 +            Value::TimestampTz(v) => Some(ExtensionValue::TimestampTz(v.clone())),
+  253 +            Value::Interval(v) => Some(ExtensionValue::Interval(v.clone())),
+  254 +            _ => None,
+  255 +        }
+  256 +    }
+  257 +}

@@ -1,0 +1,28 @@
+@@ -1104,6 +1104,27 @@ impl Field {
+ 1104              .for_each(|f| f.set_id(self.id, id_seed));
+ 1105      }
+ 1106  
+ 1107 +    /// Recursively assign missing field IDs without overflowing the `i32` ID space.
+ 1108 +    ///
+ 1109 +    /// Callers that persist the result should prefer this method over [`Self::set_id`].
+ 1110 +    /// The `i64` seed represents the next candidate ID so `i32::MAX + 1` can be
+ 1111 +    /// reported as an error instead of wrapping.
+ 1112 +    pub fn try_set_id(&mut self, parent_id: i32, id_seed: &mut i64) -> Result<()> {
+ 1113 +        self.parent_id = parent_id;
+ 1114 +        if self.id < 0 {
+ 1115 +            self.id = i32::try_from(*id_seed).map_err(|_| {
+ 1116 +                Error::invalid_input(
+ 1117 +                    "No further field ID can be allocated because IDs are exhausted",
+ 1118 +                )
+ 1119 +            })?;
+ 1120 +            *id_seed += 1;
+ 1121 +        }
+ 1122 +        for child in &mut self.children {
+ 1123 +            child.try_set_id(self.id, id_seed)?;
+ 1124 +        }
+ 1125 +        Ok(())
+ 1126 +    }
+ 1127 +
+ 1128      /// Recursively reset field ID for this field and all its children.
+ 1129      pub(super) fn reset_id(&mut self) {
+ 1130          self.id = -1;

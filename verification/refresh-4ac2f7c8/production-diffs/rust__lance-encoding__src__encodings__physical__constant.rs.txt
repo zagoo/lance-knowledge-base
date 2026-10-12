@@ -1,0 +1,158 @@
+@@ -5,11 +5,155 @@
+    5  
+    6  use crate::{
+    7      buffer::LanceBuffer,
+    8 -    compression::{BlockDecompressor, FixedPerValueDecompressor, require_no_block_payload},
+    8 +    compression::{
+    9 +        BlockCompressor, BlockDecompressor, FixedPerValueDecompressor, require_no_block_payload,
+   10 +    },
+   11      data::{AllNullDataBlock, ConstantDataBlock, DataBlock, FixedWidthDataBlock},
+   12 +    encodings::physical::{checked_fixed_values, try_vec_with_capacity},
+   13 +    format::{ProtobufUtils21, pb21::CompressiveEncoding},
+   14  };
+   15  
+   12 -use lance_core::Result;
+   16 +use lance_core::{Error, Result};
+   17 +
+   18 +/// Metadata-only compressor for a repeated unsigned `u32` or `u64` value.
+   19 +#[derive(Debug)]
+   20 +pub struct ConstantEncoder {
+   21 +    bits_per_value: u64,
+   22 +    value: u64,
+   23 +}
+   24 +
+   25 +impl ConstantEncoder {
+   26 +    pub fn new(bits_per_value: u64, value: u64) -> Self {
+   27 +        Self {
+   28 +            bits_per_value,
+   29 +            value,
+   30 +        }
+   31 +    }
+   32 +
+   33 +    /// Describes a known constant sequence without materializing its values.
+   34 +    /// Zero values have no scalar; non-empty sequences store one typed scalar.
+   35 +    pub(crate) fn encoding(&self, num_values: u64) -> Result<CompressiveEncoding> {
+   36 +        if !matches!(self.bits_per_value, 32 | 64) {
+   37 +            return Err(Error::invalid_input(format!(
+   38 +                "Constant block compression only supports 32 or 64-bit values, got {}",
+   39 +                self.bits_per_value
+   40 +            )));
+   41 +        }
+   42 +        if num_values == 0 {
+   43 +            return Ok(ProtobufUtils21::constant(None));
+   44 +        }
+   45 +        let scalar = if self.bits_per_value == 32 {
+   46 +            let value = u32::try_from(self.value).map_err(|_| {
+   47 +                Error::invalid_input(format!("Constant value {} exceeds u32::MAX", self.value))
+   48 +            })?;
+   49 +            bytes::Bytes::copy_from_slice(&value.to_le_bytes())
+   50 +        } else {
+   51 +            bytes::Bytes::copy_from_slice(&self.value.to_le_bytes())
+   52 +        };
+   53 +        Ok(ProtobufUtils21::constant(Some(scalar)))
+   54 +    }
+   55 +}
+   56 +
+   57 +impl BlockCompressor for ConstantEncoder {
+   58 +    fn compress(&self, data: DataBlock) -> Result<(Option<LanceBuffer>, CompressiveEncoding)> {
+   59 +        let DataBlock::FixedWidth(data) = data else {
+   60 +            return Err(Error::invalid_input(
+   61 +                "Constant block compression requires fixed-width data",
+   62 +            ));
+   63 +        };
+   64 +        if data.bits_per_value != self.bits_per_value {
+   65 +            return Err(Error::invalid_input(format!(
+   66 +                "Constant codec expects {}-bit values, got {}",
+   67 +                self.bits_per_value, data.bits_per_value
+   68 +            )));
+   69 +        }
+   70 +        let encoding = self.encoding(data.num_values)?;
+   71 +        match self.bits_per_value {
+   72 +            32 => {
+   73 +                if checked_fixed_values::<u32>(&data, "Constant input")?
+   74 +                    .iter()
+   75 +                    .any(|candidate| u64::from(*candidate) != self.value)
+   76 +                {
+   77 +                    return Err(Error::invalid_input(
+   78 +                        "Constant input contains a different value",
+   79 +                    ));
+   80 +                }
+   81 +            }
+   82 +            64 => {
+   83 +                if checked_fixed_values::<u64>(&data, "Constant input")?
+   84 +                    .iter()
+   85 +                    .any(|candidate| *candidate != self.value)
+   86 +                {
+   87 +                    return Err(Error::invalid_input(
+   88 +                        "Constant input contains a different value",
+   89 +                    ));
+   90 +                }
+   91 +            }
+   92 +            _ => unreachable!("constant width was validated above"),
+   93 +        };
+   94 +        Ok((None, encoding))
+   95 +    }
+   96 +}
+   97 +
+   98 +/// Materializes a metadata-only constant as a typed fixed-width block.
+   99 +#[derive(Debug)]
+  100 +pub(crate) struct ConstantBlockDecompressor {
+  101 +    bits_per_value: u64,
+  102 +    value: Option<u64>,
+  103 +}
+  104 +
+  105 +impl ConstantBlockDecompressor {
+  106 +    pub(crate) fn new(bits_per_value: u64, value: Option<u64>) -> Self {
+  107 +        Self {
+  108 +            bits_per_value,
+  109 +            value,
+  110 +        }
+  111 +    }
+  112 +}
+  113 +
+  114 +impl BlockDecompressor for ConstantBlockDecompressor {
+  115 +    fn decompress(&self, data: Option<LanceBuffer>, num_values: u64) -> Result<DataBlock> {
+  116 +        require_no_block_payload(data, "Constant")?;
+  117 +        if self.value.is_none() != (num_values == 0) {
+  118 +            return Err(Error::invalid_input(
+  119 +                "Constant scalar must be absent exactly when cardinality is zero",
+  120 +            ));
+  121 +        }
+  122 +        let value = self.value.unwrap_or(0);
+  123 +        let output_len = usize::try_from(num_values)
+  124 +            .map_err(|_| Error::invalid_input("Constant output cardinality does not fit usize"))?;
+  125 +        let data = match self.bits_per_value {
+  126 +            32 => {
+  127 +                let value = u32::try_from(value).map_err(|_| {
+  128 +                    Error::invalid_input(format!("Constant value {value} exceeds u32::MAX"))
+  129 +                })?;
+  130 +                let mut values = try_vec_with_capacity::<u32>(num_values, "Constant output")?;
+  131 +                values.resize(output_len, value);
+  132 +                LanceBuffer::reinterpret_vec(values)
+  133 +            }
+  134 +            64 => {
+  135 +                let mut values = try_vec_with_capacity::<u64>(num_values, "Constant output")?;
+  136 +                values.resize(output_len, value);
+  137 +                LanceBuffer::reinterpret_vec(values)
+  138 +            }
+  139 +            bits_per_value => {
+  140 +                return Err(Error::invalid_input(format!(
+  141 +                    "Constant block decompression only supports 32 or 64-bit values, got {bits_per_value}"
+  142 +                )));
+  143 +            }
+  144 +        };
+  145 +        Ok(DataBlock::FixedWidth(FixedWidthDataBlock {
+  146 +            bits_per_value: self.bits_per_value,
+  147 +            data,
+  148 +            num_values,
+  149 +            block_info: Default::default(),
+  150 +        }))
+  151 +    }
+  152 +
+  153 +    fn requires_payload(&self) -> bool {
+  154 +        false
+  155 +    }
+  156 +}
+  157  
+  158  /// A decompressor for constant-encoded data
+  159  #[derive(Debug)]

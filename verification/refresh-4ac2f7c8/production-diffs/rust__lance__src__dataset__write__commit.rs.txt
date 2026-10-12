@@ -1,0 +1,65 @@
+@@ -28,7 +28,6 @@ use crate::{
+   28  
+   29  use super::{WriteDestination, resolve_commit_handler};
+   30  use crate::dataset::branch_location::BranchLocation;
+   31 -use crate::dataset::transaction::validate_operation;
+   31  use lance_core::utils::tracing::{DATASET_COMMITTED_EVENT, TRACE_DATASET_EVENTS};
+   32  use tracing::info;
+   33  
+
+@@ -54,6 +53,8 @@ pub struct CommitBuilder<'a> {
+   53      timeout: Option<Duration>,
+   54      /// When `Some`, this commit is the second step of `migrate_to_stable_row_ids`.
+   55      migration_next_row_id: Option<u64>,
+   56 +    /// Whether this commit atomically activates non-reusable field IDs.
+   57 +    activate_non_reusable_field_ids: bool,
+   58      /// Set only by `Dataset::deep_clone`, after it has copied the source files.
+   59      deep_clone_files_copied: bool,
+   60  }
+
+@@ -80,6 +81,7 @@ impl<'a> CommitBuilder<'a> {
+   81              transaction_properties: None,
+   82              timeout: Some(DEFAULT_COMMIT_TIMEOUT),
+   83              migration_next_row_id: None,
+   84 +            activate_non_reusable_field_ids: false,
+   85              deep_clone_files_copied: false,
+   86          }
+   87      }
+
+@@ -280,6 +282,11 @@ impl<'a> CommitBuilder<'a> {
+  282          self
+  283      }
+  284  
+  285 +    pub(crate) fn with_non_reusable_field_id_migration_activation(mut self) -> Self {
+  286 +        self.activate_non_reusable_field_ids = true;
+  287 +        self
+  288 +    }
+  289 +
+  290      /// Mark this commit as the last step of [`Dataset::deep_clone`], which has
+  291      /// already copied the source's data, deletion and index files to the
+  292      /// destination.
+
+@@ -416,14 +423,6 @@ impl<'a> CommitBuilder<'a> {
+  423              ));
+  424          }
+  425  
+  419 -        // Validate the operation before proceeding with the commit
+  420 -        // This ensures that operations like Merge have proper validation for data integrity
+  421 -        if let Some(dataset) = dest.dataset() {
+  422 -            validate_operation(Some(&dataset.manifest), &transaction.operation)?;
+  423 -        } else {
+  424 -            validate_operation(None, &transaction.operation)?;
+  425 -        }
+  426 -
+  426          let (metadata_cache, index_cache) = match &dest {
+  427              WriteDestination::Dataset(ds) => (ds.metadata_cache.clone(), ds.index_cache.clone()),
+  428              WriteDestination::Uri(uri) => (
+
+@@ -454,6 +453,7 @@ impl<'a> CommitBuilder<'a> {
+  453              use_stable_row_ids,
+  454              storage_format: self.storage_format.map(DataStorageFormat::new),
+  455              migration_next_row_id: self.migration_next_row_id,
+  456 +            activate_non_reusable_field_ids: self.activate_non_reusable_field_ids,
+  457              ..Default::default()
+  458          };
+  459  

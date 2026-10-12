@@ -1,0 +1,101 @@
+[
+  {
+    "id": 1,
+    "path": "rust/lance-file/src/versions/v1/writer/statistics.rs",
+    "start": 611,
+    "end": 634,
+    "unit": "lines",
+    "read_at": "2026-10-04T06:39:08.402Z",
+    "evidence": "611 | #[derive(Debug)]\n612 | pub struct StatisticsCollector {\n613 |     builders: BTreeMap<i32, (Field, StatisticsBuilder)>,\n614 | }\n615 | \n616 | impl StatisticsCollector {\n617 |     /// Try to create a new statistics collection. If no fields in the schema\n618 |     /// support statistics, will just return None.\n619 |     pub fn try_new(schema: &Schema) -> Option<Self> {\n620 |         let builders: BTreeMap<i32, (Field, StatisticsBuilder)> = visit_fields(schema)\n621 |             .filter(|f| supports_stats_collection(&f.data_type()))\n622 |             .map(|f| (f.id, (f.clone(), StatisticsBuilder::new(&f.data_type()))))\n623 |             .collect();\n624 |         if builders.is_empty() {\n625 |             None\n626 |         } else {\n627 |             Some(Self { builders })\n628 |         }\n629 |     }\n630 | \n631 |     pub fn get_builder(&mut self, field_id: i32) -> Option<&mut StatisticsBuilder> {\n632 |         self.builders.get_mut(&field_id).map(|(_, b)| b)\n633 |     }\n634 | "
+  },
+  {
+    "id": 3,
+    "path": "rust/lance-file/src/writer_tests.rs",
+    "start": 72,
+    "end": 100,
+    "unit": "lines",
+    "read_at": "2026-10-04T06:39:08.403Z",
+    "evidence": "72 |     #[tokio::test]\n73 |     async fn test_basic_write() {\n74 |         let tmp_path = TempObjFile::default();\n75 |         let obj_store = Arc::new(ObjectStore::local());\n76 | \n77 |         let reader = gen_batch()\n78 |             .col(\"score\", array::rand::<Float64Type>())\n79 |             .into_reader_rows(RowCount::from(1000), BatchCount::from(10));\n80 | \n81 |         let writer = obj_store.create(&tmp_path).await.unwrap();\n82 | \n83 |         let lance_schema =\n84 |             lance_core::datatypes::Schema::try_from(reader.schema().as_ref()).unwrap();\n85 | \n86 |         let mut file_writer = create_writer(\n87 |             writer,\n88 |             lance_schema,\n89 |             ConcreteFileVersion::V2_1,\n90 |             FileWriterOptions::default(),\n91 |         )\n92 |         .unwrap();\n93 | \n94 |         for batch in reader {\n95 |             file_writer.write_batch(&batch.unwrap()).await.unwrap();\n96 |         }\n97 |         file_writer.add_schema_metadata(\"foo\", \"bar\");\n98 |         file_writer.finish().await.unwrap();\n99 |         // Tests asserting the contents of the written file are in reader.rs\n100 |     }"
+  },
+  {
+    "id": 5,
+    "path": "rust/lance-file/src/reader.rs",
+    "start": 162,
+    "end": 177,
+    "unit": "lines",
+    "read_at": "2026-10-04T06:39:08.403Z",
+    "evidence": "162 | \n163 | impl CachedFileMetadata {\n164 |     /// Total file size in bytes.\n165 |     pub fn file_size(&self) -> u64 {\n166 |         self.file_size_bytes\n167 |     }\n168 | }\n169 | \n170 | fn column_metadata_deep_size(column_metadatas: &[pbfile::ColumnMetadata]) -> usize {\n171 |     column_metadatas\n172 |         .iter()\n173 |         .map(|cm| cm.encoded_len() * 4)\n174 |         .sum::<usize>()\n175 |         + std::mem::size_of_val(column_metadatas)\n176 | }\n177 | "
+  },
+  {
+    "id": 6,
+    "path": "rust/lance-file/src/writer/structural.rs",
+    "start": 813,
+    "end": 833,
+    "unit": "lines",
+    "read_at": "2026-10-04T06:39:08.403Z",
+    "evidence": "813 | fn make_file_descriptor(schema: &Schema, num_rows: u64) -> Result<pb::FileDescriptor> {\n814 |     let fields_with_meta = FieldsWithMeta::from(schema);\n815 |     Ok(pb::FileDescriptor {\n816 |         schema: Some(pb::Schema {\n817 |             fields: fields_with_meta.fields.0,\n818 |             metadata: fields_with_meta.metadata,\n819 |         }),\n820 |         length: num_rows,\n821 |     })\n822 | }\n823 | \n824 | /// Structural file body produced before an exact version appends its footer.\n825 | pub struct EncodedBatchBody {\n826 |     pub data: BytesMut,\n827 |     pub column_metadata_start: u64,\n828 |     pub column_metadata_offsets_start: u64,\n829 |     pub global_buffer_offsets_start: u64,\n830 |     pub num_global_buffers: u32,\n831 |     pub num_columns: u32,\n832 | }\n833 | "
+  },
+  {
+    "id": 8,
+    "path": "rust/lance-table/src/utils/stream.rs",
+    "start": 235,
+    "end": 264,
+    "unit": "lines",
+    "read_at": "2026-10-04T06:39:08.403Z",
+    "evidence": "235 |     // For each column convert to data\n236 |     let new_columns = batch\n237 |         .schema()\n238 |         .fields()\n239 |         .iter()\n240 |         .zip(batch.columns())\n241 |         .map(|(field, col)| {\n242 |             if field.name() == ROW_ID || field.name() == ROW_ADDR {\n243 |                 let col_data = col.to_data();\n244 |                 // If it already has a validity bitmap, then AND it with the mask.\n245 |                 // Otherwise, use the boolean buffer as the mask.\n246 |                 let null_buffer = NullBuffer::union(col_data.nulls(), Some(&mask_buffer));\n247 | \n248 |                 Ok(col_data\n249 |                     .into_builder()\n250 |                     .null_bit_buffer(null_buffer.map(|b| b.buffer().clone()))\n251 |                     .build()\n252 |                     .map(make_array)?)\n253 |             } else {\n254 |                 Ok(col.clone())\n255 |             }\n256 |         })\n257 |         .collect::<Result<Vec<_>>>()?;\n258 | \n259 |     Ok(RecordBatch::try_new_with_options(\n260 |         batch.schema(),\n261 |         new_columns,\n262 |         &RecordBatchOptions::new().with_row_count(Some(batch.num_rows())),\n263 |     )?)\n264 | }"
+  },
+  {
+    "id": 11,
+    "path": "rust/lance-table/src/rowids/serde.rs",
+    "start": 428,
+    "end": 452,
+    "unit": "lines",
+    "read_at": "2026-10-04T06:39:08.403Z",
+    "evidence": "428 | #[cfg(test)]\n429 | mod test {\n430 |     use pretty_assertions::assert_eq;\n431 |     use proptest::prelude::*;\n432 |     use rstest::rstest;\n433 | \n434 |     use super::*;\n435 | \n436 |     #[test]\n437 |     fn test_bitmap_serialization_is_byte_exact() {\n438 |         let mut bitmap = Bitmap::new_full(10);\n439 |         bitmap.clear(2);\n440 |         let segment = U64Segment::RangeWithBitmap {\n441 |             range: 100..110,\n442 |             bitmap,\n443 |         };\n444 |         assert_eq!(segment.len(), 9);\n445 | \n446 |         let serialized = pb::U64Segment::from(segment.clone());\n447 |         let Some(pb::u64_segment::Segment::RangeWithBitmap(encoded)) = &serialized.segment else {\n448 |             panic!(\"expected bitmap segment\");\n449 |         };\n450 |         assert_eq!(encoded.bitmap, vec![0xfb, 0x03]);\n451 |         assert_eq!(U64Segment::try_from(serialized).unwrap(), segment);\n452 |     }"
+  },
+  {
+    "id": 12,
+    "path": "rust/lance-table/src/rowids.rs",
+    "start": 559,
+    "end": 593,
+    "unit": "lines",
+    "read_at": "2026-10-04T06:39:08.404Z",
+    "evidence": "559 |     /// Get a contiguous range of row ids while preserving scan state from a\n560 |     /// previous call.\n561 |     pub(crate) fn select_range_with_cursor(\n562 |         &self,\n563 |         cursor: &mut RowIdSequenceCursor,\n564 |         selection: Range<usize>,\n565 |     ) -> Vec<u64> {\n566 |         let mut row_ids = Vec::with_capacity(selection.len());\n567 |         cursor.extend_range(self, selection, &mut row_ids);\n568 |         row_ids\n569 |     }\n570 | \n571 |     /// Get a contiguous range from a sequence whose bitmap segments are dense.\n572 |     pub(crate) fn select_dense_range_with_cursor(\n573 |         &self,\n574 |         cursor: &mut RowIdSequenceCursor,\n575 |         selection: Range<usize>,\n576 |     ) -> Vec<u64> {\n577 |         let mut row_ids = Vec::with_capacity(selection.len());\n578 |         cursor.extend_dense_range(self, selection, &mut row_ids);\n579 |         row_ids\n580 |     }\n581 | \n582 |     /// Get row ids while preserving scan state from a previous call.\n583 |     ///\n584 |     /// Decreasing offsets are supported by rewinding the cursor. This matters\n585 |     /// for take requests, whose indices are not required to be sorted.\n586 |     pub(crate) fn select_with_cursor<'a>(\n587 |         &'a self,\n588 |         cursor: &'a mut RowIdSequenceCursor,\n589 |         selection: impl Iterator<Item = usize> + 'a,\n590 |     ) -> impl Iterator<Item = u64> + 'a {\n591 |         selection.filter_map(move |index| cursor.get(self, index))\n592 |     }\n593 | "
+  },
+  {
+    "id": 13,
+    "path": "rust/lance-file/src/writer_tests.rs",
+    "start": 852,
+    "end": 883,
+    "unit": "lines",
+    "read_at": "2026-10-04T06:39:27.175Z",
+    "evidence": "852 |         let arrow_schema = Arc::new(ArrowSchema::new(vec![ArrowField::new(\n853 |             \"items\",\n854 |             list.data_type().clone(),\n855 |             true,\n856 |         )]));\n857 |         let batch = RecordBatch::try_new(\n858 |             arrow_schema.clone(),\n859 |             vec![Arc::new(list.slice(offset, len))],\n860 |         )\n861 |         .unwrap();\n862 |         let lance_schema = LanceSchema::try_from(arrow_schema.as_ref()).unwrap();\n863 | \n864 |         let fs = FsFixture::default();\n865 |         let mut writer = create_writer(\n866 |             fs.object_store.create(&fs.tmp_path).await.unwrap(),\n867 |             lance_schema,\n868 |             ConcreteFileVersion::V2_0,\n869 |             FileWriterOptions::default(),\n870 |         )\n871 |         .unwrap();\n872 | \n873 |         let result = writer.write_batch(&batch).await;\n874 |         if !should_succeed {\n875 |             let error = result.unwrap_err();\n876 |             assert!(matches!(error, lance_core::Error::InvalidInput { .. }));\n877 |             assert!(error.to_string().contains(\"struct validity\"));\n878 |             return;\n879 |         }\n880 |         result.unwrap();\n881 |         writer.finish().await.unwrap();\n882 |     }\n883 | "
+  },
+  {
+    "id": 15,
+    "path": "rust/lance-table/src/rowids/index.rs",
+    "start": 329,
+    "end": 351,
+    "unit": "lines",
+    "read_at": "2026-10-04T06:39:27.175Z",
+    "evidence": "329 | /// Set bits before each [`RANK_BLOCK_BYTES`] block of `bitmap`, and in total.\n330 | fn build_bitmap_rank(bitmap: &Bitmap) -> (Vec<u32>, usize) {\n331 |     let mut rank = Vec::with_capacity(bitmap.data.len().div_ceil(RANK_BLOCK_BYTES));\n332 |     let mut ones = 0usize;\n333 |     for block in bitmap.data.chunks(RANK_BLOCK_BYTES) {\n334 |         rank.push(ones as u32);\n335 |         ones += count_ones(block);\n336 |     }\n337 |     (rank, ones)\n338 | }\n339 | \n340 | #[derive(Debug)]\n341 | struct FragmentEntry {\n342 |     fragment_id: u32,\n343 |     sequence: Arc<RowIdSequence>,\n344 |     deletion_vector: Arc<DeletionVector>,\n345 |     segments: Vec<SegmentEntry>,\n346 |     start: u64,\n347 |     end: u64,\n348 |     /// Row ids the merged build reads one by one.\n349 |     merge_rows: u64,\n350 | }\n351 | "
+  },
+  {
+    "id": 16,
+    "path": "rust/lance-encoding/src/format.rs",
+    "start": 358,
+    "end": 373,
+    "unit": "lines",
+    "read_at": "2026-10-04T06:39:27.175Z",
+    "evidence": "358 |             pub fn variable(\n359 |                 offsets_desc: crate::format::$module::CompressiveEncoding,\n360 |                 values_compression: Option<crate::format::$module::BufferCompression>,\n361 |             ) -> crate::format::$module::CompressiveEncoding {\n362 |                 crate::format::$module::CompressiveEncoding {\n363 |                     compression: Some(\n364 |                         crate::format::$module::compressive_encoding::Compression::Variable(\n365 |                             Box::new(crate::format::$module::Variable {\n366 |                                 offsets: Some(Box::new(offsets_desc)),\n367 |                                 values: values_compression,\n368 |                             }),\n369 |                         ),\n370 |                     ),\n371 |                 }\n372 |             }\n373 | "
+  },
+  {
+    "id": 20,
+    "path": "AGENTS.md",
+    "start": 112,
+    "end": 116,
+    "unit": "lines",
+    "read_at": "2026-10-04T06:39:27.176Z",
+    "evidence": "112 | ## Filing Issues\n113 | \n114 | - When opening an issue with `gh issue create` or the API, classify it and pass the matching label: `--label bug`, `--label feature`, or `--label performance`. These paths bypass the `.github/ISSUE_TEMPLATE` forms, so the label is not applied automatically.\n115 | - Prefix the title to match, e.g. `bug: ...`, `feature: ...`, or `perf: ...`. A content-based labeler (`.github/workflows/issue-labeler.yml`) uses this as a fallback signal, but an explicit `--label` is the reliable path.\n116 | "
+  }
+]

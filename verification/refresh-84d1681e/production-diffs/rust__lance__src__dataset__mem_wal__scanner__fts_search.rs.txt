@@ -1,0 +1,54 @@
+@@ -722,9 +722,9 @@ impl LsmFtsSearchPlanner {
+  722              ));
+  723          }
+  724  
+  725 -        // Any remaining schema divergence would panic inside `UnionExec::new`
+  726 -        // rather than erroring, so this is the last point where it is still a
+  727 -        // query error instead of a process failure.
+  725 +        // `UnionExec::try_new` only rejects inputs with different field counts
+  726 +        // and does not compare field types, so check the schemas here and report
+  727 +        // any divergence as an unsupported cross-column query.
+  728          if let Some((first, rest)) = per_column_plans.split_first()
+  729              && let Some(mismatch) = rest.iter().find(|plan| plan.schema() != first.schema())
+  730          {
+
+@@ -736,12 +736,8 @@ impl LsmFtsSearchPlanner {
+  736              )));
+  737          }
+  738  
+  739 -        let merged: Arc<dyn ExecutionPlan> = if per_column_plans.len() == 1 {
+  740 -            per_column_plans.into_iter().next().unwrap()
+  741 -        } else {
+  742 -            #[allow(deprecated)]
+  743 -            Arc::new(UnionExec::new(per_column_plans))
+  744 -        };
+  739 +        // `try_new` returns a single plan as is instead of wrapping it in a union.
+  740 +        let merged = UnionExec::try_new(per_column_plans)?;
+  741          // Order the candidates, collapse duplicates, *then* cut to k. Cutting
+  742          // before the collapse spends the budget on repeat hits of the same row.
+  743          // The input is sorted by `_score` descending, so keeping the first
+
+@@ -931,17 +927,12 @@ impl LsmFtsSearchPlanner {
+  927              per_source_plans.push(normalized);
+  928          }
+  929  
+  934 -        // Single source: skip Union and the merge.
+  935 -        let merged: Arc<dyn ExecutionPlan> = if per_source_plans.len() == 1 {
+  936 -            per_source_plans.into_iter().next().unwrap()
+  937 -        } else {
+  938 -            #[allow(deprecated)]
+  939 -            // The downstream `SortPreservingMergeExec` already spawns one driver
+  940 -            // task per input partition (one per union arm) via `spawn_buffered`,
+  941 -            // so each arm's per-arm CPU (posting decode, BM25) runs on its own
+  942 -            // task without an extra repartition.
+  943 -            Arc::new(UnionExec::new(per_source_plans))
+  944 -        };
+  930 +        // A single source is returned as is, without a union. Otherwise the
+  931 +        // downstream `SortPreservingMergeExec` already spawns one driver task per
+  932 +        // input partition (one per union arm) via `spawn_buffered`, so each arm's
+  933 +        // per-arm CPU (posting decode, BM25) runs on its own task without an
+  934 +        // extra repartition.
+  935 +        let merged = UnionExec::try_new(per_source_plans)?;
+  936  
+  937          self.sort_by_score(merged, limit)
+  938      }

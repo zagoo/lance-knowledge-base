@@ -1,0 +1,252 @@
+@@ -2,6 +2,7 @@
+    2  // SPDX-FileCopyrightText: Copyright The Lance Authors
+    3  
+    4  use lance_core::utils::row_addr_remap::RowAddrRemap;
+    5 +use lance_index_core::remapping::RowAddrTranslator;
+    6  use lance_index_core::remapping::{BatchRowIdRemapper, remap_record_batch_async};
+    7  use std::{
+    8      any::Any,
+
+@@ -2312,7 +2313,7 @@ fn filter_row_ids(
+ 2313  
+ 2314  /// True if `filter` would keep no rows at all (its keep-set is empty), letting
+ 2315  /// the merge skip reading the segment entirely.
+ 2315 -fn filter_keeps_nothing(filter: &Option<OldIndexDataFilter>) -> bool {
+ 2316 +pub(super) fn filter_keeps_nothing(filter: &Option<OldIndexDataFilter>) -> bool {
+ 2317      match filter {
+ 2318          Some(OldIndexDataFilter::Fragments { to_keep, .. }) => to_keep.is_empty(),
+ 2319          Some(OldIndexDataFilter::RowIds(valid)) => valid.is_empty(),
+
+@@ -2481,6 +2482,108 @@ impl Index for BTreeIndex {
+ 2482      }
+ 2483  }
+ 2484  
+ 2485 +impl BTreeIndex {
+ 2486 +    /// The one remap implementation behind the legacy `remap` and
+ 2487 +    /// `remap_streaming`: retrains each part from its pages, translating one
+ 2488 +    /// page's addresses at a time.
+ 2489 +    async fn remap_with(
+ 2490 +        &self,
+ 2491 +        mapping: RowAddrTranslator,
+ 2492 +        dest_store: &dyn IndexStore,
+ 2493 +    ) -> Result<CreatedIndex> {
+ 2494 +        // (part_id, path)
+ 2495 +        // The part_id is None for a basic index
+ 2496 +        // For a range-based index we use Some(0), Some(1), ...
+ 2497 +        //   even if those weren't the original part ids
+ 2498 +        let part_page_files: Vec<(Option<u32>, &str)> =
+ 2499 +            if let Some(ranges_to_files) = &self.ranges_to_files {
+ 2500 +                // Range-based Index: Directly collect references to the file paths.
+ 2501 +                ranges_to_files
+ 2502 +                    .iter()
+ 2503 +                    .enumerate()
+ 2504 +                    .map(|(part_id, (_, (path, _)))| (Some(part_id as u32), path.as_str()))
+ 2505 +                    .collect()
+ 2506 +            } else {
+ 2507 +                // Basic Index: There is only one source page file.
+ 2508 +                vec![(None, BTREE_PAGES_NAME)]
+ 2509 +            };
+ 2510 +
+ 2511 +        let mapping = mapping.clone();
+ 2512 +        let train_schema = Arc::new(self.train_schema());
+ 2513 +        let mut remapped_files = Vec::new();
+ 2514 +
+ 2515 +        // TODO: Could potentially parallelize this across parts, unclear it would be worth it
+ 2516 +        for (part_id, page_file) in part_page_files {
+ 2517 +            // Retrain on the remapped pages
+ 2518 +            let sub_index_reader = self.store.open_index_file(page_file).await?;
+ 2519 +            let mapping = mapping.clone();
+ 2520 +
+ 2521 +            let train_schema_clone = train_schema.clone();
+ 2522 +            let train_schema = train_schema.clone();
+ 2523 +
+ 2524 +            let remapped_stream = Self::page_stream(
+ 2525 +                sub_index_reader,
+ 2526 +                self.batch_size,
+ 2527 +                self.store.io_parallelism(),
+ 2528 +            )
+ 2529 +            .await?
+ 2530 +            .map_ok(|(_, batch)| batch)
+ 2531 +            .map_err(DataFusionError::from)
+ 2532 +            .and_then(move |batch| {
+ 2533 +                let mapping = mapping.clone();
+ 2534 +                let train_schema = train_schema.clone();
+ 2535 +                async move {
+ 2536 +                    // Translate one page's addresses, then convert from the
+ 2537 +                    // serialized schema to the training input schema.
+ 2538 +                    let remapped = FlatIndex::remap_batch_with(batch, &mapping)
+ 2539 +                        .await
+ 2540 +                        .map_err(DataFusionError::from)?;
+ 2541 +                    RecordBatch::try_new(train_schema, remapped.columns().to_vec())
+ 2542 +                        .map_err(DataFusionError::from)
+ 2543 +                }
+ 2544 +            });
+ 2545 +
+ 2546 +            let remapped_stream = Box::pin(RecordBatchStreamAdapter::new(
+ 2547 +                train_schema_clone,
+ 2548 +                remapped_stream,
+ 2549 +            ));
+ 2550 +
+ 2551 +            let mut files =
+ 2552 +                train_btree_index(remapped_stream, dest_store, self.batch_size, None, part_id)
+ 2553 +                    .await?;
+ 2554 +            remapped_files.append(&mut files);
+ 2555 +        }
+ 2556 +
+ 2557 +        if let Some(ranges_to_files) = &self.ranges_to_files {
+ 2558 +            let num_parts = ranges_to_files.len();
+ 2559 +            // Merge the lookups if we are a range-based index
+ 2560 +            let page_files = (0..num_parts)
+ 2561 +                .map(|part_id| part_page_data_file_path((part_id as u64) << 32))
+ 2562 +                .collect::<Vec<_>>();
+ 2563 +            let lookup_files = (0..num_parts)
+ 2564 +                .map(|part_id| part_lookup_file_path((part_id as u64) << 32))
+ 2565 +                .collect::<Vec<_>>();
+ 2566 +            let merged_files = merge_metadata_files(
+ 2567 +                dest_store,
+ 2568 +                &page_files,
+ 2569 +                &lookup_files,
+ 2570 +                None,
+ 2571 +                noop_progress(),
+ 2572 +            )
+ 2573 +            .await?;
+ 2574 +            remapped_files.retain(|file| file.path.ends_with("_page_data.lance"));
+ 2575 +            remapped_files.extend(merged_files);
+ 2576 +        }
+ 2577 +
+ 2578 +        Ok(CreatedIndex {
+ 2579 +            index_details: prost_types::Any::from_msg(&pbold::BTreeIndexDetails::default())
+ 2580 +                .unwrap(),
+ 2581 +            index_version: BTREE_INDEX_VERSION,
+ 2582 +            files: remapped_files,
+ 2583 +        })
+ 2584 +    }
+ 2585 +}
+ 2586 +
+ 2587  #[async_trait]
+ 2588  impl ScalarIndex for BTreeIndex {
+ 2589      async fn search(
+
+@@ -2666,93 +2769,18 @@ impl ScalarIndex for BTreeIndex {
+ 2769          mapping: &RowAddrRemap,
+ 2770          dest_store: &dyn IndexStore,
+ 2771      ) -> Result<CreatedIndex> {
+ 2669 -        // (part_id, path)
+ 2670 -        // The part_id is None for a basic index
+ 2671 -        // For a range-based index we use Some(0), Some(1), ...
+ 2672 -        //   even if those weren't the original part ids
+ 2673 -        let part_page_files: Vec<(Option<u32>, &str)> =
+ 2674 -            if let Some(ranges_to_files) = &self.ranges_to_files {
+ 2675 -                // Range-based Index: Directly collect references to the file paths.
+ 2676 -                ranges_to_files
+ 2677 -                    .iter()
+ 2678 -                    .enumerate()
+ 2679 -                    .map(|(part_id, (_, (path, _)))| (Some(part_id as u32), path.as_str()))
+ 2680 -                    .collect()
+ 2681 -            } else {
+ 2682 -                // Basic Index: There is only one source page file.
+ 2683 -                vec![(None, BTREE_PAGES_NAME)]
+ 2684 -            };
+ 2685 -
+ 2686 -        let mapping = Arc::new(mapping.clone());
+ 2687 -        let train_schema = Arc::new(self.train_schema());
+ 2688 -        let mut remapped_files = Vec::new();
+ 2689 -
+ 2690 -        // TODO: Could potentially parallelize this across parts, unclear it would be worth it
+ 2691 -        for (part_id, page_file) in part_page_files {
+ 2692 -            // Retrain on the remapped pages
+ 2693 -            let sub_index_reader = self.store.open_index_file(page_file).await?;
+ 2694 -            let mapping = mapping.clone();
+ 2695 -
+ 2696 -            let train_schema_clone = train_schema.clone();
+ 2697 -            let train_schema = train_schema.clone();
+ 2698 -
+ 2699 -            let remapped_stream = Self::page_stream(
+ 2700 -                sub_index_reader,
+ 2701 -                self.batch_size,
+ 2702 -                self.store.io_parallelism(),
+ 2703 -            )
+ 2704 -            .await?
+ 2705 -            .map_ok(|(_, batch)| batch)
+ 2706 -            .map_err(DataFusionError::from)
+ 2707 -            .and_then(move |batch| {
+ 2708 -                // Remap the batch and then convert from the serialized schema to the training input schema
+ 2709 -                let remapped =
+ 2710 -                    FlatIndex::remap_batch(batch, &mapping).map_err(DataFusionError::from);
+ 2711 -                let with_train_schema = remapped.and_then(|batch| {
+ 2712 -                    RecordBatch::try_new(train_schema.clone(), batch.columns().to_vec())
+ 2713 -                        .map_err(DataFusionError::from)
+ 2714 -                });
+ 2715 -                std::future::ready(with_train_schema)
+ 2716 -            });
+ 2717 -
+ 2718 -            let remapped_stream = Box::pin(RecordBatchStreamAdapter::new(
+ 2719 -                train_schema_clone,
+ 2720 -                remapped_stream,
+ 2721 -            ));
+ 2722 -
+ 2723 -            let mut files =
+ 2724 -                train_btree_index(remapped_stream, dest_store, self.batch_size, None, part_id)
+ 2725 -                    .await?;
+ 2726 -            remapped_files.append(&mut files);
+ 2727 -        }
+ 2728 -
+ 2729 -        if let Some(ranges_to_files) = &self.ranges_to_files {
+ 2730 -            let num_parts = ranges_to_files.len();
+ 2731 -            // Merge the lookups if we are a range-based index
+ 2732 -            let page_files = (0..num_parts)
+ 2733 -                .map(|part_id| part_page_data_file_path((part_id as u64) << 32))
+ 2734 -                .collect::<Vec<_>>();
+ 2735 -            let lookup_files = (0..num_parts)
+ 2736 -                .map(|part_id| part_lookup_file_path((part_id as u64) << 32))
+ 2737 -                .collect::<Vec<_>>();
+ 2738 -            let merged_files = merge_metadata_files(
+ 2739 -                dest_store,
+ 2740 -                &page_files,
+ 2741 -                &lookup_files,
+ 2742 -                None,
+ 2743 -                noop_progress(),
+ 2744 -            )
+ 2745 -            .await?;
+ 2746 -            remapped_files.retain(|file| file.path.ends_with("_page_data.lance"));
+ 2747 -            remapped_files.extend(merged_files);
+ 2748 -        }
+ 2772 +        // The page streams are `'static`, so the map is shared through an
+ 2773 +        // owned translator (the same clone this method always made).
+ 2774 +        self.remap_with(RowAddrTranslator::sync(mapping.clone()), dest_store)
+ 2775 +            .await
+ 2776 +    }
+ 2777  
+ 2750 -        Ok(CreatedIndex {
+ 2751 -            index_details: prost_types::Any::from_msg(&pbold::BTreeIndexDetails::default())
+ 2752 -                .unwrap(),
+ 2753 -            index_version: BTREE_INDEX_VERSION,
+ 2754 -            files: remapped_files,
+ 2755 -        })
+ 2778 +    async fn remap_streaming(
+ 2779 +        &self,
+ 2780 +        translator: &RowAddrTranslator,
+ 2781 +        dest_store: &dyn IndexStore,
+ 2782 +    ) -> Result<CreatedIndex> {
+ 2783 +        self.remap_with(translator.clone(), dest_store).await
+ 2784      }
+ 2785  
+ 2786      async fn update(
+
+@@ -3706,6 +3734,7 @@ impl ScalarIndexPlugin for BTreeIndexPlugin {
+ 3734          &self,
+ 3735          index_store: Arc<dyn IndexStore>,
+ 3736          _index_details: &prost_types::Any,
+ 3737 +        _index_version: u32,
+ 3738          frag_reuse_index: Option<Arc<dyn RowIdRemapper>>,
+ 3739          cache: &LanceCache,
+ 3740      ) -> Result<Arc<dyn ScalarIndex>> {
+
+@@ -3720,6 +3749,7 @@ impl ScalarIndexPlugin for BTreeIndexPlugin {
+ 3749          &self,
+ 3750          index_store: Arc<dyn IndexStore>,
+ 3751          _index_details: &prost_types::Any,
+ 3752 +        _index_version: u32,
+ 3753          remapping: Option<Arc<dyn BatchRowIdRemapper>>,
+ 3754          cache: &LanceCache,
+ 3755      ) -> Result<Arc<dyn ScalarIndex>> {

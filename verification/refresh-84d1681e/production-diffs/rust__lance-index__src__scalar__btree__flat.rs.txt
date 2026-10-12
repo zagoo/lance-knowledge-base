@@ -1,0 +1,28 @@
+@@ -2,6 +2,7 @@
+    2  // SPDX-FileCopyrightText: Copyright The Lance Authors
+    3  
+    4  use lance_core::utils::row_addr_remap::RowAddrRemap;
+    5 +use lance_index_core::remapping::RowAddrTranslator;
+    6  use std::collections::BTreeSet;
+    7  use std::{ops::Bound, sync::Arc};
+    8  
+
+@@ -226,6 +227,18 @@ impl FlatIndex {
+  227          self.all_non_null_matches()?.into_row_addr_set()
+  228      }
+  229  
+  230 +    /// [`Self::remap_batch`] through a [`RowAddrTranslator`]: the page's
+  231 +    /// addresses are translated first, so a batch translator performs one
+  232 +    /// bounded translation per page.
+  233 +    pub async fn remap_batch_with(
+  234 +        batch: RecordBatch,
+  235 +        translator: &RowAddrTranslator,
+  236 +    ) -> Result<RecordBatch> {
+  237 +        let row_ids = batch.column(IDS_COL_IDX).as_primitive::<UInt64Type>();
+  238 +        let resolved = translator.resolve(row_ids.values().iter().copied()).await?;
+  239 +        Self::remap_batch(batch, &resolved)
+  240 +    }
+  241 +
+  242      pub fn remap_batch(batch: RecordBatch, mapping: &RowAddrRemap) -> Result<RecordBatch> {
+  243          let row_ids = batch.column(IDS_COL_IDX).as_primitive::<UInt64Type>();
+  244          let val_idx_and_new_id = row_ids

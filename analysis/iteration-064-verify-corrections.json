@@ -1,0 +1,1020 @@
+{
+  "iteration": 64,
+  "files": [
+    {
+      "path": "rust/lance-file/src/lib.rs",
+      "module": "L1-modules/rust-lance-file.md",
+      "reviewed": true,
+      "role": "Crate module facade and asynchronous footer-only exact file-version recognition.",
+      "ranges": [
+        [
+          1,
+          18,
+          "SPDX; public concat,datatypes,format,reader,testing,version,versions,writer modules; io is pub(crate), compatibility_tests private cfg(test). Public LanceEncodingsIo reexport exposes selected IO type despite module visibility. Schema conversion, IO adapter, exact dispatch, writer facade and type checker are now covered; V2_1/V2_2/V2_3 concrete writers and shared structural pipeline are covered separately. The V2_0 writer, testing helpers, exact-version compatibility tests and fixture generator sources are also covered. writer_tests.rs is also fully analyzed. Shared reader metadata/index loading, local cache and read dispatch plus all its tests are now covered. Encoded-file concat compatibility, Blob part validation, page relocation and output lifecycle are now covered. Delegated IO/decoder scheduling, individual binary fixtures remain pending. Frozen V1 projection/mapping, dictionary dispatch, metadata conversion/batch grouping and dense page-table helpers are now covered; their concrete binary/plain/dictionary codecs are now covered; full V1 reader is now analyzed; backend lifecycle remains pending."
+        ],
+        [
+          19,
+          35,
+          "Imports shared MAGIC, core errors, ObjectStore/Path and exact version. determine_file_version(store,path,known_size)->Result<ConcreteFileVersion> obtains size via await store.size only if unknown, checked-converts it to usize or InvalidInput with path. Supplied usize size is trusted without checking actual length; no explicit size lookup then. Underlying open behavior is delegated, so this does not prove all HEAD requests avoided."
+        ],
+        [
+          36,
+          55,
+          "Reject size<8 with InvalidInput source text and path, then await open_with_size and exactly requested range size-8..size. Compare footer[4..] to MAGIC; mismatch returns contextual InvalidInput. No explicit received-length check: fewer than4 returned bytes can panic on slice; other non8 lengths fail magic comparison. Store/range IO errors propagate. No full file parse or schema/page integrity check."
+        ],
+        [
+          56,
+          60,
+          "Decode first two little-endian u16 values from four bytes, then delegate ConcreteFileVersion::from_footer_numbers. Magic match implies exactly8 returned bytes for this equality check. Unknown version error lacks path because decoder formats just the pair. The helper recognizes accepted footer aliases only and cannot establish complete file validity."
+        ]
+      ],
+      "limits": "Complete bounded read and authored physical-line coverage. No build, test, benchmark or network execution; delegated implementations remain pending unless separately analyzed."
+    },
+    {
+      "path": "rust/lance-file/src/versions/v1/encoding/binary.rs",
+      "module": "L1-modules/rust-lance-file-v1-codecs.md",
+      "role": "Public frozen V1 variable-length binary encoder and generic decoder, plus a private take-chunk planner. Persists payload bytes followed by absolute Int64 positions, reconstructs optional validity from zero lengths and performs range/chunked take IO. Contains eight active tests and two test helpers.",
+      "reviewed": true,
+      "limits": "Every physical line was read during ANALYZE61, including disabled test bodies. Tests were inspected, not run. Source remains offline and read-only: no build, test, benchmark, generator or installation was executed. These frozen V1 codecs are historical compatibility surfaces, not extension points for new format capabilities. Full V1 reader is now analyzed; backend lifecycle remains pending; narrow helper/caller reads are separately recorded. Malformed-input consequences and the repeated-leading-index trace are source deductions, not executed reproductions. No local feature flag, environment variable, global mutable state, task spawning, shutdown or cancellation cleanup is introduced by these codec implementations.",
+      "ranges": [
+        [
+          1,
+          37,
+          "SPDX and variable-length module header; dependencies provide Arrow arithmetic/casts/builders and byte-array types, buffers, Bytes, ordered futures streams, alignment-aware BufferExt, async Writer/Reader and PlainDecoder for the position array. No current-format registration or version selection occurs here."
+        ],
+        [
+          38,
+          47,
+          "Public BinaryEncoder holds a private exclusive borrowed Writer. new only stores that reference; it does not validate writer position, initialize a header or allocate a page. The caller retains writer lifecycle responsibility."
+        ],
+        [
+          48,
+          64,
+          "Private generic encode_typed_arr sums logical lengths, reserves N+1 Int64 positions, records current writer position as the first absolute offset, then downcasts every input to the chosen GenericByteArray<T> with unwrap. It uses each sliced array's first and final offsets. Mixed input types can panic after earlier arrays have already been written; lengths, arithmetic and usize-to-i64 conversion are unchecked."
+        ],
+        [
+          65,
+          80,
+          "Unsafe from_raw_parts borrows exactly the sliced value-buffer span start..end, writes it, then appends rebased absolute positions for every logical element. Safety relies on valid Arrow offsets/buffers and homogeneous generic arrays; no local check or SAFETY comment enforces the pointer span. Original validity is not serialized or consulted. Null slots with nonzero payload spans therefore cannot be reconstructed as null solely from this output. Each successful write precedes updating local last_offset; later failure has no rollback."
+        ],
+        [
+          81,
+          106,
+          "After all payloads, capture positions_offset, write the Int64 values buffer directly and return that table position. No explicit endian conversion, alignment, page header, framing or validity bitmap is emitted. encode asserts a nonempty slice, dispatches solely from the first array to Utf8/Binary/LargeUtf8/LargeBinary and returns InvalidInput with type for all others, including views. A nonempty slice of empty arrays still writes one position; an empty slice panics."
+        ],
+        [
+          107,
+          151,
+          "Public BinaryDecoder<T> privately borrows Reader and stores position, logical length, nullable and PhantomData<T>. new is infallible and performs no bounds/type/offset validation. The constructor doc mistakenly links BinaryEncoder and calls position the batch start; the implementation expects the position-table location returned by BinaryEncoder. The example constructs an Utf8 decoder over a local reader but does not execute a read."
+        ],
+        [
+          152,
+          164,
+          "get_positions constructs a PlainDecoder<Int64> with length+1, requests index.start..index.end+1 and returns an Arc of the cloned primitive array. Position bounds are delegated to PlainDecoder, and additions are unchecked. This obtains both endpoints for the selected logical range; the complete first-to-last take position span is read at once."
+        ],
+        [
+          165,
+          183,
+          "count_nulls allocates validity for offsets.len()-1 elements. Adjacent equal offsets clear validity and increment null count; unequal offsets set it. If none are null the bitmap is discarded. This intentionally conflates empty values with null when nullable=true; nullable=false callers never invoke it. It does not distinguish equal offsets caused by an originally valid empty value."
+        ],
+        [
+          184,
+          212,
+          "get_range indexes absolute start/end, slices range.len()+1 positions, subtracts start and casts to Int32 for small-offset byte types; large types retain Int64. It skips payload IO for start>=end, otherwise requests the absolute byte range. The assertion positions.len()>=range.end is weaker than the final endpoint access, which needs range.end<len; private callers must supply that extra endpoint. Negative, nonmonotone, oversized and arithmetic-overflow positions have no explicit local validation; arithmetic/casts/array building may fail later."
+        ],
+        [
+          213,
+          235,
+          "Build the requested GenericByteArray with row count, normalized offsets and payload Bytes converted through BufferExt(alignment1). When nullable, validity comes from equal original position pairs. The fallible ArrayDataBuilder::build is the final delegated validation boundary; no local short-response or UTF8 check is separately implemented. Return a new Arc array, potentially sharing the reader-returned payload allocation through BufferExt."
+        ],
+        [
+          236,
+          258,
+          "Private Debug TakeChunksPlan holds relative UInt32 indices plus is_contiguous. Planner documentation promises either contiguous nonrepeating indices or nearby values. It subtracts the first input index with Arrow arithmetic, initializes start_idx=0, last_idx=-1 and contiguous=true. Empty input would panic at value(0); public take guards emptiness first. No sort, null rejection or monotonicity validation occurs here."
+        ],
+        [
+          259,
+          285,
+          "For each relative current index, curr_contiguous is current==start_idx OR current-last_idx==1. A noncontiguous item starts a new chunk only when its byte position is strictly more than min_io_size from the current chunk's first index. Otherwise AND the contiguous flag; always update last_idx and finally append the remainder. Continuous runs can exceed the IO threshold. start_idx is an ordinal, so its comparison with a relative row index can classify repeats as contiguous: normalized [0,0] retains true. This is a source-derived discrepancy with the nonrepeating comment, not a runtime reproduction."
+        ],
+        [
+          286,
+          308,
+          "decode delegates get(..). Public take documents sorted indices, returns a typed empty array before IO for empty input, otherwise uses first/last values to request the full position span. MIN_IO_SIZE is fixed at 64*1024 bytes; TODOs leave it nonconfigurable and position reads unchunked. end+1 uses u32 arithmetic before conversion. Unsorted, nullable or out-of-bounds indices are not validated here."
+        ],
+        [
+          309,
+          328,
+          "Compute exact intended payload capacity by iterating every index, unwrapping its validity and summing adjacent position differences relative to the first index. Null indices panic here. Allocate payload and (N+1)*offset-width buffers, initialize zero offset using unchecked push. The safety comment relies on sufficient precomputed capacity; length/product/difference overflow and negative persisted positions remain unchecked. Duplicate indices contribute their payload lengths repeatedly to capacity."
+        ],
+        [
+          329,
+          367,
+          "Plan chunks, issue each enclosing byte-array range through get_range and poll with ordered buffered(reader.io_parallelism()). A contiguous chunk copies value_data once, while a noncontiguous chunk copies each requested value. Both append a cumulative offset per requested index with unsafe push_unchecked under the capacity assumption. Repeated-leading [k,k] with a nonempty value becomes a contiguous [0,0] chunk: only one value span is copied but two offsets are accumulated. Ordered buffering preserves planned output order; it does not spawn detached tasks or add error/cancellation cleanup."
+        ],
+        [
+          368,
+          393,
+          "After IO, build output offsets and debug-assert copied payload bytes equal the precomputed capacity. The repeated-leading nonempty-value trace violates that assertion in debug builds; without it, inconsistent final offsets reach fallible array building. When nullable, equal output offsets again determine validity. Return a new materialized payload array. No guarantee is claimed for malformed inputs or release behavior beyond the observed builder call."
+        ],
+        [
+          394,
+          415,
+          "decode_range checks end>logical length first and returns contextual InvalidInput, then accepts any Range::is_empty as a typed empty array. Thus out-of-bounds equal endpoints fail when end is too large, while reversed ranges whose end is in bounds return empty. Otherwise read N+1 positions through PlainDecoder and decode local 0..N. RangeFrom beyond length becomes an empty reversed range after get expands it."
+        ],
+        [
+          416,
+          430,
+          "Public get converts ReadBatchParams once: Range, full, to and from become decode_range; Indices delegates take; Ranges returns InvalidInput stating multiple ranges are unsupported. There is no inclusive-range arm, fallback or automatic sorting here."
+        ],
+        [
+          431,
+          456,
+          "The cfg(test) module imports string/binary types, concat and local temp-file IO. write_test_data creates/truncates a file, writes four garbage prefix bytes, encodes provided strings and explicitly shuts down before returning table offset. It tests nonzero absolute positions but is a helper, not an independent assertion oracle."
+        ],
+        [
+          457,
+          484,
+          "Generic test_round_trips writes strings, opens a 1024-byte-block local reader, decodes nullable=true using summed rows and compares the typed result with Arrow concat of the original arrays. It covers the arrays supplied by callers only; no byte-layout, failure-timing or backend durability assertion is present."
+        ],
+        [
+          485,
+          510,
+          "test_write_binary_data runs six Utf8/LargeUtf8 fixtures: basic nonempty values, nullable values and multiple arrays. Nullable examples use None rather than valid empty strings; they do not distinguish empty values from null, cover views, or exercise LargeBinary. All compare decoded contents through the shared helper."
+        ],
+        [
+          511,
+          516,
+          "The offset test slices [d,e] to the one-element e view, then runs the string roundtrip helper. It specifically exercises nonzero Arrow value offsets, not arbitrary malformed offsets or multiple sliced inputs."
+        ],
+        [
+          517,
+          564,
+          "Range fixture encodes a..g after a four-byte prefix with nullable=false. It asserts decode/full, 2..5, ..5, 4.. and empty 2..2 exact results; 100..100 is only required to return some error. It does not check the error category/message, reversed ranges or a RangeFrom beyond length."
+        ],
+        [
+          565,
+          586,
+          "Basic take fixture decodes sorted unique indices [1,2,5] from a..g and requires [b,c,f]. No duplicate, null-index, unsorted or out-of-bounds behavior is tested."
+        ],
+        [
+          587,
+          615,
+          "Sparse fixture builds one million strings, checks that a plan for indices [1,999998] yields two relative singleton chunks [0] and [999997], then checks actual decoded values. The planner receives a positions excerpt beginning at1; decoder.take obtains its own endpoints. This is a large source fixture, not evidence of subsecond runtime or measured IO count."
+        ],
+        [
+          616,
+          656,
+          "Dense planner fixture uses one million strings and indices [2,3,4,1001,1001,1002,2001,2002,2004,3004,3005] with a 1024-byte threshold. It asserts four exact relative chunks and flags true,false,false,true, distinguishing repeats in the later chunk and gaps. The manually supplied positions begin at1 although the first requested index is2; this fixture's asserted grouping is not a general origin-validation test. Leading repeats such as [2,2] are absent."
+        ],
+        [
+          657,
+          663,
+          "The dense fixture separately calls decoder.take with its normal fixed 64KiB planner threshold and checks exact values including the repeated string-1001. That successful oracle does not establish that the preceding 1024-byte plan is used by take, nor cover the leading-repeat fast-path discrepancy."
+        ],
+        [
+          664,
+          676,
+          "Write-slice test emits ten slices of ten ten-byte strings and checks only returned positions: i*(8*11)+(i+1)*(10*10). This pins payload-first layout and N+1 Int64 table spacing across repeated calls. It does not read back, shut down explicitly or test nullable slices."
+        ],
+        [
+          677,
+          710,
+          "Binary-null take fixture constructs 60000 values, with every fourth null and all others eight bytes. After prefixed write/shutdown it takes [0,5,59996] and requires [None,abcdefgh,None]. A commented debugging fragment has no behavior. The file ends after eight active tests; malformed positions, leading duplicates, empty-vs-null, mixed-array types, partial writes and cancellation lack local tests."
+        ]
+      ]
+    },
+    {
+      "path": "rust/lance-file/src/versions/v1/encoding/dictionary.rs",
+      "module": "L1-modules/rust-lance-file-v1-codecs.md",
+      "role": "Public frozen V1 dictionary key encoder and decoder. Keys use the plain codec; dictionary values are supplied separately as an ArrayRef. Contains one active test dispatching eight key types and one generic decoder fixture helper.",
+      "reviewed": true,
+      "limits": "Every physical line was read during ANALYZE61, including disabled test bodies. Tests were inspected, not run. Source remains offline and read-only: no build, test, benchmark, generator or installation was executed. These frozen V1 codecs are historical compatibility surfaces, not extension points for new format capabilities. Full V1 reader is now analyzed; backend lifecycle remains pending; narrow helper/caller reads are separately recorded. Malformed-input consequences and the repeated-leading-index trace are source deductions, not executed reproductions. No local feature flag, environment variable, global mutable state, task spawning, shutdown or cancellation cleanup is introduced by these codec implementations.",
+      "ranges": [
+        [
+          1,
+          25,
+          "SPDX/module header and imports establish Arrow dictionary/primitive arrays, all eight integer key types, core errors, Reader/Writer/ReadBatchParams and PlainEncoder/PlainDecoder. No dictionary values are persisted by this module, and it does not select a file version."
+        ],
+        [
+          26,
+          36,
+          "DictionaryEncoder privately borrows a mutable Writer and key DataType. Public new stores both without checking dictionary array shape, supported key type or correspondence with future inputs."
+        ],
+        [
+          37,
+          58,
+          "write_typed_array asserts nonempty inputs, records writer position, then downcasts every input using the chosen key type and collects borrowed key arrays. It constructs PlainEncoder using the first original dictionary DataType, but PlainEncoder's non-FSL branch selects actual primitive key type from the arrays. It writes only raw key values and returns the initial position. No check compares dictionaries across batches, remaps keys, writes values or preserves key validity; downcast mismatches panic."
+        ],
+        [
+          59,
+          79,
+          "encode dispatches from the configured key_type over unsigned/signed 8/16/32/64; unsupported types return Schema with Debug type. Supported type plus empty input reaches the assertion, whereas unsupported type returns its error without examining the slice. No per-array schema preflight or rollback is added."
+        ],
+        [
+          80,
+          103,
+          "Public DictionaryDecoder privately stores Reader, key-page position, logical row count, borrowed dictionary DataType and owned shared value_arr. Its Debug output includes position, length, declared type and full value_arr debug representation, but omits Reader. This can be large; no redaction or abbreviated dictionary is implemented."
+        ],
+        [
+          104,
+          121,
+          "new asserts only that data_type is Dictionary, then stores supplied state. It does not check the declared value type against value_arr.data_type, key validity, dictionary cardinality or file bounds. A non-dictionary input panics despite later decode_impl containing an Arrow error branch for that shape."
+        ],
+        [
+          122,
+          150,
+          "decode_impl extracts and asserts a dictionary key type, creates PlainDecoder over the key page, and awaits the requested selection. It dispatches the decoded key array over the eight integer types to make_dict_array; unsupported match fallback is Arrow error. Range and take behavior, lost stored validity and read failures inherit PlainDecoder. The expected value type is ignored after extracting the key type."
+        ],
+        [
+          151,
+          162,
+          "make_dict_array downcasts/clones the primitive keys and calls fallible DictionaryArray::try_new with a clone of the stored values Arc. This delegates key/value construction validation and shares the existing dictionary values. No values IO or schema-value-type comparison occurs; the resulting dictionary's value type follows the supplied value array. The async helper has no await in its body."
+        ],
+        [
+          163,
+          176,
+          "Public decode requests full range, take clones the UInt32Array selector and forwards it, and get forwards arbitrary convertible ReadBatchParams. All converge on decode_impl without another validation layer. No cache, value dictionary merge or independently optimized take is introduced."
+        ],
+        [
+          177,
+          208,
+          "cfg(test) imports local-file helpers. Generic test_dict_decoder_for_type builds shared string values [a,b,c,d] and two dictionary arrays with keys [0,1] and [1,3]. It then extracts their keys into the input list. These inputs contain no null keys or null dictionary values."
+        ],
+        [
+          209,
+          240,
+          "The decoder fixture writes those extracted keys with PlainEncoder directly, shuts down, supplies the same values Arc to DictionaryDecoder and compares full decoded dictionary contents with [a,b,b,d]. It never instantiates DictionaryEncoder, and it does not assert raw key layout, dictionary Arc identity or error behavior."
+        ],
+        [
+          241,
+          253,
+          "The sole active test invokes the helper sequentially for Int8/16/32/64 and UInt8/16/32/64. It supplies eight full-decode oracles, not dictionary-encoder, take/range, null-key, mismatched-value-type, invalid-key or incompatible-dictionary coverage. File ends here without unsafe blocks."
+        ]
+      ]
+    },
+    {
+      "path": "rust/lance-file/src/versions/v1/encoding/plain.rs",
+      "module": "L1-modules/rust-lance-file-v1-codecs.md",
+      "role": "Public frozen V1 fixed-stride encoder/decoder and private byte conversion and take-chunk helpers. Writes raw primitive buffers, packs booleans across batches, recursively flattens fixed-size lists and reconstructs arrays without stored validity. Contains nine active tests, two helpers and three entirely commented-out historical tests.",
+      "reviewed": true,
+      "limits": "Every physical line was read during ANALYZE61, including disabled test bodies. Tests were inspected, not run. Source remains offline and read-only: no build, test, benchmark, generator or installation was executed. These frozen V1 codecs are historical compatibility surfaces, not extension points for new format capabilities. Full V1 reader is now analyzed; backend lifecycle remains pending; narrow helper/caller reads are separately recorded. Malformed-input consequences and the repeated-leading-index trace are source deductions, not executed reproductions. No local feature flag, environment variable, global mutable state, task spawning, shutdown or cancellation cleanup is introduced by these codec implementations.",
+      "ranges": [
+        [
+          1,
+          31,
+          "SPDX and module prose describe fixed-stride direct storage and O(1) access. That complexity describes computing a row byte position, not total IO, recursive reconstruction or take allocation. Imports provide raw slices, Arrow arithmetic/layout/buffers/selection, async recursion, ordered streams, local Arrow extensions and Reader/Writer."
+        ],
+        [
+          32,
+          59,
+          "PlainEncoder stores borrowed Writer and configured DataType; new performs no validation. Static write records tell, returns that position without encoding for an empty array slice, otherwise chooses the first array type and encodes. Instance encode delegates recursively even for an empty slice and can reach an assertion. Its comment calls the return a metadata offset, but primitive implementation returns the raw values start; no separate plain metadata is emitted."
+        ],
+        [
+          60,
+          72,
+          "encode_internal branches only on configured FixedSizeList, delegating its item Field; every other configured type goes to encode_primitive, which reads the actual first input type. async_recursion boxes recursive calls. This distinction explains why DictionaryEncoder can configure a dictionary type while passing primitive key arrays. No general configured-vs-actual type check exists."
+        ],
+        [
+          73,
+          89,
+          "encode_boolean reserves summed logical length, iterates every input value, replaces None with false and appends values to one BooleanBuilder. It writes only the finished values bitmap, eliminating byte-padding gaps between short arrays. No validity bitmap is written, so null booleans read as valid false. Allocation and iteration are proportional to total input rows."
+        ],
+        [
+          90,
+          117,
+          "encode_primitive asserts a nonempty slice and captures writer position. Boolean inputs are downcast and packed; other inputs use the first type's byte_width for every raw buffer slice, starting at each array offset and writing len*width bytes. No endian conversion, validity, per-array type/buffer-length check, alignment padding or rollback. Unsafe from_raw_parts requires each computed span to remain inside a valid allocation across await; mixed narrower arrays can violate that safety precondition. Existing Arrow validity alone does not establish homogeneous inputs."
+        ],
+        [
+          118,
+          154,
+          "encode_fixed_size_list downcasts each input or returns Schema with actual type, slices its child values from value_offset(0) for len*value_length, collects shared child arrays and recurses using configured items.data_type. Parent nulls are discarded, as are child validity buffers once primitive encoding occurs. Actual list sizes and configured item type are not compared here; casts/products and recursion depth are unchecked. A failure can follow already-written data in nested/earlier operations."
+        ],
+        [
+          155,
+          173,
+          "PlainDecoder privately borrows Reader and DataType and stores position/length. get_byte_range maps booleans to floor(start/8)..ceil(end/8), otherwise multiplies endpoints by byte_width. All byte-offset arithmetic is unchecked. The locally defined DataTypeExt::byte_width panics when width is unavailable; FixedSizeList<Boolean> has no scalar byte width for the take planner (rust/lance-arrow/src/lib.rs:144-182)."
+        ],
+        [
+          174,
+          201,
+          "bytes_to_array requires Arrow layout.buffers.len()==1 or returns Internal with type. FixedWidth computes (len+offset).saturating_mul(width); a short Bytes response is copied into that minimum size with zero fill, otherwise BufferExt may retain aligned Bytes or copy misaligned bytes. Non-FixedWidth layouts copy from the byte slice. The len+offset addition itself is unchecked; this helper does not reject truncation for fixed-width values. BufferExt behavior is established at rust/lance-arrow/src/lib.rs:1536-1600."
+        ],
+        [
+          202,
+          225,
+          "ArrayDataBuilder constructs the declared type with requested len/offset, null_count0 and one value buffer, then fallibly builds and make_array returns an ArrayRef. All restored rows are valid at this layer. Public PlainDecoder::new returns Result but unconditionally constructs Ok and does not enforce fixed stride, positive dimensions, file bounds or schema compatibility."
+        ],
+        [
+          226,
+          251,
+          "decode_primitive rejects only end>length, computes absolute file byte range, awaits Reader::get_range, and reconstructs with bit offset start%8 for booleans or0 otherwise. It relies on decode_range to remove empty/reversed ranges. Short fixed-width responses may be zero-padded by bytes_to_array; exact response length is not independently checked. Position additions, byte multiplication and end-start subtraction are unchecked."
+        ],
+        [
+          252,
+          281,
+          "Fixed-size-list decoding requires the item type satisfy local is_fixed_stride or returns Schema. It constructs a child decoder with length*list_size and requests scaled endpoints, then uses FixedSizeListArray::new with cloned item Field and parent validity None. Nested fixed lists are allowed by the predicate and recurse. Signed sizes are cast unchecked and products are unchecked; zero/negative dimensions and constructor panic behavior are not locally guarded."
+        ],
+        [
+          282,
+          305,
+          "Fixed-size-binary decoding treats values as UInt8 with length*stride, requests scaled endpoints, downcasts or returns Schema, then delegates to FixedSizeBinaryArrayExt::try_new_from_values. The helper sets len=values.len()/stride and builds from the value buffer without validity (rust/lance-arrow/src/lib.rs:455-463). Zero stride can reach division by zero; negative dimensions and overflow are not locally validated."
+        ],
+        [
+          306,
+          324,
+          "Boolean take casts reader.block_size to u32, multiplies by8 and partitions sorted selector ordinals when the next row enters a higher block than the chunk's first row. It assumes nonempty input, which public take guards. Zero/truncated block size can cause division by zero, and multiplication/ordinal casts are unchecked. Selector validity and sortedness are not examined."
+        ],
+        [
+          325,
+          345,
+          "For each boolean chunk, read its enclosing first..last+1 row range, subtract the first row from the UInt32 selector and invoke Arrow take. Poll ordered futures with reader.io_parallelism, collect every decoded chunk array, then concatenate. This allocates intermediate arrays plus final output, preserves chunk order and delegates nullable-index selection to Arrow after planning from raw values. No detached spawn or local cancellation guard is present."
+        ],
+        [
+          346,
+          373,
+          "make_chunked_requests returns ordinal ranges into a nonempty sorted index slice. Adjacent consecutive rows always stay together even if the run exceeds block_size; otherwise split only when next*width is strictly greater than first*width+block_size. The comment about limiting IO is therefore not a hard cap. It uses usize byte arithmetic but unchecked u32 previous+1 and unchecked products/sums; empty input underflows len-1."
+        ],
+        [
+          374,
+          392,
+          "decode delegates the full logical range. take returns an empty typed array before type checks/IO, routes Boolean specially, otherwise computes byte_width and chunks raw indices.values using reader.block_size. No sort, bound preflight, null rejection or normalization occurs. FixedSizeList<Boolean> can decode by range but its take path reaches the byte_width panic; the constructor does not prevent that combination."
+        ],
+        [
+          393,
+          409,
+          "For each ordinary take chunk, read enclosing first..last+1, shift its selector by the first row, run Arrow take, collect ordered buffered results and concat. Duplicates in valid sorted selectors are preserved by Arrow take; unsorted or nullable selector storage can affect the planned enclosing range before Arrow processes validity. Reads can cover intervening unselected rows and contiguous runs larger than block_size. All chunk arrays remain alive until final concatenation."
+        ],
+        [
+          410,
+          427,
+          "decode_range returns new_empty_array immediately for Range::is_empty, before any bounds/type validation. Thus even an empty range beyond length or a reversed range is accepted. Nonempty fixed lists/binary delegate recursive reconstruction; everything else goes to primitive. This differs from BinaryDecoder, which checks end before empty-range return."
+        ],
+        [
+          428,
+          441,
+          "get converts the parameter once; Range/full/to/from route to decode_range, Indices to take, and Ranges returns InvalidInput saying multiple ranges are unsupported. There is no per-selection extra type/bounds check. A RangeFrom start beyond length becomes reversed and returns empty."
+        ],
+        [
+          442,
+          477,
+          "cfg(test) imports assertions, random generation and local temp IO. Primitive test enumerates eight integer types, builds an i64 buffer from1..127, then makes ten arrays of each target type using the same raw bytes and fixed logical length126. Narrow integers reinterpret portions of the i64 buffer; this is not a cast preserving the mathematical sequence1..126. Every case uses the shared roundtrip oracle."
+        ],
+        [
+          478,
+          491,
+          "The same test generates126 random f64 values, reinterprets their bytes as Float16/32/64 arrays and runs ten-array roundtrips. It tests raw-buffer roundtrip, not equivalent numerical values across float widths, deterministic fixtures or all NaN/Infinity semantics. No runtime timing evidence was gathered."
+        ],
+        [
+          492,
+          522,
+          "test_round_trip writes arrays, requires returned offset0, flushes and drops writer, opens a reader, requires positive file size, decodes summed row count, compares with Arrow concat and asserts resulting length. It checks in-process local contents only, without pinned bytes, nonzero offsets, error injection or durable backend guarantees."
+        ],
+        [
+          523,
+          533,
+          "Boolean roundtrip uses ten length3 arrays of true values. It covers joining arrays whose lengths are not byte-aligned, but no false/null values, sliced bit offsets or boolean take."
+        ],
+        [
+          534,
+          561,
+          "Fixed-size-list test runs eight integer item types with list size3 and ten arrays per type, using the same reinterpreted i64 buffer and the local list constructor. Shared roundtrip checks equality and count. Parent/item nulls, sliced lists, invalid sizes and child types outside this matrix are absent."
+        ],
+        [
+          562,
+          574,
+          "FixedSizeBinary(3) roundtrip creates ten arrays over UInt8 values1..127 and checks them through the shared helper. It tests a positive divisible stride and no nulls, not malformed zero/negative strides or nondivisible input."
+        ],
+        [
+          575,
+          593,
+          "Padding fixture passes five bytes [1,0,2,0,3] to bytes_to_array(UInt16,len3,offset0), asserts values [1,2,3] and a Debug buffer substring [1,0,2,0,3,0]. This directly pins zero extension and the fixture's byte interpretation, not rejection of truncated input or portable endian conversion."
+        ],
+        [
+          594,
+          611,
+          "Nested fixture roundtrips ten arrays of FixedSizeList<FixedSizeList<Int64,2>,2> built from120 values. It exercises recursive encoder/decoder flattening but no nulls or slices."
+        ],
+        [
+          612,
+          628,
+          "The second nested fixture uses FixedSizeList<FixedSizeBinary(2),2> over120 UInt8 values with ten arrays. It confirms the fixed-binary child branch through the same full-read oracle, not boolean children or take."
+        ],
+        [
+          629,
+          638,
+          "Async make_array_ simply builds a len126 array of the requested type over a clone of a supplied raw buffer and unwraps; it has no await. That deliberate reinterpretation is why the primitive matrix is a buffer-roundtrip test rather than a numeric-conversion test."
+        ],
+        [
+          639,
+          684,
+          "Int32 range test writes [0,1,2,3,4,5], checks offset0 and positive file size, and asserts 2..4, ..4, 2.., empty2..2 and5..5 results. 3..1000 only needs some error. It does not cover empty out-of-bounds/reversed ranges, boolean offsets or error category/message."
+        ],
+        [
+          685,
+          716,
+          "Int32 take test writes0..100 with shutdown, then requests sorted unique [2,4,5,20,30,55,60] and asserts exact values. All are within a small file; this does not pin IO count, multi-block behavior, duplicates, null selectors or out-of-bounds errors."
+        ],
+        [
+          717,
+          747,
+          "Entirely commented-out boolean-slice test is historical text, not compiled/executed coverage. It describes ten12-row slices and whole-file readback after a FileReader/FileWriter migration. No tracking URL or active test attribute exists; the old API snippet is preserved only as evidence."
+        ],
+        [
+          748,
+          763,
+          "The disabled boolean test's second half expects [true,false,None] to read [true,false,false], matching current BooleanEncoder's null-to-false implementation. This comment is not a live regression assertion."
+        ],
+        [
+          764,
+          798,
+          "Entirely disabled fixed-list-slice test describes1600 Int32 values grouped by16, writing four-row slices and comparing full readback. It supplies no current executable coverage or proof that its old FileWriter signature remains valid."
+        ],
+        [
+          799,
+          832,
+          "Entirely disabled boolean-take test describes120 modulo5 values and selected indices [2,4,5,8,63,64,65], expecting [false,false,true,false,false,false,true]. It is a historical intended oracle only; this exact codec-local regression is inactive. A separate active reader test uses5000 Boolean values, block_size256 and indices[2,4,5,8,4555], asserting false,false,true,false,true across chunks (rust/lance-file/src/versions/v1/reader.rs:1459-1504)."
+        ],
+        [
+          833,
+          852,
+          "The ninth active test uses width4096 and block65536 with row indices producing byte offsets above u32::MAX, asserting six exact ordinal chunks [(0..2),(2..3),(3..4),(4..5),(5..6),(6..7)]. This protects usize byte arithmetic on a sufficiently wide host, not checked overflow or u32::MAX row indices. The file ends with no active null, boolean-take, malformed-size, mixed-type unsafe-span or failure/cancellation tests."
+        ]
+      ]
+    },
+    {
+      "path": "rust/lance-file/src/versions/v2_0/reader.rs",
+      "module": "L1-modules/rust-lance-file-readers.md",
+      "reviewed": true,
+      "role": "Exact V2_0 reader metadata/projection implementation inside a private reader child module. The parent publicly reexports three projection constructors and reexports metadata functions pub(crate); other pub declarations are implementation interfaces, not independently external API.",
+      "ranges": [
+        [
+          1,
+          29,
+          "SPDX/imports connect Arc/BTreeMap, async_trait, Bytes, core cache/errors/schema/fields, EncodingsIo and normalized metadata, pb Array/Column encodings, prost Name/Message, file protobuf/provider/read-projection types and exact version. Unlike newer readers this file owns syntax decoding and header-inclusive traversal."
+        ],
+        [
+          30,
+          56,
+          "Private generic fetch_encoding accepts only Direct location, clones encoding bytes into Bytes, decodes prost Any envelope then to_msg<M>, wrapping failures as InvalidInput with message type and error display. Indirect unsupported, explicit None description and absent location each return contextual InvalidInput. No recursive ArrayEncoding grammar validation, IO or deferred-buffer lookup here."
+        ],
+        [
+          57,
+          76,
+          "decode_column enumerates pages in input order. Each requires encoding (InvalidInput names column/page), then decodes pb::ArrayEncoding through Any before checking buffer counts. This reader uses legacy array grammar namespace, not pb21 structural PageLayout. A syntactically valid ArrayEncoding with absent or otherwise invalid nested variant is not inspected at this stage."
+        ],
+        [
+          77,
+          103,
+          "Unequal page buffer offset/size counts return InvalidInput with column/page/counts. Equal pairs are copied into Arc slice; no alignment, bounds, overlap, size or checked end-position validation. Construct PageInfo with PageEncoding::Legacy(array_encoding), length as num_rows and priority unchanged; fallible Vec collection aborts on first bad page. Empty pages accepted."
+        ],
+        [
+          104,
+          134,
+          "After all pages decode, reject unequal column buffer counts, copy pairs to Arc, require column encoding and decode its Any to ColumnEncoding inferred by the target field type. Return Arc<ColumnInfo> with supplied index, Arc pages, descriptors and encoding. No column index validation, ColumnEncoding arm traversal or consistency between declared rows/schema/pages is added. Allocation before a later failure is dropped."
+        ],
+        [
+          135,
+          149,
+          "decode_column_metadata enumerates columns, checked-converts each zero-based index to u32 then calls decode_column and fallibly collects Vec<Arc<ColumnInfo>> in order. Error text says more than u32::MAX columns, but the actual check is on index: index u32::MAX itself is accepted. Empty input yields empty Vec. No decoded-column concurrency."
+        ],
+        [
+          150,
+          176,
+          "Async prepare_projection ignores supplied IO/cache. Full provider runs FileReader::validate_projection, clones column infos and projection, then succeeds. Indexed provider first runs structural validity checks (so malformed input error precedes unsupported), then always returns indexed_projection_error. No await/IO within this body despite async signature; no metadata decode or row-length check until caller. Contextual validators reject empty schema/duplicate/out-of-bounds indices (rust/lance-file/src/reader.rs:1117-1144; rust/lance-file/src/reader.rs:1557-1595)."
+        ],
+        [
+          177,
+          201,
+          "field_column_shape always contributes one column; Blob/packed stop recursion, other fields recurse only when children exist. append_field_ids traverses parent before descendants, looks up field.id as u32, silently omits missing mappings and never prunes schema. Preserve source order, no dedup/sort/checked ID conversion; recursion has no local depth bound."
+        ],
+        [
+          202,
+          221,
+          "projection_from_field_ids is infallible, builds traversal indices then Arc-wraps a complete Schema clone. projection_from_whole_schema constructs parent module physical ID map and invokes it. Duplicate/negative IDs inherit map collapse/cast semantics; this layer adds no schema or index validation."
+        ],
+        [
+          222,
+          237,
+          "projection_from_column_names builds the mapping from the full original schema before schema.project(names)?, then maps projected fields through it. Thus selected physical indices retain original file numbering rather than renumbering from selected schema. Name projection errors propagate. children_share_parent_length recognizes only logical structs."
+        ],
+        [
+          238,
+          257,
+          "validate_field_length consumes one supplied index per contributing field, errors with field name if exhausted, advances cursor then calls fallible column_len. Unlike leaf layout, ordinary container field_rows is initialized from its own header column. Missing column infos later produce their own bounds error."
+        ],
+        [
+          258,
+          278,
+          "When recursing, comparable && logical struct controls equality and is passed to descendants. Each child must equal the parent header length when enabled; error wording says children differ but expected is already the parent column count. A nonstruct ancestor disables comparisons for all deeper descendants. Parent returns its own header count (not first child) regardless of child counts when disabled. maps-to-no-columns guard is defensive because this shape always contributes. No list-size/offset arithmetic or local recursion bound."
+        ],
+        [
+          279,
+          301,
+          "prepared_read_length indexes column_infos using decoder indices and errors with index/available count when absent. normalized_column_num_rows computes each length. Walk all top-level fields with comparable=true, reserve name/length pairs. For columns decoded by this file PageEncoding is Legacy so helper sums page.num_rows with checked u64 addition; manually supplied PreparedProjection may contain other encodings (rust/lance-file/src/reader.rs:539-561)."
+        ],
+        [
+          302,
+          318,
+          "Reject surplus supplied indices after full traversal, then verify_uniform_lengths returns common top-level length or contextual mismatch; empty schema+empty indices yields0 at this helper layer (caller full-projection validation rejects zero fields). Private Debug unit V20ReadProjection stores no state; parent-visible read_projection allocates it in Arc<dyn ReadProjection>."
+        ],
+        [
+          319,
+          336,
+          "async_trait ReadProjection implementation validate_indexed first performs provider structural validation then always returns provider NotSupported diagnostic. read_length forwards prepared_read_length. Matching V2_0 FileMetadataIndex does not imply indexed projection support."
+        ],
+        [
+          337,
+          349,
+          "Trait async prepare awaits prepare_projection, then checks read_length and returns (PreparedProjection,u64). The inner V2_0 preparation performs no IO and ignores IO/cache; errors short-circuit in validation then length order. No task spawn, cancellation guard or rollback."
+        ],
+        [
+          350,
+          361,
+          "finish_metadata accepts raw footer pair exactly(0,3) or(2,0). Every other pair returns VersionConflict with actual major/minor and V2_0 reader message before column decoding. Then decode all raw column metadata. It does not call validate_global_buffers here (that function is a no-op below)."
+        ],
+        [
+          362,
+          379,
+          "Build CachedFileMetadata by moving raw schema, original protobuf column metadata, decoded infos, declared num_rows, file buffers, data/column-metadata/global/footer byte counts, raw footer major/minor, file size and retained global buffers; set exact version V2_0. Literal accepted alias is preserved in major/minor while concrete identity canonicalizes. No row/count/size reconciliation or metadata IO in finalization. Both protobuf and normalized metadata remain owned in the cache object."
+        ],
+        [
+          380,
+          396,
+          "validate_global_buffers unconditionally Ok without examining descriptors. finish_metadata_index accepts only exact enum V2_0 and returns index unchanged; mismatch converts actual enum to standard footer numbers and returns VersionConflict. It does not decode columns or validate global alignment/projection eligibility."
+        ],
+        [
+          397,
+          415,
+          "cfg(test) test_projection_length creates synthetic indexed length closure, uses the same header-inclusive field walker and uniform top-level check, errors for missing synthetic length. Unlike production prepared_read_length it does not reject leftover column_indices after traversal. Thus synthetic helper success alone does not test surplus-index validation. No executing test functions or fixtures are defined in this file; no unsafe blocks."
+        ]
+      ],
+      "limits": "All physical lines read in ANALYZE54. No source builds/tests/benchmarks run. Local metadata grammar, dispatch and projection behavior are covered; shared reader IO/cache orchestration and exact current writer pipelines are analyzed; delegated encoding byte decompression and backend lifecycle remains pending. Exact declarations/source appendix preserve every signature. No source modification."
+    },
+    {
+      "path": "rust/lance-file/src/versions/v2_1/reader.rs",
+      "module": "L1-modules/rust-lance-file-readers.md",
+      "reviewed": true,
+      "role": "Exact V2_1 reader metadata/projection implementation inside a private reader child module. The parent publicly reexports three projection constructors and reexports metadata functions pub(crate); other pub declarations are implementation interfaces, not independently external API.",
+      "ranges": [
+        [
+          1,
+          17,
+          "SPDX/imports connect BTreeMap/Arc, core Schema/errors, ColumnInfo and pb21 grammar, file protobuf, shared structural normalization/projection, raw/cached/index metadata and ConcreteFileVersion. No IO scheduler, decompressor, plugin registry or environment input is used in this exact grammar validator."
+        ],
+        [
+          18,
+          25,
+          "Private required borrows Option<&T>, returns the same reference or InvalidInput source naming Lance v2.1, supplied label and missing nested encoding. It does not clone payloads or supply defaults."
+        ],
+        [
+          26,
+          45,
+          "Private validate_compressive_encoding requires compression oneof. Flat, InlineBitpacking and Constant immediately succeed without inspecting bit widths/data fields/literal size. Variable requires/revalidates offsets; OutOfLineBitpacking requires/revalidates values; Fsst likewise values. Local recursive validation has no explicit depth limit; external protobuf decode limits remain a separate concern."
+        ],
+        [
+          46,
+          55,
+          "Dictionary first requires and recursively validates indices, then items. Missing/invalid indices short-circuit before items. num_dictionary_items and index/value relationships are not checked. This is grammar validation, not decoding data bytes."
+        ],
+        [
+          56,
+          76,
+          "RLE requires values and run_lengths present before validating their shapes. Values must be direct Flat with bits_per_value 8/16/32/64 and data=None; lengths must be direct Flat8 with data=None. Flat.data is an optional BufferCompression descriptor, not the encoded bytes (protos/encodings_v2_1.proto:419-425). Wrappers, 128-bit values, any present buffer-compression descriptor (including a default descriptor), and any other shape fail InvalidInput requiring flat values and flat u8 run lengths. It does not inspect encoded runs or row totals."
+        ],
+        [
+          77,
+          101,
+          "ByteStreamSplit, General, FixedSizeList and PackedStruct each require and recursively validate their values child; scheme/level, dimensions, packed field widths and other properties are not inspected. VariablePackedStruct is rejected unconditionally as outside v2.1 grammar, even empty. Missing compression variant is InvalidInput."
+        ],
+        [
+          102,
+          127,
+          "validate_page_layout MiniBlock rejects has_large_chunk=true before nested checks. If false, validate optional rep then def, required value, optional dictionary, in order. Optional missing rep/def/dictionary are accepted. It does not inspect buffers, chunk counts, level widths or data values."
+        ],
+        [
+          128,
+          144,
+          "FullZip requires/revalidates value_compression only. Constant accepts only inline_value=None and both rep_compression/def_compression=None; any inline_value presence is first error (including empty), then compressed-level presence error, otherwise succeeds. Constant-layout acceptance includes all-null form even though writer policy list has no constant() mechanism. Other Constant fields are not inspected here."
+        ],
+        [
+          145,
+          160,
+          "Blob requires inner_layout with its own missing-inner InvalidInput, then recursively validates the same exact version. Nested Blob wrappers have no local recursion cap. Sparse is always InvalidInput outside v2.1 grammar; absent page layout has a distinct missing-layout error."
+        ],
+        [
+          161,
+          177,
+          "decode_column enumerates every page: shared syntax decode PageLayout, exact validate_page_layout, then shared build_page_info. First syntax/grammar failure precedes that page alignment checks. Fallibly collect pages then shared build_column_info decodes column encoding. No local ColumnEncoding variant validator, physical data read or schema comparison. Empty page list still requires a valid column-encoding envelope (rust/lance-file/src/reader/structural.rs:118-155)."
+        ],
+        [
+          178,
+          192,
+          "decode_column_metadata enumerates and checked-converts zero-based indices to u32, decodes in order and collects Result<Vec<Arc<ColumnInfo>>>. Message says more than u32::MAX columns; actual guard is per-index and permits index u32::MAX. No parallelism; first error drops constructed Vec."
+        ],
+        [
+          193,
+          214,
+          "projection_from_field_ids forwards shared leaf traversal. Whole-schema projection first creates parent module mapping from entire schema. Name projection passes original full schema and its mapping to shared schema.project wrapper, so indices preserve original file numbering. Unknown mapping entries remain silently omitted until downstream checks; these functions add no new validation."
+        ],
+        [
+          215,
+          224,
+          "finish_metadata requires literal footer pair(2,1) before any alignment or grammar work; wrong pair returns VersionConflict with actual raw footer numbers and exact version message. Then validate_global_buffers and decode all column metadata in that order."
+        ],
+        [
+          225,
+          242,
+          "On success construct CachedFileMetadata moving raw schema, original protobuf columns, decoded infos, declared row count, descriptors, all four byte-accounting fields, file size and retained global bytes. Preserve literal major/minor; set exact ConcreteFileVersion::V2_1. Full metadata and normalized descriptors both remain retained. This function does not reconcile schema, total rows, counts, file bounds or byte-accounting totals and performs no IO."
+        ],
+        [
+          243,
+          246,
+          "validate_global_buffers delegates shared64-byte position-alignment check; no size/file-bound check at this boundary."
+        ],
+        [
+          247,
+          259,
+          "finish_metadata_index requires enum V2_1; mismatch uses actual enum standard footer tuple for VersionConflict. Matching identity then checks global-buffer alignment and returns index unchanged. Does not load/decode individual columns or establish projection eligibility/length. Global alignment error follows version check."
+        ],
+        [
+          260,
+          268,
+          "cfg(test) test_projection_length delegates shared structural synthetic-length helper; unlike V2_0 helper it inherits surplus-index checking. It is a helper, not a test case."
+        ],
+        [
+          269,
+          290,
+          "Private cfg(test) grammar_tests imports pb21 types. rejects_nested_variable_packed_struct builds an empty VariablePackedStruct wrapped in General with compression=None and values=Some(Box(child)); it tests traversal through General, not codec scheme validity."
+        ],
+        [
+          291,
+          304,
+          "Wrap in FullZip with other fields Default; validate_page_layout must error and display contain Variable packed struct compression is not part. The test does not assert the error variant, use bytes/IO, or test a valid packed payload. No other local grammar fixtures; no unsafe or async functions."
+        ]
+      ],
+      "limits": "All physical lines read in ANALYZE54. No source builds/tests/benchmarks run. Local metadata grammar, dispatch and projection behavior are covered; shared reader IO/cache orchestration and exact current writer pipelines are analyzed; delegated encoding byte decompression and backend lifecycle remains pending. Exact declarations/source appendix preserve every signature. No source modification."
+    },
+    {
+      "path": "rust/lance-file/src/versions/v2_2/reader.rs",
+      "module": "L1-modules/rust-lance-file-readers.md",
+      "reviewed": true,
+      "role": "Exact V2_2 reader metadata/projection implementation inside a private reader child module. The parent publicly reexports three projection constructors and reexports metadata functions pub(crate); other pub declarations are implementation interfaces, not independently external API.",
+      "ranges": [
+        [
+          1,
+          17,
+          "SPDX/imports connect BTreeMap/Arc, core Schema/errors, ColumnInfo and pb21 grammar, file protobuf, shared structural normalization/projection, raw/cached/index metadata and ConcreteFileVersion. No IO scheduler, decompressor, plugin registry or environment input is used in this exact grammar validator."
+        ],
+        [
+          18,
+          25,
+          "Private required borrows Option<&T>, returns the same reference or InvalidInput source naming Lance v2.2, supplied label and missing nested encoding. It does not clone payloads or supply defaults."
+        ],
+        [
+          26,
+          45,
+          "Private validate_compressive_encoding requires compression oneof. Flat, InlineBitpacking and Constant immediately succeed without inspecting bit widths/data fields/literal size. Variable requires/revalidates offsets; OutOfLineBitpacking requires/revalidates values; Fsst likewise values. Local recursive validation has no explicit depth limit; external protobuf decode limits remain a separate concern."
+        ],
+        [
+          46,
+          55,
+          "Dictionary first requires and recursively validates indices, then items. Missing/invalid indices short-circuit before items. num_dictionary_items and index/value relationships are not checked. This is grammar validation, not decoding data bytes."
+        ],
+        [
+          56,
+          76,
+          "RLE requires both nested children, then demands direct Flat values at 8/16/32/64 bits with data=None and direct Flat8 run lengths with data=None. InvalidInput on any other shape; no recursive generic validation here because children must already be literal flat forms. Flat.data is an optional BufferCompression descriptor, not the encoded bytes; any present descriptor, including a default descriptor, is rejected (protos/encodings_v2_1.proto:419-425)."
+        ],
+        [
+          77,
+          107,
+          "ByteStreamSplit, General, FixedSizeList and PackedStruct require/revalidate values. VariablePackedStruct loops fields in order, requires each field.value and recursively validates; empty field list succeeds. Other packed field properties and width/schema correspondence are not checked. Missing compression variant errors; all other ancillary numeric/codec fields are unchecked locally."
+        ],
+        [
+          108,
+          133,
+          "MiniBlock requires has_large_chunk=true (u32 chunk grammar); false returns InvalidInput before rep/def/value/dictionary traversal. Validate optional rep then def, required value then optional dictionary. Absence of optional fields accepted; no buffer/chunk/row validation."
+        ],
+        [
+          134,
+          146,
+          "FullZip validates required value only. Constant validates optional rep then def encodings, otherwise succeeds; it does not reject or inspect inline_value presence/content. Thus both all-null and literal-bearing forms pass this local gate, subject to later decoding."
+        ],
+        [
+          147,
+          162,
+          "Blob requires inner_layout and recursively validates exact v2.2 grammar. Sparse always rejected, missing page-layout variant gets InvalidInput. No local depth limit; acceptance of syntax does not prove data payload validity."
+        ],
+        [
+          163,
+          179,
+          "decode_column enumerates every page: shared syntax decode PageLayout, exact validate_page_layout, then shared build_page_info. First syntax/grammar failure precedes that page alignment checks. Fallibly collect pages then shared build_column_info decodes column encoding. No local ColumnEncoding variant validator, physical data read or schema comparison. Empty page list still requires a valid column-encoding envelope (rust/lance-file/src/reader/structural.rs:118-155)."
+        ],
+        [
+          180,
+          194,
+          "decode_column_metadata enumerates and checked-converts zero-based indices to u32, decodes in order and collects Result<Vec<Arc<ColumnInfo>>>. Message says more than u32::MAX columns; actual guard is per-index and permits index u32::MAX. No parallelism; first error drops constructed Vec."
+        ],
+        [
+          195,
+          216,
+          "projection_from_field_ids forwards shared leaf traversal. Whole-schema projection first creates parent module mapping from entire schema. Name projection passes original full schema and its mapping to shared schema.project wrapper, so indices preserve original file numbering. Unknown mapping entries remain silently omitted until downstream checks; these functions add no new validation."
+        ],
+        [
+          217,
+          226,
+          "finish_metadata requires literal footer pair(2,2) before any alignment or grammar work; wrong pair returns VersionConflict with actual raw footer numbers and exact version message. Then validate_global_buffers and decode all column metadata in that order."
+        ],
+        [
+          227,
+          244,
+          "On success construct CachedFileMetadata moving raw schema, original protobuf columns, decoded infos, declared row count, descriptors, all four byte-accounting fields, file size and retained global bytes. Preserve literal major/minor; set exact ConcreteFileVersion::V2_2. Full metadata and normalized descriptors both remain retained. This function does not reconcile schema, total rows, counts, file bounds or byte-accounting totals and performs no IO."
+        ],
+        [
+          245,
+          248,
+          "validate_global_buffers delegates shared64-byte position-alignment check; no size/file-bound check at this boundary."
+        ],
+        [
+          249,
+          261,
+          "finish_metadata_index requires enum V2_2; mismatch uses actual enum standard footer tuple for VersionConflict. Matching identity then checks global-buffer alignment and returns index unchanged. Does not load/decode individual columns or establish projection eligibility/length. Global alignment error follows version check."
+        ],
+        [
+          262,
+          278,
+          "Private cfg(test) grammar_tests imports compression/layout types. flat(bits) constructs Flat with requested width and data=None without validation. No helper asserts the width itself."
+        ],
+        [
+          279,
+          300,
+          "rejects_nested_variable_width_rle builds RLE Flat32 values and Flat16 run lengths, nests as Dictionary indices with Flat32 items/count1, nests that in FullZip/default other fields. The disallowed shape here is sixteen-bit run lengths, not actual variable-width data payload."
+        ],
+        [
+          301,
+          308,
+          "Assert validate_page_layout errors and string contains flat values and flat u8 run lengths. No variant assertion, byte decode, file fixture or positive RLE matrix; nested wrapper traversal is what this test demonstrates. No unsafe/async functions in this file."
+        ]
+      ],
+      "limits": "All physical lines read in ANALYZE54. No source builds/tests/benchmarks run. Local metadata grammar, dispatch and projection behavior are covered; shared reader IO/cache orchestration and exact current writer pipelines are analyzed; delegated encoding byte decompression and backend lifecycle remains pending. Exact declarations/source appendix preserve every signature. No source modification."
+    },
+    {
+      "path": "rust/lance-file/src/versions/v2_3/reader.rs",
+      "module": "L1-modules/rust-lance-file-readers.md",
+      "reviewed": true,
+      "role": "Exact V2_3 reader metadata/projection implementation inside a private reader child module. The parent publicly reexports three projection constructors and reexports metadata functions pub(crate); other pub declarations are implementation interfaces, not independently external API.",
+      "ranges": [
+        [
+          1,
+          17,
+          "SPDX/imports connect BTreeMap/Arc, core Schema/errors, ColumnInfo and pb21 grammar, file protobuf, shared structural normalization/projection, raw/cached/index metadata and ConcreteFileVersion. No IO scheduler, decompressor, plugin registry or environment input is used in this exact grammar validator."
+        ],
+        [
+          18,
+          25,
+          "Private required borrows Option<&T>, returns the same reference or InvalidInput source naming Lance v2.3, supplied label and missing nested encoding. It does not clone payloads or supply defaults."
+        ],
+        [
+          26,
+          45,
+          "Private validate_compressive_encoding requires compression oneof. Flat, InlineBitpacking and Constant immediately succeed without inspecting bit widths/data fields/literal size. Variable requires/revalidates offsets; OutOfLineBitpacking requires/revalidates values; Fsst likewise values. Local recursive validation has no explicit depth limit; external protobuf decode limits remain a separate concern."
+        ],
+        [
+          46,
+          55,
+          "Dictionary first requires and recursively validates indices, then items. Missing/invalid indices short-circuit before items. num_dictionary_items and index/value relationships are not checked. This is grammar validation, not decoding data bytes."
+        ],
+        [
+          56,
+          76,
+          "RLE now recursively validates required values then required run lengths using full v2.3 grammar; direct Flat8 run lengths and fixed flat values are no longer mandatory here. ByteStreamSplit/General/FixedSizeList/PackedStruct likewise require/revalidate values only. No numeric width/domain/codec fields are checked on accepted leaf nodes."
+        ],
+        [
+          77,
+          90,
+          "VariablePackedStruct requires each field.value and recursively validates, first failure stops; empty fields accepted. Missing compression oneof returns v2.3 InvalidInput. Logical schema/child count and value decoding are outside this function."
+        ],
+        [
+          91,
+          108,
+          "validate_sparse_positions inspects only a present Positions::Explicit encoding and applies compressive validation; absent SparsePositionSet, absent positions oneof and nonexplicit variants all succeed. validate_sparse_validity does nothing for absent validity, otherwise delegates its optional positions. It does not require a complete set representation or check position ordering/count/range."
+        ],
+        [
+          109,
+          126,
+          "validate_sparse_layout first requires has_large_chunk=true, then required/validated value_compression. Iterate structural layers; Validity layer checks only optional validity set via helper. No check that layers is nonempty, num_slots agrees with row count or sparse data exists."
+        ],
+        [
+          127,
+          147,
+          "List layer validates optional non_empty_positions, only explicit counts encoding, then optional validity. Absent count set/oneof and nonexplicit counts pass. FixedSizeList checks only optional validity. Missing structural layer variant returns InvalidInput; all layers otherwise complete with Ok. Fixed-size dimension/counts/slot arithmetic are not checked here."
+        ],
+        [
+          148,
+          172,
+          "validate_page_layout MiniBlock requires has_large_chunk=true then traverses optional rep, optional def, required values and optional dictionary in order. Error precedence follows this order; this dense page branch is separate from sparse layout checks."
+        ],
+        [
+          173,
+          200,
+          "FullZip validates required value only. Constant validates optional rep/def and leaves inline_value unchecked. Sparse invokes validate_sparse_layout; Blob requires inner_layout then recursive exact validation. Missing layout errors. No local recursion limit, file-bound/data-byte/codec-level validation or fallback to earlier grammar."
+        ],
+        [
+          201,
+          217,
+          "decode_column enumerates every page: shared syntax decode PageLayout, exact validate_page_layout, then shared build_page_info. First syntax/grammar failure precedes that page alignment checks. Fallibly collect pages then shared build_column_info decodes column encoding. No local ColumnEncoding variant validator, physical data read or schema comparison. Empty page list still requires a valid column-encoding envelope (rust/lance-file/src/reader/structural.rs:118-155)."
+        ],
+        [
+          218,
+          232,
+          "decode_column_metadata enumerates and checked-converts zero-based indices to u32, decodes in order and collects Result<Vec<Arc<ColumnInfo>>>. Message says more than u32::MAX columns; actual guard is per-index and permits index u32::MAX. No parallelism; first error drops constructed Vec."
+        ],
+        [
+          233,
+          254,
+          "projection_from_field_ids forwards shared leaf traversal. Whole-schema projection first creates parent module mapping from entire schema. Name projection passes original full schema and its mapping to shared schema.project wrapper, so indices preserve original file numbering. Unknown mapping entries remain silently omitted until downstream checks; these functions add no new validation."
+        ],
+        [
+          255,
+          264,
+          "finish_metadata requires literal footer pair(2,3) before any alignment or grammar work; wrong pair returns VersionConflict with actual raw footer numbers and exact version message. Then validate_global_buffers and decode all column metadata in that order."
+        ],
+        [
+          265,
+          282,
+          "On success construct CachedFileMetadata moving raw schema, original protobuf columns, decoded infos, declared row count, descriptors, all four byte-accounting fields, file size and retained global bytes. Preserve literal major/minor; set exact ConcreteFileVersion::V2_3. Full metadata and normalized descriptors both remain retained. This function does not reconcile schema, total rows, counts, file bounds or byte-accounting totals and performs no IO."
+        ],
+        [
+          283,
+          286,
+          "validate_global_buffers delegates shared64-byte position-alignment check; no size/file-bound check at this boundary."
+        ],
+        [
+          287,
+          299,
+          "finish_metadata_index requires enum V2_3; mismatch uses actual enum standard footer tuple for VersionConflict. Matching identity then checks global-buffer alignment and returns index unchanged. Does not load/decode individual columns or establish projection eligibility/length. Global alignment error follows version check."
+        ],
+        [
+          300,
+          316,
+          "Private cfg(test) grammar_tests imports pb21 types and defines flat(bits) with data=None. No sparse fixture appears in this file despite v2.3 sparse validation code."
+        ],
+        [
+          317,
+          338,
+          "accepts_nested_variable_width_rle uses Flat32 RLE values with Flat16 run lengths, nested as Dictionary indices with Flat32 items/count1, then FullZip with defaults. It is structurally the v2.2 rejection fixture with opposite outcome; name variable_width describes broader grammar, not a constructed Variable encoding."
+        ],
+        [
+          339,
+          341,
+          "The sole test unwraps validate_page_layout success. It asserts local grammar acceptance only, not actual compression/decompression, offsets, data correctness or compatibility. No async/unsafe code and no source test execution."
+        ]
+      ],
+      "limits": "All physical lines read in ANALYZE54. No source builds/tests/benchmarks run. Local metadata grammar, dispatch and projection behavior are covered; shared reader IO/cache orchestration and exact current writer pipelines are analyzed; delegated encoding byte decompression and backend lifecycle remains pending. Exact declarations/source appendix preserve every signature. No source modification."
+    },
+    {
+      "path": "rust/lance-file/src/writer/field_types.rs",
+      "module": "L1-modules/rust-lance-file-runtime.md",
+      "reviewed": true,
+      "role": "Shared crate-internal writer type/extension checker, with publicly reexported FieldTypeMismatch diagnostic. Caller conversion and encoder nullability/missing-column checks stay separate.",
+      "ranges": [
+        [
+          1,
+          20,
+          "SPDX/module docs explain rejecting input Arrow type/extension drift before encoding because schema controls readers; callers must convert representations such as JSON text to JSONB. Imports formatting/Arc, Arrow arrays/schema and Blob-v2 extension name, core errors/schema. No conversion or page encoding occurs here."
+        ],
+        [
+          21,
+          36,
+          "Publicly reexported Debug/Clone/PartialEq/Eq FieldTypeMismatch owns dot-separated expected-field path and expected/actual FieldRef Arcs, both public. Bare columns have no top-level extension metadata. This diagnostic is stored as InvalidInput source, not a separate top-level core error variant."
+        ],
+        [
+          37,
+          50,
+          "Display writes field path plus formatted expected/actual types using FieldType helper. Standard Error is implemented with default source behavior; no nested cause here. Cloned diagnostics share FieldRef allocations."
+        ],
+        [
+          51,
+          66,
+          "Private FieldType displays Arrow datatype, then extension name and metadata when both present, just name if metadata absent, otherwise no extension. Metadata without a name is rendered as no extension even though the checker can compare that metadata option. Formatting errors propagate."
+        ],
+        [
+          67,
+          86,
+          "ExpectedTypes is public inside a private module and reexported only pub(crate). It owns expected Arrow fields converted once from core Schema and optional last accepted SchemaRef. new clones/converts each field, starts accepted=None. Core conversion may normalize/add extension metadata (rust/lance-core/src/datatypes/field.rs:1327-1347); this constructor has no Result."
+        ],
+        [
+          87,
+          114,
+          "check_batch compares accepted.as_ref()==Some(&batch.schema()), using Arc/Schema value equality rather than only pointer identity. Equal accepted schema returns immediately. Otherwise for every expected field prefer same-position actual with matching name, else search schema by name. If present recursively check type/extensions; missing fields are skipped for encoders, extra fields ignored. Only successful complete loop replaces accepted; failure leaves previous accepted schema. The method reads batch schema, not array values/nulls, relying on RecordBatch consistency. Reordered-name fallback can cost quadratic name searches on wide schemas."
+        ],
+        [
+          115,
+          130,
+          "check_column indexes expected fields directly (invalid index panics in this helper), creates nullable=true ArrowField with expected name and array datatype but no field metadata, then calls check_field(compare_extension=false). Top-level extension identity is intentionally not compared; nested children are compared recursively. No accepted-schema cache update. Contextual concrete writers validate column index before calling this helper."
+        ],
+        [
+          131,
+          146,
+          "into_error wraps mismatch in Box as core Error::invalid_input_source, preserving downcastable diagnostic. Recursive private check_field returns Result<(),FieldTypeMismatch>; mismatch closure captures expected name and clones expected/actual Arcs. Docs say nested names/nullability are not compared because encoders address by position and check null values separately."
+        ],
+        [
+          147,
+          161,
+          "When compare_extension=true, differing extension-name OR extension-metadata Option returns mismatch before datatype checks. For Struct/Struct with expected Blob-v2 extension, immediately succeed after that gate, ignoring child count/types/names. Docs delegate preprocessed descriptor validation to blob encoder. Bare-column mode skips the outer extension gate but still gets this Blob structural exception."
+        ],
+        [
+          162,
+          179,
+          "Equal-length Struct children pair by position; differing lengths fall through to equality/failure. Same-kind List/LargeList and Map pair the item child recursively; Map sorted flag is ignored in this arm. FixedSizeList pairs only when sizes equal. Nested field names, nullability and ordinary non-extension metadata do not participate in these recursive comparisons. No List-vs-LargeList coercion."
+        ],
+        [
+          180,
+          185,
+          "Directional representation exceptions accept expected Utf8 with actual Utf8View and expected Binary with actual BinaryView after extension gate. Reverse direction and LargeUtf8/LargeBinary view mismatches have no special acceptance. Otherwise exact DataType equality succeeds; mismatches return diagnostic. Types outside explicit recursive arms (such as Dictionary/Union) rely on whole DataType equality, whose embedded field details can therefore be stricter than the nested-name comment."
+        ],
+        [
+          186,
+          193,
+          "Walk paired children recursively with compare_extension=true; prefix the failing path with expected parent name and propagate first failure. Successful traversal returns Ok. Dot-separated paths are not escaped and can be ambiguous when field names contain dots. Temporary child-pair Vec allocation occurs per visited composite; recursion depth follows datatype nesting. No tests in this file."
+        ]
+      ],
+      "limits": "All193 lines read. Local checker semantics are complete, not full writer validation. Observed calls precede encoding in rust/lance-file/src/writer/structural.rs:610-630 and rust/lance-file/src/versions/v2_0/writer.rs:458-468; nullability/array preparation is separate. writer_tests.rs and all exact current writer callers are now analyzed; delegated encoders and backend lifecycle remains pending."
+    }
+  ],
+  "changes": [
+    {
+      "path": "rust/lance-file/src/lib.rs",
+      "kind": "status grammar",
+      "start": 1,
+      "end": 18,
+      "before": "SPDX; public concat,datatypes,format,reader,testing,version,versions,writer modules; io is pub(crate), compatibility_tests private cfg(test). Public LanceEncodingsIo reexport exposes selected IO type despite module visibility. Schema conversion, IO adapter, exact dispatch, writer facade and type checker are now covered; V2_1/V2_2/V2_3 concrete writers and shared structural pipeline are covered separately. The V2_0 writer, testing helpers, exact-version compatibility tests and fixture generator sources are also covered. writer_tests.rs is also fully analyzed. Shared reader metadata/index loading, local cache and read dispatch plus all its tests are now covered. Encoded-file concat compatibility, Blob part validation, page relocation and output lifecycle are now covered. Delegated IO/decoder scheduling, individual binary fixtures remain pending. Frozen V1 projection/mapping, dictionary dispatch, metadata conversion/batch grouping and dense page-table helpers are now covered; their concrete binary/plain/dictionary codecs are now covered; full V1 reader is now analyzed; backend lifecycle remain pending.",
+      "after": "SPDX; public concat,datatypes,format,reader,testing,version,versions,writer modules; io is pub(crate), compatibility_tests private cfg(test). Public LanceEncodingsIo reexport exposes selected IO type despite module visibility. Schema conversion, IO adapter, exact dispatch, writer facade and type checker are now covered; V2_1/V2_2/V2_3 concrete writers and shared structural pipeline are covered separately. The V2_0 writer, testing helpers, exact-version compatibility tests and fixture generator sources are also covered. writer_tests.rs is also fully analyzed. Shared reader metadata/index loading, local cache and read dispatch plus all its tests are now covered. Encoded-file concat compatibility, Blob part validation, page relocation and output lifecycle are now covered. Delegated IO/decoder scheduling, individual binary fixtures remain pending. Frozen V1 projection/mapping, dictionary dispatch, metadata conversion/batch grouping and dense page-table helpers are now covered; their concrete binary/plain/dictionary codecs are now covered; full V1 reader is now analyzed; backend lifecycle remains pending."
+    },
+    {
+      "path": "rust/lance-file/src/versions/v1/encoding/binary.rs",
+      "kind": "status grammar",
+      "before": "Every physical line was read during ANALYZE61, including disabled test bodies. Tests were inspected, not run. Source remains offline and read-only: no build, test, benchmark, generator or installation was executed. These frozen V1 codecs are historical compatibility surfaces, not extension points for new format capabilities. Full V1 reader is now analyzed; backend lifecycle remain pending; narrow helper/caller reads are separately recorded. Malformed-input consequences and the repeated-leading-index trace are source deductions, not executed reproductions. No local feature flag, environment variable, global mutable state, task spawning, shutdown or cancellation cleanup is introduced by these codec implementations.",
+      "after": "Every physical line was read during ANALYZE61, including disabled test bodies. Tests were inspected, not run. Source remains offline and read-only: no build, test, benchmark, generator or installation was executed. These frozen V1 codecs are historical compatibility surfaces, not extension points for new format capabilities. Full V1 reader is now analyzed; backend lifecycle remains pending; narrow helper/caller reads are separately recorded. Malformed-input consequences and the repeated-leading-index trace are source deductions, not executed reproductions. No local feature flag, environment variable, global mutable state, task spawning, shutdown or cancellation cleanup is introduced by these codec implementations."
+    },
+    {
+      "path": "rust/lance-file/src/versions/v1/encoding/dictionary.rs",
+      "kind": "status grammar",
+      "before": "Every physical line was read during ANALYZE61, including disabled test bodies. Tests were inspected, not run. Source remains offline and read-only: no build, test, benchmark, generator or installation was executed. These frozen V1 codecs are historical compatibility surfaces, not extension points for new format capabilities. Full V1 reader is now analyzed; backend lifecycle remain pending; narrow helper/caller reads are separately recorded. Malformed-input consequences and the repeated-leading-index trace are source deductions, not executed reproductions. No local feature flag, environment variable, global mutable state, task spawning, shutdown or cancellation cleanup is introduced by these codec implementations.",
+      "after": "Every physical line was read during ANALYZE61, including disabled test bodies. Tests were inspected, not run. Source remains offline and read-only: no build, test, benchmark, generator or installation was executed. These frozen V1 codecs are historical compatibility surfaces, not extension points for new format capabilities. Full V1 reader is now analyzed; backend lifecycle remains pending; narrow helper/caller reads are separately recorded. Malformed-input consequences and the repeated-leading-index trace are source deductions, not executed reproductions. No local feature flag, environment variable, global mutable state, task spawning, shutdown or cancellation cleanup is introduced by these codec implementations."
+    },
+    {
+      "path": "rust/lance-file/src/versions/v1/encoding/plain.rs",
+      "kind": "status grammar",
+      "before": "Every physical line was read during ANALYZE61, including disabled test bodies. Tests were inspected, not run. Source remains offline and read-only: no build, test, benchmark, generator or installation was executed. These frozen V1 codecs are historical compatibility surfaces, not extension points for new format capabilities. Full V1 reader is now analyzed; backend lifecycle remain pending; narrow helper/caller reads are separately recorded. Malformed-input consequences and the repeated-leading-index trace are source deductions, not executed reproductions. No local feature flag, environment variable, global mutable state, task spawning, shutdown or cancellation cleanup is introduced by these codec implementations.",
+      "after": "Every physical line was read during ANALYZE61, including disabled test bodies. Tests were inspected, not run. Source remains offline and read-only: no build, test, benchmark, generator or installation was executed. These frozen V1 codecs are historical compatibility surfaces, not extension points for new format capabilities. Full V1 reader is now analyzed; backend lifecycle remains pending; narrow helper/caller reads are separately recorded. Malformed-input consequences and the repeated-leading-index trace are source deductions, not executed reproductions. No local feature flag, environment variable, global mutable state, task spawning, shutdown or cancellation cleanup is introduced by these codec implementations."
+    },
+    {
+      "path": "rust/lance-file/src/versions/v2_0/reader.rs",
+      "kind": "status grammar",
+      "before": "All physical lines read in ANALYZE54. No source builds/tests/benchmarks run. Local metadata grammar, dispatch and projection behavior are covered; shared reader IO/cache orchestration and exact current writer pipelines are analyzed; delegated encoding byte decompression and backend lifecycle remain pending. Exact declarations/source appendix preserve every signature. No source modification.",
+      "after": "All physical lines read in ANALYZE54. No source builds/tests/benchmarks run. Local metadata grammar, dispatch and projection behavior are covered; shared reader IO/cache orchestration and exact current writer pipelines are analyzed; delegated encoding byte decompression and backend lifecycle remains pending. Exact declarations/source appendix preserve every signature. No source modification."
+    },
+    {
+      "path": "rust/lance-file/src/versions/v2_1/reader.rs",
+      "kind": "status grammar",
+      "before": "All physical lines read in ANALYZE54. No source builds/tests/benchmarks run. Local metadata grammar, dispatch and projection behavior are covered; shared reader IO/cache orchestration and exact current writer pipelines are analyzed; delegated encoding byte decompression and backend lifecycle remain pending. Exact declarations/source appendix preserve every signature. No source modification.",
+      "after": "All physical lines read in ANALYZE54. No source builds/tests/benchmarks run. Local metadata grammar, dispatch and projection behavior are covered; shared reader IO/cache orchestration and exact current writer pipelines are analyzed; delegated encoding byte decompression and backend lifecycle remains pending. Exact declarations/source appendix preserve every signature. No source modification."
+    },
+    {
+      "path": "rust/lance-file/src/versions/v2_2/reader.rs",
+      "kind": "status grammar",
+      "before": "All physical lines read in ANALYZE54. No source builds/tests/benchmarks run. Local metadata grammar, dispatch and projection behavior are covered; shared reader IO/cache orchestration and exact current writer pipelines are analyzed; delegated encoding byte decompression and backend lifecycle remain pending. Exact declarations/source appendix preserve every signature. No source modification.",
+      "after": "All physical lines read in ANALYZE54. No source builds/tests/benchmarks run. Local metadata grammar, dispatch and projection behavior are covered; shared reader IO/cache orchestration and exact current writer pipelines are analyzed; delegated encoding byte decompression and backend lifecycle remains pending. Exact declarations/source appendix preserve every signature. No source modification."
+    },
+    {
+      "path": "rust/lance-file/src/versions/v2_3/reader.rs",
+      "kind": "status grammar",
+      "before": "All physical lines read in ANALYZE54. No source builds/tests/benchmarks run. Local metadata grammar, dispatch and projection behavior are covered; shared reader IO/cache orchestration and exact current writer pipelines are analyzed; delegated encoding byte decompression and backend lifecycle remain pending. Exact declarations/source appendix preserve every signature. No source modification.",
+      "after": "All physical lines read in ANALYZE54. No source builds/tests/benchmarks run. Local metadata grammar, dispatch and projection behavior are covered; shared reader IO/cache orchestration and exact current writer pipelines are analyzed; delegated encoding byte decompression and backend lifecycle remains pending. Exact declarations/source appendix preserve every signature. No source modification."
+    },
+    {
+      "path": "rust/lance-file/src/writer/field_types.rs",
+      "kind": "status grammar",
+      "before": "All193 lines read. Local checker semantics are complete, not full writer validation. Observed calls precede encoding in rust/lance-file/src/writer/structural.rs:610-630 and rust/lance-file/src/versions/v2_0/writer.rs:458-468; nullability/array preparation is separate. writer_tests.rs and all exact current writer callers are now analyzed; delegated encoders and backend lifecycle remain pending.",
+      "after": "All193 lines read. Local checker semantics are complete, not full writer validation. Observed calls precede encoding in rust/lance-file/src/writer/structural.rs:610-630 and rust/lance-file/src/versions/v2_0/writer.rs:458-468; nullability/array preparation is separate. writer_tests.rs and all exact current writer callers are now analyzed; delegated encoders and backend lifecycle remains pending."
+    },
+    {
+      "document": "L1-modules/rust-lance-file-v1-codecs.md",
+      "kind": "status grammar",
+      "before": "# Frozen V1 concrete codecs\n\nComplete local scope: binary.rs, dictionary.rs and plain.rs, all 1,815 physical lines. The 18 active test functions and five helpers were read, not run; three commented-out tests provide historical context only. The [full V1 reader](rust-lance-file-v1-reader.md) is covered; backend lifecycle remain pending. Preserve these frozen compatibility surfaces rather than extending them for new format features. (AGENTS.md:13-18)\n\n[Crate](rust-lance-file.md) · [V1 foundations](rust-lance-file-v1-foundation.md) · [Orientation](../L0-orientation.md) · [Symbols](../L3-symbols/symbol-index.md) · [Contracts](../L3-symbols/behavior-contracts.md) · [Format](../L3-symbols/format-spec.md) · [Scenarios](../L4-crosscutting/scenarios.md)\n\n## Ownership and integration\n\nEach encoder exclusively borrows Writer; each decoder borrows Reader. Plain and dictionary codecs also borrow DataType, while BinaryDecoder selects the Arrow byte-array type through its generic parameter and stores nullable. DictionaryDecoder owns an ArrayRef for already loaded values. Constructors store state without general file-bound or schema validation; DictionaryDecoder::new asserts the outer dictionary shape, and PlainDecoder::new unconditionally returns Ok. (rust/lance-file/src/versions/v1/encoding/binary.rs:38-47; rust/lance-file/src/versions/v1/encoding/binary.rs:107-151; rust/lance-file/src/versions/v1/encoding/plain.rs:32-42; rust/lance-file/src/versions/v1/encoding/plain.rs:211-224; rust/lance-file/src/versions/v1/encoding/dictionary.rs:26-36; rust/lance-file/src/versions/v1/encoding/dictionary.rs:80-120)\n\n~~~text\nV1 writer page adapter\n|-- PlainEncoder: primitive bytes / joined Boolean bits / recursive FSL values\n|-- BinaryEncoder: payload bytes -> absolute Int64 position table\n`-- DictionaryEncoder: PlainEncoder for keys only\n\nV1 reader page adapter\n|-- PlainDecoder: range IO -> array reconstruction\n|-- BinaryDecoder: PlainDecoder positions -> payload range(s)\n`-- DictionaryDecoder: PlainDecoder keys + supplied dictionary values\n~~~\n\nThe page adapters store the encoder return as PageInfo.position and summed logical rows as length. Dictionary values travel separately through schema dictionary hydration; the reader adapter unwraps both dictionary metadata and loaded values before constructing its decoder. Complete local reader and writer lifecycles are now covered in their supplements; full Dataset/backend lifecycle remains pending. (rust/lance-file/src/versions/v1/writer/mod.rs:406-459; rust/lance-file/src/versions/v1/reader.rs:625-668; rust/lance-file/src/versions/v1/encoding.rs:92-192)\n\n## Binary layout and null semantics\n\nFor N rows, write the sliced payload spans in order, then N+1 absolute Int64 byte positions. Return the position-table start, not the first payload byte. The first position is Writer::tell before payloads; later array offsets are rebased to the current absolute end. The raw Int64 buffer is written without explicit endian conversion or framing. A nonempty list of empty arrays writes one endpoint; an empty input slice asserts. Exactly Utf8, Binary, LargeUtf8 and LargeBinary are supported; views return InvalidInput. (rust/lance-file/src/versions/v1/encoding/binary.rs:48-105)\n\nThe encoder ignores original validity. Decoder nullable=true marks equal adjacent positions null, so valid empty values become null and null slots retaining nonempty payload cannot be distinguished from valid values. nullable=false returns all values valid, including empty spans. This is a frozen representation rule, not a universal null-preserving binary codec. (rust/lance-file/src/versions/v1/encoding/binary.rs:61-86; rust/lance-file/src/versions/v1/encoding/binary.rs:165-232)\n\nRange reads first fetch N+1 Int64 positions through PlainDecoder, subtract the first absolute position and cast offsets to Int32 for small byte arrays. Payload IO is skipped when start>=end; otherwise request that absolute byte range. Array construction is fallible, but negative/nonmonotone offsets and exact response size have no dedicated local checks. The internal endpoint assertion is weaker than the subsequent endpoint access. (rust/lance-file/src/versions/v1/encoding/binary.rs:153-233; rust/lance-file/src/versions/v1/encoding/binary.rs:394-415)\n\n## Selection rules and IO cost\n\n| Behavior | BinaryDecoder | PlainDecoder and dictionary key reads |\n|---|---|---|\n| Empty range beyond logical length | Reject if end exceeds length before empty check | Return empty before bounds/type checks |\n| Reversed range with end in bounds | Return empty | Return empty |\n| RangeFrom starting beyond length | Return empty reversed range | Return empty reversed range |\n| Multiple Ranges | InvalidInput | InvalidInput |\n| Empty Indices | Typed empty, no IO | Typed empty, no IO |\n| Take planning | Full first-to-last position span; fixed 64KiB byte-distance threshold | Reader block size; Boolean-specific block arithmetic |\n| Ordering validation | Sorted-input assumption, no sorting; null index unwraps during sizing | Raw selector values drive planning without sorting or null preflight |\n\nSelection evidence: rust/lance-file/src/versions/v1/encoding/binary.rs:286-328; rust/lance-file/src/versions/v1/encoding/binary.rs:394-428; rust/lance-file/src/versions/v1/encoding/plain.rs:306-343; rust/lance-file/src/versions/v1/encoding/plain.rs:374-439; rust/lance-file/src/versions/v1/encoding/dictionary.rs:122-174.\n\nBinary takes precompute the sum of selected value lengths, allocate payload and N+1 offsets, read planned chunks with ordered buffered(reader.io_parallelism), then copy a contiguous chunk once or gather each requested value. The position span can be large for two far-apart rows; a contiguous value run can exceed the nominal 64KiB threshold. Output is materialized even when the range-reader payload can share Bytes storage. (rust/lance-file/src/versions/v1/encoding/binary.rs:246-390)\n\nPlain takes keep consecutive rows in the same chunk regardless of block_size, and otherwise split by distance from the chunk's first row. Boolean takes split on row/(block_size*8). Both read enclosing ranges, apply Arrow take and retain all decoded chunk arrays before concat. The IO threshold is not a maximum request size; zero/truncated Boolean block sizes and unchecked arithmetic remain assumptions. FixedSizeList<Boolean> range decoding can recurse, while take calls byte_width, which is unavailable for its Boolean child. (rust/lance-file/src/versions/v1/encoding/plain.rs:306-408; rust/lance-arrow/src/lib.rs:144-182)\n\n## Repeated-leading-index discrepancy\n\nThe binary planner's condition is current==start_idx OR current-last_idx==1, where current is a relative row index and start_idx is a selector ordinal. For a nonempty value of length L and sorted indices [k,k], subtraction gives [0,0]; both iterations satisfy current==start_idx, leaving is_contiguous=true. The chunk reads/copies one value span L, but the output offsets and capacity count two values, reaching the debug assertion L==2L. Release execution reaches fallible array building with inconsistent offsets. This is an explicit source trace, not an executed reproduction. (rust/lance-file/src/versions/v1/encoding/binary.rs:251-284; rust/lance-file/src/versions/v1/encoding/binary.rs:309-388)\n\nThe dense test includes a repeated later index and checks correct output; it does not include a repeated first index. Its standalone planner uses a 1024-byte threshold, whereas decoder.take uses 64KiB. Do not generalize that passing fixture into all-duplicate correctness or assume the tested standalone plan is the actual take plan. (rust/lance-file/src/versions/v1/encoding/binary.rs:616-662)\n\n## Plain bytes, recursive arrays and unsafe boundaries\n\nPlain primitives write values only. Boolean inputs are joined bit by bit and None becomes false; other types use first-array byte_width and each array's offset/length to form an unsafe raw buffer slice. The configured DataType only selects FixedSizeList recursion; the primitive branch otherwise uses the actual first array type. It never validates that every later array has that type or enough bytes for the resulting span. Homogeneous valid Arrow arrays are a safety precondition: mixed narrower arrays can make the computed raw slice exceed its allocation. (rust/lance-file/src/versions/v1/encoding/plain.rs:60-152)\n\nFixed lists recursively write sliced child values, discarding parent and eventual primitive validity. Read reconstructs them with parent validity None; fixed binary reads UInt8 values then builds a width-based array. Signed dimensions are cast and multiplied without local validation. Null primitive payloads are whatever the input values buffer contains, except Boolean's explicit false substitution; the compatibility fixture's zero/null-key expectations do not prove every possible null backing value is zero. (rust/lance-file/src/versions/v1/encoding/plain.rs:73-152; rust/lance-file/src/versions/v1/encoding/plain.rs:252-304; rust/lance-file/src/compatibility_tests.rs:100-135)\n\nbytes_to_array requires one value buffer. For FixedWidth, a short response is copied and zero-filled to (len+offset)*width; otherwise aligned Bytes can be retained and misaligned Bytes are copied. The resulting array has null_count0. This means truncated fixed-width input is not necessarily rejected: the active test supplies five bytes for three UInt16 values and expects the missing sixth byte to be zero. Bit-packed Boolean uses its separate buffer branch and starting bit offset. (rust/lance-file/src/versions/v1/encoding/plain.rs:174-249; rust/lance-file/src/versions/v1/encoding/plain.rs:575-592; rust/lance-arrow/src/lib.rs:1536-1600)\n\nThese codecs perform unchecked pointer/offset/capacity arithmetic and have assertions/downcasts in public-call paths. No local transaction, rollback, flush/shutdown, abort guard or cancellation cleanup appears. Buffered futures preserve order and limit polling concurrency but do not prove backend cancellation; complete IO ownership remains pending. (rust/lance-file/src/versions/v1/encoding/binary.rs:48-105; rust/lance-file/src/versions/v1/encoding/binary.rs:309-390; rust/lance-file/src/versions/v1/encoding/plain.rs:90-152; rust/lance-file/src/versions/v1/encoding/plain.rs:325-408; rust/lance-file/src/versions/v1/encoding/dictionary.rs:37-77)\n\n## Dictionary keys and values\n\nDictionaryEncoder supports all eight signed/unsigned integer key widths. It extracts each array's keys and writes them with PlainEncoder; no value comparison, dictionary merge/remap, value persistence or key-validity bitmap occurs. Supplying different dictionaries with the same key width therefore requires the caller to have already established compatible key meaning. The constructor's configured key type controls downcasts; unsupported types return Schema and supported types with an empty slice assert. (rust/lance-file/src/versions/v1/encoding/dictionary.rs:26-77)\n\nDictionaryDecoder reads keys using PlainDecoder, clones the shared values Arc and calls DictionaryArray::try_new. Its declared dictionary value type is never compared with the supplied array; result value type follows that array. Keys lose stored validity through plain reconstruction, but dictionary values can independently be null. The one local test writes keys directly using PlainEncoder and never invokes DictionaryEncoder. (rust/lance-file/src/versions/v1/encoding/dictionary.rs:104-174; rust/lance-file/src/versions/v1/encoding/dictionary.rs:187-252)\n\nThe foundation's binary-like predicate includes views, but both concrete binary encode and facade decode reject them. PlainEncoder can write fixed-width numeric buffers beyond integer widths, whereas schema dictionary hydration explicitly accepts only eight integer value types or the four binary families. These are different boundaries; do not infer symmetric hydration from write dispatch. (rust/lance-file/src/versions/v1/encoding/binary.rs:91-105; rust/lance-file/src/versions/v1/encoding/plain.rs:90-115; rust/lance-arrow/src/lib.rs:144-182; rust/lance-file/src/versions/v1/encoding.rs:116-175)\n\n## Test map and dependencies\n\nEight binary tests cover Utf8/LargeUtf8 multi-array/null roundtrips, one sliced offset, range variants, a simple take, million-row sparse/dense takes, repeated-write table positions and Binary null takes. Nine plain tests cover primitive raw-buffer roundtrips, Boolean joining, FSL/FSB and nested shapes, zero-padding, Int32 ranges/takes and usize chunk arithmetic. One dictionary test invokes eight key widths with supplied string values. Three disabled plain tests describe Boolean slices/nulls, FSL slices and Boolean takes; they are not executable coverage. (rust/lance-file/src/versions/v1/encoding/binary.rs:431-710; rust/lance-file/src/versions/v1/encoding/plain.rs:442-852; rust/lance-file/src/versions/v1/encoding/dictionary.rs:177-253)\n\nUntested local cases include leading duplicate binary indices, empty-vs-null binary values, mixed-array unsafe spans, null dictionary keys, inconsistent dictionaries/value types, invalid dimensions, all selector variants and error timing, and partial-write/cancellation behavior. Primitive test inputs reinterpret raw i64/f64 buffers for narrower types rather than numerically casting values; random float inputs are not pinned portable fixtures. (rust/lance-file/src/versions/v1/encoding/binary.rs:485-710; rust/lance-file/src/versions/v1/encoding/plain.rs:456-490; rust/lance-file/src/versions/v1/encoding/plain.rs:717-851; rust/lance-file/src/versions/v1/encoding/dictionary.rs:187-252)\n\nDependencies are Arrow arrays/layout/casts/arithmetic/take/concat, Bytes and local BufferExt for ownership/alignment, Reader/Writer for IO policy, Tokio write extensions, ordered futures streams and async-recursion. Generic ByteArrayType and ArrowDictionaryKeyType select existing Arrow representations, not runtime codec registries. No local Cargo feature, environment variable or codec plugin hook is declared. Full Arrow and IO implementations remain outside this completed slice. (rust/lance-file/src/versions/v1/encoding/binary.rs:7-36; rust/lance-file/src/versions/v1/encoding/plain.rs:9-29; rust/lance-file/src/versions/v1/encoding/dictionary.rs:7-24)\n\n## Exact production declarations\n\nAll 70 non-test declarations are retained below, including the function-local MIN_IO_SIZE constant. Full bodies, disabled test text and contiguous annotations are in the linked L2 documents.\n\n| Qualified suffix within lance_file::versions::v1::encoding | Visibility / kind | Exact declaration | Evidence |\n|---|---|---|---|\n| `binary::BinaryEncoder` | pub / struct | `pub struct BinaryEncoder<'a> {` | [rust/lance-file/src/versions/v1/encoding/binary.rs:39-39](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::BinaryEncoder::writer` | private / field | `writer: &'a mut dyn Writer,` | [rust/lance-file/src/versions/v1/encoding/binary.rs:40-40](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::BinaryEncoder::new` | pub / function | `pub fn new(writer: &'a mut dyn Writer) -> Self {` | [rust/lance-file/src/versions/v1/encoding/binary.rs:44-44](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::BinaryEncoder::encode_typed_arr` | private / async function | `async fn encode_typed_arr<T: ByteArrayType>(&mut self, arrs: &[&dyn Array]) -> Result<usize> {` | [rust/lance-file/src/versions/v1/encoding/binary.rs:48-48](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::BinaryEncoder::encode` | pub / async function | `pub async fn encode(&mut self, arrs: &[&dyn Array]) -> Result<usize> {` | [rust/lance-file/src/versions/v1/encoding/binary.rs:92-92](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::BinaryDecoder` | pub / struct | `pub struct BinaryDecoder<'a, T: ByteArrayType> {` | [rust/lance-file/src/versions/v1/encoding/binary.rs:109-109](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::BinaryDecoder::reader` | private / field | `reader: &'a dyn Reader,` | [rust/lance-file/src/versions/v1/encoding/binary.rs:110-110](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::BinaryDecoder::position` | private / field | `position: usize,` | [rust/lance-file/src/versions/v1/encoding/binary.rs:112-112](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::BinaryDecoder::length` | private / field | `length: usize,` | [rust/lance-file/src/versions/v1/encoding/binary.rs:114-114](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::BinaryDecoder::nullable` | private / field | `nullable: bool,` | [rust/lance-file/src/versions/v1/encoding/binary.rs:116-116](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::BinaryDecoder::phantom` | private / field | `phantom: PhantomData<T>,` | [rust/lance-file/src/versions/v1/encoding/binary.rs:118-118](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::BinaryDecoder::new` | pub / function | `pub fn new(reader: &'a dyn Reader, position: usize, length: usize, nullable: bool) -> Self {` | [rust/lance-file/src/versions/v1/encoding/binary.rs:143-143](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::BinaryDecoder::get_positions` | private / async function | `async fn get_positions(&self, index: Range<usize>) -> Result<Arc<Int64Array>> {` | [rust/lance-file/src/versions/v1/encoding/binary.rs:154-154](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::BinaryDecoder::count_nulls` | private / function | `fn count_nulls<O: OffsetSizeTrait>(offsets: &ScalarBuffer<O>) -> (usize, Option<Buffer>) {` | [rust/lance-file/src/versions/v1/encoding/binary.rs:165-165](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::BinaryDecoder::get_range` | private / async function | `async fn get_range(&self, positions: &Int64Array, range: Range<usize>) -> Result<ArrayRef> {` | [rust/lance-file/src/versions/v1/encoding/binary.rs:190-190](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::TakeChunksPlan` | private / struct | `struct TakeChunksPlan {` | [rust/lance-file/src/versions/v1/encoding/binary.rs:237-237](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::TakeChunksPlan::indices` | private / field | `indices: UInt32Array,` | [rust/lance-file/src/versions/v1/encoding/binary.rs:238-238](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::TakeChunksPlan::is_contiguous` | private / field | `is_contiguous: bool,` | [rust/lance-file/src/versions/v1/encoding/binary.rs:239-239](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::plan_take_chunks` | private / function | `fn plan_take_chunks(     positions: &Int64Array,     indices: &UInt32Array,     min_io_size: i64, ) -> Result<Vec<TakeChunksPlan>> {` | [rust/lance-file/src/versions/v1/encoding/binary.rs:246-250](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::BinaryDecoder::decode` | pub / async function | `pub async fn decode(&self) -> Result<ArrayRef> {` | [rust/lance-file/src/versions/v1/encoding/binary.rs:288-288](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::BinaryDecoder::take` | pub / async function | `pub async fn take(&self, indices: &UInt32Array) -> Result<ArrayRef> {` | [rust/lance-file/src/versions/v1/encoding/binary.rs:295-295](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::BinaryDecoder::take::MIN_IO_SIZE` | private function-local / constant | `const MIN_IO_SIZE: i64 = 64 * 1024; // 64KB` | [rust/lance-file/src/versions/v1/encoding/binary.rs:305-305](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::BinaryDecoder::decode_range` | private / async function | `async fn decode_range(&self, index: Range<usize>) -> Result<ArrayRef> {` | [rust/lance-file/src/versions/v1/encoding/binary.rs:395-395](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::BinaryDecoder::get` | pub / async function | `pub async fn get(&self, params: impl Into<ReadBatchParams>) -> Result<ArrayRef> {` | [rust/lance-file/src/versions/v1/encoding/binary.rs:417-417](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `dictionary::DictionaryEncoder` | pub / struct | `pub struct DictionaryEncoder<'a> {` | [rust/lance-file/src/versions/v1/encoding/dictionary.rs:27-27](../L2-files/rust/lance-file/src/versions/v1/encoding/dictionary.rs.md) |\n| `dictionary::DictionaryEncoder::writer` | private / field | `writer: &'a mut dyn Writer,` | [rust/lance-file/src/versions/v1/encoding/dictionary.rs:28-28](../L2-files/rust/lance-file/src/versions/v1/encoding/dictionary.rs.md) |\n| `dictionary::DictionaryEncoder::key_type` | private / field | `key_type: &'a DataType,` | [rust/lance-file/src/versions/v1/encoding/dictionary.rs:29-29](../L2-files/rust/lance-file/src/versions/v1/encoding/dictionary.rs.md) |\n| `dictionary::DictionaryEncoder::new` | pub / function | `pub fn new(writer: &'a mut dyn Writer, key_type: &'a DataType) -> Self {` | [rust/lance-file/src/versions/v1/encoding/dictionary.rs:33-33](../L2-files/rust/lance-file/src/versions/v1/encoding/dictionary.rs.md) |\n| `dictionary::DictionaryEncoder::write_typed_array` | private / async function | `async fn write_typed_array<T: ArrowDictionaryKeyType>(         &mut self,         arrs: &[&dyn Array],     ) -> Result<usize> {` | [rust/lance-file/src/versions/v1/encoding/dictionary.rs:37-40](../L2-files/rust/lance-file/src/versions/v1/encoding/dictionary.rs.md) |\n| `dictionary::DictionaryEncoder::encode` | pub / async function | `pub async fn encode(&mut self, array: &[&dyn Array]) -> Result<usize> {` | [rust/lance-file/src/versions/v1/encoding/dictionary.rs:60-60](../L2-files/rust/lance-file/src/versions/v1/encoding/dictionary.rs.md) |\n| `dictionary::DictionaryDecoder` | pub / struct | `pub struct DictionaryDecoder<'a> {` | [rust/lance-file/src/versions/v1/encoding/dictionary.rs:81-81](../L2-files/rust/lance-file/src/versions/v1/encoding/dictionary.rs.md) |\n| `dictionary::DictionaryDecoder::reader` | private / field | `reader: &'a dyn Reader,` | [rust/lance-file/src/versions/v1/encoding/dictionary.rs:82-82](../L2-files/rust/lance-file/src/versions/v1/encoding/dictionary.rs.md) |\n| `dictionary::DictionaryDecoder::position` | private / field | `position: usize,` | [rust/lance-file/src/versions/v1/encoding/dictionary.rs:84-84](../L2-files/rust/lance-file/src/versions/v1/encoding/dictionary.rs.md) |\n| `dictionary::DictionaryDecoder::length` | private / field | `length: usize,` | [rust/lance-file/src/versions/v1/encoding/dictionary.rs:86-86](../L2-files/rust/lance-file/src/versions/v1/encoding/dictionary.rs.md) |\n| `dictionary::DictionaryDecoder::data_type` | private / field | `data_type: &'a DataType,` | [rust/lance-file/src/versions/v1/encoding/dictionary.rs:88-88](../L2-files/rust/lance-file/src/versions/v1/encoding/dictionary.rs.md) |\n| `dictionary::DictionaryDecoder::value_arr` | private / field | `value_arr: ArrayRef,` | [rust/lance-file/src/versions/v1/encoding/dictionary.rs:90-90](../L2-files/rust/lance-file/src/versions/v1/encoding/dictionary.rs.md) |\n| `dictionary::<DictionaryDecoder as fmt::Debug>::fmt` | trait implementation / function | `fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {` | [rust/lance-file/src/versions/v1/encoding/dictionary.rs:94-94](../L2-files/rust/lance-file/src/versions/v1/encoding/dictionary.rs.md) |\n| `dictionary::DictionaryDecoder::new` | pub / function | `pub fn new(         reader: &'a dyn Reader,         position: usize,         length: usize,         data_type: &'a DataType,         value_arr: ArrayRef,     ) -> Self {` | [rust/lance-file/src/versions/v1/encoding/dictionary.rs:105-111](../L2-files/rust/lance-file/src/versions/v1/encoding/dictionary.rs.md) |\n| `dictionary::DictionaryDecoder::decode_impl` | private / async function | `async fn decode_impl(&self, params: impl Into<ReadBatchParams>) -> Result<ArrayRef> {` | [rust/lance-file/src/versions/v1/encoding/dictionary.rs:122-122](../L2-files/rust/lance-file/src/versions/v1/encoding/dictionary.rs.md) |\n| `dictionary::DictionaryDecoder::make_dict_array` | private / async function | `async fn make_dict_array<T: ArrowDictionaryKeyType + Sync + Send>(         &self,         index_array: ArrayRef,     ) -> Result<ArrayRef> {` | [rust/lance-file/src/versions/v1/encoding/dictionary.rs:151-154](../L2-files/rust/lance-file/src/versions/v1/encoding/dictionary.rs.md) |\n| `dictionary::DictionaryDecoder::decode` | pub / async function | `pub async fn decode(&self) -> Result<ArrayRef> {` | [rust/lance-file/src/versions/v1/encoding/dictionary.rs:164-164](../L2-files/rust/lance-file/src/versions/v1/encoding/dictionary.rs.md) |\n| `dictionary::DictionaryDecoder::take` | pub / async function | `pub async fn take(&self, indices: &UInt32Array) -> Result<ArrayRef> {` | [rust/lance-file/src/versions/v1/encoding/dictionary.rs:168-168](../L2-files/rust/lance-file/src/versions/v1/encoding/dictionary.rs.md) |\n| `dictionary::DictionaryDecoder::get` | pub / async function | `pub async fn get(&self, params: impl Into<ReadBatchParams>) -> Result<ArrayRef> {` | [rust/lance-file/src/versions/v1/encoding/dictionary.rs:172-172](../L2-files/rust/lance-file/src/versions/v1/encoding/dictionary.rs.md) |\n| `plain::PlainEncoder` | pub / struct | `pub struct PlainEncoder<'a> {` | [rust/lance-file/src/versions/v1/encoding/plain.rs:34-34](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainEncoder::writer` | private / field | `writer: &'a mut dyn Writer,` | [rust/lance-file/src/versions/v1/encoding/plain.rs:35-35](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainEncoder::data_type` | private / field | `data_type: &'a DataType,` | [rust/lance-file/src/versions/v1/encoding/plain.rs:36-36](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainEncoder::new` | pub / function | `pub fn new(writer: &'a mut dyn Writer, data_type: &'a DataType) -> Self {` | [rust/lance-file/src/versions/v1/encoding/plain.rs:40-40](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainEncoder::write` | pub / async function | `pub async fn write(writer: &'a mut dyn Writer, arrays: &[&'a dyn Array]) -> Result<usize> {` | [rust/lance-file/src/versions/v1/encoding/plain.rs:45-45](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainEncoder::encode` | pub / async function | `pub async fn encode(&mut self, arrays: &[&dyn Array]) -> Result<usize> {` | [rust/lance-file/src/versions/v1/encoding/plain.rs:56-56](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainEncoder::encode_internal` | private / async function | `async fn encode_internal(         &mut self,         array: &[&dyn Array],         data_type: &DataType,     ) -> Result<usize> {` | [rust/lance-file/src/versions/v1/encoding/plain.rs:61-65](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainEncoder::encode_boolean` | private / async function | `async fn encode_boolean(&mut self, arrays: &[&BooleanArray]) -> Result<()> {` | [rust/lance-file/src/versions/v1/encoding/plain.rs:73-73](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainEncoder::encode_primitive` | private / async function | `async fn encode_primitive(&mut self, arrays: &[&dyn Array]) -> Result<usize> {` | [rust/lance-file/src/versions/v1/encoding/plain.rs:91-91](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainEncoder::encode_fixed_size_list` | private / async function | `async fn encode_fixed_size_list(         &mut self,         arrays: &[&dyn Array],         items: &Field,     ) -> Result<usize> {` | [rust/lance-file/src/versions/v1/encoding/plain.rs:119-123](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainDecoder` | pub / struct | `pub struct PlainDecoder<'a> {` | [rust/lance-file/src/versions/v1/encoding/plain.rs:156-156](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainDecoder::reader` | private / field | `reader: &'a dyn Reader,` | [rust/lance-file/src/versions/v1/encoding/plain.rs:157-157](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainDecoder::data_type` | private / field | `data_type: &'a DataType,` | [rust/lance-file/src/versions/v1/encoding/plain.rs:158-158](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainDecoder::position` | private / field | `position: usize,` | [rust/lance-file/src/versions/v1/encoding/plain.rs:160-160](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainDecoder::length` | private / field | `length: usize,` | [rust/lance-file/src/versions/v1/encoding/plain.rs:162-162](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::get_byte_range` | private / function | `fn get_byte_range(data_type: &DataType, row_range: Range<usize>) -> Range<usize> {` | [rust/lance-file/src/versions/v1/encoding/plain.rs:167-167](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::bytes_to_array` | private / function | `fn bytes_to_array(     data_type: &DataType,     bytes: bytes::Bytes,     len: usize,     offset: usize, ) -> Result<ArrayRef> {` | [rust/lance-file/src/versions/v1/encoding/plain.rs:174-179](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainDecoder::new` | pub / function | `pub fn new(         reader: &'a dyn Reader,         data_type: &'a DataType,         position: usize,         length: usize,     ) -> Result<Self> {` | [rust/lance-file/src/versions/v1/encoding/plain.rs:212-217](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainDecoder::decode_primitive` | private / async function | `async fn decode_primitive(&self, start: usize, end: usize) -> Result<ArrayRef> {` | [rust/lance-file/src/versions/v1/encoding/plain.rs:228-228](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainDecoder::decode_fixed_size_list` | private / async function | `async fn decode_fixed_size_list(         &self,         items: &Field,         list_size: i32,         start: usize,         end: usize,     ) -> Result<ArrayRef> {` | [rust/lance-file/src/versions/v1/encoding/plain.rs:252-258](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainDecoder::decode_fixed_size_binary` | private / async function | `async fn decode_fixed_size_binary(         &self,         stride: i32,         start: usize,         end: usize,     ) -> Result<ArrayRef> {` | [rust/lance-file/src/versions/v1/encoding/plain.rs:282-287](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainDecoder::take_boolean` | private / async function | `async fn take_boolean(&self, indices: &UInt32Array) -> Result<ArrayRef> {` | [rust/lance-file/src/versions/v1/encoding/plain.rs:306-306](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::make_chunked_requests` | private / function | `fn make_chunked_requests(     indices: &[u32],     byte_width: usize,     block_size: usize, ) -> Vec<Range<usize>> {` | [rust/lance-file/src/versions/v1/encoding/plain.rs:346-350](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainDecoder::decode` | pub / async function | `pub async fn decode(&self) -> Result<ArrayRef> {` | [rust/lance-file/src/versions/v1/encoding/plain.rs:375-375](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainDecoder::take` | pub / async function | `pub async fn take(&self, indices: &UInt32Array) -> Result<ArrayRef> {` | [rust/lance-file/src/versions/v1/encoding/plain.rs:379-379](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainDecoder::decode_range` | private / async function | `async fn decode_range(&self, index: Range<usize>) -> Result<ArrayRef> {` | [rust/lance-file/src/versions/v1/encoding/plain.rs:411-411](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainDecoder::get` | pub / async function | `pub async fn get(&self, params: impl Into<ReadBatchParams>) -> Result<ArrayRef> {` | [rust/lance-file/src/versions/v1/encoding/plain.rs:428-428](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n",
+      "after": "# Frozen V1 concrete codecs\n\nComplete local scope: binary.rs, dictionary.rs and plain.rs, all 1,815 physical lines. The 18 active test functions and five helpers were read, not run; three commented-out tests provide historical context only. The [full V1 reader](rust-lance-file-v1-reader.md) is covered; backend lifecycle remains pending. Preserve these frozen compatibility surfaces rather than extending them for new format features. (AGENTS.md:13-18)\n\n[Crate](rust-lance-file.md) · [V1 foundations](rust-lance-file-v1-foundation.md) · [Orientation](../L0-orientation.md) · [Symbols](../L3-symbols/symbol-index.md) · [Contracts](../L3-symbols/behavior-contracts.md) · [Format](../L3-symbols/format-spec.md) · [Scenarios](../L4-crosscutting/scenarios.md)\n\n## Ownership and integration\n\nEach encoder exclusively borrows Writer; each decoder borrows Reader. Plain and dictionary codecs also borrow DataType, while BinaryDecoder selects the Arrow byte-array type through its generic parameter and stores nullable. DictionaryDecoder owns an ArrayRef for already loaded values. Constructors store state without general file-bound or schema validation; DictionaryDecoder::new asserts the outer dictionary shape, and PlainDecoder::new unconditionally returns Ok. (rust/lance-file/src/versions/v1/encoding/binary.rs:38-47; rust/lance-file/src/versions/v1/encoding/binary.rs:107-151; rust/lance-file/src/versions/v1/encoding/plain.rs:32-42; rust/lance-file/src/versions/v1/encoding/plain.rs:211-224; rust/lance-file/src/versions/v1/encoding/dictionary.rs:26-36; rust/lance-file/src/versions/v1/encoding/dictionary.rs:80-120)\n\n~~~text\nV1 writer page adapter\n|-- PlainEncoder: primitive bytes / joined Boolean bits / recursive FSL values\n|-- BinaryEncoder: payload bytes -> absolute Int64 position table\n`-- DictionaryEncoder: PlainEncoder for keys only\n\nV1 reader page adapter\n|-- PlainDecoder: range IO -> array reconstruction\n|-- BinaryDecoder: PlainDecoder positions -> payload range(s)\n`-- DictionaryDecoder: PlainDecoder keys + supplied dictionary values\n~~~\n\nThe page adapters store the encoder return as PageInfo.position and summed logical rows as length. Dictionary values travel separately through schema dictionary hydration; the reader adapter unwraps both dictionary metadata and loaded values before constructing its decoder. Complete local reader and writer lifecycles are now covered in their supplements; full Dataset/backend lifecycle remains pending. (rust/lance-file/src/versions/v1/writer/mod.rs:406-459; rust/lance-file/src/versions/v1/reader.rs:625-668; rust/lance-file/src/versions/v1/encoding.rs:92-192)\n\n## Binary layout and null semantics\n\nFor N rows, write the sliced payload spans in order, then N+1 absolute Int64 byte positions. Return the position-table start, not the first payload byte. The first position is Writer::tell before payloads; later array offsets are rebased to the current absolute end. The raw Int64 buffer is written without explicit endian conversion or framing. A nonempty list of empty arrays writes one endpoint; an empty input slice asserts. Exactly Utf8, Binary, LargeUtf8 and LargeBinary are supported; views return InvalidInput. (rust/lance-file/src/versions/v1/encoding/binary.rs:48-105)\n\nThe encoder ignores original validity. Decoder nullable=true marks equal adjacent positions null, so valid empty values become null and null slots retaining nonempty payload cannot be distinguished from valid values. nullable=false returns all values valid, including empty spans. This is a frozen representation rule, not a universal null-preserving binary codec. (rust/lance-file/src/versions/v1/encoding/binary.rs:61-86; rust/lance-file/src/versions/v1/encoding/binary.rs:165-232)\n\nRange reads first fetch N+1 Int64 positions through PlainDecoder, subtract the first absolute position and cast offsets to Int32 for small byte arrays. Payload IO is skipped when start>=end; otherwise request that absolute byte range. Array construction is fallible, but negative/nonmonotone offsets and exact response size have no dedicated local checks. The internal endpoint assertion is weaker than the subsequent endpoint access. (rust/lance-file/src/versions/v1/encoding/binary.rs:153-233; rust/lance-file/src/versions/v1/encoding/binary.rs:394-415)\n\n## Selection rules and IO cost\n\n| Behavior | BinaryDecoder | PlainDecoder and dictionary key reads |\n|---|---|---|\n| Empty range beyond logical length | Reject if end exceeds length before empty check | Return empty before bounds/type checks |\n| Reversed range with end in bounds | Return empty | Return empty |\n| RangeFrom starting beyond length | Return empty reversed range | Return empty reversed range |\n| Multiple Ranges | InvalidInput | InvalidInput |\n| Empty Indices | Typed empty, no IO | Typed empty, no IO |\n| Take planning | Full first-to-last position span; fixed 64KiB byte-distance threshold | Reader block size; Boolean-specific block arithmetic |\n| Ordering validation | Sorted-input assumption, no sorting; null index unwraps during sizing | Raw selector values drive planning without sorting or null preflight |\n\nSelection evidence: rust/lance-file/src/versions/v1/encoding/binary.rs:286-328; rust/lance-file/src/versions/v1/encoding/binary.rs:394-428; rust/lance-file/src/versions/v1/encoding/plain.rs:306-343; rust/lance-file/src/versions/v1/encoding/plain.rs:374-439; rust/lance-file/src/versions/v1/encoding/dictionary.rs:122-174.\n\nBinary takes precompute the sum of selected value lengths, allocate payload and N+1 offsets, read planned chunks with ordered buffered(reader.io_parallelism), then copy a contiguous chunk once or gather each requested value. The position span can be large for two far-apart rows; a contiguous value run can exceed the nominal 64KiB threshold. Output is materialized even when the range-reader payload can share Bytes storage. (rust/lance-file/src/versions/v1/encoding/binary.rs:246-390)\n\nPlain takes keep consecutive rows in the same chunk regardless of block_size, and otherwise split by distance from the chunk's first row. Boolean takes split on row/(block_size*8). Both read enclosing ranges, apply Arrow take and retain all decoded chunk arrays before concat. The IO threshold is not a maximum request size; zero/truncated Boolean block sizes and unchecked arithmetic remain assumptions. FixedSizeList<Boolean> range decoding can recurse, while take calls byte_width, which is unavailable for its Boolean child. (rust/lance-file/src/versions/v1/encoding/plain.rs:306-408; rust/lance-arrow/src/lib.rs:144-182)\n\n## Repeated-leading-index discrepancy\n\nThe binary planner's condition is current==start_idx OR current-last_idx==1, where current is a relative row index and start_idx is a selector ordinal. For a nonempty value of length L and sorted indices [k,k], subtraction gives [0,0]; both iterations satisfy current==start_idx, leaving is_contiguous=true. The chunk reads/copies one value span L, but the output offsets and capacity count two values, reaching the debug assertion L==2L. Release execution reaches fallible array building with inconsistent offsets. This is an explicit source trace, not an executed reproduction. (rust/lance-file/src/versions/v1/encoding/binary.rs:251-284; rust/lance-file/src/versions/v1/encoding/binary.rs:309-388)\n\nThe dense test includes a repeated later index and checks correct output; it does not include a repeated first index. Its standalone planner uses a 1024-byte threshold, whereas decoder.take uses 64KiB. Do not generalize that passing fixture into all-duplicate correctness or assume the tested standalone plan is the actual take plan. (rust/lance-file/src/versions/v1/encoding/binary.rs:616-662)\n\n## Plain bytes, recursive arrays and unsafe boundaries\n\nPlain primitives write values only. Boolean inputs are joined bit by bit and None becomes false; other types use first-array byte_width and each array's offset/length to form an unsafe raw buffer slice. The configured DataType only selects FixedSizeList recursion; the primitive branch otherwise uses the actual first array type. It never validates that every later array has that type or enough bytes for the resulting span. Homogeneous valid Arrow arrays are a safety precondition: mixed narrower arrays can make the computed raw slice exceed its allocation. (rust/lance-file/src/versions/v1/encoding/plain.rs:60-152)\n\nFixed lists recursively write sliced child values, discarding parent and eventual primitive validity. Read reconstructs them with parent validity None; fixed binary reads UInt8 values then builds a width-based array. Signed dimensions are cast and multiplied without local validation. Null primitive payloads are whatever the input values buffer contains, except Boolean's explicit false substitution; the compatibility fixture's zero/null-key expectations do not prove every possible null backing value is zero. (rust/lance-file/src/versions/v1/encoding/plain.rs:73-152; rust/lance-file/src/versions/v1/encoding/plain.rs:252-304; rust/lance-file/src/compatibility_tests.rs:100-135)\n\nbytes_to_array requires one value buffer. For FixedWidth, a short response is copied and zero-filled to (len+offset)*width; otherwise aligned Bytes can be retained and misaligned Bytes are copied. The resulting array has null_count0. This means truncated fixed-width input is not necessarily rejected: the active test supplies five bytes for three UInt16 values and expects the missing sixth byte to be zero. Bit-packed Boolean uses its separate buffer branch and starting bit offset. (rust/lance-file/src/versions/v1/encoding/plain.rs:174-249; rust/lance-file/src/versions/v1/encoding/plain.rs:575-592; rust/lance-arrow/src/lib.rs:1536-1600)\n\nThese codecs perform unchecked pointer/offset/capacity arithmetic and have assertions/downcasts in public-call paths. No local transaction, rollback, flush/shutdown, abort guard or cancellation cleanup appears. Buffered futures preserve order and limit polling concurrency but do not prove backend cancellation; complete IO ownership remains pending. (rust/lance-file/src/versions/v1/encoding/binary.rs:48-105; rust/lance-file/src/versions/v1/encoding/binary.rs:309-390; rust/lance-file/src/versions/v1/encoding/plain.rs:90-152; rust/lance-file/src/versions/v1/encoding/plain.rs:325-408; rust/lance-file/src/versions/v1/encoding/dictionary.rs:37-77)\n\n## Dictionary keys and values\n\nDictionaryEncoder supports all eight signed/unsigned integer key widths. It extracts each array's keys and writes them with PlainEncoder; no value comparison, dictionary merge/remap, value persistence or key-validity bitmap occurs. Supplying different dictionaries with the same key width therefore requires the caller to have already established compatible key meaning. The constructor's configured key type controls downcasts; unsupported types return Schema and supported types with an empty slice assert. (rust/lance-file/src/versions/v1/encoding/dictionary.rs:26-77)\n\nDictionaryDecoder reads keys using PlainDecoder, clones the shared values Arc and calls DictionaryArray::try_new. Its declared dictionary value type is never compared with the supplied array; result value type follows that array. Keys lose stored validity through plain reconstruction, but dictionary values can independently be null. The one local test writes keys directly using PlainEncoder and never invokes DictionaryEncoder. (rust/lance-file/src/versions/v1/encoding/dictionary.rs:104-174; rust/lance-file/src/versions/v1/encoding/dictionary.rs:187-252)\n\nThe foundation's binary-like predicate includes views, but both concrete binary encode and facade decode reject them. PlainEncoder can write fixed-width numeric buffers beyond integer widths, whereas schema dictionary hydration explicitly accepts only eight integer value types or the four binary families. These are different boundaries; do not infer symmetric hydration from write dispatch. (rust/lance-file/src/versions/v1/encoding/binary.rs:91-105; rust/lance-file/src/versions/v1/encoding/plain.rs:90-115; rust/lance-arrow/src/lib.rs:144-182; rust/lance-file/src/versions/v1/encoding.rs:116-175)\n\n## Test map and dependencies\n\nEight binary tests cover Utf8/LargeUtf8 multi-array/null roundtrips, one sliced offset, range variants, a simple take, million-row sparse/dense takes, repeated-write table positions and Binary null takes. Nine plain tests cover primitive raw-buffer roundtrips, Boolean joining, FSL/FSB and nested shapes, zero-padding, Int32 ranges/takes and usize chunk arithmetic. One dictionary test invokes eight key widths with supplied string values. Three disabled plain tests describe Boolean slices/nulls, FSL slices and Boolean takes; they are not executable coverage. (rust/lance-file/src/versions/v1/encoding/binary.rs:431-710; rust/lance-file/src/versions/v1/encoding/plain.rs:442-852; rust/lance-file/src/versions/v1/encoding/dictionary.rs:177-253)\n\nUntested local cases include leading duplicate binary indices, empty-vs-null binary values, mixed-array unsafe spans, null dictionary keys, inconsistent dictionaries/value types, invalid dimensions, all selector variants and error timing, and partial-write/cancellation behavior. Primitive test inputs reinterpret raw i64/f64 buffers for narrower types rather than numerically casting values; random float inputs are not pinned portable fixtures. (rust/lance-file/src/versions/v1/encoding/binary.rs:485-710; rust/lance-file/src/versions/v1/encoding/plain.rs:456-490; rust/lance-file/src/versions/v1/encoding/plain.rs:717-851; rust/lance-file/src/versions/v1/encoding/dictionary.rs:187-252)\n\nDependencies are Arrow arrays/layout/casts/arithmetic/take/concat, Bytes and local BufferExt for ownership/alignment, Reader/Writer for IO policy, Tokio write extensions, ordered futures streams and async-recursion. Generic ByteArrayType and ArrowDictionaryKeyType select existing Arrow representations, not runtime codec registries. No local Cargo feature, environment variable or codec plugin hook is declared. Full Arrow and IO implementations remain outside this completed slice. (rust/lance-file/src/versions/v1/encoding/binary.rs:7-36; rust/lance-file/src/versions/v1/encoding/plain.rs:9-29; rust/lance-file/src/versions/v1/encoding/dictionary.rs:7-24)\n\n## Exact production declarations\n\nAll 70 non-test declarations are retained below, including the function-local MIN_IO_SIZE constant. Full bodies, disabled test text and contiguous annotations are in the linked L2 documents.\n\n| Qualified suffix within lance_file::versions::v1::encoding | Visibility / kind | Exact declaration | Evidence |\n|---|---|---|---|\n| `binary::BinaryEncoder` | pub / struct | `pub struct BinaryEncoder<'a> {` | [rust/lance-file/src/versions/v1/encoding/binary.rs:39-39](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::BinaryEncoder::writer` | private / field | `writer: &'a mut dyn Writer,` | [rust/lance-file/src/versions/v1/encoding/binary.rs:40-40](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::BinaryEncoder::new` | pub / function | `pub fn new(writer: &'a mut dyn Writer) -> Self {` | [rust/lance-file/src/versions/v1/encoding/binary.rs:44-44](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::BinaryEncoder::encode_typed_arr` | private / async function | `async fn encode_typed_arr<T: ByteArrayType>(&mut self, arrs: &[&dyn Array]) -> Result<usize> {` | [rust/lance-file/src/versions/v1/encoding/binary.rs:48-48](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::BinaryEncoder::encode` | pub / async function | `pub async fn encode(&mut self, arrs: &[&dyn Array]) -> Result<usize> {` | [rust/lance-file/src/versions/v1/encoding/binary.rs:92-92](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::BinaryDecoder` | pub / struct | `pub struct BinaryDecoder<'a, T: ByteArrayType> {` | [rust/lance-file/src/versions/v1/encoding/binary.rs:109-109](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::BinaryDecoder::reader` | private / field | `reader: &'a dyn Reader,` | [rust/lance-file/src/versions/v1/encoding/binary.rs:110-110](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::BinaryDecoder::position` | private / field | `position: usize,` | [rust/lance-file/src/versions/v1/encoding/binary.rs:112-112](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::BinaryDecoder::length` | private / field | `length: usize,` | [rust/lance-file/src/versions/v1/encoding/binary.rs:114-114](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::BinaryDecoder::nullable` | private / field | `nullable: bool,` | [rust/lance-file/src/versions/v1/encoding/binary.rs:116-116](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::BinaryDecoder::phantom` | private / field | `phantom: PhantomData<T>,` | [rust/lance-file/src/versions/v1/encoding/binary.rs:118-118](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::BinaryDecoder::new` | pub / function | `pub fn new(reader: &'a dyn Reader, position: usize, length: usize, nullable: bool) -> Self {` | [rust/lance-file/src/versions/v1/encoding/binary.rs:143-143](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::BinaryDecoder::get_positions` | private / async function | `async fn get_positions(&self, index: Range<usize>) -> Result<Arc<Int64Array>> {` | [rust/lance-file/src/versions/v1/encoding/binary.rs:154-154](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::BinaryDecoder::count_nulls` | private / function | `fn count_nulls<O: OffsetSizeTrait>(offsets: &ScalarBuffer<O>) -> (usize, Option<Buffer>) {` | [rust/lance-file/src/versions/v1/encoding/binary.rs:165-165](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::BinaryDecoder::get_range` | private / async function | `async fn get_range(&self, positions: &Int64Array, range: Range<usize>) -> Result<ArrayRef> {` | [rust/lance-file/src/versions/v1/encoding/binary.rs:190-190](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::TakeChunksPlan` | private / struct | `struct TakeChunksPlan {` | [rust/lance-file/src/versions/v1/encoding/binary.rs:237-237](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::TakeChunksPlan::indices` | private / field | `indices: UInt32Array,` | [rust/lance-file/src/versions/v1/encoding/binary.rs:238-238](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::TakeChunksPlan::is_contiguous` | private / field | `is_contiguous: bool,` | [rust/lance-file/src/versions/v1/encoding/binary.rs:239-239](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::plan_take_chunks` | private / function | `fn plan_take_chunks(     positions: &Int64Array,     indices: &UInt32Array,     min_io_size: i64, ) -> Result<Vec<TakeChunksPlan>> {` | [rust/lance-file/src/versions/v1/encoding/binary.rs:246-250](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::BinaryDecoder::decode` | pub / async function | `pub async fn decode(&self) -> Result<ArrayRef> {` | [rust/lance-file/src/versions/v1/encoding/binary.rs:288-288](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::BinaryDecoder::take` | pub / async function | `pub async fn take(&self, indices: &UInt32Array) -> Result<ArrayRef> {` | [rust/lance-file/src/versions/v1/encoding/binary.rs:295-295](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::BinaryDecoder::take::MIN_IO_SIZE` | private function-local / constant | `const MIN_IO_SIZE: i64 = 64 * 1024; // 64KB` | [rust/lance-file/src/versions/v1/encoding/binary.rs:305-305](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::BinaryDecoder::decode_range` | private / async function | `async fn decode_range(&self, index: Range<usize>) -> Result<ArrayRef> {` | [rust/lance-file/src/versions/v1/encoding/binary.rs:395-395](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `binary::BinaryDecoder::get` | pub / async function | `pub async fn get(&self, params: impl Into<ReadBatchParams>) -> Result<ArrayRef> {` | [rust/lance-file/src/versions/v1/encoding/binary.rs:417-417](../L2-files/rust/lance-file/src/versions/v1/encoding/binary.rs.md) |\n| `dictionary::DictionaryEncoder` | pub / struct | `pub struct DictionaryEncoder<'a> {` | [rust/lance-file/src/versions/v1/encoding/dictionary.rs:27-27](../L2-files/rust/lance-file/src/versions/v1/encoding/dictionary.rs.md) |\n| `dictionary::DictionaryEncoder::writer` | private / field | `writer: &'a mut dyn Writer,` | [rust/lance-file/src/versions/v1/encoding/dictionary.rs:28-28](../L2-files/rust/lance-file/src/versions/v1/encoding/dictionary.rs.md) |\n| `dictionary::DictionaryEncoder::key_type` | private / field | `key_type: &'a DataType,` | [rust/lance-file/src/versions/v1/encoding/dictionary.rs:29-29](../L2-files/rust/lance-file/src/versions/v1/encoding/dictionary.rs.md) |\n| `dictionary::DictionaryEncoder::new` | pub / function | `pub fn new(writer: &'a mut dyn Writer, key_type: &'a DataType) -> Self {` | [rust/lance-file/src/versions/v1/encoding/dictionary.rs:33-33](../L2-files/rust/lance-file/src/versions/v1/encoding/dictionary.rs.md) |\n| `dictionary::DictionaryEncoder::write_typed_array` | private / async function | `async fn write_typed_array<T: ArrowDictionaryKeyType>(         &mut self,         arrs: &[&dyn Array],     ) -> Result<usize> {` | [rust/lance-file/src/versions/v1/encoding/dictionary.rs:37-40](../L2-files/rust/lance-file/src/versions/v1/encoding/dictionary.rs.md) |\n| `dictionary::DictionaryEncoder::encode` | pub / async function | `pub async fn encode(&mut self, array: &[&dyn Array]) -> Result<usize> {` | [rust/lance-file/src/versions/v1/encoding/dictionary.rs:60-60](../L2-files/rust/lance-file/src/versions/v1/encoding/dictionary.rs.md) |\n| `dictionary::DictionaryDecoder` | pub / struct | `pub struct DictionaryDecoder<'a> {` | [rust/lance-file/src/versions/v1/encoding/dictionary.rs:81-81](../L2-files/rust/lance-file/src/versions/v1/encoding/dictionary.rs.md) |\n| `dictionary::DictionaryDecoder::reader` | private / field | `reader: &'a dyn Reader,` | [rust/lance-file/src/versions/v1/encoding/dictionary.rs:82-82](../L2-files/rust/lance-file/src/versions/v1/encoding/dictionary.rs.md) |\n| `dictionary::DictionaryDecoder::position` | private / field | `position: usize,` | [rust/lance-file/src/versions/v1/encoding/dictionary.rs:84-84](../L2-files/rust/lance-file/src/versions/v1/encoding/dictionary.rs.md) |\n| `dictionary::DictionaryDecoder::length` | private / field | `length: usize,` | [rust/lance-file/src/versions/v1/encoding/dictionary.rs:86-86](../L2-files/rust/lance-file/src/versions/v1/encoding/dictionary.rs.md) |\n| `dictionary::DictionaryDecoder::data_type` | private / field | `data_type: &'a DataType,` | [rust/lance-file/src/versions/v1/encoding/dictionary.rs:88-88](../L2-files/rust/lance-file/src/versions/v1/encoding/dictionary.rs.md) |\n| `dictionary::DictionaryDecoder::value_arr` | private / field | `value_arr: ArrayRef,` | [rust/lance-file/src/versions/v1/encoding/dictionary.rs:90-90](../L2-files/rust/lance-file/src/versions/v1/encoding/dictionary.rs.md) |\n| `dictionary::<DictionaryDecoder as fmt::Debug>::fmt` | trait implementation / function | `fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {` | [rust/lance-file/src/versions/v1/encoding/dictionary.rs:94-94](../L2-files/rust/lance-file/src/versions/v1/encoding/dictionary.rs.md) |\n| `dictionary::DictionaryDecoder::new` | pub / function | `pub fn new(         reader: &'a dyn Reader,         position: usize,         length: usize,         data_type: &'a DataType,         value_arr: ArrayRef,     ) -> Self {` | [rust/lance-file/src/versions/v1/encoding/dictionary.rs:105-111](../L2-files/rust/lance-file/src/versions/v1/encoding/dictionary.rs.md) |\n| `dictionary::DictionaryDecoder::decode_impl` | private / async function | `async fn decode_impl(&self, params: impl Into<ReadBatchParams>) -> Result<ArrayRef> {` | [rust/lance-file/src/versions/v1/encoding/dictionary.rs:122-122](../L2-files/rust/lance-file/src/versions/v1/encoding/dictionary.rs.md) |\n| `dictionary::DictionaryDecoder::make_dict_array` | private / async function | `async fn make_dict_array<T: ArrowDictionaryKeyType + Sync + Send>(         &self,         index_array: ArrayRef,     ) -> Result<ArrayRef> {` | [rust/lance-file/src/versions/v1/encoding/dictionary.rs:151-154](../L2-files/rust/lance-file/src/versions/v1/encoding/dictionary.rs.md) |\n| `dictionary::DictionaryDecoder::decode` | pub / async function | `pub async fn decode(&self) -> Result<ArrayRef> {` | [rust/lance-file/src/versions/v1/encoding/dictionary.rs:164-164](../L2-files/rust/lance-file/src/versions/v1/encoding/dictionary.rs.md) |\n| `dictionary::DictionaryDecoder::take` | pub / async function | `pub async fn take(&self, indices: &UInt32Array) -> Result<ArrayRef> {` | [rust/lance-file/src/versions/v1/encoding/dictionary.rs:168-168](../L2-files/rust/lance-file/src/versions/v1/encoding/dictionary.rs.md) |\n| `dictionary::DictionaryDecoder::get` | pub / async function | `pub async fn get(&self, params: impl Into<ReadBatchParams>) -> Result<ArrayRef> {` | [rust/lance-file/src/versions/v1/encoding/dictionary.rs:172-172](../L2-files/rust/lance-file/src/versions/v1/encoding/dictionary.rs.md) |\n| `plain::PlainEncoder` | pub / struct | `pub struct PlainEncoder<'a> {` | [rust/lance-file/src/versions/v1/encoding/plain.rs:34-34](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainEncoder::writer` | private / field | `writer: &'a mut dyn Writer,` | [rust/lance-file/src/versions/v1/encoding/plain.rs:35-35](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainEncoder::data_type` | private / field | `data_type: &'a DataType,` | [rust/lance-file/src/versions/v1/encoding/plain.rs:36-36](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainEncoder::new` | pub / function | `pub fn new(writer: &'a mut dyn Writer, data_type: &'a DataType) -> Self {` | [rust/lance-file/src/versions/v1/encoding/plain.rs:40-40](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainEncoder::write` | pub / async function | `pub async fn write(writer: &'a mut dyn Writer, arrays: &[&'a dyn Array]) -> Result<usize> {` | [rust/lance-file/src/versions/v1/encoding/plain.rs:45-45](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainEncoder::encode` | pub / async function | `pub async fn encode(&mut self, arrays: &[&dyn Array]) -> Result<usize> {` | [rust/lance-file/src/versions/v1/encoding/plain.rs:56-56](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainEncoder::encode_internal` | private / async function | `async fn encode_internal(         &mut self,         array: &[&dyn Array],         data_type: &DataType,     ) -> Result<usize> {` | [rust/lance-file/src/versions/v1/encoding/plain.rs:61-65](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainEncoder::encode_boolean` | private / async function | `async fn encode_boolean(&mut self, arrays: &[&BooleanArray]) -> Result<()> {` | [rust/lance-file/src/versions/v1/encoding/plain.rs:73-73](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainEncoder::encode_primitive` | private / async function | `async fn encode_primitive(&mut self, arrays: &[&dyn Array]) -> Result<usize> {` | [rust/lance-file/src/versions/v1/encoding/plain.rs:91-91](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainEncoder::encode_fixed_size_list` | private / async function | `async fn encode_fixed_size_list(         &mut self,         arrays: &[&dyn Array],         items: &Field,     ) -> Result<usize> {` | [rust/lance-file/src/versions/v1/encoding/plain.rs:119-123](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainDecoder` | pub / struct | `pub struct PlainDecoder<'a> {` | [rust/lance-file/src/versions/v1/encoding/plain.rs:156-156](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainDecoder::reader` | private / field | `reader: &'a dyn Reader,` | [rust/lance-file/src/versions/v1/encoding/plain.rs:157-157](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainDecoder::data_type` | private / field | `data_type: &'a DataType,` | [rust/lance-file/src/versions/v1/encoding/plain.rs:158-158](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainDecoder::position` | private / field | `position: usize,` | [rust/lance-file/src/versions/v1/encoding/plain.rs:160-160](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainDecoder::length` | private / field | `length: usize,` | [rust/lance-file/src/versions/v1/encoding/plain.rs:162-162](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::get_byte_range` | private / function | `fn get_byte_range(data_type: &DataType, row_range: Range<usize>) -> Range<usize> {` | [rust/lance-file/src/versions/v1/encoding/plain.rs:167-167](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::bytes_to_array` | private / function | `fn bytes_to_array(     data_type: &DataType,     bytes: bytes::Bytes,     len: usize,     offset: usize, ) -> Result<ArrayRef> {` | [rust/lance-file/src/versions/v1/encoding/plain.rs:174-179](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainDecoder::new` | pub / function | `pub fn new(         reader: &'a dyn Reader,         data_type: &'a DataType,         position: usize,         length: usize,     ) -> Result<Self> {` | [rust/lance-file/src/versions/v1/encoding/plain.rs:212-217](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainDecoder::decode_primitive` | private / async function | `async fn decode_primitive(&self, start: usize, end: usize) -> Result<ArrayRef> {` | [rust/lance-file/src/versions/v1/encoding/plain.rs:228-228](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainDecoder::decode_fixed_size_list` | private / async function | `async fn decode_fixed_size_list(         &self,         items: &Field,         list_size: i32,         start: usize,         end: usize,     ) -> Result<ArrayRef> {` | [rust/lance-file/src/versions/v1/encoding/plain.rs:252-258](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainDecoder::decode_fixed_size_binary` | private / async function | `async fn decode_fixed_size_binary(         &self,         stride: i32,         start: usize,         end: usize,     ) -> Result<ArrayRef> {` | [rust/lance-file/src/versions/v1/encoding/plain.rs:282-287](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainDecoder::take_boolean` | private / async function | `async fn take_boolean(&self, indices: &UInt32Array) -> Result<ArrayRef> {` | [rust/lance-file/src/versions/v1/encoding/plain.rs:306-306](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::make_chunked_requests` | private / function | `fn make_chunked_requests(     indices: &[u32],     byte_width: usize,     block_size: usize, ) -> Vec<Range<usize>> {` | [rust/lance-file/src/versions/v1/encoding/plain.rs:346-350](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainDecoder::decode` | pub / async function | `pub async fn decode(&self) -> Result<ArrayRef> {` | [rust/lance-file/src/versions/v1/encoding/plain.rs:375-375](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainDecoder::take` | pub / async function | `pub async fn take(&self, indices: &UInt32Array) -> Result<ArrayRef> {` | [rust/lance-file/src/versions/v1/encoding/plain.rs:379-379](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainDecoder::decode_range` | private / async function | `async fn decode_range(&self, index: Range<usize>) -> Result<ArrayRef> {` | [rust/lance-file/src/versions/v1/encoding/plain.rs:411-411](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n| `plain::PlainDecoder::get` | pub / async function | `pub async fn get(&self, params: impl Into<ReadBatchParams>) -> Result<ArrayRef> {` | [rust/lance-file/src/versions/v1/encoding/plain.rs:428-428](../L2-files/rust/lance-file/src/versions/v1/encoding/plain.rs.md) |\n"
+    },
+    {
+      "document": "L1-modules/rust-lance-file-v1-statistics.md",
+      "kind": "API boundary clarification",
+      "before": "# Frozen V1 statistics reducers and collector\n\nComplete local scope: all 2,249 physical lines, 67 authored intervals, 41 production declarations and 25 test declarations, including fourteen test entry points. All tests were read, not run. These are frozen compatibility surfaces; modern statistics features belong in current-format paths. (rust/lance-file/src/versions/v1/writer/statistics.rs:1-2249) (AGENTS.md:13-18)\n\n[File crate](rust-lance-file.md) · [V1 writer](rust-lance-file-v1-writer.md) · [L2 statistics](../L2-files/rust/lance-file/src/versions/v1/writer/statistics.rs.md) · [Symbols](../L3-symbols/symbol-index.md) · [Contracts](../L3-symbols/behavior-contracts.md) · [Format](../L3-symbols/format-spec.md) · [Testing](../L4-crosscutting/build-and-test.md)\n\n## Responsibility, visibility and dependencies\n\nThis synchronous module reduces borrowed Arrow arrays to a StatisticsRow, accumulates rows in per-field builders, and finishes one Arrow RecordBatch. It does not perform IO, serialize pages, schedule tasks, select file versions or enforce writer rollback. Pub declarations are enclosed by private writer::statistics, without a public re-export here. Arrow supplies arrays/builders, DataFusion ScalarValue stores typed bounds, Lance Field/Schema identifies columns, num_traits supplies numeric bounds and Float operations, and BTreeMap orders output by original field ID. (rust/lance-file/src/versions/v1/writer/statistics.rs:6-34) (rust/lance-file/src/versions/v1/writer/statistics.rs:611-670) (rust/lance-file/src/versions/v1/writer/mod.rs:4-4)\n\n## Three separate type boundaries\n\n| Boundary | Accepted types |\n|---|---|\n| collect_statistics | Boolean; eight integers; Float32/64; Date32/64; valid Time32/64 units; all Timestamp/Duration units; Decimal128; Binary/LargeBinary; Utf8/LargeUtf8; FixedSizeBinary; Dictionary with eight integer key types |\n| supports_stats_collection / automatic collector | Boolean; eight integers; Float32/64; Date32/64; Decimal128; Binary/LargeBinary; Utf8/LargeUtf8 |\n| StatisticsBuilder::append | Automatic set plus valid Time32/64, Timestamp and Duration; no FixedSizeBinary or Dictionary arm |\n\nThe dispatcher panics for an empty outer slice and reaches unreachable for unsupported types, while append uses todo! for unmatched stored dtype. No API here returns a validation Result for mismatched arrays/rows. An empty eligible schema returns None from try_new. Commented list/FixedSizeBinary arms and Decimal256 TODOs are not support. (rust/lance-file/src/versions/v1/writer/statistics.rs:493-609) (rust/lance-file/src/versions/v1/writer/statistics.rs:619-633) (rust/lance-file/src/versions/v1/writer/statistics.rs:869-929)\n\n## Reduction contracts\n\n| Family | No valid ordered values | Ordinary bounds and null counting |\n|---|---|---|\n| Integers / temporal / Decimal128 | Present native MIN/MAX | Strict native partial comparisons; sum physical array nulls; first dtype carries temporal parameters; Decimal128 first precision/scale |\n| Float32/64 | Present -infinity/+infinity | Ignore NaN for extrema without counting it as null; normalize zero minimum to negative zero and maximum to positive zero |\n| Boolean | Present false/true | Presence flags; later arrays still add null counts after both values found |\n| UTF8 / binary | Typed absent bounds | Lexical prefixes up to64 bytes; optional upper successor when any input was truncated |\n| Fixed binary | Absent bounds tagged original width | Prefix payload up to64 bytes but original width retained in both scalar tags; excluded from collector |\n| Dictionary | Determined by value reducer | Scan full dictionary values, including unused entries; null count concerns values arrays, not keys/decoded rows; shared dictionaries are rescanned |\n\nThese are source contracts, not results of executing Arrow/DataFusion dependencies. Native decimal extrema are not clamped to precision, and primitive scalar conversion can impose separate failures. (rust/lance-file/src/versions/v1/writer/statistics.rs:47-174) (rust/lance-file/src/versions/v1/writer/statistics.rs:241-513)\n\n## Prefixes, successors and cost\n\nBINARY_PREFIX_LENGTH is64 bytes. UTF8 truncation scans backward over the original string for the longest nonempty prefix ending at or before64. Binary truncation takes exactly64 bytes. The comments saying less than are weaker than the actual <= condition. Values exactly64 bytes are not truncated. Each string/binary reduction has one global flag: if ANY value was truncated, the selected maximum is incremented even if that maximum was short. A missing successor produces a null upper bound. (rust/lance-file/src/versions/v1/writer/statistics.rs:176-387)\n\nBinary increment carries right-to-left, zeroing overflowed suffix bytes; all0xFF returns None. UTF8 increment instead tries successive larger bytes at each position, validates the full candidate, and restores the original byte on overflow before moving left. It keeps suffix bytes and total length unchanged. None is an algorithm limitation, not a proof that no upper bound with another length exists. Prefix comparison/storage is bounded, but UTF8 truncation can traverse a long suffix; reduction scans all valid values except Boolean arrays after both values are known. Dictionary extraction allocates a Vec of borrowed values references and rescans shared dictionaries. (rust/lance-file/src/versions/v1/writer/statistics.rs:176-239) (rust/lance-file/src/versions/v1/writer/statistics.rs:453-513)\n\n## Collector lifecycle and failure boundaries\n\nvisit_fields emits roots and struct descendants in schema order, including struct nodes; it does not descend through lists/dictionaries. Eligibility removes unsupported types, and BTreeMap keys sort output numerically. Duplicate IDs overwrite during collection. The writer has a separate reversed traversal of scalar leaves, so traversal order is not row/output order. (rust/lance-file/src/versions/v1/writer/statistics.rs:619-686) (rust/lance-file/src/versions/v1/writer/mod.rs:654-692)\n\nEach selected field receives one StatisticsRow for an entire nonempty write slice, before page IO. Builder construction uses initial capacity1. String/binary appenders turn missing OR wrong-variant bounds into null; Boolean falls back to false/true; primitive appender converts scalars to arrays and reads value0 without checking validity, then appends a nonnull value. Null counts accept arbitrary i64 with no local sign check. Downcast/conversion unwraps can panic. (rust/lance-file/src/versions/v1/writer/statistics.rs:704-929) (rust/lance-file/src/versions/v1/writer/mod.rs:189-199)\n\nfinish drains builders before checking the final RecordBatch. Every root is a nonnullable Struct named by original field ID, containing nonnullable Int64 null_count and nullable original-type min_value/max_value. Field names/metadata are not copied. Any RecordBatch error becomes the fixed same-length SchemaError; prior builder contents are already lost. StructArray validation can panic earlier. There is no completed flag, rollback or retained row snapshot. Writer finalization consumes this batch into legacy pages and its own statistics table. (rust/lance-file/src/versions/v1/writer/statistics.rs:635-670) (rust/lance-file/src/versions/v1/writer/mod.rs:588-625)\n\n## Exact production declarations\n\nVisibility below is syntactic visibility inside the private module. Full generic bounds and lifetimes are retained. Each declaration links to its complete L2 behavior; fields are separately indexed.\n\n| Symbol | Visibility | Exact declaration | Source |\n|---|---|---|---|\n| BINARY_PREFIX_LENGTH | private (private enclosing module) | `const BINARY_PREFIX_LENGTH: usize = 64;` | rust/lance-file/src/versions/v1/writer/statistics.rs:34-34 |\n| StatisticsRow | pub (private enclosing module) | `pub struct StatisticsRow {` | rust/lance-file/src/versions/v1/writer/statistics.rs:38-38 |\n| StatisticsRow::null_count | pub(crate) (private enclosing module) | `pub(crate) null_count: i64,` | rust/lance-file/src/versions/v1/writer/statistics.rs:40-40 |\n| StatisticsRow::min_value | pub(crate) (private enclosing module) | `pub(crate) min_value: ScalarValue,` | rust/lance-file/src/versions/v1/writer/statistics.rs:42-42 |\n| StatisticsRow::max_value | pub(crate) (private enclosing module) | `pub(crate) max_value: ScalarValue,` | rust/lance-file/src/versions/v1/writer/statistics.rs:44-44 |\n| compute_primitive_statistics | private (private enclosing module) | `fn compute_primitive_statistics<T: ArrowNumericType>(     arrays: &[&ArrayRef], ) -> (T::Native, T::Native, i64) where     T::Native: Bounded + PartialOrd, {` | rust/lance-file/src/versions/v1/writer/statistics.rs:47-52 |\n| get_statistics | private (private enclosing module) | `fn get_statistics<T: ArrowNumericType>(arrays: &[&ArrayRef]) -> StatisticsRow where     T::Native: Bounded,     datafusion_common::scalar::ScalarValue: From<<T as ArrowPrimitiveType>::Native>, {` | rust/lance-file/src/versions/v1/writer/statistics.rs:84-88 |\n| compute_float_statistics | private (private enclosing module) | `fn compute_float_statistics<T: ArrowNumericType>(     arrays: &[&ArrayRef], ) -> (T::Native, T::Native, i64) where     T::Native: Float, {` | rust/lance-file/src/versions/v1/writer/statistics.rs:101-106 |\n| get_float_statistics | private (private enclosing module) | `fn get_float_statistics<T: ArrowNumericType>(arrays: &[&ArrayRef]) -> StatisticsRow where     T::Native: Bounded + Float,     datafusion_common::scalar::ScalarValue: From<<T as ArrowPrimitiveType>::Native>, {` | rust/lance-file/src/versions/v1/writer/statistics.rs:138-142 |\n| get_decimal_statistics | private (private enclosing module) | `fn get_decimal_statistics(arrays: &[&ArrayRef]) -> StatisticsRow {` | rust/lance-file/src/versions/v1/writer/statistics.rs:163-163 |\n| truncate_utf8 | private (private enclosing module) | `fn truncate_utf8(data: &str, length: usize) -> Option<&str> {` | rust/lance-file/src/versions/v1/writer/statistics.rs:177-177 |\n| increment_utf8 | private (private enclosing module) | `fn increment_utf8(mut data: Vec<u8>) -> Option<Vec<u8>> {` | rust/lance-file/src/versions/v1/writer/statistics.rs:195-195 |\n| truncate_binary | private (private enclosing module) | `fn truncate_binary(data: &[u8], length: usize) -> Option<&[u8]> {` | rust/lance-file/src/versions/v1/writer/statistics.rs:217-217 |\n| increment | private (private enclosing module) | `fn increment(mut data: Vec<u8>) -> Option<Vec<u8>> {` | rust/lance-file/src/versions/v1/writer/statistics.rs:228-228 |\n| get_string_statistics | private (private enclosing module) | `fn get_string_statistics<T: OffsetSizeTrait>(arrays: &[&ArrayRef]) -> StatisticsRow {` | rust/lance-file/src/versions/v1/writer/statistics.rs:241-241 |\n| get_binary_statistics | private (private enclosing module) | `fn get_binary_statistics<T: OffsetSizeTrait>(arrays: &[&ArrayRef]) -> StatisticsRow {` | rust/lance-file/src/versions/v1/writer/statistics.rs:316-316 |\n| get_fixed_size_binary_statistics | private (private enclosing module) | `fn get_fixed_size_binary_statistics(arrays: &[&ArrayRef]) -> StatisticsRow {` | rust/lance-file/src/versions/v1/writer/statistics.rs:389-389 |\n| get_boolean_statistics | private (private enclosing module) | `fn get_boolean_statistics(arrays: &[&ArrayRef]) -> StatisticsRow {` | rust/lance-file/src/versions/v1/writer/statistics.rs:453-453 |\n| cast_dictionary_arrays | private (private enclosing module) | `fn cast_dictionary_arrays<'a, T: ArrowDictionaryKeyType + 'static>(     arrays: &'a [&'a ArrayRef], ) -> Vec<&'a Arc<dyn Array>> {` | rust/lance-file/src/versions/v1/writer/statistics.rs:484-486 |\n| get_dictionary_statistics | private (private enclosing module) | `fn get_dictionary_statistics(arrays: &[&ArrayRef]) -> StatisticsRow {` | rust/lance-file/src/versions/v1/writer/statistics.rs:493-493 |\n| get_temporal_statistics | private (private enclosing module) | `fn get_temporal_statistics(arrays: &[&ArrayRef]) -> StatisticsRow {` | rust/lance-file/src/versions/v1/writer/statistics.rs:515-515 |\n| collect_statistics | pub (private enclosing module) | `pub fn collect_statistics(arrays: &[&ArrayRef]) -> StatisticsRow {` | rust/lance-file/src/versions/v1/writer/statistics.rs:550-550 |\n| supports_stats_collection | pub (private enclosing module) | `pub fn supports_stats_collection(datatype: &DataType) -> bool {` | rust/lance-file/src/versions/v1/writer/statistics.rs:586-586 |\n| StatisticsCollector | pub (private enclosing module) | `pub struct StatisticsCollector {` | rust/lance-file/src/versions/v1/writer/statistics.rs:612-612 |\n| StatisticsCollector::builders | private (private enclosing module) | `builders: BTreeMap<i32, (Field, StatisticsBuilder)>,` | rust/lance-file/src/versions/v1/writer/statistics.rs:613-613 |\n| StatisticsCollector::try_new | pub (private enclosing module) | `pub fn try_new(schema: &Schema) -> Option<Self> {` | rust/lance-file/src/versions/v1/writer/statistics.rs:619-619 |\n| StatisticsCollector::get_builder | pub (private enclosing module) | `pub fn get_builder(&mut self, field_id: i32) -> Option<&mut StatisticsBuilder> {` | rust/lance-file/src/versions/v1/writer/statistics.rs:631-631 |\n| StatisticsCollector::finish | pub (private enclosing module) | `pub fn finish(&mut self) -> Result<RecordBatch> {` | rust/lance-file/src/versions/v1/writer/statistics.rs:635-635 |\n| visit_fields | private (private enclosing module) | `fn visit_fields(schema: &Schema) -> impl Iterator<Item = &Field> {` | rust/lance-file/src/versions/v1/writer/statistics.rs:674-674 |\n| StatisticsBuilder | pub (private enclosing module) | `pub struct StatisticsBuilder {` | rust/lance-file/src/versions/v1/writer/statistics.rs:688-688 |\n| StatisticsBuilder::null_count | private (private enclosing module) | `null_count: PrimitiveBuilder<Int64Type>,` | rust/lance-file/src/versions/v1/writer/statistics.rs:689-689 |\n| StatisticsBuilder::min_value | private (private enclosing module) | `min_value: Box<dyn ArrayBuilder>,` | rust/lance-file/src/versions/v1/writer/statistics.rs:690-690 |\n| StatisticsBuilder::max_value | private (private enclosing module) | `max_value: Box<dyn ArrayBuilder>,` | rust/lance-file/src/versions/v1/writer/statistics.rs:691-691 |\n| StatisticsBuilder::dt | private (private enclosing module) | `dt: DataType,` | rust/lance-file/src/versions/v1/writer/statistics.rs:692-692 |\n| <StatisticsBuilder as Debug>::fmt | trait implementation (private enclosing module) | `fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {` | rust/lance-file/src/versions/v1/writer/statistics.rs:696-696 |\n| StatisticsBuilder::new | private (private enclosing module) | `fn new(data_type: &DataType) -> Self {` | rust/lance-file/src/versions/v1/writer/statistics.rs:705-705 |\n| StatisticsBuilder::string_statistics_appender | private (private enclosing module) | `fn string_statistics_appender<T: OffsetSizeTrait>(&mut self, row: StatisticsRow) {` | rust/lance-file/src/versions/v1/writer/statistics.rs:718-718 |\n| StatisticsBuilder::binary_statistics_appender | private (private enclosing module) | `fn binary_statistics_appender<T: OffsetSizeTrait>(&mut self, row: StatisticsRow) {` | rust/lance-file/src/versions/v1/writer/statistics.rs:763-763 |\n| StatisticsBuilder::statistics_appender | private (private enclosing module) | `fn statistics_appender<T: arrow_array::ArrowPrimitiveType>(&mut self, row: StatisticsRow) {` | rust/lance-file/src/versions/v1/writer/statistics.rs:808-808 |\n| StatisticsBuilder::boolean_appender | private (private enclosing module) | `fn boolean_appender(&mut self, row: StatisticsRow) {` | rust/lance-file/src/versions/v1/writer/statistics.rs:842-842 |\n| StatisticsBuilder::append | pub (private enclosing module) | `pub fn append(&mut self, row: StatisticsRow) {` | rust/lance-file/src/versions/v1/writer/statistics.rs:869-869 |\n\n## Test oracles and their limits\n\nThe [complete L2 catalog](../L2-files/rust/lance-file/src/versions/v1/writer/statistics.rs.md) preserves each literal fixture and assertion, including24 primitive cases,13 string/binary/fixed-binary cases,19 constant values tested with/without null, timestamp unit/timezone sampling, float subsequence bounds, and string/binary/fixed-binary property generators. Fourteen entry points include the empty-outer panic, empty typed arrays, float NaN/infinity/zero behavior, two dictionary examples, complete collector batch/schema comparisons and Boolean multi-array null counting. (rust/lance-file/src/versions/v1/writer/statistics.rs:932-2249)\n\nThe width71 fixed-binary fixture expects its absent maximum tagged64, whereas production tags both bounds with original width71. This is a literal code/fixture discrepancy; dependency equality semantics and test execution are unverified. Decimal fixture expected scalars explicitly use precision38/scale10 while arrays use constructor defaults. Do not claim a passing/failing runtime from those lines alone. (rust/lance-file/src/versions/v1/writer/statistics.rs:1284-1293) (rust/lance-file/src/versions/v1/writer/statistics.rs:1542-1600) (rust/lance-file/src/versions/v1/writer/statistics.rs:446-450)\n\nBinary property generators use half-open0..u8::MAX, excluding0xFF; deterministic cases cover all0xFF overflow separately. Float properties exempt NaN from inequalities and do not assert null_count. No local direct collector test establishes duplicate-ID behavior, unsupported-type selection, parent validity masking, fixed-binary appendability or safe retry after failure. (rust/lance-file/src/versions/v1/writer/statistics.rs:1491-1541) (rust/lance-file/src/versions/v1/writer/statistics.rs:1647-1948) (rust/lance-file/src/versions/v1/writer/statistics.rs:2038-2249)\n",
+      "after": "# Frozen V1 statistics reducers and collector\n\nComplete local scope: all 2,249 physical lines, 67 authored intervals, 41 production declarations and 25 test declarations, including fourteen test entry points. All tests were read, not run. These are frozen compatibility surfaces; modern statistics features belong in current-format paths. (rust/lance-file/src/versions/v1/writer/statistics.rs:1-2249) (AGENTS.md:13-18)\n\n[File crate](rust-lance-file.md) · [V1 writer](rust-lance-file-v1-writer.md) · [L2 statistics](../L2-files/rust/lance-file/src/versions/v1/writer/statistics.rs.md) · [Symbols](../L3-symbols/symbol-index.md) · [Contracts](../L3-symbols/behavior-contracts.md) · [Format](../L3-symbols/format-spec.md) · [Testing](../L4-crosscutting/build-and-test.md)\n\n## Responsibility, visibility and dependencies\n\nThis synchronous module reduces borrowed Arrow arrays to a StatisticsRow, accumulates rows in per-field builders, and finishes one Arrow RecordBatch. It does not perform IO, serialize pages, schedule tasks, select file versions or enforce writer rollback. Pub declarations are enclosed by private writer::statistics, without a public re-export here. Arrow supplies arrays/builders, DataFusion ScalarValue stores typed bounds, Lance Field/Schema identifies columns, num_traits supplies numeric bounds and Float operations, and BTreeMap orders output by original field ID. (rust/lance-file/src/versions/v1/writer/statistics.rs:6-34) (rust/lance-file/src/versions/v1/writer/statistics.rs:611-670) (rust/lance-file/src/versions/v1/writer/mod.rs:4-4)\n\n## Three separate type boundaries\n\n| Boundary | Accepted types |\n|---|---|\n| collect_statistics | Boolean; eight integers; Float32/64; Date32/64; valid Time32/64 units; all Timestamp/Duration units; Decimal128; Binary/LargeBinary; Utf8/LargeUtf8; FixedSizeBinary; Dictionary with eight integer key types |\n| supports_stats_collection / automatic collector | Boolean; eight integers; Float32/64; Date32/64; Decimal128; Binary/LargeBinary; Utf8/LargeUtf8 |\n| StatisticsBuilder::append | Automatic set plus valid Time32/64, Timestamp and Duration; no FixedSizeBinary or Dictionary arm |\n\nThe dispatcher panics for an empty outer slice and reaches unreachable for unsupported types, while append uses todo! for unmatched stored dtype. Neither collect_statistics nor StatisticsBuilder::append returns a validation Result for mismatched input arrays or supplied bound scalar types; collector finish separately returns a Result for final batch construction. An empty eligible schema returns None from try_new. Commented list/FixedSizeBinary arms and Decimal256 TODOs are not support. (rust/lance-file/src/versions/v1/writer/statistics.rs:493-609) (rust/lance-file/src/versions/v1/writer/statistics.rs:619-633) (rust/lance-file/src/versions/v1/writer/statistics.rs:869-929)\n\n## Reduction contracts\n\n| Family | No valid ordered values | Ordinary bounds and null counting |\n|---|---|---|\n| Integers / temporal / Decimal128 | Present native MIN/MAX | Strict native partial comparisons; sum physical array nulls; first dtype carries temporal parameters; Decimal128 first precision/scale |\n| Float32/64 | Present -infinity/+infinity | Ignore NaN for extrema without counting it as null; normalize zero minimum to negative zero and maximum to positive zero |\n| Boolean | Present false/true | Presence flags; later arrays still add null counts after both values found |\n| UTF8 / binary | Typed absent bounds | Lexical prefixes up to64 bytes; optional upper successor when any input was truncated |\n| Fixed binary | Absent bounds tagged original width | Prefix payload up to64 bytes but original width retained in both scalar tags; excluded from collector |\n| Dictionary | Determined by value reducer | Scan full dictionary values, including unused entries; null count concerns values arrays, not keys/decoded rows; shared dictionaries are rescanned |\n\nThese are source contracts, not results of executing Arrow/DataFusion dependencies. Native decimal extrema are not clamped to precision, and primitive scalar conversion can impose separate failures. (rust/lance-file/src/versions/v1/writer/statistics.rs:47-174) (rust/lance-file/src/versions/v1/writer/statistics.rs:241-513)\n\n## Prefixes, successors and cost\n\nBINARY_PREFIX_LENGTH is64 bytes. UTF8 truncation scans backward over the original string for the longest nonempty prefix ending at or before64. Binary truncation takes exactly64 bytes. The comments saying less than are weaker than the actual <= condition. Values exactly64 bytes are not truncated. Each string/binary reduction has one global flag: if ANY value was truncated, the selected maximum is incremented even if that maximum was short. A missing successor produces a null upper bound. (rust/lance-file/src/versions/v1/writer/statistics.rs:176-387)\n\nBinary increment carries right-to-left, zeroing overflowed suffix bytes; all0xFF returns None. UTF8 increment instead tries successive larger bytes at each position, validates the full candidate, and restores the original byte on overflow before moving left. It keeps suffix bytes and total length unchanged. None is an algorithm limitation, not a proof that no upper bound with another length exists. Prefix comparison/storage is bounded, but UTF8 truncation can traverse a long suffix; reduction scans all valid values except Boolean arrays after both values are known. Dictionary extraction allocates a Vec of borrowed values references and rescans shared dictionaries. (rust/lance-file/src/versions/v1/writer/statistics.rs:176-239) (rust/lance-file/src/versions/v1/writer/statistics.rs:453-513)\n\n## Collector lifecycle and failure boundaries\n\nvisit_fields emits roots and struct descendants in schema order, including struct nodes; it does not descend through lists/dictionaries. Eligibility removes unsupported types, and BTreeMap keys sort output numerically. Duplicate IDs overwrite during collection. The writer has a separate reversed traversal of scalar leaves, so traversal order is not row/output order. (rust/lance-file/src/versions/v1/writer/statistics.rs:619-686) (rust/lance-file/src/versions/v1/writer/mod.rs:654-692)\n\nEach selected field receives one StatisticsRow for an entire nonempty write slice, before page IO. Builder construction uses initial capacity1. String/binary appenders turn missing OR wrong-variant bounds into null; Boolean falls back to false/true; primitive appender converts scalars to arrays and reads value0 without checking validity, then appends a nonnull value. Null counts accept arbitrary i64 with no local sign check. Downcast/conversion unwraps can panic. (rust/lance-file/src/versions/v1/writer/statistics.rs:704-929) (rust/lance-file/src/versions/v1/writer/mod.rs:189-199)\n\nfinish drains builders before checking the final RecordBatch. Every root is a nonnullable Struct named by original field ID, containing nonnullable Int64 null_count and nullable original-type min_value/max_value. Field names/metadata are not copied. Any RecordBatch error becomes the fixed same-length SchemaError; prior builder contents are already lost. StructArray validation can panic earlier. There is no completed flag, rollback or retained row snapshot. Writer finalization consumes this batch into legacy pages and its own statistics table. (rust/lance-file/src/versions/v1/writer/statistics.rs:635-670) (rust/lance-file/src/versions/v1/writer/mod.rs:588-625)\n\n## Exact production declarations\n\nVisibility below is syntactic visibility inside the private module. Full generic bounds and lifetimes are retained. Each declaration links to its complete L2 behavior; fields are separately indexed.\n\n| Symbol | Visibility | Exact declaration | Source |\n|---|---|---|---|\n| BINARY_PREFIX_LENGTH | private (private enclosing module) | `const BINARY_PREFIX_LENGTH: usize = 64;` | rust/lance-file/src/versions/v1/writer/statistics.rs:34-34 |\n| StatisticsRow | pub (private enclosing module) | `pub struct StatisticsRow {` | rust/lance-file/src/versions/v1/writer/statistics.rs:38-38 |\n| StatisticsRow::null_count | pub(crate) (private enclosing module) | `pub(crate) null_count: i64,` | rust/lance-file/src/versions/v1/writer/statistics.rs:40-40 |\n| StatisticsRow::min_value | pub(crate) (private enclosing module) | `pub(crate) min_value: ScalarValue,` | rust/lance-file/src/versions/v1/writer/statistics.rs:42-42 |\n| StatisticsRow::max_value | pub(crate) (private enclosing module) | `pub(crate) max_value: ScalarValue,` | rust/lance-file/src/versions/v1/writer/statistics.rs:44-44 |\n| compute_primitive_statistics | private (private enclosing module) | `fn compute_primitive_statistics<T: ArrowNumericType>(     arrays: &[&ArrayRef], ) -> (T::Native, T::Native, i64) where     T::Native: Bounded + PartialOrd, {` | rust/lance-file/src/versions/v1/writer/statistics.rs:47-52 |\n| get_statistics | private (private enclosing module) | `fn get_statistics<T: ArrowNumericType>(arrays: &[&ArrayRef]) -> StatisticsRow where     T::Native: Bounded,     datafusion_common::scalar::ScalarValue: From<<T as ArrowPrimitiveType>::Native>, {` | rust/lance-file/src/versions/v1/writer/statistics.rs:84-88 |\n| compute_float_statistics | private (private enclosing module) | `fn compute_float_statistics<T: ArrowNumericType>(     arrays: &[&ArrayRef], ) -> (T::Native, T::Native, i64) where     T::Native: Float, {` | rust/lance-file/src/versions/v1/writer/statistics.rs:101-106 |\n| get_float_statistics | private (private enclosing module) | `fn get_float_statistics<T: ArrowNumericType>(arrays: &[&ArrayRef]) -> StatisticsRow where     T::Native: Bounded + Float,     datafusion_common::scalar::ScalarValue: From<<T as ArrowPrimitiveType>::Native>, {` | rust/lance-file/src/versions/v1/writer/statistics.rs:138-142 |\n| get_decimal_statistics | private (private enclosing module) | `fn get_decimal_statistics(arrays: &[&ArrayRef]) -> StatisticsRow {` | rust/lance-file/src/versions/v1/writer/statistics.rs:163-163 |\n| truncate_utf8 | private (private enclosing module) | `fn truncate_utf8(data: &str, length: usize) -> Option<&str> {` | rust/lance-file/src/versions/v1/writer/statistics.rs:177-177 |\n| increment_utf8 | private (private enclosing module) | `fn increment_utf8(mut data: Vec<u8>) -> Option<Vec<u8>> {` | rust/lance-file/src/versions/v1/writer/statistics.rs:195-195 |\n| truncate_binary | private (private enclosing module) | `fn truncate_binary(data: &[u8], length: usize) -> Option<&[u8]> {` | rust/lance-file/src/versions/v1/writer/statistics.rs:217-217 |\n| increment | private (private enclosing module) | `fn increment(mut data: Vec<u8>) -> Option<Vec<u8>> {` | rust/lance-file/src/versions/v1/writer/statistics.rs:228-228 |\n| get_string_statistics | private (private enclosing module) | `fn get_string_statistics<T: OffsetSizeTrait>(arrays: &[&ArrayRef]) -> StatisticsRow {` | rust/lance-file/src/versions/v1/writer/statistics.rs:241-241 |\n| get_binary_statistics | private (private enclosing module) | `fn get_binary_statistics<T: OffsetSizeTrait>(arrays: &[&ArrayRef]) -> StatisticsRow {` | rust/lance-file/src/versions/v1/writer/statistics.rs:316-316 |\n| get_fixed_size_binary_statistics | private (private enclosing module) | `fn get_fixed_size_binary_statistics(arrays: &[&ArrayRef]) -> StatisticsRow {` | rust/lance-file/src/versions/v1/writer/statistics.rs:389-389 |\n| get_boolean_statistics | private (private enclosing module) | `fn get_boolean_statistics(arrays: &[&ArrayRef]) -> StatisticsRow {` | rust/lance-file/src/versions/v1/writer/statistics.rs:453-453 |\n| cast_dictionary_arrays | private (private enclosing module) | `fn cast_dictionary_arrays<'a, T: ArrowDictionaryKeyType + 'static>(     arrays: &'a [&'a ArrayRef], ) -> Vec<&'a Arc<dyn Array>> {` | rust/lance-file/src/versions/v1/writer/statistics.rs:484-486 |\n| get_dictionary_statistics | private (private enclosing module) | `fn get_dictionary_statistics(arrays: &[&ArrayRef]) -> StatisticsRow {` | rust/lance-file/src/versions/v1/writer/statistics.rs:493-493 |\n| get_temporal_statistics | private (private enclosing module) | `fn get_temporal_statistics(arrays: &[&ArrayRef]) -> StatisticsRow {` | rust/lance-file/src/versions/v1/writer/statistics.rs:515-515 |\n| collect_statistics | pub (private enclosing module) | `pub fn collect_statistics(arrays: &[&ArrayRef]) -> StatisticsRow {` | rust/lance-file/src/versions/v1/writer/statistics.rs:550-550 |\n| supports_stats_collection | pub (private enclosing module) | `pub fn supports_stats_collection(datatype: &DataType) -> bool {` | rust/lance-file/src/versions/v1/writer/statistics.rs:586-586 |\n| StatisticsCollector | pub (private enclosing module) | `pub struct StatisticsCollector {` | rust/lance-file/src/versions/v1/writer/statistics.rs:612-612 |\n| StatisticsCollector::builders | private (private enclosing module) | `builders: BTreeMap<i32, (Field, StatisticsBuilder)>,` | rust/lance-file/src/versions/v1/writer/statistics.rs:613-613 |\n| StatisticsCollector::try_new | pub (private enclosing module) | `pub fn try_new(schema: &Schema) -> Option<Self> {` | rust/lance-file/src/versions/v1/writer/statistics.rs:619-619 |\n| StatisticsCollector::get_builder | pub (private enclosing module) | `pub fn get_builder(&mut self, field_id: i32) -> Option<&mut StatisticsBuilder> {` | rust/lance-file/src/versions/v1/writer/statistics.rs:631-631 |\n| StatisticsCollector::finish | pub (private enclosing module) | `pub fn finish(&mut self) -> Result<RecordBatch> {` | rust/lance-file/src/versions/v1/writer/statistics.rs:635-635 |\n| visit_fields | private (private enclosing module) | `fn visit_fields(schema: &Schema) -> impl Iterator<Item = &Field> {` | rust/lance-file/src/versions/v1/writer/statistics.rs:674-674 |\n| StatisticsBuilder | pub (private enclosing module) | `pub struct StatisticsBuilder {` | rust/lance-file/src/versions/v1/writer/statistics.rs:688-688 |\n| StatisticsBuilder::null_count | private (private enclosing module) | `null_count: PrimitiveBuilder<Int64Type>,` | rust/lance-file/src/versions/v1/writer/statistics.rs:689-689 |\n| StatisticsBuilder::min_value | private (private enclosing module) | `min_value: Box<dyn ArrayBuilder>,` | rust/lance-file/src/versions/v1/writer/statistics.rs:690-690 |\n| StatisticsBuilder::max_value | private (private enclosing module) | `max_value: Box<dyn ArrayBuilder>,` | rust/lance-file/src/versions/v1/writer/statistics.rs:691-691 |\n| StatisticsBuilder::dt | private (private enclosing module) | `dt: DataType,` | rust/lance-file/src/versions/v1/writer/statistics.rs:692-692 |\n| <StatisticsBuilder as Debug>::fmt | trait implementation (private enclosing module) | `fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {` | rust/lance-file/src/versions/v1/writer/statistics.rs:696-696 |\n| StatisticsBuilder::new | private (private enclosing module) | `fn new(data_type: &DataType) -> Self {` | rust/lance-file/src/versions/v1/writer/statistics.rs:705-705 |\n| StatisticsBuilder::string_statistics_appender | private (private enclosing module) | `fn string_statistics_appender<T: OffsetSizeTrait>(&mut self, row: StatisticsRow) {` | rust/lance-file/src/versions/v1/writer/statistics.rs:718-718 |\n| StatisticsBuilder::binary_statistics_appender | private (private enclosing module) | `fn binary_statistics_appender<T: OffsetSizeTrait>(&mut self, row: StatisticsRow) {` | rust/lance-file/src/versions/v1/writer/statistics.rs:763-763 |\n| StatisticsBuilder::statistics_appender | private (private enclosing module) | `fn statistics_appender<T: arrow_array::ArrowPrimitiveType>(&mut self, row: StatisticsRow) {` | rust/lance-file/src/versions/v1/writer/statistics.rs:808-808 |\n| StatisticsBuilder::boolean_appender | private (private enclosing module) | `fn boolean_appender(&mut self, row: StatisticsRow) {` | rust/lance-file/src/versions/v1/writer/statistics.rs:842-842 |\n| StatisticsBuilder::append | pub (private enclosing module) | `pub fn append(&mut self, row: StatisticsRow) {` | rust/lance-file/src/versions/v1/writer/statistics.rs:869-869 |\n\n## Test oracles and their limits\n\nThe [complete L2 catalog](../L2-files/rust/lance-file/src/versions/v1/writer/statistics.rs.md) preserves each literal fixture and assertion, including24 primitive cases,13 string/binary/fixed-binary cases,19 constant values tested with/without null, timestamp unit/timezone sampling, float subsequence bounds, and string/binary/fixed-binary property generators. Fourteen entry points include the empty-outer panic, empty typed arrays, float NaN/infinity/zero behavior, two dictionary examples, complete collector batch/schema comparisons and Boolean multi-array null counting. (rust/lance-file/src/versions/v1/writer/statistics.rs:932-2249)\n\nThe width71 fixed-binary fixture expects its absent maximum tagged64, whereas production tags both bounds with original width71. This is a literal code/fixture discrepancy; dependency equality semantics and test execution are unverified. Decimal fixture expected scalars explicitly use precision38/scale10 while arrays use constructor defaults. Do not claim a passing/failing runtime from those lines alone. (rust/lance-file/src/versions/v1/writer/statistics.rs:1284-1293) (rust/lance-file/src/versions/v1/writer/statistics.rs:1542-1600) (rust/lance-file/src/versions/v1/writer/statistics.rs:446-450)\n\nBinary property generators use half-open0..u8::MAX, excluding0xFF; deterministic cases cover all0xFF overflow separately. Float properties exempt NaN from inequalities and do not assert null_count. No local direct collector test establishes duplicate-ID behavior, unsupported-type selection, parent validity masking, fixed-binary appendability or safe retry after failure. (rust/lance-file/src/versions/v1/writer/statistics.rs:1491-1541) (rust/lance-file/src/versions/v1/writer/statistics.rs:1647-1948) (rust/lance-file/src/versions/v1/writer/statistics.rs:2038-2249)\n"
+    }
+  ],
+  "random_claim_mismatches": 0,
+  "random_claim_clarifications": 0,
+  "new_document_clarifications": 1,
+  "derived_symbol_descriptions_synchronized": 11
+}

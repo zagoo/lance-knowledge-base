@@ -1,0 +1,119 @@
+[
+  {
+    "id": 3,
+    "path": "rust/lance-table/src/rowids/bitmap.rs",
+    "start": 23,
+    "end": 32,
+    "unit": "lines",
+    "read_at": "2026-10-04T05:46:19.980Z",
+    "evidence": "23 | impl std::fmt::Debug for Bitmap {\n24 |     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {\n25 |         write!(f, \"Bitmap {{ data: \")?;\n26 |         for i in 0..self.len {\n27 |             write!(f, \"{}\", if self.get(i) { \"1\" } else { \"0\" })?;\n28 |         }\n29 |         write!(f, \", len: {} }}\", self.len)\n30 |     }\n31 | }\n32 | "
+  },
+  {
+    "id": 4,
+    "path": "rust/lance-file/src/reader.rs",
+    "start": 426,
+    "end": 455,
+    "unit": "lines",
+    "read_at": "2026-10-04T05:46:19.982Z",
+    "evidence": "426 | \n427 | #[derive(Debug, Clone)]\n428 | pub(crate) struct DecodeEngine {\n429 |     pub scheduler: Arc<dyn EncodingsIo>,\n430 |     pub base_projection: ReaderProjection,\n431 |     pub metadata_provider: FileMetadataProvider,\n432 |     pub read_projection: Arc<dyn ReadProjection>,\n433 |     pub decoder_plugins: Arc<DecoderPlugins>,\n434 |     pub cache: Arc<LanceCache>,\n435 |     pub options: FileReaderOptions,\n436 | }\n437 | \n438 | /// A projection-scoped reader for a current-format Lance file.\n439 | ///\n440 | /// This reader fixes a base projection at construction time. All later reads\n441 | /// must stay within that projection, which lets the reader load only the column\n442 | /// metadata needed by the base projection when opening from a [`FileMetadataIndex`].\n443 | /// It intentionally does not expose APIs that require synchronous access to full\n444 | /// file metadata.\n445 | #[derive(Debug, Clone)]\n446 | pub struct ProjectedFileReader {\n447 |     core: DecodeEngine,\n448 | }\n449 | \n450 | /// A current-format Lance file reader backed by fully decoded metadata.\n451 | #[derive(Debug, Clone)]\n452 | pub struct FileReader {\n453 |     pub(crate) core: DecodeEngine,\n454 |     pub(crate) metadata: Arc<CachedFileMetadata>,\n455 | }"
+  },
+  {
+    "id": 5,
+    "path": "rust/lance-table/src/utils/stream.rs",
+    "start": 1321,
+    "end": 1354,
+    "unit": "lines",
+    "read_at": "2026-10-04T05:46:19.982Z",
+    "evidence": "1321 |     #[tokio::test]\n1322 |     async fn test_system_columns_share_schema_for_equivalent_payload_batches() {\n1323 |         let batches = (0..3)\n1324 |             .map(|batch_index| {\n1325 |                 arrow_array::record_batch!((\n1326 |                     \"payload\",\n1327 |                     Int32,\n1328 |                     (batch_index * 10..(batch_index + 1) * 10).collect::<Vec<_>>()\n1329 |                 ))\n1330 |                 .unwrap()\n1331 |             })\n1332 |             .collect::<Vec<_>>();\n1333 |         assert!(!Arc::ptr_eq(&batches[0].schema(), &batches[1].schema()));\n1334 |         let tasks = batches.into_iter().map(|batch| ReadBatchTask {\n1335 |             num_rows: batch.num_rows() as u32,\n1336 |             task: std::future::ready(Ok(batch)).boxed(),\n1337 |         });\n1338 |         let config = RowIdAndDeletesConfig {\n1339 |             params: ReadBatchParams::RangeFull,\n1340 |             with_row_id: true,\n1341 |             with_row_addr: true,\n1342 |             with_row_last_updated_at_version: true,\n1343 |             with_row_created_at_version: true,\n1344 |             deletion_vector: None,\n1345 |             row_id_sequence: Some(Arc::new(\n1346 |                 RowIdSequence::try_from_iter((0..30).map(|row_id| 100 + row_id + row_id / 7))\n1347 |                     .unwrap(),\n1348 |             )),\n1349 |             last_updated_at_sequence: None,\n1350 |             created_at_sequence: None,\n1351 |             make_deletions_null: false,\n1352 |             total_num_rows: 30,\n1353 |         };\n1354 | "
+  },
+  {
+    "id": 6,
+    "path": "rust/lance-core/src/cache/codec.rs",
+    "start": 104,
+    "end": 119,
+    "unit": "lines",
+    "read_at": "2026-10-04T05:46:19.982Z",
+    "evidence": "104 |     let type_id_len = u16::from_le_bytes(bytes.get(off..off + 2)?.try_into().ok()?) as usize;\n105 |     off += 2;\n106 | \n107 |     let type_id = std::str::from_utf8(bytes.get(off..off + type_id_len)?).ok()?;\n108 |     off += type_id_len;\n109 | \n110 |     let type_version = u32::from_le_bytes(bytes.get(off..off + 4)?.try_into().ok()?);\n111 |     off += 4;\n112 | \n113 |     Some(ParsedEnvelope {\n114 |         type_id,\n115 |         type_version,\n116 |         body_offset: off,\n117 |     })\n118 | }\n119 | "
+  },
+  {
+    "id": 7,
+    "path": "rust/lance-file/src/reader.rs",
+    "start": 456,
+    "end": 469,
+    "unit": "lines",
+    "read_at": "2026-10-04T05:46:19.982Z",
+    "evidence": "456 | \n457 | pub(crate) fn tasks_to_record_batch_stream(\n458 |     schema: Arc<Schema>,\n459 |     tasks: Pin<Box<dyn Stream<Item = ReadBatchTask> + Send>>,\n460 |     batch_readahead: u32,\n461 | ) -> Pin<Box<dyn RecordBatchStream>> {\n462 |     let arrow_schema = Arc::new(ArrowSchema::from(schema.as_ref()));\n463 |     let batches = tasks\n464 |         .map(|task| task.task)\n465 |         .buffered(batch_readahead as usize)\n466 |         .boxed();\n467 |     Box::pin(RecordBatchStreamAdapter::new(arrow_schema, batches))\n468 | }\n469 | "
+  },
+  {
+    "id": 8,
+    "path": "rust/lance-table/src/rowids/index.rs",
+    "start": 1442,
+    "end": 1516,
+    "unit": "lines",
+    "read_at": "2026-10-04T05:46:30.551Z",
+    "evidence": "1442 |     #[test]\n1443 |     fn test_large_range_segments_with_deletions() {\n1444 |         let rows_per_fragment = 1_000u64;\n1445 |         let num_fragments = 10u32;\n1446 |         let mut offset = 0u64;\n1447 | \n1448 |         let fragment_indices: Vec<FragmentRowIdIndex> = (0..num_fragments)\n1449 |             .map(|frag_id| {\n1450 |                 let start = offset;\n1451 |                 offset += rows_per_fragment;\n1452 | \n1453 |                 // Delete every 3rd row (offsets 0, 3, 6, ...) within each fragment.\n1454 |                 let mut deleted = roaring::RoaringBitmap::new();\n1455 |                 for i in (0..rows_per_fragment as u32).step_by(3) {\n1456 |                     deleted.insert(i);\n1457 |                 }\n1458 | \n1459 |                 FragmentRowIdIndex {\n1460 |                     fragment_id: frag_id,\n1461 |                     row_id_sequence: Arc::new(RowIdSequence(vec![U64Segment::Range(\n1462 |                         start..start + rows_per_fragment,\n1463 |                     )])),\n1464 |                     deletion_vector: Arc::new(DeletionVector::Bitmap(deleted)),\n1465 |                 }\n1466 |             })\n1467 |             .collect();\n1468 | \n1469 |         let index = RowIdIndex::new(&fragment_indices).unwrap();\n1470 | \n1471 |         // Deleted rows (offset 0, 3, 6, ...) should not be found.\n1472 |         // Row ID 0 has offset 0 in fragment 0 -> deleted.\n1473 |         assert_eq!(index.get(0).unwrap(), None);\n1474 |         // Row ID 3 has offset 3 in fragment 0 -> deleted.\n1475 |         assert_eq!(index.get(3).unwrap(), None);\n1476 | \n1477 |         // Non-deleted rows should resolve correctly.\n1478 |         // Row ID 1 has offset 1 in fragment 0 -> address (frag=0, row=1).\n1479 |         assert_eq!(\n1480 |             index.get(1).unwrap(),\n1481 |             Some(RowAddress::new_from_parts(0, 1))\n1482 |         );\n1483 |         // Row ID 2 has offset 2 in fragment 0 -> address (frag=0, row=2).\n1484 |         assert_eq!(\n1485 |             index.get(2).unwrap(),\n1486 |             Some(RowAddress::new_from_parts(0, 2))\n1487 |         );\n1488 |         // Row ID 4 has offset 4 in fragment 0 -> address (frag=0, row=4).\n1489 |         assert_eq!(\n1490 |             index.get(4).unwrap(),\n1491 |             Some(RowAddress::new_from_parts(0, 4))\n1492 |         );\n1493 | \n1494 |         // Check second fragment: row IDs start at 1000.\n1495 |         // Row ID 1000 has offset 0 in fragment 1 -> deleted.\n1496 |         assert_eq!(index.get(rows_per_fragment).unwrap(), None);\n1497 |         // Row ID 1001 has offset 1 in fragment 1 -> address (frag=1, row=1).\n1498 |         assert_eq!(\n1499 |             index.get(rows_per_fragment + 1).unwrap(),\n1500 |             Some(RowAddress::new_from_parts(1, 1))\n1501 |         );\n1502 | \n1503 |         // Last fragment, last non-deleted row.\n1504 |         // Row ID 9999 has offset 999 in fragment 9 -> 999 % 3 == 0 -> deleted.\n1505 |         let last_row = num_fragments as u64 * rows_per_fragment - 1;\n1506 |         assert_eq!(index.get(last_row).unwrap(), None);\n1507 |         // Row ID 9998 has offset 998 -> 998 % 3 == 2 -> not deleted.\n1508 |         assert_eq!(\n1509 |             index.get(last_row - 1).unwrap(),\n1510 |             Some(RowAddress::new_from_parts(num_fragments - 1, 998))\n1511 |         );\n1512 | \n1513 |         // Out of range.\n1514 |         assert_eq!(index.get(last_row + 1).unwrap(), None);\n1515 |     }\n1516 | "
+  },
+  {
+    "id": 11,
+    "path": "rust/lance-encoding/src/encodings/physical/packed.rs",
+    "start": 1133,
+    "end": 1208,
+    "unit": "lines",
+    "read_at": "2026-10-04T05:46:30.551Z",
+    "evidence": "1133 |     #[test]\n1134 |     fn variable_packed_struct_large_utf8_round_trip() -> Result<()> {\n1135 |         let arrow_fields: Fields = vec![\n1136 |             ArrowField::new(\"value\", DataType::Int64, false),\n1137 |             ArrowField::new(\"text\", DataType::LargeUtf8, false),\n1138 |         ]\n1139 |         .into();\n1140 |         let arrow_struct = ArrowField::new(\"item\", DataType::Struct(arrow_fields), false);\n1141 |         let struct_field = Field::try_from(&arrow_struct)?;\n1142 | \n1143 |         let id_block = fixed_block_from_array(Int64Array::from(vec![10, 20, 30, 40]));\n1144 |         let payload_array = LargeStringArray::from(vec![\n1145 |             \"alpha\",\n1146 |             \"a considerably longer payload for testing\",\n1147 |             \"mid\",\n1148 |             \"z\",\n1149 |         ]);\n1150 |         let payload_block = variable_block_from_large_string_array(payload_array);\n1151 | \n1152 |         let struct_block = StructDataBlock {\n1153 |             children: vec![\n1154 |                 DataBlock::FixedWidth(id_block.clone()),\n1155 |                 DataBlock::VariableWidth(payload_block.clone()),\n1156 |             ],\n1157 |             block_info: BlockInfo::new(),\n1158 |             validity: None,\n1159 |         };\n1160 | \n1161 |         let data_block = DataBlock::Struct(struct_block);\n1162 | \n1163 |         let compression_strategy =\n1164 |             test_compression_strategy(TestEncoding::StructuralU32, CompressionParams::default());\n1165 |         let compressor = crate::compression::CompressionStrategy::create_per_value(\n1166 |             compression_strategy.as_ref(),\n1167 |             &struct_field,\n1168 |             &data_block,\n1169 |         )?;\n1170 |         let (compressed, encoding) = compressor.compress(data_block)?;\n1171 | \n1172 |         let PerValueDataBlock::Variable(zipped) = compressed else {\n1173 |             panic!(\"expected variable-width packed struct output\");\n1174 |         };\n1175 | \n1176 |         let decompression_strategy = DefaultDecompressionStrategy::default();\n1177 |         let decompressor =\n1178 |             crate::compression::DecompressionStrategy::create_variable_per_value_decompressor(\n1179 |                 &decompression_strategy,\n1180 |                 &encoding,\n1181 |             )?;\n1182 |         let decoded = decompressor.decompress(zipped)?;\n1183 | \n1184 |         let DataBlock::Struct(decoded_struct) = decoded else {\n1185 |             panic!(\"expected struct datablock after decode\");\n1186 |         };\n1187 | \n1188 |         let decoded_id = decoded_struct.children[0].as_fixed_width_ref().unwrap();\n1189 |         assert_eq!(decoded_id.bits_per_value, 64);\n1190 |         assert_eq!(decoded_id.data.as_ref(), id_block.data.as_ref());\n1191 | \n1192 |         let decoded_payload = decoded_struct.children[1].as_variable_width_ref().unwrap();\n1193 |         assert_eq!(decoded_payload.bits_per_offset, 64);\n1194 |         assert_eq!(\n1195 |             decoded_payload\n1196 |                 .offsets\n1197 |                 .borrow_to_typed_slice::<i64>()\n1198 |                 .as_ref(),\n1199 |             payload_block\n1200 |                 .offsets\n1201 |                 .borrow_to_typed_slice::<i64>()\n1202 |                 .as_ref()\n1203 |         );\n1204 |         assert_eq!(decoded_payload.data.as_ref(), payload_block.data.as_ref());\n1205 | \n1206 |         Ok(())\n1207 |     }\n1208 | "
+  },
+  {
+    "id": 13,
+    "path": "rust/lance-core/src/cache/moka.rs",
+    "start": 49,
+    "end": 66,
+    "unit": "lines",
+    "read_at": "2026-10-04T05:46:30.552Z",
+    "evidence": "49 | /// Default [`CacheBackend`] backed by a [moka](https://crates.io/crates/moka) cache.\n50 | ///\n51 | /// Nonzero capacities provide weighted eviction and concurrent-load deduplication.\n52 | /// A zero capacity invokes each loader independently without caching.\n53 | pub struct MokaCacheBackend {\n54 |     cache: moka::future::Cache<InternalCacheKey, MokaCacheEntry>,\n55 |     capacity: usize,\n56 |     weight_unit: usize,\n57 | }\n58 | \n59 | impl std::fmt::Debug for MokaCacheBackend {\n60 |     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n61 |         f.debug_struct(\"MokaCacheBackend\")\n62 |             .field(\"entry_count\", &self.cache.entry_count())\n63 |             .finish()\n64 |     }\n65 | }\n66 | "
+  },
+  {
+    "id": 15,
+    "path": "rust/lance-file/src/versions/mod.rs",
+    "start": 109,
+    "end": 122,
+    "unit": "lines",
+    "read_at": "2026-10-04T05:46:36.505Z",
+    "evidence": "109 | pub(crate) fn finish_metadata_index(index: FileMetadataIndex) -> Result<FileMetadataIndex> {\n110 |     match index.version {\n111 |         ConcreteFileVersion::V1 => Err(Error::version_conflict(\n112 |             \"Attempt to use the Lance current-format reader with a v1 metadata index\".to_string(),\n113 |             0,\n114 |             2,\n115 |         )),\n116 |         ConcreteFileVersion::V2_0 => v2_0::finish_metadata_index(index),\n117 |         ConcreteFileVersion::V2_1 => v2_1::finish_metadata_index(index),\n118 |         ConcreteFileVersion::V2_2 => v2_2::finish_metadata_index(index),\n119 |         ConcreteFileVersion::V2_3 => v2_3::finish_metadata_index(index),\n120 |     }\n121 | }\n122 | "
+  },
+  {
+    "id": 17,
+    "path": "rust/lance-file/src/reader.rs",
+    "start": 4173,
+    "end": 4224,
+    "unit": "lines",
+    "read_at": "2026-10-04T05:46:36.506Z",
+    "evidence": "4173 |     #[rstest]\n4174 |     #[tokio::test]\n4175 |     async fn test_blocking_take(\n4176 |         #[values(\n4177 |             ConcreteFileVersion::V2_0,\n4178 |             ConcreteFileVersion::V2_1,\n4179 |             ConcreteFileVersion::V2_2\n4180 |         )]\n4181 |         version: ConcreteFileVersion,\n4182 |     ) {\n4183 |         let fs = FsFixture::default();\n4184 |         let WrittenFile { data, schema, .. } = create_some_file(&fs, version).await;\n4185 |         let total_rows = data.iter().map(|batch| batch.num_rows()).sum::<usize>();\n4186 | \n4187 |         let file_scheduler = fs\n4188 |             .scheduler\n4189 |             .open_file(&fs.tmp_path, &CachedFileSize::unknown())\n4190 |             .await\n4191 |             .unwrap();\n4192 |         let file_reader = FileReader::try_open(\n4193 |             file_scheduler.clone(),\n4194 |             Some(\n4195 |                 versions::reader_projection_from_column_names(version, &schema, &[\"score\"])\n4196 |                     .unwrap(),\n4197 |             ),\n4198 |             Arc::<DecoderPlugins>::default(),\n4199 |             &test_cache(),\n4200 |             FileReaderOptions::default(),\n4201 |         )\n4202 |         .await\n4203 |         .unwrap();\n4204 | \n4205 |         let batches = tokio::task::spawn_blocking(move || {\n4206 |             file_reader\n4207 |                 .read_stream_projected_blocking(\n4208 |                     lance_io::ReadBatchParams::Indices(UInt32Array::from(vec![0, 1, 2, 3, 4])),\n4209 |                     total_rows as u32,\n4210 |                     None,\n4211 |                     FilterExpression::no_filter(),\n4212 |                 )\n4213 |                 .unwrap()\n4214 |                 .collect::<ArrowResult<Vec<_>>>()\n4215 |                 .unwrap()\n4216 |         })\n4217 |         .await\n4218 |         .unwrap();\n4219 | \n4220 |         assert_eq!(batches.len(), 1);\n4221 |         assert_eq!(batches[0].num_rows(), 5);\n4222 |         assert_eq!(batches[0].num_columns(), 1);\n4223 |     }\n4224 | "
+  },
+  {
+    "id": 18,
+    "path": "rust/lance-table/src/transaction/manifest_build.rs",
+    "start": 1507,
+    "end": 1540,
+    "unit": "lines",
+    "read_at": "2026-10-04T05:49:25.326Z",
+    "evidence": "1507 |                 for fragment in existing_fragments {\n1508 |                     let mut fragment = fragment.clone();\n1509 |                     if let Some(new_overlays) = overlays_by_fragment.get(&fragment.id) {\n1510 |                         if next_row_id.is_some() {\n1511 |                             let mut covered_offsets = RoaringBitmap::new();\n1512 |                             for overlay in new_overlays {\n1513 |                                 match &overlay.coverage {\n1514 |                                     OverlayCoverage::Shared(bitmap) => {\n1515 |                                         covered_offsets |= bitmap.as_ref();\n1516 |                                     }\n1517 |                                     OverlayCoverage::PerField(bitmaps) => {\n1518 |                                         for bitmap in bitmaps {\n1519 |                                             covered_offsets |= bitmap.as_ref();\n1520 |                                         }\n1521 |                                     }\n1522 |                                 }\n1523 |                             }\n1524 |                             if !covered_offsets.is_empty() {\n1525 |                                 let covered_offsets: Vec<usize> = covered_offsets\n1526 |                                     .iter()\n1527 |                                     .map(|offset| offset as usize)\n1528 |                                     .collect();\n1529 |                                 // Scans interpret missing lineage metadata as version 1,\n1530 |                                 // so using 1 as the fallback preserves the observable\n1531 |                                 // version of every uncovered row.\n1532 |                                 crate::rowids::version::refresh_row_latest_update_meta_for_partial_frag_rewrite_cols(\n1533 |                                     &mut fragment,\n1534 |                                     &covered_offsets,\n1535 |                                     new_version,\n1536 |                                     1,\n1537 |                                     &config.spilled_row_lineage,\n1538 |                                 )?;\n1539 |                             }\n1540 |                         }"
+  },
+  {
+    "id": 19,
+    "path": "rust/lance-encoding/src/buffer.rs",
+    "start": 144,
+    "end": 173,
+    "unit": "lines",
+    "read_at": "2026-10-04T05:46:36.507Z",
+    "evidence": "144 |     /// Reinterprets a LanceBuffer into a `Vec<T>`\n145 |     ///\n146 |     /// If the underlying buffer is not properly aligned, this will involve a copy of the data\n147 |     ///\n148 |     /// Note: doing this sort of re-interpretation generally makes assumptions about the endianness\n149 |     /// of the data.  Lance does not support big-endian machines so this is safe.  However, if we end\n150 |     /// up supporting big-endian machines in the future, then any use of this method will need to be\n151 |     /// carefully reviewed.\n152 |     pub fn borrow_to_typed_slice<T: ArrowNativeType>(&self) -> ScalarBuffer<T> {\n153 |         let align = std::mem::align_of::<T>();\n154 |         let is_aligned = self.as_ptr().align_offset(align) == 0;\n155 |         if !self.len().is_multiple_of(std::mem::size_of::<T>()) {\n156 |             panic!(\n157 |                 \"attempt to borrow_to_typed_slice to data type of size {} but we have {} bytes which isn't evenly divisible\",\n158 |                 std::mem::size_of::<T>(),\n159 |                 self.len()\n160 |             );\n161 |         }\n162 | \n163 |         if is_aligned {\n164 |             ScalarBuffer::<T>::from(self.clone().into_buffer())\n165 |         } else {\n166 |             let num_values = self.len() / std::mem::size_of::<T>();\n167 |             let vec = Vec::<T>::with_capacity(num_values);\n168 |             let mut bytes = MutableBuffer::from(vec);\n169 |             bytes.extend_from_slice(self);\n170 |             ScalarBuffer::<T>::from(Buffer::from(bytes))\n171 |         }\n172 |     }\n173 | "
+  },
+  {
+    "id": 20,
+    "path": "rust/lance-core/src/cache/backend_uri.rs",
+    "start": 38,
+    "end": 55,
+    "unit": "lines",
+    "read_at": "2026-10-04T05:46:36.507Z",
+    "evidence": "38 | use std::sync::Arc;\n39 | \n40 | use super::backend::CacheBackend;\n41 | use super::registry::{BackendConfig, build_from_config, normalize_backend_kind};\n42 | use crate::{Error, Result};\n43 | \n44 | /// Parse `uri` into a [`BackendConfig`] and build the backend registered\n45 | /// under its `scheme`.\n46 | ///\n47 | /// Returns an error if:\n48 | /// * the URI cannot be parsed,\n49 | /// * no backend is registered for that scheme, or\n50 | /// * the constructor itself fails.\n51 | pub fn build_from_uri(uri: &str) -> Result<Arc<dyn CacheBackend>> {\n52 |     let config = parse_backend_uri(uri)?;\n53 |     build_from_config(&config)\n54 | }\n55 | "
+  }
+]

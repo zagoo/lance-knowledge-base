@@ -1,0 +1,41 @@
+@@ -237,6 +237,40 @@ impl PyBlobDescriptorArrayBuilder {
+  237              .infer_error()
+  238      }
+  239  
+  240 +    /// Append a reference to an existing immutable, table-managed blob object.
+  241 +    ///
+  242 +    /// ``uri`` is relative to the destination table's base, or to the registered
+  243 +    /// ``base_id`` when supplied. ``offset`` and ``size`` select an exact byte
+  244 +    /// range; a zero size means an empty value. This does not upload bytes or
+  245 +    /// commit a reference. Keep the source snapshot protected until the new
+  246 +    /// reference commits, and use Managed-aware clients for table maintenance.
+  247 +    /// References shared across independent tables are not supported.
+  248 +    ///
+  249 +    /// Examples
+  250 +    /// --------
+  251 +    /// >>> builder = BlobDescriptorArrayBuilder("blob")
+  252 +    /// >>> builder.append_managed("_blobs/existing.blob", 0, 100)
+  253 +    /// >>> builder.append_managed("_blobs/existing.blob", 0, 100)
+  254 +    /// >>> len(builder.finish())
+  255 +    /// 2
+  256 +    #[pyo3(signature = (uri, offset, size, *, base_id=None))]
+  257 +    pub fn append_managed(
+  258 +        &mut self,
+  259 +        uri: String,
+  260 +        offset: u64,
+  261 +        size: u64,
+  262 +        base_id: Option<u32>,
+  263 +    ) -> PyResult<()> {
+  264 +        self.inner_mut()?
+  265 +            .push(BlobDescriptor::Managed {
+  266 +                base_id,
+  267 +                uri,
+  268 +                offset,
+  269 +                size,
+  270 +            })
+  271 +            .infer_error()
+  272 +    }
+  273 +
+  274      pub fn append(&mut self, value: &Bound<'_, PyAny>) -> PyResult<()> {
+  275          let value = value.extract::<pyo3::PyRef<'_, PyBlobDescriptor>>()?;
+  276          self.inner_mut()?.push(value.inner.clone()).infer_error()

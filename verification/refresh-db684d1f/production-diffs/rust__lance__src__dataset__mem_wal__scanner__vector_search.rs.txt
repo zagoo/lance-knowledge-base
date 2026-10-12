@@ -1,0 +1,108 @@
+@@ -28,7 +28,7 @@ use crate::io::exec::TakeExec;
+   28  
+   29  use super::collector::LsmDataSourceCollector;
+   30  use super::data_source::LsmDataSource;
+   31 -use super::generation_read::{GenerationRead, filter_above};
+   31 +use super::generation_read::{GenerationRead, memtable_matches_table};
+   32  use super::projection::{
+   33      DISTANCE_COLUMN, build_scanner_projection, canonical_output_schema, null_columns,
+   34      project_to_canonical, validate_projection_names, wants_row_id,
+
+@@ -650,11 +650,7 @@ impl LsmVectorSearchPlanner {
+  650                  // Boxed for the reason the scan planner's arm gives: a
+  651                  // generation resolves its own schema before scanning, and
+  652                  // the inlined future is too deep for the `Send` proof.
+  653 -                let reconciled = generation.reconcile(Box::pin(scanner.create_plan()).await?)?;
+  654 -                match &above {
+  655 -                    Some(expr) => filter_above(reconciled, expr),
+  656 -                    None => Ok(reconciled),
+  657 -                }
+  653 +                generation.reconcile_above(Box::pin(scanner.create_plan()).await?, &above)
+  654              }
+  655              LsmDataSource::ActiveMemTable {
+  656                  batch_store,
+
+@@ -666,20 +662,61 @@ impl LsmVectorSearchPlanner {
+  662  
+  663                  let mut scanner =
+  664                      MemTableScanner::new(batch_store.clone(), index_store.clone(), schema.clone());
+  669 -                // Supply PKs so the memtable scanner can choose HNSW for
+  670 -                // append-only data and exact newest-before-top-k search when
+  671 -                // PK rewrites or filters make stale suppression necessary.
+  672 -                scanner.with_pk_columns(self.pk_columns.clone());
+  665                  // PK auto-included so the staleness filter retains its bloom hash key.
+  666                  let cols =
+  667                      build_scanner_projection(projection, &self.base_schema, &self.pk_columns);
+  676 -                scanner.project(&cols.iter().map(|s| s.as_str()).collect::<Vec<_>>())?;
+  677 -                if let Some(ref filter) = self.filter {
+  668 +
+  669 +                // A memtable created before a schema change uses old column names.
+  670 +                let mut generation =
+  671 +                    (!memtable_matches_table(schema, &self.identity_schema)).then(|| {
+  672 +                        GenerationRead::for_memtable(
+  673 +                            schema,
+  674 +                            &self.identity_schema,
+  675 +                            &self.pk_columns,
+  676 +                            cols.clone(),
+  677 +                        )
+  678 +                    });
+  679 +                let vector_column = match &generation {
+  680 +                    Some(generation) => match generation.stored_name(&self.vector_column) {
+  681 +                        Some(stored) => stored.to_string(),
+  682 +                        // Created before the searched column existed: no candidates.
+  683 +                        None => return self.empty_plan(projection),
+  684 +                    },
+  685 +                    None => self.vector_column.clone(),
+  686 +                };
+  687 +                let (stored_filter, above) = match &mut generation {
+  688 +                    Some(generation) => generation.split_filter(self.filter.as_ref()),
+  689 +                    None => (self.filter.clone(), None),
+  690 +                };
+  691 +
+  692 +                // Supply PKs so the memtable scanner can choose HNSW for
+  693 +                // append-only data and exact newest-before-top-k search when
+  694 +                // PK rewrites or filters make stale suppression necessary.
+  695 +                match &generation {
+  696 +                    Some(generation) => {
+  697 +                        scanner.with_pk_columns(generation.stored_pk_columns()?);
+  698 +                        scanner.project(&generation.stored_projection())?;
+  699 +                    }
+  700 +                    None => {
+  701 +                        scanner.with_pk_columns(self.pk_columns.clone());
+  702 +                        scanner.project(&cols.iter().map(|s| s.as_str()).collect::<Vec<_>>())?;
+  703 +                    }
+  704 +                }
+  705 +                if let Some(stored) = stored_filter {
+  706                      // Routed to filtered brute-force (see `plan_vector_search`):
+  707                      // the predicate masks rows before the memtable top-k cut.
+  680 -                    scanner.filter_expr(filter.clone());
+  708 +                    scanner.filter_expr(stored);
+  709                  }
+  682 -                scanner.nearest(&self.vector_column, query_vector, k)?;
+  710 +                // A filter applied after the scan would run after the top-k cut,
+  711 +                // so search every row exactly and let the filter cut instead.
+  712 +                let k = match above {
+  713 +                    None => k,
+  714 +                    Some(_) => {
+  715 +                        scanner.use_index(false);
+  716 +                        batch_store.total_rows().max(1)
+  717 +                    }
+  718 +                };
+  719 +                scanner.nearest(&vector_column, query_vector, k)?;
+  720                  scanner.distance_range(self.distance_range.0, self.distance_range.1);
+  721                  if let Some(minimum_nprobes) = probe_bounds.minimum_nprobes {
+  722                      scanner.minimum_nprobes(minimum_nprobes);
+
+@@ -691,7 +728,11 @@ impl LsmVectorSearchPlanner {
+  728                  if let Some(ef) = self.ef {
+  729                      scanner.ef(ef);
+  730                  }
+  694 -                scanner.create_plan().await
+  731 +                let plan = Box::pin(scanner.create_plan()).await?;
+  732 +                match generation {
+  733 +                    Some(generation) => generation.reconcile_above(plan, &above),
+  734 +                    None => Ok(plan),
+  735 +                }
+  736              }
+  737          }
+  738      }

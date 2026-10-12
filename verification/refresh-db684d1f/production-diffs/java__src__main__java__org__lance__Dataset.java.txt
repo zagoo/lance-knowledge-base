@@ -1,0 +1,80 @@
+@@ -71,6 +71,7 @@ import java.util.List;
+   71  import java.util.Map;
+   72  import java.util.Optional;
+   73  import java.util.Set;
+   74 +import java.util.UUID;
+   75  import java.util.concurrent.locks.ReentrantLock;
+   76  import java.util.stream.Collectors;
+   77  
+
+@@ -1484,6 +1485,10 @@ public class Dataset implements Closeable {
+ 1485     * counts matching row addresses, which is more efficient than scanning when the index covers the
+ 1486     * filter column.
+ 1487     *
+ 1488 +   * <p>Planning is pinned to {@code indexName}. A filter that cannot be answered by that scalar
+ 1489 +   * index is rejected instead of scanning the table or selecting another index. Deleted rows are
+ 1490 +   * excluded.
+ 1491 +   *
+ 1492     * @param indexName the name of the scalar index to use
+ 1493     * @param filter the filter expression (e.g., "column = 5")
+ 1494     * @param fragmentIds optional list of fragment IDs to restrict the count to
+
+@@ -1501,9 +1506,58 @@ public class Dataset implements Closeable {
+ 1506      }
+ 1507    }
+ 1508  
+ 1509 +  /**
+ 1510 +   * Count rows matching a filter using explicit physical segments of a scalar index.
+ 1511 +   *
+ 1512 +   * <p>Only {@code segmentUuids} are opened. Their current fragment coverage defines the count
+ 1513 +   * scope: matching deleted rows inside that scope are excluded, and rows outside it are not
+ 1514 +   * counted. When {@code fragmentIds} is omitted, the scope is derived from that coverage. When it
+ 1515 +   * is present, its set must equal the coverage; order does not matter. A mismatch is rejected with
+ 1516 +   * an error that reports both sets.
+ 1517 +   *
+ 1518 +   * <p>The selection is accepted only when it includes every segment that contributes to that
+ 1519 +   * coverage. After fragment reuse, one source segment can advertise every destination fragment
+ 1520 +   * while still depending on its siblings. An incomplete selection is rejected, and the error names
+ 1521 +   * the missing segment UUIDs. A segment whose coverage does not overlap the selection can be
+ 1522 +   * queried alone.
+ 1523 +   *
+ 1524 +   * <p>An empty segment list, duplicate segment UUIDs, an unknown UUID, a UUID from a different
+ 1525 +   * index, or a segment without fragment coverage is rejected. The existing three-argument method
+ 1526 +   * remains available and does not take a segment list.
+ 1527 +   *
+ 1528 +   * @param indexName the logical scalar index name that every selected segment must belong to
+ 1529 +   * @param filter the filter expression (e.g., "column = 5")
+ 1530 +   * @param segmentUuids physical segment UUIDs to open; must be non-empty and contain no duplicates
+ 1531 +   * @param fragmentIds optional fragment IDs that must match the selected segments' current
+ 1532 +   *     coverage
+ 1533 +   * @return count of matching rows in the selected segment scope
+ 1534 +   */
+ 1535 +  public long countIndexedRows(
+ 1536 +      String indexName,
+ 1537 +      String filter,
+ 1538 +      List<UUID> segmentUuids,
+ 1539 +      Optional<List<Integer>> fragmentIds) {
+ 1540 +    try (LockManager.ReadLock readLock = lockManager.acquireReadLock()) {
+ 1541 +      Preconditions.checkArgument(nativeDatasetHandle != 0, "Dataset is closed");
+ 1542 +      Preconditions.checkArgument(
+ 1543 +          indexName != null && !indexName.isEmpty(), "indexName cannot be null or empty");
+ 1544 +      Preconditions.checkArgument(
+ 1545 +          filter != null && !filter.isEmpty(), "filter cannot be null or empty");
+ 1546 +      Preconditions.checkNotNull(segmentUuids, "segmentUuids cannot be null");
+ 1547 +      Preconditions.checkArgument(!segmentUuids.isEmpty(), "segmentUuids cannot be empty");
+ 1548 +      return nativeCountIndexedRowsWithSegments(indexName, filter, segmentUuids, fragmentIds);
+ 1549 +    }
+ 1550 +  }
+ 1551 +
+ 1552    private native long nativeCountIndexedRows(
+ 1553        String indexName, String filter, Optional<List<Integer>> fragmentIds);
+ 1554  
+ 1555 +  private native long nativeCountIndexedRowsWithSegments(
+ 1556 +      String indexName,
+ 1557 +      String filter,
+ 1558 +      List<UUID> segmentUuids,
+ 1559 +      Optional<List<Integer>> fragmentIds);
+ 1560 +
+ 1561    /**
+ 1562     * Calculate the size of the dataset.
+ 1563     *

@@ -1,0 +1,162 @@
+[
+  {
+    "id": 1,
+    "path": "rust/lance-table/src/rowids/segment.rs",
+    "start": 1068,
+    "end": 1112,
+    "read_at": "2026-10-03T22:15:56.999Z",
+    "evidence": "1068 |         // Empty\n1069 |         check_segment(&[], &U64Segment::Range(0..0));\n1070 | \n1071 |         // Single value\n1072 |         check_segment(&[42], &U64Segment::Range(42..43));\n1073 | \n1074 |         // Contiguous range\n1075 |         check_segment(\n1076 |             &(100..200).collect::<Vec<_>>(),\n1077 |             &U64Segment::Range(100..200),\n1078 |         );\n1079 | \n1080 |         // Range with a hole\n1081 |         let values = (0..1000).filter(|&x| x != 100).collect::<Vec<_>>();\n1082 |         check_segment(\n1083 |             &values,\n1084 |             &U64Segment::RangeWithHoles {\n1085 |                 range: 0..1000,\n1086 |                 holes: vec![100].into(),\n1087 |             },\n1088 |         );\n1089 | \n1090 |         // Range with every other value missing\n1091 |         let values = (0..1000).filter(|&x| x % 2 == 0).collect::<Vec<_>>();\n1092 |         check_segment(\n1093 |             &values,\n1094 |             &U64Segment::RangeWithBitmap {\n1095 |                 range: 0..999,\n1096 |                 bitmap: Bitmap::from((0..999).map(|x| x % 2 == 0).collect::<Vec<_>>().as_slice()),\n1097 |             },\n1098 |         );\n1099 | \n1100 |         // Sparse but sorted sequence\n1101 |         check_segment(\n1102 |             &[1, 7000, 24000],\n1103 |             &U64Segment::SortedArray(vec![1, 7000, 24000].into()),\n1104 |         );\n1105 | \n1106 |         // Sparse unsorted sequence\n1107 |         check_segment(\n1108 |             &[7000, 1, 24000],\n1109 |             &U64Segment::Array(vec![7000, 1, 24000].into()),\n1110 |         );\n1111 |     }\n1112 | "
+  },
+  {
+    "id": 2,
+    "path": "rust/lance-core/src/cache/entry_io.rs",
+    "start": 266,
+    "end": 289,
+    "read_at": "2026-10-03T22:15:56.999Z",
+    "evidence": "266 |     #[test]\n267 |     fn test_read_header_rejects_truncated_length_prefix() {\n268 |         let data = Bytes::from_static(&[0, 0]);\n269 |         let message = CacheEntryReader::new(&data, 0, 1)\n270 |             .read_header::<u64>()\n271 |             .unwrap_err()\n272 |             .to_string();\n273 |         assert!(message.contains(\"truncated length prefix\"), \"{message}\");\n274 |     }\n275 | \n276 |     #[test]\n277 |     fn test_read_header_rejects_truncated_body() {\n278 |         // Prefix claims 16 payload bytes; only 3 follow.\n279 |         let mut data = 16u32.to_le_bytes().to_vec();\n280 |         data.extend_from_slice(&[1, 2, 3]);\n281 |         let data = Bytes::from(data);\n282 | \n283 |         let message = CacheEntryReader::new(&data, 0, 1)\n284 |             .read_header::<u64>()\n285 |             .unwrap_err()\n286 |             .to_string();\n287 |         assert!(message.contains(\"truncated body\"), \"{message}\");\n288 |     }\n289 | "
+  },
+  {
+    "id": 3,
+    "path": "rust/lance-core/src/datatypes/schema.rs",
+    "start": 2712,
+    "end": 2769,
+    "read_at": "2026-10-03T22:15:57.000Z",
+    "evidence": "2712 |     #[test]\n2713 |     fn test_schema_unenforced_primary_key() {\n2714 |         let cases = vec![\n2715 |             ArrowSchema::new(vec![ArrowField::new(\"a\", DataType::Int32, false)]),\n2716 |             ArrowSchema::new(vec![\n2717 |                 ArrowField::new(\"a\", DataType::Int32, false).with_metadata(\n2718 |                     vec![(\n2719 |                         \"lance-schema:unenforced-primary-key\".to_owned(),\n2720 |                         \"true\".to_owned(),\n2721 |                     )]\n2722 |                     .into_iter()\n2723 |                     .collect::<HashMap<_, _>>(),\n2724 |                 ),\n2725 |             ]),\n2726 |             ArrowSchema::new(vec![\n2727 |                 ArrowField::new(\"a\", DataType::Int32, false).with_metadata(\n2728 |                     vec![(\n2729 |                         \"lance-schema:unenforced-primary-key\".to_owned(),\n2730 |                         \"true\".to_owned(),\n2731 |                     )]\n2732 |                     .into_iter()\n2733 |                     .collect::<HashMap<_, _>>(),\n2734 |                 ),\n2735 |                 ArrowField::new(\n2736 |                     \"b\",\n2737 |                     DataType::Struct(ArrowFields::from(vec![\n2738 |                         ArrowField::new(\"f1\", DataType::Utf8, false).with_metadata(\n2739 |                             vec![(\n2740 |                                 \"lance-schema:unenforced-primary-key\".to_owned(),\n2741 |                                 \"true\".to_owned(),\n2742 |                             )]\n2743 |                             .into_iter()\n2744 |                             .collect::<HashMap<_, _>>(),\n2745 |                         ),\n2746 |                     ])),\n2747 |                     false,\n2748 |                 ),\n2749 |             ]),\n2750 |         ];\n2751 |         let expected = [\n2752 |             vec![],\n2753 |             vec![\"a\".to_owned()],\n2754 |             vec![\"a\".to_owned(), \"f1\".to_owned()],\n2755 |         ];\n2756 | \n2757 |         for (idx, case) in cases.into_iter().enumerate() {\n2758 |             let schema = Schema::try_from(&case).unwrap();\n2759 |             assert_eq!(\n2760 |                 schema\n2761 |                     .unenforced_primary_key()\n2762 |                     .iter()\n2763 |                     .map(|f| f.name.clone())\n2764 |                     .collect::<Vec<_>>(),\n2765 |                 expected[idx]\n2766 |             );\n2767 |         }\n2768 |     }\n2769 | "
+  },
+  {
+    "id": 4,
+    "path": "rust/lance-file/src/writer_tests.rs",
+    "start": 1208,
+    "end": 1225,
+    "read_at": "2026-10-03T22:15:57.000Z",
+    "evidence": "1208 |         let file_scheduler = fs\n1209 |             .scheduler\n1210 |             .open_file(&fs.tmp_path, &CachedFileSize::unknown())\n1211 |             .await\n1212 |             .unwrap();\n1213 |         let reader = FileReader::try_open(\n1214 |             file_scheduler,\n1215 |             None,\n1216 |             Arc::<DecoderPlugins>::default(),\n1217 |             &LanceCache::no_cache(),\n1218 |             FileReaderOptions::default(),\n1219 |         )\n1220 |         .await\n1221 |         .unwrap();\n1222 |         assert_eq!(reader.column_num_rows(0).unwrap(), 3);\n1223 |         assert_eq!(reader.column_num_rows(1).unwrap(), 3);\n1224 |     }\n1225 | "
+  },
+  {
+    "id": 5,
+    "path": "rust/lance-table/src/io/commit.rs",
+    "start": 289,
+    "end": 314,
+    "read_at": "2026-10-03T22:16:09.434Z",
+    "evidence": "289 | /// Get the latest manifest path.\n290 | ///\n291 | /// - Local filesystem: a single directory read.\n292 | /// - Stores where listing is not lexicographically ordered (e.g. S3 Express):\n293 | ///   the version hint (read the hint file, then probe higher versions with\n294 | ///   HEADs), falling back to a listing if the hint is missing or stale. A full\n295 | ///   listing on these stores is O(n) in the number of versions.\n296 | /// - Lexicographically ordered stores (e.g. S3 Standard, GCS): the listing\n297 | ///   already resolves the latest version in roughly one request.\n298 | async fn current_manifest_path(\n299 |     object_store: &ObjectStore,\n300 |     base: &Path,\n301 | ) -> Result<ManifestLocation> {\n302 |     if object_store.has_direct_local_paths() {\n303 |         if let Ok(Some(location)) = current_manifest_local(base) {\n304 |             return Ok(location);\n305 |         }\n306 |     } else if uses_version_hint(object_store)\n307 |         && let Some(location) = read_version_hint_and_probe(object_store, base).await\n308 |     {\n309 |         return Ok(location);\n310 |     }\n311 | \n312 |     resolve_version_from_listing(object_store, base).await\n313 | }\n314 | "
+  },
+  {
+    "id": 6,
+    "path": "rust/lance-table/src/rowids.rs",
+    "start": 1447,
+    "end": 1467,
+    "read_at": "2026-10-03T22:16:09.435Z",
+    "evidence": "1447 |     #[test]\n1448 |     fn test_row_id_sequence_to_treemap_overlapping_segments() {\n1449 |         // Compaction can concatenate segments whose ranges overlap but whose\n1450 |         // selected ids are disjoint (here: even ids, then odd ids over 0..6).\n1451 |         // The tree map must contain every id the sequence yields.\n1452 |         let sequence = RowIdSequence(vec![\n1453 |             U64Segment::RangeWithBitmap {\n1454 |                 range: 0..6,\n1455 |                 bitmap: [true, false, true, false, true, false].as_slice().into(),\n1456 |             },\n1457 |             U64Segment::RangeWithBitmap {\n1458 |                 range: 0..6,\n1459 |                 bitmap: [false, true, false, true, false, true].as_slice().into(),\n1460 |             },\n1461 |         ]);\n1462 | \n1463 |         let expected = sequence.iter().collect::<RowAddrTreeMap>();\n1464 |         assert_eq!(expected, (0..6).collect::<RowAddrTreeMap>());\n1465 |         assert_eq!(RowAddrTreeMap::from(&sequence), expected);\n1466 |     }\n1467 | "
+  },
+  {
+    "id": 7,
+    "path": "rust/lance-file/src/reader.rs",
+    "start": 4476,
+    "end": 4498,
+    "read_at": "2026-10-03T22:16:09.436Z",
+    "evidence": "4476 |         let scheduler = fs\n4477 |             .scheduler\n4478 |             .open_file(&fs.tmp_path, &CachedFileSize::unknown())\n4479 |             .await\n4480 |             .unwrap();\n4481 |         let error = match read_path {\n4482 |             MetadataReadPath::Full => FileReader::read_all_metadata(&scheduler).await.map(|_| ()),\n4483 |             MetadataReadPath::Indexed => FileReader::read_metadata_index(&scheduler)\n4484 |                 .await\n4485 |                 .map(|_| ()),\n4486 |         }\n4487 |         .expect_err(\"invalid GBO descriptor must fail before metadata I/O\");\n4488 | \n4489 |         assert!(\n4490 |             matches!(error, lance_core::Error::InvalidInput { .. }),\n4491 |             \"expected InvalidInput, got {error:?}\"\n4492 |         );\n4493 |         assert!(\n4494 |             error.to_string().contains(expected_message),\n4495 |             \"unexpected error: {error}\"\n4496 |         );\n4497 |     }\n4498 | "
+  },
+  {
+    "id": 8,
+    "path": "rust/lance-core/src/cache/codec.rs",
+    "start": 449,
+    "end": 477,
+    "read_at": "2026-10-03T22:16:09.436Z",
+    "evidence": "449 |     #[test]\n450 |     fn wrong_magic_is_miss() {\n451 |         let mut bytes = serialize_widget(&Widget { n: 7 }).to_vec();\n452 |         bytes[0] = b'X';\n453 |         assert_eq!(\n454 |             miss_reason(&Bytes::from(bytes)),\n455 |             Some(CacheMissReason::InvalidEnvelope)\n456 |         );\n457 |     }\n458 | \n459 |     #[test]\n460 |     fn pre_stabilization_blob_is_miss() {\n461 |         // An old unstable blob led with a small u64 LE length prefix (a JSON\n462 |         // header of tens of bytes) — no magic. It must self-heal to a miss.\n463 |         let mut blob = Vec::new();\n464 |         blob.extend_from_slice(&(42u64).to_le_bytes());\n465 |         blob.extend_from_slice(&[0u8; 42]);\n466 |         assert_eq!(\n467 |             miss_reason(&Bytes::from(blob)),\n468 |             Some(CacheMissReason::InvalidEnvelope)\n469 |         );\n470 | \n471 |         // A different unstable shape led with a small u8 tag (0/1/2).\n472 |         assert_eq!(\n473 |             miss_reason(&Bytes::from(vec![0u8, 1, 2, 3])),\n474 |             Some(CacheMissReason::InvalidEnvelope)\n475 |         );\n476 |     }\n477 | "
+  },
+  {
+    "id": 9,
+    "path": "rust/lance-file/src/concat.rs",
+    "start": 201,
+    "end": 231,
+    "read_at": "2026-10-03T22:16:20.340Z",
+    "evidence": "201 |         let has_blob_v2 = schema.fields_pre_order().any(|field| field.is_blob_v2());\n202 |         if has_blob_v2 {\n203 |             validate_blob_descriptors(\n204 |                 &input,\n205 |                 metadata.as_ref(),\n206 |                 schema.as_ref(),\n207 |                 blob_ids.as_ref(),\n208 |             )\n209 |             .await?;\n210 |             if blob_target_id.is_none() {\n211 |                 return Err(Error::invalid_input(format!(\n212 |                     \"part at '{}' contains Blob v2 columns but no Blob target ID was provided\",\n213 |                     input.path()\n214 |                 )));\n215 |             }\n216 |         }\n217 | \n218 |         Ok(Self {\n219 |             input,\n220 |             metadata,\n221 |             schema,\n222 |             blob_ids,\n223 |             blob_target_id,\n224 |         })\n225 |     }\n226 | \n227 |     /// Number of physical rows described by the part footer.\n228 |     pub fn num_rows(&self) -> u64 {\n229 |         self.metadata.num_rows\n230 |     }\n231 | }"
+  },
+  {
+    "id": 10,
+    "path": "rust/lance-core/src/datatypes/field.rs",
+    "start": 644,
+    "end": 659,
+    "read_at": "2026-10-03T22:16:20.341Z",
+    "evidence": "644 |     /// If the field is a blob, update this field with the same name and id\n645 |     /// but with the data type set to a struct of the blob description fields.\n646 |     ///\n647 |     /// If the field is not a blob, return the field itself.\n648 |     pub fn unloaded_mut(&mut self) {\n649 |         if self.is_blob_v2() {\n650 |             self.logical_type = BLOB_V2_DESC_LANCE_FIELD.logical_type.clone();\n651 |             self.children = BLOB_V2_DESC_LANCE_FIELD.children.clone();\n652 |             self.metadata = BLOB_V2_DESC_LANCE_FIELD.metadata.clone();\n653 |         } else if self.is_blob() {\n654 |             self.logical_type = BLOB_DESC_LANCE_FIELD.logical_type.clone();\n655 |             self.children = BLOB_DESC_LANCE_FIELD.children.clone();\n656 |             self.metadata = BLOB_DESC_LANCE_FIELD.metadata.clone();\n657 |         }\n658 |     }\n659 | "
+  },
+  {
+    "id": 11,
+    "path": "rust/lance-core/src/cache/entry_io.rs",
+    "start": 139,
+    "end": 153,
+    "read_at": "2026-10-03T22:16:20.341Z",
+    "evidence": "139 |     /// The `type_version` from the envelope. Branch on this for backward compat.\n140 |     pub fn version(&self) -> u32 {\n141 |         self.version\n142 |     }\n143 | \n144 |     /// Read a single discriminant byte written by [`CacheEntryWriter::write_u8`].\n145 |     pub fn read_u8(&mut self) -> Result<u8> {\n146 |         let bytes = self.data.as_ref();\n147 |         let v = *bytes\n148 |             .get(self.offset)\n149 |             .ok_or_else(|| Error::io(\"cache entry: truncated, missing tag byte\".to_string()))?;\n150 |         self.offset += 1;\n151 |         Ok(v)\n152 |     }\n153 | "
+  },
+  {
+    "id": 12,
+    "path": "rust/lance-file/src/reader/structural.rs",
+    "start": 118,
+    "end": 143,
+    "read_at": "2026-10-03T22:16:20.341Z",
+    "evidence": "118 | /// Finish normalized column metadata after all pages have been validated.\n119 | pub fn build_column_info(\n120 |     column_index: u32,\n121 |     metadata: &pbfile::ColumnMetadata,\n122 |     page_infos: Vec<PageInfo>,\n123 | ) -> Result<Arc<ColumnInfo>> {\n124 |     if metadata.buffer_offsets.len() != metadata.buffer_sizes.len() {\n125 |         return Err(Error::invalid_input_source(\n126 |             format!(\n127 |                 \"Column {} has {} buffer offsets but {} buffer sizes\",\n128 |                 column_index,\n129 |                 metadata.buffer_offsets.len(),\n130 |                 metadata.buffer_sizes.len()\n131 |             )\n132 |             .into(),\n133 |         ));\n134 |     }\n135 |     let buffer_offsets_and_sizes = Arc::from(\n136 |         metadata\n137 |             .buffer_offsets\n138 |             .iter()\n139 |             .zip(&metadata.buffer_sizes)\n140 |             .map(|(offset, size)| (*offset, *size))\n141 |             .collect::<Vec<_>>(),\n142 |     );\n143 |     let encoding: pb::ColumnEncoding ="
+  },
+  {
+    "id": 13,
+    "path": "rust/lance-table/Cargo.toml",
+    "start": 14,
+    "end": 25,
+    "read_at": "2026-10-03T22:16:37.556Z",
+    "evidence": "14 | [dependencies]\n15 | lance-arrow.workspace = true\n16 | lance-core.workspace = true\n17 | lance-file.workspace = true\n18 | lance-select.workspace = true\n19 | lance-io.workspace = true\n20 | arrow.workspace = true\n21 | arrow-array.workspace = true\n22 | arrow-buffer.workspace = true\n23 | arrow-ipc.workspace = true\n24 | arrow-schema.workspace = true\n25 | async-trait.workspace = true"
+  },
+  {
+    "id": 14,
+    "path": "rust/lance-table/src/system_index/mem_wal.rs",
+    "start": 27,
+    "end": 55,
+    "read_at": "2026-10-03T22:16:37.557Z",
+    "evidence": "27 | \n28 | /// Type alias for shard identifier (UUID v4).\n29 | pub type ShardId = Uuid;\n30 | \n31 | /// An SSTable: the immutable result of flushing a MemTable, stored as a Lance dataset.\n32 | #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, DeepSizeOf)]\n33 | pub struct SsTable {\n34 |     pub generation: u64,\n35 |     pub path: String,\n36 |     /// Payload size of the rows, as the writer's MemTable accounted for them.\n37 |     ///\n38 |     /// An estimate of the payload, not a bound on what reading the SSTable\n39 |     /// costs: it excludes the per-array structure a reader materializes, so a\n40 |     /// consumer budgeting memory from it must add its own headroom.\n41 |     ///\n42 |     /// `None` on an SSTable written before these fields existed, which a reader\n43 |     /// must carry as unmeasured rather than as zero. The same applies to the two\n44 |     /// below.\n45 |     pub in_memory_bytes: Option<u64>,\n46 |     /// Rows held, counting the older duplicates of a primary key that the\n47 |     /// generation's deletion vector masks.\n48 |     pub physical_rows: Option<u64>,\n49 |     /// Total payload size of the primary-key columns over every row in\n50 |     /// [`Self::physical_rows`] -- not a per-row size, which varies for a\n51 |     /// variable-length key. Carries the same estimate caveat as\n52 |     /// [`Self::in_memory_bytes`], and is also `None` on a table with no primary\n53 |     /// key.\n54 |     pub primary_key_bytes: Option<u64>,\n55 | }"
+  },
+  {
+    "id": 15,
+    "path": "rust/lance-file/src/reader.rs",
+    "start": 3101,
+    "end": 3163,
+    "read_at": "2026-10-03T22:16:37.558Z",
+    "evidence": "3101 |     #[tokio::test]\n3102 |     async fn test_round_trip() {\n3103 |         let fs = FsFixture::default();\n3104 | \n3105 |         let WrittenFile { data, .. } = create_some_file(&fs, ConcreteFileVersion::V2_0).await;\n3106 | \n3107 |         let file_size = fs.object_store.size(&fs.tmp_path).await.unwrap() as usize;\n3108 |         let footer = fs\n3109 |             .object_store\n3110 |             .open(&fs.tmp_path)\n3111 |             .await\n3112 |             .unwrap()\n3113 |             .get_range(file_size - 8..file_size)\n3114 |             .await\n3115 |             .unwrap();\n3116 |         assert_eq!(footer_version(&footer), (0, 3));\n3117 |         assert_eq!(\n3118 |             crate::determine_file_version(&fs.object_store, &fs.tmp_path, Some(file_size))\n3119 |                 .await\n3120 |                 .unwrap(),\n3121 |             ConcreteFileVersion::V2_0\n3122 |         );\n3123 | \n3124 |         for read_size in [32, 1024, 1024 * 1024] {\n3125 |             let file_scheduler = fs\n3126 |                 .scheduler\n3127 |                 .open_file(&fs.tmp_path, &CachedFileSize::unknown())\n3128 |                 .await\n3129 |                 .unwrap();\n3130 |             let file_reader = FileReader::try_open(\n3131 |                 file_scheduler,\n3132 |                 None,\n3133 |                 Arc::<DecoderPlugins>::default(),\n3134 |                 &test_cache(),\n3135 |                 FileReaderOptions::default(),\n3136 |             )\n3137 |             .await\n3138 |             .unwrap();\n3139 | \n3140 |             assert_eq!(\n3141 |                 (\n3142 |                     file_reader.metadata().major_version,\n3143 |                     file_reader.metadata().minor_version\n3144 |                 ),\n3145 |                 (0, 3)\n3146 |             );\n3147 |             let schema = file_reader.schema();\n3148 |             assert_eq!(schema.metadata.get(\"foo\").unwrap(), \"bar\");\n3149 | \n3150 |             let batch_stream = file_reader\n3151 |                 .read_stream(\n3152 |                     lance_io::ReadBatchParams::RangeFull,\n3153 |                     read_size,\n3154 |                     16,\n3155 |                     FilterExpression::no_filter(),\n3156 |                 )\n3157 |                 .await\n3158 |                 .unwrap();\n3159 | \n3160 |             verify_expected(&data, batch_stream, read_size, None).await;\n3161 |         }\n3162 |     }\n3163 | "
+  },
+  {
+    "id": 16,
+    "path": "rust/lance-table/src/io/commit/external_manifest.rs",
+    "start": 2012,
+    "end": 2040,
+    "read_at": "2026-10-03T22:16:37.558Z",
+    "evidence": "2012 |         policy.lock().unwrap().clear_before_policy(\"fail-copy-once\");\n2013 |         let resolved = handler\n2014 |             .resolve_version_location(&base_path, version, object_store.inner.as_ref())\n2015 |             .await\n2016 |             .expect(\"the retained staging manifest must allow finalization\");\n2017 |         assert_eq!(resolved.path, canonical_path);\n2018 | \n2019 |         let finalized_location = external_store\n2020 |             .get_manifest_location(base_path.as_ref(), version)\n2021 |             .await\n2022 |             .expect(\"the external store must publish the canonical location\");\n2023 |         assert_eq!(finalized_location.path, canonical_path);\n2024 |         object_store\n2025 |             .inner\n2026 |             .head(&canonical_path)\n2027 |             .await\n2028 |             .expect(\"the canonical manifest must exist after finalization\");\n2029 | \n2030 |         let staging_error = object_store\n2031 |             .inner\n2032 |             .head(&staging_path)\n2033 |             .await\n2034 |             .expect_err(\"successful finalization must clean up the staging manifest\");\n2035 |         assert!(\n2036 |             matches!(staging_error, ObjectStoreError::NotFound { .. }),\n2037 |             \"unexpected staging manifest error: {staging_error}\"\n2038 |         );\n2039 |     }\n2040 | "
+  },
+  {
+    "id": 17,
+    "path": "rust/lance-file/src/versions/v1/encoding/dictionary.rs",
+    "start": 59,
+    "end": 79,
+    "read_at": "2026-10-03T22:19:57.590Z",
+    "evidence": "59 | impl DictionaryEncoder<'_> {\n60 |     pub async fn encode(&mut self, array: &[&dyn Array]) -> Result<usize> {\n61 |         use DataType::*;\n62 | \n63 |         match self.key_type {\n64 |             UInt8 => self.write_typed_array::<UInt8Type>(array).await,\n65 |             UInt16 => self.write_typed_array::<UInt16Type>(array).await,\n66 |             UInt32 => self.write_typed_array::<UInt32Type>(array).await,\n67 |             UInt64 => self.write_typed_array::<UInt64Type>(array).await,\n68 |             Int8 => self.write_typed_array::<Int8Type>(array).await,\n69 |             Int16 => self.write_typed_array::<Int16Type>(array).await,\n70 |             Int32 => self.write_typed_array::<Int32Type>(array).await,\n71 |             Int64 => self.write_typed_array::<Int64Type>(array).await,\n72 |             _ => Err(Error::schema(format!(\n73 |                 \"DictionaryEncoder: unsupported key type: {:?}\",\n74 |                 self.key_type\n75 |             ))),\n76 |         }\n77 |     }\n78 | }\n79 | "
+  },
+  {
+    "id": 18,
+    "path": "rust/lance-table/src/transaction/index_maintenance.rs",
+    "start": 467,
+    "end": 516,
+    "read_at": "2026-10-03T22:19:57.591Z",
+    "evidence": "467 |     /// After a `Rewrite` fully compacts a fragment, its data overlays are baked\n468 |     /// into the new fragment's base data. An index built *before* one of those\n469 |     /// overlays (`overlay.committed_version > index.dataset_version`) indexed the\n470 |     /// stale pre-overlay values -- and unlike a live overlay, the compacted\n471 |     /// fragment no longer signals that staleness to the query path. Drop each\n472 |     /// rewritten (new) fragment from the coverage of any index covering a field\n473 |     /// such an overlay supplied, so those rows fall back to a flat scan.\n474 |     pub(super) fn prune_overlay_stale_fields_from_indices(\n475 |         indices: &mut [IndexMetadata],\n476 |         groups: &[RewriteGroup],\n477 |     ) {\n478 |         for group in groups {\n479 |             // field id -> newest overlay committed_version supplying that field\n480 |             let mut overlaid_field_versions: HashMap<i32, u64> = HashMap::new();\n481 |             for old_frag in &group.old_fragments {\n482 |                 for overlay in &old_frag.overlays {\n483 |                     for &field_id in overlay.data_file.fields.iter() {\n484 |                         if field_id < 0 {\n485 |                             // Tombstoned (obsolete) overlay field: supplies nothing.\n486 |                             continue;\n487 |                         }\n488 |                         let entry = overlaid_field_versions.entry(field_id).or_insert(0);\n489 |                         *entry = (*entry).max(overlay.committed_version);\n490 |                     }\n491 |                 }\n492 |             }\n493 |             if overlaid_field_versions.is_empty() {\n494 |                 continue;\n495 |             }\n496 | \n497 |             let new_fragment_ids = group\n498 |                 .new_fragments\n499 |                 .iter()\n500 |                 .map(|f| f.id as u32)\n501 |                 .collect::<Vec<_>>();\n502 |             for index in indices.iter_mut() {\n503 |                 let is_stale = index.fields.iter().any(|field_id| {\n504 |                     overlaid_field_versions\n505 |                         .get(field_id)\n506 |                         .is_some_and(|&overlay_version| overlay_version > index.dataset_version)\n507 |                 });\n508 |                 if is_stale && let Some(fragment_bitmap) = &mut index.fragment_bitmap {\n509 |                     for new_id in &new_fragment_ids {\n510 |                         fragment_bitmap.remove(*new_id);\n511 |                     }\n512 |                 }\n513 |             }\n514 |         }\n515 |     }\n516 | "
+  },
+  {
+    "id": 19,
+    "path": "rust/lance-core/src/utils/deletion.rs",
+    "start": 276,
+    "end": 293,
+    "read_at": "2026-10-03T22:19:57.591Z",
+    "evidence": "276 | \n277 | impl FromIterator<u32> for DeletionVector {\n278 |     fn from_iter<T: IntoIterator<Item = u32>>(iter: T) -> Self {\n279 |         let mut deletion_vector = Self::default();\n280 |         deletion_vector.extend(iter);\n281 |         deletion_vector\n282 |     }\n283 | }\n284 | \n285 | impl From<RoaringBitmap> for DeletionVector {\n286 |     fn from(bitmap: RoaringBitmap) -> Self {\n287 |         if bitmap.is_empty() {\n288 |             Self::NoDeletions\n289 |         } else {\n290 |             Self::Bitmap(bitmap)\n291 |         }\n292 |     }\n293 | }"
+  },
+  {
+    "id": 20,
+    "path": "rust/lance-file/src/writer/structural.rs",
+    "start": 957,
+    "end": 968,
+    "read_at": "2026-10-03T22:19:57.591Z",
+    "evidence": "957 |     #[test]\n958 |     fn child_nulls_under_a_null_parent_are_writable() {\n959 |         // A null struct slot leaves its child undefined, and a reader returns\n960 |         // null there for a column this writer stored a value in. Rejecting it\n961 |         // would make the column unwritable after a round trip.\n962 |         let (array, schema) = analysis(\n963 |             vec![true, false, true, false],\n964 |             vec![Some(true), None, Some(false), None],\n965 |         );\n966 |         EncodingPipeline::verify_field_nullability(array.as_ref(), &schema.fields[0]).unwrap();\n967 |     }\n968 | "
+  }
+]

@@ -1,0 +1,135 @@
+@@ -19,7 +19,7 @@ use std::ops::Range;
+   19  use std::sync::Arc;
+   20  
+   21  use super::{Fragment, InlineRowIds, RowIdMeta};
+   22 -use crate::feature_flags::{FLAG_COVERED_INDEX_METADATA, STICKY_PAIRED_FLAGS};
+   22 +use crate::feature_flags::{FLAG_COVERED_INDEX_METADATA, STICKY_READER_FLAGS, STICKY_WRITER_FLAGS};
+   23  use crate::feature_flags::{FLAG_STABLE_ROW_IDS, has_deprecated_v2_feature_flag};
+   24  use crate::format::fragment::DataFileFieldInterner;
+   25  use crate::format::pb;
+
+@@ -77,6 +77,10 @@ pub struct Manifest {
+   77      /// None means never set, Some(0) means max ID used so far is 0
+   78      pub max_fragment_id: Option<u32>,
+   79  
+   80 +    /// The highest field ID allocated since non-reusable field identity was activated.
+   81 +    /// `None` means the dataset still uses the legacy live-reference allocator.
+   82 +    pub max_allocated_field_id: Option<i32>,
+   83 +
+   84      /// The path to the transaction file, relative to the root of the dataset
+   85      pub transaction_file: Option<String>,
+   86  
+
+@@ -197,6 +201,7 @@ impl Manifest {
+  201              reader_feature_flags: 0, // These will be set on commit
+  202              writer_feature_flags: 0, // These will be set on commit
+  203              max_fragment_id: None,
+  204 +            max_allocated_field_id: None,
+  205              transaction_file: None,
+  206              transaction_section: None,
+  207              fragment_offsets,
+
+@@ -225,9 +230,10 @@ impl Manifest {
+  230              index_section: None, // Caller should update index if they want to keep them.
+  231              timestamp_nanos: 0,  // This will be set on commit
+  232              tag: None,
+  228 -            reader_feature_flags: previous.reader_feature_flags & STICKY_PAIRED_FLAGS,
+  229 -            writer_feature_flags: previous.writer_feature_flags & STICKY_PAIRED_FLAGS,
+  233 +            reader_feature_flags: previous.reader_feature_flags & STICKY_READER_FLAGS,
+  234 +            writer_feature_flags: previous.writer_feature_flags & STICKY_WRITER_FLAGS,
+  235              max_fragment_id: previous.max_fragment_id,
+  236 +            max_allocated_field_id: previous.max_allocated_field_id,
+  237              transaction_file: None,
+  238              transaction_section: None,
+  239              fragment_offsets,
+
+@@ -292,10 +298,11 @@ impl Manifest {
+  298              // Sticky capabilities are also retained because the clone keeps the
+  299              // source file identities that require them.
+  300              reader_feature_flags: self.reader_feature_flags
+  295 -                & (FLAG_COVERED_INDEX_METADATA | STICKY_PAIRED_FLAGS),
+  301 +                & (FLAG_COVERED_INDEX_METADATA | STICKY_READER_FLAGS),
+  302              writer_feature_flags: self.writer_feature_flags
+  297 -                & (FLAG_COVERED_INDEX_METADATA | STICKY_PAIRED_FLAGS),
+  303 +                & (FLAG_COVERED_INDEX_METADATA | STICKY_WRITER_FLAGS),
+  304              max_fragment_id: self.max_fragment_id,
+  305 +            max_allocated_field_id: self.max_allocated_field_id,
+  306              transaction_file: Some(transaction_file),
+  307              transaction_section: None,
+  308              fragment_offsets: self.fragment_offsets.clone(),
+
+@@ -468,12 +475,17 @@ impl Manifest {
+  475          }
+  476      }
+  477  
+  471 -    /// Get the max used field id
+  478 +    /// Get the highest field ID that may not be allocated again.
+  479      ///
+  480      /// This is different than [Schema::max_field_id] because it also considers
+  481      /// the field ids in the data files that have been dropped from the schema,
+  482      /// including overlay files referenced by fragments.
+  483      pub fn max_field_id(&self) -> i32 {
+  484 +        self.max_allocated_field_id
+  485 +            .unwrap_or_else(|| self.max_referenced_field_id())
+  486 +    }
+  487 +
+  488 +    pub(crate) fn max_referenced_field_id(&self) -> i32 {
+  489          let schema_max_id = self.schema.max_field_id().unwrap_or(-1);
+  490          let fragment_max_id = self
+  491              .fragments
+
+@@ -489,6 +501,26 @@ impl Manifest {
+  501          schema_max_id.max(fragment_max_id)
+  502      }
+  503  
+  504 +    /// Whether the non-reusable-field-ID allocation contract is active.
+  505 +    pub fn uses_non_reusable_field_ids(&self) -> bool {
+  506 +        self.max_allocated_field_id.is_some()
+  507 +    }
+  508 +
+  509 +    /// Activate non-reusable field IDs at the maximum ID visible in this snapshot.
+  510 +    pub fn activate_non_reusable_field_ids(&mut self) {
+  511 +        if self.max_allocated_field_id.is_none() {
+  512 +            self.max_allocated_field_id = Some(self.max_referenced_field_id());
+  513 +        }
+  514 +    }
+  515 +
+  516 +    /// Advance the persistent field-ID high-water mark to cover this manifest.
+  517 +    pub fn update_max_field_id(&mut self) {
+  518 +        let max_referenced_field_id = self.max_referenced_field_id();
+  519 +        if let Some(max_allocated_field_id) = &mut self.max_allocated_field_id {
+  520 +            *max_allocated_field_id = (*max_allocated_field_id).max(max_referenced_field_id);
+  521 +        }
+  522 +    }
+  523 +
+  524      /// Return the fragments that are newer than the given manifest.
+  525      /// Note this does not support recycling of fragment ids.
+  526      pub fn fragments_since(&self, since: &Self) -> Result<Vec<Fragment>> {
+
+@@ -774,6 +806,8 @@ pub struct ManifestBuildConfig {
+  806      /// It bypasses the "cannot enable stable row ids on existing dataset" guard and
+  807      /// sets `manifest.next_row_id` to the provided value before activating the flag.
+  808      pub migration_next_row_id: Option<u64>,
+  809 +    /// Whether this commit atomically activates non-reusable field IDs.
+  810 +    pub activate_non_reusable_field_ids: bool,
+  811      /// Row lineage sequences of the current manifest's fragments that live
+  812      /// outside the manifest, read ahead of the build. An update that rewrites
+  813      /// rows needs the existing row ids and created-at versions to carry each
+
+@@ -1058,6 +1092,7 @@ impl TryFrom<pb::Manifest> for Manifest {
+ 1092              reader_feature_flags: p.reader_feature_flags,
+ 1093              writer_feature_flags: p.writer_feature_flags,
+ 1094              max_fragment_id: p.max_fragment_id,
+ 1095 +            max_allocated_field_id: p.max_allocated_field_id,
+ 1096              fragments,
+ 1097              transaction_file: if p.transaction_file.is_empty() {
+ 1098                  None
+
+@@ -1124,6 +1159,7 @@ impl From<&Manifest> for pb::Manifest {
+ 1159              reader_feature_flags: m.reader_feature_flags,
+ 1160              writer_feature_flags: m.writer_feature_flags,
+ 1161              max_fragment_id: m.max_fragment_id,
+ 1162 +            max_allocated_field_id: m.max_allocated_field_id,
+ 1163              transaction_file: m.transaction_file.clone().unwrap_or_default(),
+ 1164              next_row_id: m.next_row_id,
+ 1165              data_format: Some(pb::manifest::DataStorageFormat {

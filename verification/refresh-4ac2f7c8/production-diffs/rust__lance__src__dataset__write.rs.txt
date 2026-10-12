@@ -1,0 +1,62 @@
+@@ -34,6 +34,7 @@ use lance_io::traits::Writer;
+   34  use lance_table::format::{BasePath, DataFile, Fragment, IndexMetadata};
+   35  use lance_table::io::commit::{CommitHandler, commit_handler_from_url};
+   36  use lance_table::io::manifest::ManifestDescribing;
+   37 +use lance_table::transaction::{Operation, resolve_arrow_field_ids};
+   38  use object_store::{ObjectStoreExt, path::Path};
+   39  use std::borrow::Cow;
+   40  use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+
+@@ -1848,7 +1849,7 @@ pub(super) fn promote_legacy_blob_schema(schema: &Schema) -> Result<Schema> {
+ 1849      for field in &mut schema.fields {
+ 1850          field.promote_blob_v2()?;
+ 1851      }
+ 1851 -    schema.set_field_id(schema.max_field_id());
+ 1852 +    schema.try_set_field_id(schema.max_field_id())?;
+ 1853      Ok(schema)
+ 1854  }
+ 1855  
+
+@@ -1858,7 +1859,11 @@ pub(super) fn prepare_write_schema(
+ 1859      params: &WriteParams,
+ 1860      mut schema_compare_options: lance_core::datatypes::SchemaCompareOptions,
+ 1861  ) -> Result<Schema> {
+ 1861 -    let schema = if let Some(dataset) = dataset
+ 1862 +    let schema = if dataset.is_none() {
+ 1863 +        let mut schema = normalized_converted_schema;
+ 1864 +        schema.try_reassign_field_ids(None)?;
+ 1865 +        schema
+ 1866 +    } else if let Some(dataset) = dataset
+ 1867          && matches!(params.mode, WriteMode::Append | WriteMode::Create)
+ 1868      {
+ 1869          schema_compare_options.compare_nullability = NullabilityComparison::Ignore;
+
+@@ -1917,6 +1922,28 @@ pub(super) fn prepare_write_schema(
+ 1922              }
+ 1923          }
+ 1924          projected
+ 1925 +    } else if let Some(dataset) = dataset
+ 1926 +        && matches!(params.mode, WriteMode::Overwrite)
+ 1927 +        && dataset.manifest.uses_non_reusable_field_ids()
+ 1928 +    {
+ 1929 +        // Uncommitted fragment APIs return files without the schema used to
+ 1930 +        // write them, so their mappings must already use commit-time IDs.
+ 1931 +        // Resolve positional Arrow IDs before the schema enters the writer.
+ 1932 +        let mut operation = Operation::Overwrite {
+ 1933 +            fragments: Vec::new(),
+ 1934 +            schema: normalized_converted_schema,
+ 1935 +            config_upsert_values: None,
+ 1936 +            initial_bases: None,
+ 1937 +        };
+ 1938 +        resolve_arrow_field_ids(Some(&dataset.manifest), &mut operation)?;
+ 1939 +        match operation {
+ 1940 +            Operation::Overwrite { schema, .. } => schema,
+ 1941 +            _ => {
+ 1942 +                return Err(Error::internal(
+ 1943 +                    "Non-reusable field-ID canonicalization changed an Overwrite operation",
+ 1944 +                ));
+ 1945 +            }
+ 1946 +        }
+ 1947      } else {
+ 1948          normalized_converted_schema
+ 1949      };

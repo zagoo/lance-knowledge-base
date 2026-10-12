@@ -1,0 +1,169 @@
+{
+  "iteration": 41,
+  "files": [
+    {
+      "path": "rust/lance-table/src/transaction/proto.rs",
+      "module": "L1-modules/rust-lance-table.md",
+      "reviewed": true,
+      "role": "All16 transaction operation protobuf conversions, group/index/UpdateMap converters, envelope normalizations and format-wrapper bridge. Trait implementations are externally reachable through public types despite private proto module. Two local metadata-only tests.",
+      "ranges": [
+        [
+          1,
+          27,
+          "SPDX/module documentation identifies transaction protobuf conversions as durability boundary. Imports nested metadata/codecs, all operation groups/maps/modes, Schema/Fields, Roaring, HashMap/Arc and UUID. This file converts Rust and generated protobuf objects; it does not itself encode/decode complete protobuf bytes, choose storage paths, publish manifests or validate an operation. Nested bitmap/overlay converters do handle bytes. Documentation that added fields must roundtrip is an intent, not proof all Rust representations roundtrip identically."
+        ],
+        [
+          28,
+          54,
+          "DataReplacementGroup borrowed->protobuf copies fragment ID and always emits Some(new_file), delegating DataFile conversion. Owned protobuf->Rust requires new_file or InvalidInput with exact required-field text, then delegates TryFrom. Neither verifies target fragment existence, column schema or file contents. Typo protobug in comment has no behavior."
+        ],
+        [
+          55,
+          82,
+          "DataOverlayGroup borrowed->protobuf maps overlays in existing order, preserving fragment ID; owned reverse maps each DataOverlayFile through TryFrom and short-circuit collects Result<Vec>. No group/inner overlay sorting, duplicate-ID check, field alignment or committed-version stamping. Empty overlay Vec accepted. Nested converter requires file/coverage and decodes Roaring (rust/lance-table/src/format/overlay.rs:277-328)."
+        ],
+        [
+          83,
+          120,
+          "Transaction::try_from owns pb::Transaction, matching its operation first. Append maps fragments via fallible metadata conversion; Clone moves all five values unchanged, with no UUID/path/version/deep-clone validation. Delete converts updated fragments then moves deleted IDs and predicate; neither parses predicates nor checks ID sets. Conversion preserves vector order; errors stop collection and drop local values."
+        ],
+        [
+          121,
+          147,
+          "Overwrite decoder discards schema_metadata explicitly TODO, converts fragments then reconstructs Schema from flat Fields, maps empty config map to None and empty initial bases to None. Nonempty bases map infallibly preserving order. Some(empty) optional maps/vectors cannot survive this wire representation. Contextual Fields reconstruction returns schema metadata empty and does not invoke Schema::validate; field-level conversion is its separate dependency (rust/lance-file/src/datatypes.rs:157-245)."
+        ],
+        [
+          148,
+          184,
+          "ReserveFragments copies count. Rewrite prefers nonempty groups and ignores old flat fragment lists entirely; otherwise constructs exactly one RewriteGroup from old/new flat lists, even when both empty. Group conversion errors propagate before rewritten-index conversion. Rewritten indices convert from borrowed items; frag_reuse_index always None. Thus empty in-memory groups serialize empty and decode as one empty group, and transient reuse entry disappears; in-memory equality need not roundtrip. No merged history assembly occurs here."
+        ],
+        [
+          185,
+          216,
+          "CreateIndex decodes new then removed metadata lists via IndexMetadata::try_from, preserving order. Merge decodes fragments and Fields schema but discards schema_metadata TODO; preserves_nullability bool passes through. Comment says missing old bool defaults false causing conservative conflicts, but full resolver behavior remains pending. Restore copies version with no lookup."
+        ],
+        [
+          217,
+          251,
+          "Update decoder moves removed IDs and converts updated/new fragment lists, then maps compacted SSTables using CompactedSsTable::try_from(m).unwrap(). Missing shard UUID is a possible error in that nested converter, so malformed input can panic despite outer Result, unlike UpdateMemWalState below. Mode0 or any unknown integer becomes Some(RewriteRows),1 Some(RewriteColumns); None is never produced by decode. Field lists pass unchanged; optional inserted key filter uses fallible conversion/transpose. No ID/bounds/key-set validation. Contextual SSTable converter requires shard_id and validates UUID bytes (rust/lance-table/src/system_index/mem_wal.rs:125-139)."
+        ],
+        [
+          252,
+          284,
+          "Offset decoder selects field10 bitmap map if its outer map is nonempty, even if all values are zero-length bytes; otherwise field9 UInt32List fallback. Selected field10 skips zero-byte values, decodes other Roaring payloads with InvalidInput including fragment ID/error, and has no explicit trailing-byte exhaustion check. Valid encoded empty bitmap remains a map entry and therefore Some; field9 skips empty lists and deduplicates/sorts offsets through Roaring. Result None only if resulting map has no entries. No per-ID merge with fallback: one field10 entry suppresses every field9 entry. HashMap conversion order and first malformed error unspecified."
+        ],
+        [
+          285,
+          314,
+          "Project rebuilds Schema from Fields and carries nullability bool, with conservative-old-bool conflict commentary only. UpdateConfig detects new style by any Some config/table/schema map or nonempty field map; detects old style only by nonempty legacy upserts/deletes/schema/field map. Both true returns InvalidInput via invalid_input_source. Present empty new map counts as present; empty old scalar maps/lists do not. No compatibility/version gate selects the branch."
+        ],
+        [
+          315,
+          353,
+          "Old UpdateConfig translates nonempty config upserts/deletes into Some incremental UpdateMap, otherwise None; nonempty old schema metadata into Some replacement, empty into None. Every legacy field map entry becomes replacement UpdateMap, even if inner metadata empty (thus can clear a field when applied). Old u32 field IDs cast as i32 without range check, wrapping high values. table_metadata_updates always None. Translation clones string data and HashMap iteration order can affect resulting ordered entries; no old writer is added."
+        ],
+        [
+          354,
+          374,
+          "New UpdateConfig clones optional UpdateMaps and every field map entry using From<&...>, preserving signed field IDs, entry order and replace/None values. All-empty old/new fields take this branch and produce all optional None and empty field map. No duplicate edit/key/value validation or normalization; Some(empty) remains distinguishable here."
+        ],
+        [
+          375,
+          409,
+          "DataReplacement and DataOverlay collect fallible group conversions. UpdateMemWalState collects CompactedSsTable::try_from with ?, propagating errors rather than Update branch unwrap. UpdateBases maps BasePath infallibly. Missing operation returns Internal(Transaction message did not contain an operation), not InvalidInput. No unrecognized enum fallback at this typed oneof level; absent operation may also represent information discarded by a prior protobuf decoder, whose unknown handling is outside this file."
+        ],
+        [
+          410,
+          427,
+          "After operation success, decoder copies read_version, clones uuid despite owning message, maps empty tag to None or clones nonempty tag, maps empty properties HashMap to None or moves nonempty map into new Arc. UUID syntax/version/read-version validity is unchecked; optional empty tag/properties lose presence. Properties Arc sharing is not preserved across conversion. TransactionBuilder is not invoked."
+        ],
+        [
+          428,
+          472,
+          "Borrowed RewrittenIndex decoder requires old_id then new_id Options, converts each UUID with propagated error, then requires/clones new_index_details Any. Copies version without capability check; empty files list becomes None, nonempty becomes newly allocated IndexFile list with cloned paths and copied optional sizes. Error precedence follows struct-field evaluation. No old/new inequality, Any type/version or file-content validation; Some(empty) list cannot roundtrip distinctly."
+        ],
+        [
+          473,
+          491,
+          "Owned RewriteGroup decoder converts old fragments then new fragments through Fragment::try_from and collects separate Vecs. Empty lists accepted, order preserved, metadata sorting/normalization inside Fragment converter can still change nested representation. No uniqueness, total row conservation or group disjointness checks."
+        ],
+        [
+          492,
+          524,
+          "Borrowed Transaction encoder exhaustively matches Operation. Append converts all fragments; Clone copies bool/version and clones name/path/branch; Delete converts updated fragments and clones deleted IDs/predicate. Returns protobuf object directly, no Result and no complete byte serialization/IO. All lists preserve current input order."
+        ],
+        [
+          525,
+          554,
+          "Overwrite encoder converts fragment list and flattens schema through Fields::from, writes empty schema_metadata TODO, clones optional config or default empty, clones/converts optional bases or empty. Schema-level metadata is absent from Fields output; Project/Merge share same flattening. ReserveFragments copies count. None and Some(empty) encode identically for config/bases. Fields flatten context reads only field tree, not schema.metadata (rust/lance-file/src/datatypes.rs:292-300)."
+        ],
+        [
+          555,
+          579,
+          "Rewrite encoder emits groups and rewritten indices, explicitly ignores frag_reuse_index and uses defaults for old flat lists; it never writes the legacy flattened representation. Empty group Vec therefore triggers old-layout fallback on reverse conversion. CreateIndex maps new/removed full metadata lists. No sorting, feature gate, rewrite-history merge or payload validation."
+        ],
+        [
+          580,
+          623,
+          "Merge emits fragments, flattened schema, empty schema_metadata and exact preserves_nullability; Restore copies version. Update clones all ID/field lists, converts updated/new fragments and compacted SSTables, encodes RewriteRows0/RewriteColumns1 and None0, maps optional inserted filter. These operations allocate new owned protobuf collections; no streaming conversion or alias sharing for vectors/maps."
+        ],
+        [
+          624,
+          641,
+          "Update encoder always leaves old field9 map empty and writes only field10 bitmap bytes. It ignores empty Roaring bitmaps, serializes each nonempty bitmap into fresh Vec with expect(RoaringBitmap serialization cannot fail), then collects HashMap. No optimize() call, explicit preallocation, bitmap bounds or key-subset check. None, Some(empty map) and a map consisting only of empty bitmaps all emit empty and decode None. Comment calls empty old field forward compatibility; compatibility with any released reader still needs its gates/fixtures, not this comment alone."
+        ],
+        [
+          642,
+          675,
+          "Project emits flattened fields and bool. UpdateConfig writes all three optional new UpdateMaps and signed field metadata map; all four legacy fields set empty defaults. Some empty new map is retained as present, preserving replace semantics. No dual-writing for old consumers, no automatic migration of existing transactions or format gate here."
+        ],
+        [
+          676,
+          710,
+          "DataReplacement/DataOverlay emit groups in order using local converters. UpdateMemWalState converts all pointers through infallible borrowed converter; UpdateBases clones each BasePath then consumes it into protobuf. Match exhaustively covers all16 variants. Repeated groups/IDs remain repeated; no reorder, deduplication, IO or locks."
+        ],
+        [
+          711,
+          725,
+          "Transaction envelope encoder clones complete properties map behind Arc or defaults empty, copies read_version, clones UUID, emits Some(operation), and maps tag None to empty String. Does not generate UUID or validate it. Eager unwrap_or empty String allocation request is visible though empty String normally has no heap data; no measured allocation claim. Envelope presence normalizations mean derived Rust PartialEq may differ after conversion."
+        ],
+        [
+          726,
+          749,
+          "RewrittenIndex encoder always emits Some old/new protobuf UUIDs and Some cloned Any details, copies version, maps optional file list to cloned paths/copied sizes or default empty. Ordering preserved; no semantic checks. Its decoder collapses empty list to None, so exact representation roundtrip is not guaranteed."
+        ],
+        [
+          750,
+          766,
+          "RewriteGroup encoder allocates old/new protobuf fragment Vecs preserving sequence order. Fragment converters may serialize nested optional counts as sentinels; no operation validation, conservation check or group normalization."
+        ],
+        [
+          767,
+          798,
+          "Bidirectional borrowed UpdateMap converters clone every key and optional value, preserve entry order/duplicates, None deletion tokens, empty strings and replace flag. Both always succeed; no application, validation or sorting. Some outer map presence is handled by Transaction arms, not these methods."
+        ],
+        [
+          799,
+          813,
+          "From<&Transaction> for format::Transaction delegates to pb::Transaction conversion then wraps public inner; format wrapper is distinct from in-memory operation Transaction. cfg(test) module imports DataFile and OverlayCoverage. No test fixture creates actual transaction files here."
+        ],
+        [
+          814,
+          841,
+          "Transient rewrite test constructs read_version1, empty groups/indices and Some sample frag-reuse metadata, converts Rust->protobuf->Rust and asserts only reuse entry None under Rewrite. It does not assert group shape, complete Transaction equality or bytes; empty groups become one empty group without being caught. Comment says other writers need groups, but complete conflict protocol still requires resolver analysis."
+        ],
+        [
+          842,
+          868,
+          "Overlay test creates bitmap{1,4}, legacy metadata file overlay-0.lance field3, dense coverage and committed_version6. Converts just overlay into protobuf, then builds pb::Transaction read_version1/randomUUID with one group fragment7; remaining envelope defaults. Does not start with Rust Transaction encoder or prost byte encode/decode."
+        ],
+        [
+          869,
+          885,
+          "Overlay decoder assertions require group count1,fragment7,overlay count1,version6 and coverage equalbitmap. It does not assert filename/field IDs/tag/properties/ordering or full Rust->protobuf reverse transaction roundtrip. Two local tests only; malformed SSTables/offset payloads, mixed config styles, None/empty normalizations, metadata loss, legacy rewrite fallback and all16 operation conversion matrices lack direct local tests in this file. Other modules may cover them; no tests were executed."
+        ]
+      ],
+      "limits": "All885 lines read in four bounded chunks. Full byte framing/storage/commit IO remains pending; this file handles generated protobuf objects and nested bitmap bytes only. Historical fallbacks are existing frozen read surfaces, not new migration guidance. Contextual Fields and CompactedSsTable implementations are read but their whole files remain pending. No internet, source edits, build or runtime test; derived panic/normalization cases are source deductions."
+    }
+  ]
+}

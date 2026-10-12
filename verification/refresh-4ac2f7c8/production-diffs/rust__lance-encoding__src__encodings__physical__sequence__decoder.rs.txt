@@ -1,0 +1,118 @@
+@@ -0,0 +1,117 @@
+    1 +// SPDX-License-Identifier: Apache-2.0
+    2 +// SPDX-FileCopyrightText: Copyright The Lance Authors
+    3 +
+    4 +//! Cardinality-aware decoding for independently framed unsigned sequences.
+    5 +
+    6 +use std::sync::Arc;
+    7 +
+    8 +use lance_core::{Error, Result};
+    9 +
+   10 +use crate::{
+   11 +    buffer::LanceBuffer,
+   12 +    compression::{BlockDecompressor, create_fixed_width_block_decompressor},
+   13 +    data::DataBlock,
+   14 +    encodings::physical::range::checked_range_last,
+   15 +    format::pb21::{CompressiveEncoding, compressive_encoding::Compression},
+   16 +};
+   17 +
+   18 +/// Validated metadata that a container can use without materializing values.
+   19 +#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+   20 +pub enum SequenceMetadata {
+   21 +    Empty,
+   22 +    Constant(u64),
+   23 +    Range { start: u64, step: u64 },
+   24 +}
+   25 +
+   26 +#[derive(Debug, Clone)]
+   27 +pub struct SequenceDecoder {
+   28 +    decoder: Arc<dyn BlockDecompressor>,
+   29 +    num_values: u64,
+   30 +    metadata: Option<SequenceMetadata>,
+   31 +}
+   32 +
+   33 +impl SequenceDecoder {
+   34 +    pub(crate) fn try_new(
+   35 +        encoding: &CompressiveEncoding,
+   36 +        bits: u64,
+   37 +        num_values: u64,
+   38 +    ) -> Result<Self> {
+   39 +        if matches!(encoding.compression.as_ref(), Some(Compression::Constant(c)) if c.value.is_none())
+   40 +        {
+   41 +            if num_values != 0 {
+   42 +                return Err(Error::invalid_input(
+   43 +                    "An absent unsigned Constant scalar requires zero values",
+   44 +                ));
+   45 +            }
+   46 +        } else if num_values == 0 {
+   47 +            return Err(Error::invalid_input(
+   48 +                "An empty unsigned sequence requires Constant with no scalar",
+   49 +            ));
+   50 +        }
+   51 +        let decoder = create_fixed_width_block_decompressor(encoding, bits)?;
+   52 +        let metadata = metadata(encoding, bits, num_values)?;
+   53 +        Ok(Self {
+   54 +            decoder: Arc::from(decoder),
+   55 +            num_values,
+   56 +            metadata,
+   57 +        })
+   58 +    }
+   59 +
+   60 +    pub(crate) fn metadata(&self) -> Option<SequenceMetadata> {
+   61 +        self.metadata
+   62 +    }
+   63 +
+   64 +    pub(crate) fn requires_payload(&self) -> bool {
+   65 +        self.decoder.requires_payload()
+   66 +    }
+   67 +
+   68 +    pub(crate) fn decode(&self, payload: Option<LanceBuffer>) -> Result<DataBlock> {
+   69 +        self.decoder.decompress(payload, self.num_values)
+   70 +    }
+   71 +}
+   72 +
+   73 +// The typed decoder has already validated scalar widths and bounded child grammar.
+   74 +fn metadata(
+   75 +    encoding: &CompressiveEncoding,
+   76 +    bits: u64,
+   77 +    count: u64,
+   78 +) -> Result<Option<SequenceMetadata>> {
+   79 +    Ok(match encoding.compression.as_ref() {
+   80 +        Some(Compression::Constant(c)) => {
+   81 +            let Some(scalar) = c.value.as_ref() else {
+   82 +                return Ok(Some(SequenceMetadata::Empty));
+   83 +            };
+   84 +            let mut bytes = [0; 8];
+   85 +            bytes[..scalar.len()].copy_from_slice(scalar);
+   86 +            Some(SequenceMetadata::Constant(u64::from_le_bytes(bytes)))
+   87 +        }
+   88 +        Some(Compression::Range(r)) => {
+   89 +            checked_range_last(bits, r.start, r.step, count)?;
+   90 +            Some(SequenceMetadata::Range {
+   91 +                start: r.start,
+   92 +                step: r.step,
+   93 +            })
+   94 +        }
+   95 +        Some(Compression::Delta(d)) => {
+   96 +            if count < 2 || (bits == 32 && d.base > u32::MAX as u64) {
+   97 +                return Err(Error::invalid_input("Invalid Delta cardinality or base"));
+   98 +            }
+   99 +            let child = d
+  100 +                .deltas
+  101 +                .as_deref()
+  102 +                .ok_or_else(|| Error::invalid_input("Missing Delta child"))?;
+  103 +            match metadata(child, bits, count - 1)? {
+  104 +                Some(SequenceMetadata::Constant(0)) => Some(SequenceMetadata::Constant(d.base)),
+  105 +                Some(SequenceMetadata::Constant(step)) => {
+  106 +                    checked_range_last(bits, d.base, step, count)?;
+  107 +                    Some(SequenceMetadata::Range {
+  108 +                        start: d.base,
+  109 +                        step,
+  110 +                    })
+  111 +                }
+  112 +                _ => None,
+  113 +            }
+  114 +        }
+  115 +        _ => None,
+  116 +    })
+  117 +}

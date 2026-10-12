@@ -1,0 +1,178 @@
+{
+  "iteration": 43,
+  "files": [
+    {
+      "path": "rust/lance-table/src/system_index/frag_reuse/metadata.rs",
+      "module": "L1-modules/rust-lance-table.md",
+      "reviewed": true,
+      "role": "Four public metadata guards: tagged-entry recognition, sticky-format recognition, paired-flag requirement and asynchronous clone prohibition; two local predicate tests.",
+      "ranges": [
+        [
+          1,
+          14,
+          "SPDX and metadata-guard module docs; imports core errors, ObjectStore, reserved FRI name/capability bit, Manifest/IndexMetadata, ManifestLocation and index-list reader. Guard predicates borrow metadata; only clone guard performs an asynchronous read. Public parent module routing is rust/lance-table/src/system_index/frag_reuse.rs:7-7."
+        ],
+        [
+          15,
+          19,
+          "Public is_tagged requires exact reserved name and index_version != 0. Any nonzero signed value, including negative/future versions, qualifies. It does not inspect Any type URL/details, bitmap, fields or flags. This differs from is_frag_reuse_index_entry, which validates name plus Any type-name suffix (rust/lance-table/src/system_index/frag_reuse.rs:29-41)."
+        ],
+        [
+          20,
+          36,
+          "Public uses_tagged_fri returns true if manifest reader bit is set OR provided entry satisfies is_tagged. Writer bit is ignored; caller supplies at most one entry and function does not search indices. Comments establish sticky-format intent even when entry trimmed or version0, with later lift/append behavior implemented elsewhere. This predicate itself neither stamps nor clears flags nor lifts history. FLAG_FRAGMENT_REUSE_INDEX is 1<<10 (rust/lance-table/src/feature_flags.rs:65-65)."
+        ],
+        [
+          37,
+          51,
+          "Public validate_flags rejects if any tagged entry exists and bit10 is not simultaneously present in reader AND writer flags. Returns CorruptFile named manifest with exact requirement message. With no tagged entry it returns Ok regardless of flag mismatch; other capability validation remains separate. Does not require entry presence merely because flags are set, validate version support/details, or mutate flags."
+        ],
+        [
+          52,
+          70,
+          "Public async ensure_clone_supported immediately returns Ok when reader bit10 absent, without reading index metadata. Otherwise await read_manifest_indexes, propagate its error, and reject NotSupported if any tagged entry remains; sticky flag alone, empty indices or only v0 entry pass. Writer flags and row-map layout are not examined here. No relocation, index mutation or file writes; cancellation while awaiting delegates to dropped read future. External storage/read implementation remains pending."
+        ],
+        [
+          71,
+          91,
+          "cfg(test) module and private entry fixture use nil UUID, empty fields/covering_fields, supplied name/version, dataset_version1 and None bitmap/details/time/base/files. This intentionally proves name/version recognition does not require physical index payload."
+        ],
+        [
+          92,
+          100,
+          "First test asserts reserved name with version0 false, versions1/2 true; user_idx versions0/1 false. Negative versions, malformed details and type URL ambiguity not exercised locally."
+        ],
+        [
+          101,
+          123,
+          "Second test starts shared manifest fixtures, sets only reader bit on one, then asserts tagged for flagged None and flagged v0, unflagged tagged v1; unflagged v0/None false. Does not locally test validate_flags or async clone guard. A contextual reader test uses a missing manifest path with an unflagged fixture to assert clone guard avoids index IO (rust/lance/src/index/frag_reuse_reader.rs:1011-1023); its fixture and rest of consumer remain pending."
+        ]
+      ],
+      "limits": "All123 physical lines read. Index-list IO and full clone/restore consumers remain pending; contextual callers do not imply global entrance coverage. No source edits/network/runtime tests."
+    },
+    {
+      "path": "rust/lance-table/src/system_index/frag_reuse/gate.rs",
+      "module": "L1-modules/rust-lance-table.md",
+      "reviewed": true,
+      "role": "Public six-reason Admission enum and ordered exhaustive operation classifier, plus45-case matrix and one migration test. Gate admission relies on caller preparation rather than proving final commit safety.",
+      "ranges": [
+        [
+          1,
+          20,
+          "SPDX/module docs claim every commit entrance funnels through prepare_indices and builder rechecks classify. Contextual prepare/build calls are observed, but full global entrance/retry proof remains pending. Imports reserved name, tagged predicates, metadata, FragReuseUpdate/Operation, errors and Roaring. Classifier is public, synchronous, pure over borrowed inputs, with no IO, mutation or unsafe."
+        ],
+        [
+          21,
+          39,
+          "Public Admission derives Debug/Clone/Copy/PartialEq/Eq, with six reasons: Untagged, AppendsTransitions, RewritesUncoveredFragments, MovesNoRows, RestoresManifest, MaintainsUserIndices. Variant documentation is explanatory, not an effect proof: MovesNoRows prose says no column rewrite, while classifier admits Update/Merge/DataReplacement in-place rewrites below. Untagged describes absence of a tagged entry, not necessarily absence of sticky manifest flag."
+        ],
+        [
+          40,
+          60,
+          "Public classify takes operation, optional current manifest, current index slice, settled FragReuseUpdate and optional migration_next_row_id. Returns Result<Admission>. Docs distinguish malformed intent InvalidInput versus unsupported tagged shape NotSupported. Comments explain why preassembled tagged snapshots could erase concurrent appended records; actual assembly/conservation/ledger validation is a separate caller responsibility, not performed here."
+        ],
+        [
+          61,
+          76,
+          "appends_transitions means only Operation::Rewrite plus FragReuseUpdate::Rewrite, without inspecting assembly contents. Any Rewrite carrying Some is_tagged transient entry without that marker returns InvalidInput before table-state checks, even on an untagged table or absent manifest. Supplied marker permits this shape to proceed; there is no entry/assembly equality or lineage validation in this function."
+        ],
+        [
+          77,
+          112,
+          "replaces_entry means Rewrite with any Some transient entry and no assembly marker. If no current is_tagged entry: reject replacement only when provided manifest uses tagged format by sticky flag or reserved entry; otherwise return Untagged immediately. Initial malformed-tagged check still precedes this. Sticky-flag-only tables therefore return Untagged for ordinary operations, including migration-marked ones; a v0 snapshot replacement on such table returns InvalidInput. Absence of manifest can bypass the sticky test."
+        ],
+        [
+          113,
+          127,
+          "With current tagged entry, appends_transitions returns AppendsTransitions before migration check and without inspecting groups, rewritten indices or assembly payload. Comments introduce separate uncovered rewrite escape: existing bitmap provenance must be unaffected, unknown/future histories are conservative, oversized fragment IDs cannot appear in u32 bitmaps. Comments say empty rewrites refused; actual check below only requires outer groups Vec nonempty."
+        ],
+        [
+          128,
+          156,
+          "Bare rewrite qualifies only with transient entry None, rewritten_indices empty, groups nonempty and every reserved-name entry version0 or1. Collect old fragment IDs via checked u64->u32, silently omit overflowing IDs. Every current index, not just FRI/user indices with fields, must have Some bitmap disjoint from collected IDs; None always refuses this escape even if collected bitmap empty. Nonempty groups whose old lists are all empty can qualify; new fragments and row conservation are not examined. Known future/negative FRI versions reject escape. Returns RewritesUncoveredFragments before migration check."
+        ],
+        [
+          157,
+          168,
+          "After earlier accepted branches, any Some migration_next_row_id, including0 and regardless of operation kind, yields NotSupported with stable-row-ID migration message and Trim the history first advice. It checks marker presence, not current stable-row-ID mode or actual row addresses. Therefore appending-transition/uncovered rewrites and no-tagged-entry paths bypass this check by ordering; valid caller-generated migration shapes still need full analysis."
+        ],
+        [
+          169,
+          195,
+          "Comments explain accepted in-place rewrites rely on shared preparation invalidation and eventual scan/rebuild; these effects are not performed by classify. CreateIndex is accepted as MaintainsUserIndices only when every new and removed entry has name != reserved FRI name; empty lists pass. Name test ignores type URL/version/UUID and no mutation occurs. The earlier migration check wins over this acceptance."
+        ],
+        [
+          196,
+          225,
+          "Exhaustive final Operation match: Append, ReserveFragments, Delete, Update, UpdateConfig, Overwrite, Project, Merge and DataReplacement return MovesNoRows; Restore returns RestoresManifest. Remaining Rewrite, reserved-name CreateIndex, UpdateMemWalState, DataOverlay, Clone and UpdateBases return generic NotSupported with upgrade advice. Payload validity is not checked here and admission name is not a guarantee of no physical rewriting. Unknown future enum variants require code update because match exhaustive."
+        ],
+        [
+          226,
+          251,
+          "cfg(test) imports flags, BasePath/DataFile/Fragment, shared fixtures, overlay/replacement/rewrite groups, exact V2_0, HashMap/Arc. Private Copy/Debug/Eq Table has four states: Untagged, Tagged, TaggedWithTranslatingIndex and TaggedWithDirectIndex. Docs label source5->destination0 provenance; fixtures below carry bitmap metadata without real transition payload."
+        ],
+        [
+          252,
+          281,
+          "table fixture replaces fragments with fragment0 field0 in a.lance V2_0. Tagged states set both capability bits and reserved entry fields empty/bitmap0,5. Translating user segment covers5; direct user segment uses shared fixture default bitmap. Return manifest and indices; no IO, transition validation or actual indexing."
+        ],
+        [
+          282,
+          307,
+          "update fixture obtains an Update from shared transaction helper, destructures with unreachable fallback, replaces updated fragments with0 and modified fields supplied, leaving other helper defaults. rewrite fixture has one old requested ID -> new10 group, no rewritten indices and optional transient entry. Neither carries actual file/row data."
+        ],
+        [
+          308,
+          332,
+          "appended_entry uses reserved-name sample metadata and clears fields. frag_reuse_for returns Rewrite(Arc<TaggedRewriteAssembly>) only for exact kind rewrite_appends_transitions; entry from helper, base_entry_version None, reordered_sources empty. All other kind strings yield None. This bypasses real commit assembly, intentionally testing classifier marker acceptance rather than ledger validity."
+        ],
+        [
+          333,
+          363,
+          "sample string dispatch builds Append fragment1; Delete ID0 predicate true; Overwrite fragment0/current schema/no config/bases; ordinary CreateIndex new_idx; bare covered0/uncovered7; assembled tagged rewrite; v0 snapshot by setting version0; malformed tagged snapshot. Unknown string ultimately unreachable. These fixture names distinguish gate paths, not complete valid dataset operations."
+        ],
+        [
+          364,
+          398,
+          "DataReplacement fixture swaps fragment0 field0 to b.lance V2_0; DataOverlay adds one shared field0/version1 overlay. merge_new_column actually clones current fragments/schema unchanged; its name is broader than payload. merge_rewrites_column uses b.lance field0 with unchanged schema and preserves_nullability true. Classifier does not inspect column identity in either case."
+        ],
+        [
+          399,
+          435,
+          "Remaining sample arms cover Restore1, ReserveFragments2, three Update modified-field lists empty/0/1, Project same schema, all-None/empty UpdateConfig, empty UpdateMemWalState, shallow Clone memory://source version1, and UpdateBases id1/nameNone/nonroot memory://base. Every Operation variant has a sample; wildcard panics for unrecognized fixture name."
+        ],
+        [
+          436,
+          451,
+          "Private Verdict has Admit(Admission), NotSupported and InvalidInput with Debug/Clone/Copy/Eq. verdict maps only these Result/error variants; any other Error panics with diagnostic. It deliberately collapses error payloads so matrix tests assert kind/reason without message text."
+        ],
+        [
+          452,
+          502,
+          "rstest matrix first18 cases cover all16 Operation variants on Untagged, with extra Rewrite shapes; ordinary operations return Untagged and malformed tagged snapshot InvalidInput. Appended-transition and uncovered shape are not independently sampled in this state. Comment Every Operation against every table state exceeds literal matrix: combinations are selected, not a full Cartesian product."
+        ],
+        [
+          503,
+          555,
+          "Tagged matrix first subset asserts MovesNoRows for append/delete/overwrite, MaintainsUserIndices for ordinary creation, NotSupported bare covered/v0 snapshot, RewritesUncoveredFragments bare7, AppendsTransitions assembled marker, InvalidInput tagged snapshot. DataReplacement accepted with no user/direct/translating index, DataOverlay refused, Merge no-op/direct/translating cases accepted. No reserved-name CreateIndex case here."
+        ],
+        [
+          556,
+          586,
+          "Remaining Tagged cases accept Restore, reservation, Update with row/column/unindexed-field shapes, Project/config; reject MemWAL, Clone and bases. Matrix totals45 cases across four states, heavily concentrating on Untagged/Tagged with selected user-index states, not every variant-state pair. Unknown bitmaps, future FRI versions, empty inner groups, overflow IDs and sticky-flag-only replacement are not covered locally."
+        ],
+        [
+          587,
+          603,
+          "every_operation_has_a_verdict builds fixture state/operation/marker, calls classify with Some manifest and migration None, maps Verdict, asserts expected with kind/state. This cannot validate assembly, index withdrawal, storage effects or integration ordering. All45 cases belong to one parameterized test function."
+        ],
+        [
+          604,
+          622,
+          "Separate migration test calls Merge sample on Tagged table with FragReuseUpdate::None and Some(100), expects NotSupported variant and message containing stable row id migration. It does not test Some(0), alternate operations or early-acceptance branches. Total gate test functions2, instantiated cases46. No tests run."
+        ]
+      ],
+      "limits": "All622 physical lines read in three bounded chunks. Exact branch order is captured including early returns before migration guard. Full transition assembly, ledger validation, restore/publication/retry and supported-reader behavior remain pending; no execution or mutation performed."
+    }
+  ]
+}

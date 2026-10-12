@@ -1,0 +1,141 @@
+@@ -0,0 +1,140 @@
+    1 +// SPDX-License-Identifier: Apache-2.0
+    2 +// SPDX-FileCopyrightText: Copyright The Lance Authors
+    3 +
+    4 +use arrow_array::FixedSizeListArray;
+    5 +use arrow_schema::DataType;
+    6 +use async_trait::async_trait;
+    7 +use lance_core::{Error, Result};
+    8 +use lance_linalg::distance::MetricType;
+    9 +
+   10 +use crate::dataset::Dataset;
+   11 +
+   12 +use super::super::{
+   13 +    FixedIvfTrainingRanges, FixedIvfTrainingSampler, HAMMING_METRIC_POLICY, KMeansProgressCallback,
+   14 +    StreamingKMeansMetricPolicy, refine_streaming_hamming_kmodes_with_resampling,
+   15 +    refine_streaming_hamming_kmodes_with_sampler, streaming_hamming,
+   16 +};
+   17 +use super::StreamingCoresetAlgorithm;
+   18 +
+   19 +pub(in crate::index::vector::ivf) struct HammingCoresetAlgorithm;
+   20 +
+   21 +#[async_trait]
+   22 +impl StreamingCoresetAlgorithm for HammingCoresetAlgorithm {
+   23 +    type Coreset = streaming_hamming::HammingCoreset;
+   24 +
+   25 +    fn metric_policy(&self) -> &dyn StreamingKMeansMetricPolicy {
+   26 +        &HAMMING_METRIC_POLICY
+   27 +    }
+   28 +
+   29 +    fn prepare_sample(
+   30 +        &self,
+   31 +        training_data: FixedSizeListArray,
+   32 +        sampled_metric: MetricType,
+   33 +    ) -> Result<FixedSizeListArray> {
+   34 +        self.metric_policy()
+   35 +            .validate_sample_metric(sampled_metric)?;
+   36 +        if training_data.value_type() == DataType::UInt8 {
+   37 +            Ok(training_data)
+   38 +        } else {
+   39 +            Err(Error::invalid_input(format!(
+   40 +                "streaming Hamming k-modes requires UInt8 vectors, got {}",
+   41 +                training_data.value_type()
+   42 +            )))
+   43 +        }
+   44 +    }
+   45 +
+   46 +    fn new_coreset(&self, dimension: usize, capacity: usize) -> Self::Coreset {
+   47 +        streaming_hamming::HammingCoreset::new(dimension, capacity)
+   48 +    }
+   49 +
+   50 +    fn append_local_coreset(
+   51 +        &self,
+   52 +        coreset: &mut Self::Coreset,
+   53 +        data: &FixedSizeListArray,
+   54 +        local_k: usize,
+   55 +        max_iters: usize,
+   56 +        on_progress: KMeansProgressCallback,
+   57 +    ) -> Result<()> {
+   58 +        streaming_hamming::append_local_coreset(coreset, data, local_k, max_iters, on_progress)
+   59 +    }
+   60 +
+   61 +    fn append_coreset(&self, coreset: &mut Self::Coreset, other: Self::Coreset) -> Result<()> {
+   62 +        coreset.append(other)
+   63 +    }
+   64 +
+   65 +    fn reduce_coreset(
+   66 +        &self,
+   67 +        coreset: &mut Self::Coreset,
+   68 +        _dimension: usize,
+   69 +        budget: usize,
+   70 +    ) -> Result<()> {
+   71 +        coreset.reduce_to_budget(budget)
+   72 +    }
+   73 +
+   74 +    fn coreset_len(&self, coreset: &Self::Coreset) -> usize {
+   75 +        coreset.len()
+   76 +    }
+   77 +
+   78 +    fn train_centroids(
+   79 +        &self,
+   80 +        coreset: Self::Coreset,
+   81 +        _dimension: usize,
+   82 +        num_partitions: usize,
+   83 +        max_iters: usize,
+   84 +        on_progress: KMeansProgressCallback,
+   85 +    ) -> Result<FixedSizeListArray> {
+   86 +        let centroids = streaming_hamming::train_hierarchical(
+   87 +            &coreset,
+   88 +            num_partitions,
+   89 +            max_iters,
+   90 +            on_progress.clone(),
+   91 +        )?;
+   92 +        streaming_hamming::refine_weighted(&coreset, &centroids, 3, on_progress)
+   93 +    }
+   94 +
+   95 +    async fn refine_with_sampler(
+   96 +        &self,
+   97 +        sampler: &FixedIvfTrainingSampler<'_>,
+   98 +        streaming_sample_size: usize,
+   99 +        sample_ranges: &FixedIvfTrainingRanges,
+  100 +        initial_centroids: &FixedSizeListArray,
+  101 +        passes: usize,
+  102 +        on_progress: KMeansProgressCallback,
+  103 +    ) -> Result<FixedSizeListArray> {
+  104 +        refine_streaming_hamming_kmodes_with_sampler(
+  105 +            sampler,
+  106 +            streaming_sample_size,
+  107 +            sample_ranges,
+  108 +            initial_centroids,
+  109 +            passes,
+  110 +            on_progress,
+  111 +        )
+  112 +        .await
+  113 +    }
+  114 +
+  115 +    async fn refine_with_resampling(
+  116 +        &self,
+  117 +        dataset: &Dataset,
+  118 +        column: &str,
+  119 +        total_sample_rate: usize,
+  120 +        streaming_sample_rate: usize,
+  121 +        num_partitions: usize,
+  122 +        initial_centroids: &FixedSizeListArray,
+  123 +        fragment_ids: Option<&[u32]>,
+  124 +        passes: usize,
+  125 +        on_progress: KMeansProgressCallback,
+  126 +    ) -> Result<FixedSizeListArray> {
+  127 +        refine_streaming_hamming_kmodes_with_resampling(
+  128 +            dataset,
+  129 +            column,
+  130 +            total_sample_rate,
+  131 +            streaming_sample_rate,
+  132 +            num_partitions,
+  133 +            initial_centroids,
+  134 +            fragment_ids,
+  135 +            passes,
+  136 +            on_progress,
+  137 +        )
+  138 +        .await
+  139 +    }
+  140 +}

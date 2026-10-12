@@ -1,0 +1,324 @@
+{
+  "iteration": 6,
+  "files": [
+    {
+      "path": "rust/lance-core/src/datatypes/schema.rs",
+      "module": "L1-modules/rust-lance-core.md",
+      "reviewed": true,
+      "role": "Schema tree validation/conversion, field lookup and path syntax, configurable comparison, schema set operations and a Projectable-backed Projection selection model with blob handling. This private module re-exports selected public APIs through datatypes; its pub comparison helpers are not among those re-exports. Methods operate on in-memory schema data, not dataset IO or commit transactions.",
+      "ranges": [
+        [
+          1,
+          31,
+          "SPDX, module purpose and imports establish HashMap/HashSet/VecDeque, formatting, Arc, deep-size, Arrow schemas/batches, lance_arrow helpers, Field options, core errors and system-column statics. Public Schema derives Default, Debug, Clone, DeepSizeOf and exposes fields:Vec<Field> plus metadata:HashMap<String,String>. Equality is implemented separately below and is not a full derived comparison of these two members."
+        ],
+        [
+          32,
+          81,
+          "Public FieldRef<'a> is ById(i32) or ByPath(&'a str), deriving Debug/Clone/PartialEq/Eq/Hash. into_id consumes it: ById verifies schema.field_by_id and returns InvalidInputSource for an absent ID; ByPath uses schema.field and lazy FieldNotFound diagnostics with schema.field_paths. From<i32>, From<&str> and From<&String> construct references without lookup/validation. Borrowed path lifetime is preserved."
+        ],
+        [
+          82,
+          112,
+          "Private SchemaFieldIterPreOrder stores a Vec<&Field> stack. new reserves twice top-level count and pushes top-level fields in reverse. Iterator::next pops a field, pushes its children reversed and yields the parent; thus traversal preserves source order in depth-first pre-order. Exhaustion returns None; no recursive call stack is used, but pending siblings consume heap stack space."
+        ],
+        [
+          113,
+          135,
+          "Public validate_fixed_size_list_dimensions(field_name,&DataType)->Result rejects dimension<=0 with a Schema error including name/value. It recursively follows a FixedSizeList's element DataType, stopping on every other type. It does not itself recurse through arbitrary Struct/List/Map; Schema's Field walk supplies those nodes. Rationale: row-count division by zero and nested fixed-size lists collapsed into one leaf; comments identify shared write validation and decoder scheduler usage, but downstream read callers remain pending. Negative values are rejected as well as zero."
+        ],
+        [
+          136,
+          173,
+          "unenforced_primary_key collects all marked fields in pre-order and sorts by tuple: positive u32 position becomes (false,position as i32,id), zero/legacy becomes (true,id,id). Explicit positive entries precede legacy, ties use id. The cast can wrap positions above i32::MAX, so exact ordering is signed-cast order, not all-u32 numerical order. No uniqueness/contiguity/range validation occurs here. unenforced_clustering_key collects marked fields and sorts directly by u32 position (unwrap_or0); ties retain pre-order under stable sort. Position0 remains accepted locally."
+        ],
+        [
+          174,
+          223,
+          "compare_with_options delegates child fields then optionally compares top-level metadata. explain_difference gets child diagnostics and appends metadata differences if requested, returning None or a comma-joined string. has_dictionary_types delegates to each Field. check_compatible returns SchemaMismatch with explanation or fallback unknown reason when comparison fails. to_compact_string converts through ArrowSchema and delegates the lance_arrow formatter; documentation explicitly says display, not serialization."
+        ],
+        [
+          224,
+          258,
+          "resolve parses field-path syntax, converting parser errors to None. One segment does an exact top-level name search; multiple segments find the first root, construct a VecDeque of remaining borrowed segments and invoke Field::resolve, returning the full ancestry only on success. Failed Field traversal's partial queue/output is local and discarded. Doc examples use double quotes for dotted child names, but the actual parser only treats backticks specially (rust/lance-core/src/datatypes/schema.rs:1567-1663)."
+        ],
+        [
+          259,
+          307,
+          "Private do_project parses each requested string fallibly, then uses split[0] (safe because parse guarantees a nonempty result). It calls self.field(first), then Field::project on remaining segments; repeated selected roots merge into the first candidate via Field::merge, preserving first-selection order and Self metadata. Because self.field reparses first, an already-unquoted segment containing dots/backticks can be reinterpreted; lookup is not a direct root-name search. Missing nested paths inherit Field::project's empty-child success rather than this root missing check (rust/lance-core/src/datatypes/field.rs:697-725). Recognized system names are silently dropped unless preserve_system_columns; then canonical Arrow fields for rowid/rowaddr/rowoffset/creation/update versions are converted and appended, without deduplication or tail validation. Unknown roots error via FieldNotFound only if err_on_missing; otherwise drop. Result is not revalidated."
+        ],
+        [
+          308,
+          327,
+          "Public project forwards err_on_missing=true,preserve_system_columns=false; project_or_drop uses false,false; project_preserve_system_columns uses true,true. The project documentation retains an ignored doctest, unlike current contributor preference; it is not compiled evidence. These wrappers differ only in root missing/system behavior, not in nested Field::project validation or blob handling. Contributor doctest policy: AGENTS.md:92-102; underlying projection flow: rust/lance-core/src/datatypes/schema.rs:259-306."
+        ],
+        [
+          328,
+          384,
+          "validate first rejects dots and duplicates among top-level names. It collects reserved negative lineage IDs only from top-level fields whose name maps to that same ID, then pre-order checks every ID: negative IDs outside that allowed set fail, and every duplicate fails. A nested reuse of an allowed reserved ID eventually fails duplication against its top-level owner. It does not check lineage datatype/nullability, parent_id consistency or nested name uniqueness. Every field's reconstructed DataType is passed to fixed-size-list dimension validation; malformed Field::data_type may panic before returning a validation error. Primary-key verification is a separate call, not part of validate."
+        ],
+        [
+          385,
+          416,
+          "Public intersection/intersection_ignore_types forward to private do_intersection with false/true. It iterates Other top-level order, finds matching Self fields using path-based self.field(name), delegates Field::do_intersection and propagates top-level errors; absent roots are omitted. Result metadata comes from Self, without validation. This ordering differs from Field's recursive child intersection, which iterates Self and suppresses child errors (rust/lance-core/src/datatypes/field.rs:959-984). fields_pre_order exposes the private iterator as impl Iterator<Item=&Field>."
+        ],
+        [
+          417,
+          468,
+          "field_paths traverses all fields, then performs a separate ancestry-by-ID lookup for each, joining names with raw dots. It does not quote dotted/backtick names and is not a guaranteed parseable path API. Repeated ancestry searches/path cloning can be expensive and duplicate IDs can map to another same-ID ancestry. project_by_ids delegates each root to Field::project_by_ids and retains schema metadata; its docs' false=>only selected children is qualified by the Field parent-only fallback (rust/lance-core/src/datatypes/field.rs:768-784). Private apply_projection delegates Field's atomic-aware filtering, likewise retaining metadata."
+        ],
+        [
+          469,
+          503,
+          "project_by_schema accepts S:TryInto<Self,Error=Error>, converts once, iterates projection order, rejects any requested root name containing a dot, then resolves matching Self fields and calls project_by_field with the supplied mismatch mode. OnMissing::Error yields a Schema error for missing roots; Ignore drops them. Result preserves Self metadata. A &Schema conversion later clones without validation, while &ArrowSchema conversion assigns IDs/validates/verifies keys; generic input type therefore affects preliminary checks (rust/lance-core/src/datatypes/schema.rs:889-928)."
+        ],
+        [
+          504,
+          542,
+          "exclude accepts a Debug TryInto<Self>; conversion failures are replaced with a generic Schema error, losing the original reason. For each Self root, a matching Other root removes a non-nested field or applies Field::exclude for nested fields; unmatched roots clone. Metadata stays Self. field returns the last node of resolve; field_case_insensitive returns the last node of its case-insensitive counterpart. All roots are looked up by parsed paths, not literal unescaped names."
+        ],
+        [
+          543,
+          588,
+          "resolve_case_insensitive uses the same parser/error-to-None policy as resolve. For a single root or the first segment it prefers exact name, then first ASCII-case-insensitive match. Remaining segments use Field::resolve_case_insensitive. Ambiguous folded names use first match rather than error; original case is preserved in returned references. Unicode case folding is not used."
+        ],
+        [
+          589,
+          632,
+          "Public field_id has a TODO to reduce visibility but currently returns a Schema error with fixed Vector column not in schema text on any failed path lookup. top_level_field_ids returns root IDs in order; field_ids collects pre-order IDs, including negatives. field_by_id_mut and field_by_id check each root itself then its descendants, so unlike the Field versions they include top-level nodes. First forward DFS match wins if IDs are duplicated."
+        ],
+        [
+          633,
+          672,
+          "field_ancestry_by_id builds owned Vec paths for all roots, pops from the end and pushes children in forward order, so search is reverse sibling order; each edge clones the whole path. It ignores parent_id metadata and returns the actual tree ancestry. Public mut_field_by_id provides another root-inclusive forward mutable search. max_field_id takes root max_id values and returns None for empty schema; docs advise Manifest::max_field_id for datasets because dropped IDs are absent here. Field::max_id floors negative-only leaves at -1 (rust/lance-core/src/datatypes/field.rs:1087-1093)."
+        ],
+        [
+          673,
+          710,
+          "set_dictionary requires a RecordBatch column by name for every root, including non-dictionary roots; missing column returns Schema error after any earlier attachments, and Field::set_dictionary may panic on type mismatch. set_field_id chooses max(current schema max or -1, supplied persisted max or -1)+1 then calls Field::set_id(-1,&mutseed) for each root. Existing nonnegative IDs remain, only negative IDs are assigned, and all parent IDs are rebuilt. It does not reassign already assigned IDs despite loose doc wording, validate duplicate IDs, or guard i32 overflow. Private reset_id recursively resets IDs only."
+        ],
+        [
+          711,
+          729,
+          "extend converts all Arrow fields before mutation, then appends them and only afterward checks duplicate top-level names. Duplicate names return Internal but leave the appended fields in self; there is no rollback. Success does not assign IDs, run validate, or verify primary keys. New fields retain imported IDs or -1. The comment says create a new schema, but the public API mutates &mut self."
+        ],
+        [
+          730,
+          767,
+          "merge converts Other and resets its IDs. It clones each Self root, merges a matching Other field with Field::merge, then appends new Other roots in Other order, suppressing repeated root names already in the output. Metadata begins with Other then Self overwrites shared keys. It returns a new Schema without assigning new IDs or validating it; imported fields stay -1 until explicit set_field_id, as tested below. Self is unmodified if conversion/merge fails; partial mutations affect only local clones."
+        ],
+        [
+          768,
+          834,
+          "field_path obtains ancestry and calls format_field_path; field_path_minimal calls the minimally quoting formatter. Missing ancestry yields Error::index with the ID. Full formatting is documented for SQL expression use, while minimal formatting preserves hyphens and quotes literal dots/backticks for field-path roundtrip/index metadata. The long compiled-style doctest constructs a valid schema and asserts hyphen preservation and dotted-child roundtrip; tests were read, not executed. Formatter implementation limits are described at rust/lance-core/src/datatypes/schema.rs:1665-1735."
+        ],
+        [
+          835,
+          873,
+          "verify_primary_key gathers marked fields, rejects any non-leaf, then walks actual ancestry (if found) including the field itself and rejects nullable members, List/LargeList logical types and Map logical types. It does not explicitly reject FixedSizeList, whose primitive-element representation can be a leaf; it does not verify positions, duplicate positions, value uniqueness or clustering-key constraints. Publicly malformed schemas with duplicate IDs can confuse ancestry; missing ancestry simply skips that loop. No data values are read, consistent with unenforced key naming."
+        ],
+        [
+          874,
+          929,
+          "Schema PartialEq compares only fields and ignores schema metadata; Field derived equality still compares its own members. Display writes each Field followed by newline. TryFrom<&ArrowSchema> recursively converts fields, copies metadata, assigns IDs, validates and verifies primary keys in that order; stale comment calls this arrow2 although imported type is arrow_schema::Schema. From<&Schema> to ArrowSchema converts fields and copies metadata without validation. TryFrom<&Self> just clones, preserving any invalid state and allowing shared generic APIs to accept Schema references."
+        ],
+        [
+          930,
+          981,
+          "pub compare_fields is in a private non-re-exported module. Default fast path requires equal lengths and ordered pairwise Field comparison. If allow_missing_if_nullable, ignore_field_order or allow_subschema is set, it first rejects any actual field name absent from expected, then maps actual names to (field,last_position), with duplicate names overwriting. Each expected name must compare if present; positions must be nondecreasing unless ignore_field_order. Missing expected names are allowed under allow_subschema, else only nullable expected under allow_missing_if_nullable. It does not enforce unique names or strict position increase; duplicate-name malformed inputs can behave differently from fast path."
+        ],
+        [
+          982,
+          1039,
+          "pub explain_fields_difference constructs HashSets of actual/expected names, prefixes paths with raw dot concatenation, computes unexpected and disallowed missing names and emits one combined message if needed. allow_subschema suppresses all missing reports; allow_missing_if_nullable suppresses missing nullable fields by finding the first expected name match. HashSet iteration means ordering of multiple missing/unexpected names is not explicitly stable. These paths are diagnostic text, not escaped field expressions."
+        ],
+        [
+          1040,
+          1098,
+          "Explanation then maps each expected field to the first matching actual position, checks adjacent decreases unless ignore_field_order, emits full expected/actual order if needed, and delegates per-field explain_differences in expected order. This first-match policy differs from compare_fields' slow-path last-name mapping on duplicates. debug_assert verifies matching names. Private explain_metadata_difference prints Debug maps on inequality; map entry order is not guaranteed. Public OnMissing enum has Error and Ignore."
+        ],
+        [
+          1099,
+          1143,
+          "Public Projectable:Debug+Send+Sync exposes schema(&self)->&Schema; Schema implements it by returning self. BlobHandling derives Debug/Clone/Default/PartialEq: AllBinary, default BlobsDescriptions, AllDescriptions, SomeBlobsBinary(HashSet<u32>) and SomeBinary(HashSet<u32>). Comments distinguish only marked blobs versus all binary columns. Private should_load_binary first requires is_blob, then selects all under AllBinary or IDs contained in either set; descriptor modes return false. i32 field IDs are cast to u32 without validation."
+        ],
+        [
+          1144,
+          1189,
+          "should_unload first reconstructs DataType and accepts binary-like or blob-marked fields. AllBinary=false; BlobsDescriptions=is_blob; AllDescriptions=true; SomeBlobsBinary=is_blob&&!setcontains; SomeBinary=!setcontains. returns_description directly exposes this decision for materialization heuristics. unload_if_needed checks load first (binary_blob_mut and early return), unload second (unloaded_mut and early return), otherwise recursively transforms children. For an ordinary non-blob binary field, AllDescriptions/SomeBinary can report true yet Field::unloaded_mut is a no-op because it only handles blobs (rust/lance-core/src/datatypes/field.rs:648-658). Thus the policy name/doc does not prove an ordinary binary field actually becomes a descriptor through this function."
+        ],
+        [
+          1190,
+          1224,
+          "Projection derives Clone and owns a private Arc<dyn Projectable> base, public HashSet<i32> field_ids, booleans for rowid/rowaddr/last-update/creation-version and public BlobHandling. No row-offset boolean exists. Debug prints selections/mode but omits base. System-column selection is separate from field IDs, although union_schema can insert a nonnegative field with a system-like name as an ordinary ID. The doc's no-field-id wording describes this selection model, not every persisted lineage representation."
+        ],
+        [
+          1225,
+          1275,
+          "empty stores base, empty ID set, false metadata flags and default blob mode. full clones base.schema and unions it into empty. Four consuming flag builders set true; with_blob_handling replaces the mode. Private add_field_children recursively inserts all descendants' IDs, including negative values, without checking base membership. No asynchronous or shared mutable base state is added here."
+        ],
+        [
+          1276,
+          1332,
+          "union_column consumes self, recognizes exact raw rowid/rowaddr/last-update/creation-version strings first and sets their flags. Other paths resolve through base.schema; all ancestors plus all descendants of the target are inserted, not siblings. Missing or malformed paths become InvalidInputSource under Error or no change under Ignore. Quoted system names do not take the raw-string shortcut; rowoffset and wildcard have no special handling here. contains_field_id is set membership; has_data_fields is nonempty IDs. union_columns folds this fallibly in input order."
+        ],
+        [
+          1333,
+          1364,
+          "union_predicate inserts exactly base fields satisfying the predicate; subtract_predicate removes exactly matching IDs. Neither repairs parent/child closure or touches metadata flags, so later Field::apply_projection can assert if a selected nested parent loses all children. intersect takes set intersection and ANDs all metadata flags, retaining Self base and blob mode without compatibility checks between bases/modes. Its allocations collect a new HashSet."
+        ],
+        [
+          1365,
+          1403,
+          "union_schema traverses Other fields: nonnegative IDs are blindly inserted, then negative fields matching four system names set flags; all other negative fields only debug_assert id==-1. Despite docs promising base membership checks and panic for foreign nonnegative IDs, the implementation never consults base here. Ordinary -1 fields are ignored, reserved other negatives may assert only in debug. union_projection unions IDs and ORs all metadata flags, preserving Self base/blob mode and likewise not validating base compatibility."
+        ],
+        [
+          1404,
+          1457,
+          "union_arrow_schema/subtract_arrow_schema first update metadata flags from Other's top-level names, then ask base.schema.project_by_schema(other,on_missing,TakeSelf), and finally union/subtract the resulting schema IDs. This performs Arrow conversion/validation and still inherits Field's mismatch branches that can error before TakeSelf fallback. With OnMissing::Error a system-only Arrow field absent from base can still cause project_by_schema failure after flag updates; consumed Self is not returned on error. No special filtering of those roots occurs before the schema projection."
+        ],
+        [
+          1458,
+          1498,
+          "subtract_projection takes ID set difference and clears each flag selected by Other; retains Self base/blob mode. subtract_schema mirrors union_schema using remove/false, and has the same misleading foreign-ID panic promise: absent positive IDs simply remove nothing, without checking base; non-system negatives assert id==-1 in debug. Both methods can leave incomplete ancestor/child selections, with no closure repair."
+        ],
+        [
+          1499,
+          1528,
+          "is_empty requires no IDs and all four flags false. is_metadata_only requires no IDs and at least one of those flags true, including lineage versions beyond the shorter doc wording. has_non_meta_cols duplicates the ID-nonempty predicate of has_data_fields. to_bare_schema applies the projection to base schema, preserving base ordering and metadata while applying blob transformation; it does not independently strip actual system-named fields selected by IDs."
+        ],
+        [
+          1529,
+          1566,
+          "to_schema starts from bare schema and appends requested metadata fields in fixed order rowid,rowaddr,last-update,creation-version. It calls Schema::extend(...).unwrap(), so duplicate existing names can panic; appended canonical fields remain unassigned IDs because extend does not assign. into_schema forwards, into_schema_ref wraps Arc, to_arrow_schema converts the materialized schema. No requested rowoffset flag exists and no final validation is performed."
+        ],
+        [
+          1567,
+          1623,
+          "Public parse_field_path returns Result<Vec<String>> and rejects empty input. It scans Unicode chars, collecting a current segment and in_quotes flag. Only backtick is quoting syntax; double quotes are ordinary characters despite earlier resolver doc examples. Within quotes, doubled backticks decode to one; a single closing backtick requires following dot or end. Outside quotes, backtick can start only at an empty segment; elsewhere it errors as unexpected quote. Original input is included in malformed-path diagnostics."
+        ],
+        [
+          1624,
+          1664,
+          "Unquoted dot requires a nonempty current segment then pushes it; other chars, including quoted dots, spaces, brackets and double quotes, are literal. End with open quote errors; nonempty current pushes; empty current after earlier segments errors as trailing dot; empty result errors generically. The comment calls the final result-empty check redundant after the empty-input guard, but a fully empty quoted segment is another way to reach it. Success guarantees at least one nonempty segment; no whitespace trimming, wildcard parsing or normalization occurs."
+        ],
+        [
+          1665,
+          1692,
+          "format_field_path maps segments independently, quoting when any char is neither Unicode-alphanumeric nor underscore, doubling embedded backticks, and joining with dots. It is intended for SQL expression safety but does not quote solely for a leading digit, reserved word or empty name; no SQL parser validation occurs here. Empty slice returns empty string, and empty segments stay empty. The comment calls doubled backticks PostgreSQL style; this is local naming, not evidence of a full SQL dialect grammar."
+        ],
+        [
+          1693,
+          1736,
+          "format_field_path_minimal quotes only segments containing dot or backtick, doubles backticks and joins. Hyphens, spaces and other ordinary chars remain bare; this matches the local field-path parser, not SQL expression syntax. Doctests assert hyphen/dot/backtick examples and roundtrip for their nonempty segments. The doc's unconditional roundtrip wording assumes valid nonempty segments: empty slice/segment outputs can fail parse_field_path. Both formatters return String and do not reject invalid inputs."
+        ],
+        [
+          1737,
+          1766,
+          "escape_field_path_for_project preserves exactly WILDCARD unchanged. Otherwise it parses, falls back on any error to treating the whole input as one literal segment, doubles backticks and quotes every segment. It is deliberately non-fallible; malformed path text is escaped rather than rejected, and empty input becomes a quoted empty segment. Tests module imports Arrow aliases, HashMap/Arc and the module API."
+        ],
+        [
+          1767,
+          1840,
+          "test_resolve_with_quoted_fields constructs Schema directly, bypassing validation and retaining unassigned IDs, to resolve a top-level dotted name in backticks, normal root, dotted nested child and normal nested child. It checks returned ancestry length/names and equivalent field lookup. A double-quoted nonexistent path returns None, but this does not demonstrate double-quote syntax support. The manual schema's dotted root would fail normal Schema::try_from validation."
+        ],
+        [
+          1841,
+          1917,
+          "test_field_path_parsing asserts plain multisegment/single paths, quoted dotted segments at all positions, literal tags[*], doubled backtick decoding, and failures for unclosed quote, mid-unquoted quote, empty segment and trailing dot. It also asserts full formatter outputs for dotted/backtick names. It does not test empty quoted segments, postquote text, empty formatter inputs or double quotes as quoting syntax."
+        ],
+        [
+          1918,
+          1984,
+          "Validation tests ensure duplicate ID0 is reported even when top-level names differ, and allow a top-level rowid with its own reserved negative ID. Wrong lineage name/ID pairing and a nested lineage negative without a top-level owner return Schema negative-id errors. Fixtures use valid UInt64/non-null lineage types but these tests do not establish that validate checks those properties."
+        ],
+        [
+          1985,
+          2043,
+          "test_resolve_quoted_fields asserts Arrow-schema import rejects a dotted top-level name with the expected message, then permits a dotted nested child and resolves it with backticks, plus normal root/nested fields. An additional DataType import follows. This distinguishes what resolution can handle in a manually constructed schema from what import validation permits."
+        ],
+        [
+          2044,
+          2110,
+          "Projection tests select b.f1,b.f3,c from a schema with a,b,c and assert exact Arrow shape/order with partial Struct children. The system-preserving variant inserts _rowid between b and c according to request order and asserts nullable UInt64. They do not test duplicate system selections, missing nested paths or blob policy in these wrappers."
+        ],
+        [
+          2111,
+          2179,
+          "project_by_ids tests select descendants plus another root, a single nested child, an entire parent with include_all_children=true, and parent+one child with false. Arrow-schema assertions pin the retained child sets. There is no parent-only,false case here, so the Field helper's full-child fallback is not disproved by the doc-oriented tests."
+        ],
+        [
+          2180,
+          2246,
+          "project_by_schema test builds scalar, Struct, string, List and Dictionary fields, requests a subset with OnMissing::Error/TakeSelf, and compares Arrow output to the requested projection. The fixture named fixed_l is actually DataType::List, not FixedSizeList; do not count it as fixed-size-list coverage. Types match in this fixture, so it does not prove TakeSelf accepts all mismatches."
+        ],
+        [
+          2247,
+          2298,
+          "Nested lookup test resolves b.f2 as Boolean. Exclusion test projects a,b.f2,b.f3 then excludes them, expecting b.f1 and c. These assert simple same-type name-based operations, not malformed inputs, blob atomic subtraction or conversion error preservation."
+        ],
+        [
+          2299,
+          2369,
+          "Intersection test asserts common b children f1/f2 plus c, omitting unmatched roots. A List<Struct> case builds a partial ID projection and checks intersection_ignore_types in both directions equals it. It does not exercise incompatible nested-child errors being silently omitted or LargeList intersection behavior."
+        ],
+        [
+          2370,
+          2443,
+          "Merge-ID test shows existing max5, incoming max1, merged incoming fields still id-1/max5, then set_field_id(Some7) assigns8/9. This explicitly qualifies merge's reassignment prose: assignment is a separate call. Metadata merge test asserts both unique keys survive and Self's value wins a shared key."
+        ],
+        [
+          2444,
+          2544,
+          "Arrow-schema merge test explicitly calls set_field_id(None), then expects new IDs6/7. Nested merge combines f11/f22 and f2/f3, adjusts expected IDs to reflect retained existing IDs and newly assigned values, then asserts Schema equality. That equality ignores schema metadata, but the earlier dedicated metadata test covers its merge policy."
+        ],
+        [
+          2545,
+          2609,
+          "field_by_id test checks root b at1 and child f2 at3. Schema explanation test expects exact combined text for missing nested b.f2 and nullable mismatch on c. There is only one missing name in that assertion, so it does not stabilize ordering of larger HashSet-derived missing-name sets."
+        ],
+        [
+          2610,
+          2711,
+          "Subschema comparison test rejects nullable omissions by default, allows them under allow_missing_if_nullable, rejects missing non-null fields, and rejects reordered roots/children unless ignore_field_order=true. After creating out_of_order it accidentally calls subschema.explain_difference for one expected diagnostic, so that assertion repeats the earlier subschema check rather than testing reordered diagnostics; the final ignore-order explanation uses out_of_order correctly. This test does not set allow_subschema, despite its name."
+        ],
+        [
+          2712,
+          2769,
+          "Primary-key success cases cover no key, a non-null top-level legacy boolean key and a non-null nested Struct leaf key alongside a root key. Assertions compare returned leaf names/order. No values are checked for uniqueness, and these fixtures do not test explicit position parsing."
+        ],
+        [
+          2770,
+          2849,
+          "Primary-key failure cases assert import rejects a nullable key leaf, a Struct marked as a key, a key under a nullable ancestor, and a key inside a List. They check descriptive error substrings. Map ancestry and primitive-element FixedSizeList leaf behavior are not tested here."
+        ],
+        [
+          2850,
+          2956,
+          "Primary-key ordering test covers explicit positions2/1 yielding b,a; absent positions using legacy flags yielding schema order c,d; and mixed explicit+legacy yielding f,e,g. It does not cover duplicate/gapped/zero/invalid positions or the u32-to-i32 cast boundary in the sorting implementation."
+        ],
+        [
+          2957,
+          3010,
+          "Missing-root projection diagnostics test formats errors for vectr and an unrelated name, asserting the vector suggestion only for the typo and available-field listing for both. field_paths test checks membership of three flat names, not nested quoting, ordering or invalid-ID behavior. Suggestions are generated through the previously analyzed FieldNotFoundError Display path."
+        ],
+        [
+          3011,
+          3080,
+          "Minimal-path test covers unchanged plain/underscore identifiers, full-versus-minimal hyphen handling, a nested hyphen leaf, and dotted/backtick nested names that must stay quoted and roundtrip. It obtains dotted child IDs via direct child-name search to avoid ambiguity. The regression specifically rejects the shortcut of removing every backtick from a path."
+        ],
+        [
+          3081,
+          3141,
+          "Dimension test rejects zero-sized FixedSizeList at root, inside Struct, and nested inside a positive-size FixedSizeList whose inner representation collapses into a leaf. It checks the positive-integer error substring and accepts positive direct/nested lists. Negative dimensions are rejected by code but not explicitly tested in this block."
+        ],
+        [
+          3142,
+          3225,
+          "Clustering-key tests cover no key, a single position1 key, nullable key acceptance, and position3/1/2 fields returned in a,b,c order despite source c,a,b order. An unrelated d field is omitted. There is no clustering leaf/list/position-range validation test here. This closes the complete file; all lines/tests were read, but no tests were executed during KB extraction."
+        ]
+      ],
+      "limits": "This file closes several previously pending local boundaries: Arrow schema import assigns IDs, validates names/IDs/dimensions and verifies primary-key structure; Projectable and BlobHandling now have local implementation evidence. It still does not establish every writer/reader call to these checks, IO behavior, actual schema persistence, version gates, expression parsing beyond local field paths, or a complete repository call graph. Field operations are separately analyzed at rust/lance-core/src/datatypes/field.rs:163-1348; parser/formatter and Projection doc/code discrepancies are recorded rather than silently repaired. No source files were edited."
+    }
+  ]
+}

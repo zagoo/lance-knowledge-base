@@ -1,0 +1,167 @@
+[
+  [
+    781,
+    799,
+    "Crate-visible default_list_manifest_locations returns the underlying boxed stream immediately when sorted_descending is false. Nested sort_stream collects every entry, propagates the first error, sorts by Reverse(version), and emits an owned stream. Memory scales with metadata entries, not manifest bytes."
+  ],
+  [
+    800,
+    834,
+    "Sorted lexical stores peek the first result: V2 passes the remaining stream through; empty or error also selects this branch so the original error remains streamed. First V1 collects and sorts. Nonlexical stores always collect and sort. No mixed-scheme validation occurs here; the optimized order assumes the first scheme applies throughout."
+  ],
+  [
+    835,
+    866,
+    "Crate-visible since-version default without hints uses descending listing and try_take_while(version > since), stopping at the first older or equal version. With hints it clones the base into a lazy future, accepts Some locations or falls back to collecting all ordinary listings, filtering and sorting. Once/try_flatten exposes the resulting stream; IO errors propagate."
+  ],
+  [
+    867,
+    899,
+    "Public async_trait CommitHandler requires Debug + Send + Sync. All concurrent writers must use the same handler type by contract. Defaults are is_version_not_found_definitive=false and propagate_commit_error_after_success=true, protecting cleanup under delayed visibility and preserving custom-handler errors after matching readback. These hooks do not themselves implement readback."
+  ],
+  [
+    900,
+    916,
+    "Default async resolve_latest_location delegates current_manifest_path; resolve_version_location delegates default_resolve_version using the underlying store. Neither decodes manifest bytes. The exact-version resolver can return an unproven fallback path."
+  ],
+  [
+    917,
+    936,
+    "Default version_exists HEADs the path from the supplied scheme: success yields true, NotFound false, other errors propagate. Although documented for attached versions, it does not reject detached input. It does not try another naming scheme or external authority; such handlers must override it."
+  ],
+  [
+    937,
+    962,
+    "Default detached listing delegates the public detached stream in arbitrary order. Default attached listing delegates the sorted/unsorted helper. Returned streams borrow the store and own needed path state. There is no implicit external authority lookup."
+  ],
+  [
+    963,
+    993,
+    "Default list_manifest_locations_since delegates the hint-aware helper. Required commit mutably borrows Manifest, owns optional indices/transaction, and receives base/store/function-pointer writer/scheme. It returns Result<ManifestLocation, CommitError>; existing versions should produce CommitConflict by contract. The trait does not enforce atomicity or callback behavior."
+  ],
+  [
+    994,
+    1019,
+    "Predecessor hooks default to unsupported: supports_predecessor_condition=false; async latest and specific identity queries return Ok(None) without IO. None means no supplied identity, not a zero version or token."
+  ],
+  [
+    1020,
+    1056,
+    "commit_after requires reservation conditioned on predecessor identity, with mismatch PrerequisiteFailed rather than conflict. Its default returns OtherError(NotSupported) without invoking the writer. Default forget_version and delete are async no-ops; neither deletes manifest objects. Identity-conditional retirement is an implementer obligation."
+  ],
+  [
+    1057,
+    1075,
+    "For detached input, default_resolve_version returns a deterministic d path with V2 and unknown size/ETag/identity without any existence check. A successful location result does not prove an object exists."
+  ],
+  [
+    1076,
+    1102,
+    "For attached input, HEAD only the V2 path. Success returns size/ETag with identity None. V2 NotFound returns a V1 path with unknown size and ETag without HEADing V1; other errors propagate. Later byte reads establish fallback existence."
+  ],
+  [
+    1103,
+    1138,
+    "DynamoDB-only OSObjectStoreToAwsCredAdaptor implements ProvideCredentials. Each future fetches provider credentials, maps errors, and creates AWS credentials with copied key/secret, cloned token, artificial expiry now+600 seconds via checked_add.expect, and empty provider name. Actual provider expiry is not preserved here. No credential values are logged."
+  ],
+  [
+    1139,
+    1170,
+    "DynamoDB builder configures latest SDK behavior, supplied region/credentials, no identity cache because the provider owns caching, and standard retry max_attempts=5 including the initial request. An optional endpoint overrides the SDK endpoint. It builds a Client and awaits child new_external_store. Child schema and remote IO behavior remain pending."
+  ],
+  [
+    1171,
+    1198,
+    "Public commit_handler_from_url chooses Rename locally on Windows and ConditionalPut otherwise. Parse failure or a Windows single-character scheme returns local. file/file-object-store use local; s3, gs, az, abfss, memory, oss, tos, shared-memory and goosefs use ConditionalPut; cos uses TencentCosCommitHandler. This contradicts the module default-handler comments. Routing does not probe backend atomicity."
+  ],
+  [
+    1199,
+    1226,
+    "s3+ddb without the feature returns InvalidInput. With the feature, require exactly one query pair, ddbTableName, nonempty value, and both strings Cow::Borrowed. Decoding that produces owned key/value strings fails this pattern even if decoded text matches. Wrong count/key/ownership use the query diagnostic; an empty borrowed value has its own error."
+  ],
+  [
+    1227,
+    1264,
+    "For accepted DDB input, clone/default ObjectStoreParams; extract raw storage options, endpoint, S3 options, optional region, accessor and provider scheme; await credential construction with refresh offset and optional supplied credentials. Build ExternalManifestCommitHandler using app name lancedb. Delegated errors propagate. Every other parsed scheme chooses UnsafeCommitHandler."
+  ],
+  [
+    1265,
+    1273,
+    "DynamoDB endpoint lookup prefers raw option dynamodb_endpoint, including an empty string, over DYNAMODB_ENDPOINT. Missing or non-Unicode environment values become None. This environment lookup happens per invocation, unlike the cached hint setting."
+  ],
+  [
+    1274,
+    1297,
+    "Public Debug CommitError has CommitConflict and OtherError(Error). Converting from core Error wraps it. Converting back unwraps OtherError, but turns CommitConflict into Internal with text Commit conflict, losing the dedicated discriminant. No Display/Error implementation appears locally."
+  ],
+  [
+    1298,
+    1316,
+    "Global AtomicBool WARNED_ON_UNSAFE_COMMIT starts false. Public UnsafeCommitHandler advertises definitive NotFound and suppressible errors after successful readback. Its separate relaxed load/store warning guard below is not atomic test-and-set, so concurrent first uses may log more than once."
+  ],
+  [
+    1317,
+    1358,
+    "Unsafe commit warns as needed, computes final path, awaits injected writer directly there, writes the best-effort hint, and returns writer size/ETag with current manifest version and identity None. No lock, condition, staging or readback. Writer error skips the hint. A custom writer may mutate Manifest; the path was computed before that callback. Debug prints the unit type name."
+  ],
+  [
+    1359,
+    1388,
+    "Public CommitLock: Debug associates a CommitLease and asynchronously locks a version. Docs require waiting and returning conflict if already committed, and recommend at least 30 seconds of timeout; the trait supplies no TTL or fencing. CommitLease: Send + Sync releases with a success flag and should tolerate repeated calls because cancellation can trigger a later release(false)."
+  ],
+  [
+    1389,
+    1423,
+    "Private LeaseGuard owns Option<L>. Its consuming explicit release keeps the lease inside the guard while awaiting, then clears the option even when release returns Err. Completed release errors get no background retry; cancellation while awaiting leaves ownership for Drop. The expect relies on private construction and the consuming method."
+  ],
+  [
+    1424,
+    1448,
+    "Drop takes the lease and, if a current Tokio handle exists, spawns release(false), ignoring its result without warning or join. Runtime shutdown may prevent completion. Without a runtime the lease is dropped; TTL recovery mentioned in comments is not enforced by the trait. Blanket CommitHandler for a Send+Sync CommitLock with static lease sets definitive NotFound=true but retains propagate-after-success=true."
+  ],
+  [
+    1449,
+    1483,
+    "Lock commit computes a path, awaits acquisition, then wraps the returned lease immediately. Under the lease, HEAD success releases(false) before returning conflict; NotFound proceeds; other HEAD errors release(false) before returning the error. Release failures take precedence through ?. Cancellation during acquisition has no guard yet and is the custom lock responsibility."
+  ],
+  [
+    1484,
+    1503,
+    "Await the writer under the lease and retain its Result. Release with res.is_ok() before unwrapping that result. A release error can mask a writer error or report failure after successful publication. Only successful write and release reach hint writing and the returned location. No renewal, fencing or CAS is implemented; safety depends on effective shared locking."
+  ],
+  [
+    1504,
+    1540,
+    "The Arc<T: CommitLock + Send + Sync> CommitHandler implementation forwards the definitive and propagation hooks plus commit arguments to the inner value. Other methods retain trait defaults. This is not a general Arc<dyn CommitHandler> adapter."
+  ],
+  [
+    1541,
+    1578,
+    "Public RenameCommitHandler requires atomic rename-if-absent by contract, sets definitive NotFound=true and propagate-after-success=false. Compute final and UUID staging paths, await the writer at staging, then invoke underlying rename_if_not_exists. Writer errors and cancellation have no cleanup guard here."
+  ],
+  [
+    1579,
+    1611,
+    "Rename success writes the hint and returns writer size but no ETag because renaming may change it. AlreadyExists tries deleting staging, ignores cleanup errors, and returns conflict. Other rename errors return OtherError without cleanup. Therefore the comment about cleaning up on failure is broader than implementation. Ambiguous transport outcomes need caller recovery. Debug prints the unit name."
+  ],
+  [
+    1612,
+    1647,
+    "Public ConditionalPutCommitHandler has definitive NotFound=true and propagate-after-success=false. It creates a fresh memory store, calls the injected writer at dummy, ignores its WriteResult, then reads all dummy bytes and derives actual size. Manifest mutations precede durable publication, and complete serialized bytes remain in memory. A callback that does not create dummy fails at readback."
+  ],
+  [
+    1648,
+    1678,
+    "Publish full bytes through inner.put_opts with PutMode::Create and default remaining options. AlreadyExists or Precondition maps to conflict; other errors map to OtherError. Success writes the hint and returns actual byte size and put ETag, identity None. No local retry, predecessor condition or incarnation protection. Atomicity depends on backend Create semantics; cancellation may leave an unknown outcome."
+  ],
+  [
+    1679,
+    1723,
+    "Conditional Debug prints its unit name. Private TencentCosCommitHandler documents bucket-versioning history as the reason conditional create is unsafe; this is source rationale, not live validation. It retains default reads/listings and definitive NotFound=true, while commit immediately returns NotSupported requesting a distributed Python commit_lock or custom Rust handler. No callback or storage invocation. Propagation policy remains the default true."
+  ],
+  [
+    1724,
+    1748,
+    "Public PredecessorIdentity derives Clone/Eq and stores version plus String identity; physical-incarnation uniqueness is a handler contract rather than type validation. Public CommitConfig has num_retries:u32 and skip_auto_cleanup:bool, defaulting to 20 and false. The isolation-level TODO has no field. This file declares configuration but does not run retry or cleanup loops."
+  ]
+]

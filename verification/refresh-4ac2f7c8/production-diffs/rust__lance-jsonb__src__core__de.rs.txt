@@ -1,0 +1,898 @@
+@@ -0,0 +1,897 @@
+    1 +// SPDX-License-Identifier: Apache-2.0
+    2 +// SPDX-FileCopyrightText: Copyright The Lance Authors
+    3 +// SPDX-FileCopyrightText: Copyright 2023 Datafuse Labs
+    4 +// Adapted from databendlabs/jsonb at commit fba895c5ebe77ce2539e187f9c652f51cbf195c3.
+    5 +
+    6 +use std::borrow::Cow;
+    7 +use std::collections::VecDeque;
+    8 +use std::convert::TryFrom;
+    9 +
+   10 +use num_traits::FromPrimitive;
+   11 +use serde::de;
+   12 +use serde::de::Deserialize;
+   13 +use serde::de::IntoDeserializer;
+   14 +use serde::de::Visitor;
+   15 +
+   16 +use super::constants::*;
+   17 +use super::jentry::JEntry;
+   18 +use crate::RawJsonb;
+   19 +use crate::error::Error;
+   20 +use crate::error::Result;
+   21 +use crate::extension::ExtensionValue;
+   22 +use crate::number::Number;
+   23 +
+   24 +/// `Deserializer` is a custom deserializer for JSONB data, implementing the
+   25 +/// `serde::de::Deserializer` trait. It allows deserializing a `RawJsonb` into
+   26 +/// Rust data structures using Serde.
+   27 +pub struct Deserializer<'de> {
+   28 +    index: usize,
+   29 +    current_jentry: Option<JEntry>,
+   30 +    raw: &'de RawJsonb<'de>,
+   31 +}
+   32 +
+   33 +impl<'de> Deserializer<'de> {
+   34 +    /// Creates a new `Deserializer` from a `RawJsonb`.
+   35 +    ///
+   36 +    /// This function initializes the deserializer with the provided `RawJsonb` data.
+   37 +    ///
+   38 +    /// # Arguments
+   39 +    ///
+   40 +    /// * `raw_jsonb`: A reference to the `RawJsonb` containing the JSONB data to deserialize.
+   41 +    pub(crate) fn new(raw_jsonb: &'de RawJsonb) -> Self {
+   42 +        Self {
+   43 +            index: 0,
+   44 +            current_jentry: None,
+   45 +            raw: raw_jsonb,
+   46 +        }
+   47 +    }
+   48 +
+   49 +    /// Checks if the deserializer has reached the end of the `RawJsonb` data.
+   50 +    ///
+   51 +    /// This function returns `true` if the current index is equal to the length of
+   52 +    /// the `RawJsonb` data, indicating that all data has been processed.
+   53 +    pub(crate) fn end(&self) -> bool {
+   54 +        self.index == self.raw.len()
+   55 +    }
+   56 +
+   57 +    fn read_header(&mut self) -> Result<(u32, usize)> {
+   58 +        let header = self.raw.read_header(self.index)?;
+   59 +        self.index += 4;
+   60 +        Ok(header)
+   61 +    }
+   62 +
+   63 +    fn read_jentry(&mut self) -> Result<JEntry> {
+   64 +        let jentry = self.raw.read_jentry(self.index)?;
+   65 +        self.index += 4;
+   66 +        Ok(jentry)
+   67 +    }
+   68 +
+   69 +    fn set_jentry(&mut self, jentry: JEntry) {
+   70 +        self.current_jentry = Some(jentry);
+   71 +    }
+   72 +
+   73 +    fn set_jentry_with_index(&mut self, jentry: JEntry, index: usize) {
+   74 +        self.current_jentry = Some(jentry);
+   75 +        self.index = index;
+   76 +    }
+   77 +
+   78 +    fn read_scalar_jentry(&mut self) -> Result<JEntry> {
+   79 +        if let Some(jentry) = &self.current_jentry {
+   80 +            Ok(jentry.clone())
+   81 +        } else {
+   82 +            let (header_type, _) = self.read_header()?;
+   83 +            match header_type {
+   84 +                SCALAR_CONTAINER_TAG => {
+   85 +                    let jentry = self.read_jentry()?;
+   86 +                    Ok(jentry)
+   87 +                }
+   88 +                ARRAY_CONTAINER_TAG | OBJECT_CONTAINER_TAG => Err(Error::UnexpectedType),
+   89 +                _ => Err(Error::InvalidJsonb),
+   90 +            }
+   91 +        }
+   92 +    }
+   93 +
+   94 +    fn read_array_jentries(&mut self, header_len: usize) -> Result<VecDeque<JEntry>> {
+   95 +        let mut jentries = VecDeque::with_capacity(header_len);
+   96 +        for _ in 0..header_len {
+   97 +            let jentry = self.read_jentry()?;
+   98 +            jentries.push_back(jentry);
+   99 +        }
+  100 +        Ok(jentries)
+  101 +    }
+  102 +
+  103 +    fn read_object_jentries(
+  104 +        &mut self,
+  105 +        header_len: usize,
+  106 +    ) -> Result<(VecDeque<JEntry>, VecDeque<JEntry>)> {
+  107 +        let mut key_jentries = VecDeque::with_capacity(header_len);
+  108 +        for _ in 0..header_len {
+  109 +            let jentry = self.read_jentry()?;
+  110 +            key_jentries.push_back(jentry);
+  111 +        }
+  112 +        let mut value_jentries = VecDeque::with_capacity(header_len);
+  113 +        for _ in 0..header_len {
+  114 +            let jentry = self.read_jentry()?;
+  115 +            value_jentries.push_back(jentry);
+  116 +        }
+  117 +
+  118 +        Ok((key_jentries, value_jentries))
+  119 +    }
+  120 +
+  121 +    fn read_payload_number(&mut self, length: usize) -> Result<Number> {
+  122 +        let start = self.index;
+  123 +        let end = self.index + length;
+  124 +        let num = Number::decode(&self.raw.data[start..end])?;
+  125 +        self.index = end;
+  126 +        Ok(num)
+  127 +    }
+  128 +
+  129 +    fn read_payload_str(&mut self, length: usize) -> Result<Cow<'_, str>> {
+  130 +        let start = self.index;
+  131 +        let end = self.index + length;
+  132 +        let s = unsafe { std::str::from_utf8_unchecked(&self.raw.data[start..end]) };
+  133 +        self.index = end;
+  134 +        Ok(Cow::Borrowed(s))
+  135 +    }
+  136 +
+  137 +    fn read_payload_extension(&mut self, length: usize) -> Result<ExtensionValue<'_>> {
+  138 +        let start = self.index;
+  139 +        let end = self.index + length;
+  140 +        let val = ExtensionValue::decode(&self.raw.data[start..end])?;
+  141 +        self.index = end;
+  142 +        Ok(val)
+  143 +    }
+  144 +
+  145 +    fn read_null(&mut self) -> Result<()> {
+  146 +        let jentry_res = self.read_scalar_jentry();
+  147 +        if jentry_res == Err(Error::UnexpectedType) {
+  148 +            return Err(Error::UnexpectedType);
+  149 +        }
+  150 +        let jentry = jentry_res?;
+  151 +        match jentry.type_code {
+  152 +            NULL_TAG => Ok(()),
+  153 +            FALSE_TAG | TRUE_TAG | NUMBER_TAG | STRING_TAG | CONTAINER_TAG | EXTENSION_TAG => {
+  154 +                Err(Error::UnexpectedType)
+  155 +            }
+  156 +            _ => Err(Error::InvalidJsonb),
+  157 +        }
+  158 +    }
+  159 +
+  160 +    fn read_bool(&mut self) -> Result<bool> {
+  161 +        let jentry_res = self.read_scalar_jentry();
+  162 +        if jentry_res == Err(Error::UnexpectedType) {
+  163 +            return Err(Error::UnexpectedType);
+  164 +        }
+  165 +        let jentry = jentry_res?;
+  166 +        match jentry.type_code {
+  167 +            FALSE_TAG => Ok(false),
+  168 +            TRUE_TAG => Ok(true),
+  169 +            NULL_TAG | NUMBER_TAG | STRING_TAG | CONTAINER_TAG | EXTENSION_TAG => {
+  170 +                Err(Error::UnexpectedType)
+  171 +            }
+  172 +            _ => Err(Error::InvalidJsonb),
+  173 +        }
+  174 +    }
+  175 +
+  176 +    fn read_number(&mut self) -> Result<Number> {
+  177 +        let jentry_res = self.read_scalar_jentry();
+  178 +        if jentry_res == Err(Error::UnexpectedType) {
+  179 +            return Err(Error::UnexpectedType);
+  180 +        }
+  181 +        let jentry = jentry_res?;
+  182 +        match jentry.type_code {
+  183 +            NUMBER_TAG => {
+  184 +                let length = jentry.length as usize;
+  185 +                let num = self.read_payload_number(length)?;
+  186 +                Ok(num)
+  187 +            }
+  188 +            NULL_TAG | FALSE_TAG | TRUE_TAG | STRING_TAG | CONTAINER_TAG | EXTENSION_TAG => {
+  189 +                Err(Error::UnexpectedType)
+  190 +            }
+  191 +            _ => Err(Error::InvalidJsonb),
+  192 +        }
+  193 +    }
+  194 +
+  195 +    fn read_integer<T>(&mut self) -> Result<T>
+  196 +    where
+  197 +        for<'a> T: Deserialize<'a> + FromPrimitive,
+  198 +    {
+  199 +        let num = self.read_number()?;
+  200 +        match num {
+  201 +            Number::Int64(n) => T::from_i64(n).ok_or(Error::UnexpectedType),
+  202 +            Number::UInt64(n) => T::from_u64(n).ok_or(Error::UnexpectedType),
+  203 +            Number::Float64(_)
+  204 +            | Number::Decimal64(_)
+  205 +            | Number::Decimal128(_)
+  206 +            | Number::Decimal256(_) => Err(Error::UnexpectedType),
+  207 +        }
+  208 +    }
+  209 +
+  210 +    fn read_float<T>(&mut self) -> Result<T>
+  211 +    where
+  212 +        for<'a> T: Deserialize<'a> + FromPrimitive,
+  213 +    {
+  214 +        let num = self.read_number()?;
+  215 +        match num {
+  216 +            Number::Int64(n) => T::from_i64(n).ok_or(Error::UnexpectedType),
+  217 +            Number::UInt64(n) => T::from_u64(n).ok_or(Error::UnexpectedType),
+  218 +            Number::Float64(n) => T::from_f64(n).ok_or(Error::UnexpectedType),
+  219 +            Number::Decimal64(v) => {
+  220 +                let n = v.to_float64();
+  221 +                T::from_f64(n).ok_or(Error::UnexpectedType)
+  222 +            }
+  223 +            Number::Decimal128(v) => {
+  224 +                let n = v.to_float64();
+  225 +                T::from_f64(n).ok_or(Error::UnexpectedType)
+  226 +            }
+  227 +            Number::Decimal256(v) => {
+  228 +                let n = v.to_float64();
+  229 +                T::from_f64(n).ok_or(Error::UnexpectedType)
+  230 +            }
+  231 +        }
+  232 +    }
+  233 +
+  234 +    fn read_str(&mut self) -> Result<Cow<'_, str>> {
+  235 +        let jentry_res = self.read_scalar_jentry();
+  236 +        if jentry_res == Err(Error::UnexpectedType) {
+  237 +            return Err(Error::UnexpectedType);
+  238 +        }
+  239 +        let jentry = jentry_res?;
+  240 +        match jentry.type_code {
+  241 +            STRING_TAG => {
+  242 +                let length = jentry.length as usize;
+  243 +                let s = self.read_payload_str(length)?;
+  244 +                Ok(s)
+  245 +            }
+  246 +            EXTENSION_TAG => {
+  247 +                let length = jentry.length as usize;
+  248 +                let val = self.read_payload_extension(length)?;
+  249 +                let s = format!("{}", val);
+  250 +                Ok(Cow::Owned(s))
+  251 +            }
+  252 +            NULL_TAG | FALSE_TAG | TRUE_TAG | NUMBER_TAG | CONTAINER_TAG => {
+  253 +                Err(Error::UnexpectedType)
+  254 +            }
+  255 +            _ => Err(Error::InvalidJsonb),
+  256 +        }
+  257 +    }
+  258 +
+  259 +    fn read_string(&mut self) -> Result<String> {
+  260 +        let s = self.read_str()?;
+  261 +        Ok(s.to_string())
+  262 +    }
+  263 +
+  264 +    fn read_with_jentry<V>(&mut self, jentry: JEntry, visitor: V) -> Result<V::Value>
+  265 +    where
+  266 +        V: Visitor<'de>,
+  267 +    {
+  268 +        match jentry.type_code {
+  269 +            NULL_TAG => visitor.visit_unit(),
+  270 +            TRUE_TAG => visitor.visit_bool(true),
+  271 +            FALSE_TAG => visitor.visit_bool(false),
+  272 +            STRING_TAG => {
+  273 +                let length = jentry.length as usize;
+  274 +                let s = self.read_payload_str(length)?;
+  275 +                visitor.visit_string(s.to_string())
+  276 +            }
+  277 +            NUMBER_TAG => {
+  278 +                let length = jentry.length as usize;
+  279 +                let num = self.read_payload_number(length)?;
+  280 +                match num {
+  281 +                    Number::Int64(i) => {
+  282 +                        if let Ok(x) = u8::try_from(i) {
+  283 +                            visitor.visit_u8(x)
+  284 +                        } else if let Ok(x) = i8::try_from(i) {
+  285 +                            visitor.visit_i8(x)
+  286 +                        } else if let Ok(x) = u16::try_from(i) {
+  287 +                            visitor.visit_u16(x)
+  288 +                        } else if let Ok(x) = i16::try_from(i) {
+  289 +                            visitor.visit_i16(x)
+  290 +                        } else if let Ok(x) = u32::try_from(i) {
+  291 +                            visitor.visit_u32(x)
+  292 +                        } else if let Ok(x) = i32::try_from(i) {
+  293 +                            visitor.visit_i32(x)
+  294 +                        } else if let Ok(x) = u64::try_from(i) {
+  295 +                            visitor.visit_u64(x)
+  296 +                        } else {
+  297 +                            visitor.visit_i64(i)
+  298 +                        }
+  299 +                    }
+  300 +                    Number::UInt64(i) => {
+  301 +                        if let Ok(x) = u8::try_from(i) {
+  302 +                            visitor.visit_u8(x)
+  303 +                        } else if let Ok(x) = u16::try_from(i) {
+  304 +                            visitor.visit_u16(x)
+  305 +                        } else if let Ok(x) = u32::try_from(i) {
+  306 +                            visitor.visit_u32(x)
+  307 +                        } else {
+  308 +                            visitor.visit_u64(i)
+  309 +                        }
+  310 +                    }
+  311 +                    Number::Float64(i) => visitor.visit_f64(i),
+  312 +                    Number::Decimal64(i) => {
+  313 +                        let v = i.to_float64();
+  314 +                        visitor.visit_f64(v)
+  315 +                    }
+  316 +                    Number::Decimal128(i) => {
+  317 +                        let v = i.to_float64();
+  318 +                        visitor.visit_f64(v)
+  319 +                    }
+  320 +                    Number::Decimal256(i) => {
+  321 +                        let v = i.to_float64();
+  322 +                        visitor.visit_f64(v)
+  323 +                    }
+  324 +                }
+  325 +            }
+  326 +            EXTENSION_TAG => {
+  327 +                let length = jentry.length as usize;
+  328 +                let val = self.read_payload_extension(length)?;
+  329 +                let s = format!("{}", val);
+  330 +                visitor.visit_string(s)
+  331 +            }
+  332 +            CONTAINER_TAG => Err(Error::UnexpectedType),
+  333 +            _ => Err(Error::InvalidJsonb),
+  334 +        }
+  335 +    }
+  336 +}
+  337 +
+  338 +impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
+  339 +    type Error = Error;
+  340 +
+  341 +    fn deserialize_any<V>(self, visitor: V) -> Result<V::Value>
+  342 +    where
+  343 +        V: Visitor<'de>,
+  344 +    {
+  345 +        if let Some(jentry) = &self.current_jentry {
+  346 +            match jentry.type_code {
+  347 +                CONTAINER_TAG => {
+  348 +                    self.current_jentry = None;
+  349 +                    self.deserialize_any(visitor)
+  350 +                }
+  351 +                _ => self.read_with_jentry(jentry.clone(), visitor),
+  352 +            }
+  353 +        } else {
+  354 +            let (header_type, header_len) = self.read_header()?;
+  355 +            match header_type {
+  356 +                SCALAR_CONTAINER_TAG => {
+  357 +                    let jentry = self.read_jentry()?;
+  358 +                    match jentry.type_code {
+  359 +                        CONTAINER_TAG => {
+  360 +                            self.current_jentry = None;
+  361 +                            self.deserialize_any(visitor)
+  362 +                        }
+  363 +                        _ => self.read_with_jentry(jentry, visitor),
+  364 +                    }
+  365 +                }
+  366 +                ARRAY_CONTAINER_TAG => {
+  367 +                    let jentries = self.read_array_jentries(header_len)?;
+  368 +                    visitor.visit_seq(ArrayDeserializer::new(self, jentries))
+  369 +                }
+  370 +                OBJECT_CONTAINER_TAG => {
+  371 +                    let (key_jentries, value_jentries) = self.read_object_jentries(header_len)?;
+  372 +
+  373 +                    let origin_index = self.index;
+  374 +                    let key_length: usize = key_jentries.iter().map(|j| j.length as usize).sum();
+  375 +                    let value_length: usize =
+  376 +                        value_jentries.iter().map(|j| j.length as usize).sum();
+  377 +                    let key_payload_offset = self.index;
+  378 +                    let value_payload_offset = self.index + key_length;
+  379 +
+  380 +                    let value = visitor.visit_map(ObjectDeserializer::new(
+  381 +                        self,
+  382 +                        key_payload_offset,
+  383 +                        key_jentries,
+  384 +                        value_payload_offset,
+  385 +                        value_jentries,
+  386 +                    ))?;
+  387 +                    self.index = origin_index + key_length + value_length;
+  388 +                    Ok(value)
+  389 +                }
+  390 +                _ => Err(Error::InvalidJsonb),
+  391 +            }
+  392 +        }
+  393 +    }
+  394 +
+  395 +    fn deserialize_bool<V>(self, visitor: V) -> Result<V::Value>
+  396 +    where
+  397 +        V: Visitor<'de>,
+  398 +    {
+  399 +        visitor.visit_bool(self.read_bool()?)
+  400 +    }
+  401 +
+  402 +    fn deserialize_i8<V>(self, visitor: V) -> Result<V::Value>
+  403 +    where
+  404 +        V: Visitor<'de>,
+  405 +    {
+  406 +        visitor.visit_i8(self.read_integer()?)
+  407 +    }
+  408 +
+  409 +    fn deserialize_i16<V>(self, visitor: V) -> Result<V::Value>
+  410 +    where
+  411 +        V: Visitor<'de>,
+  412 +    {
+  413 +        visitor.visit_i16(self.read_integer()?)
+  414 +    }
+  415 +
+  416 +    fn deserialize_i32<V>(self, visitor: V) -> Result<V::Value>
+  417 +    where
+  418 +        V: Visitor<'de>,
+  419 +    {
+  420 +        visitor.visit_i32(self.read_integer()?)
+  421 +    }
+  422 +
+  423 +    fn deserialize_i64<V>(self, visitor: V) -> Result<V::Value>
+  424 +    where
+  425 +        V: Visitor<'de>,
+  426 +    {
+  427 +        visitor.visit_i64(self.read_integer()?)
+  428 +    }
+  429 +
+  430 +    fn deserialize_u8<V>(self, visitor: V) -> Result<V::Value>
+  431 +    where
+  432 +        V: Visitor<'de>,
+  433 +    {
+  434 +        visitor.visit_u8(self.read_integer()?)
+  435 +    }
+  436 +
+  437 +    fn deserialize_u16<V>(self, visitor: V) -> Result<V::Value>
+  438 +    where
+  439 +        V: Visitor<'de>,
+  440 +    {
+  441 +        visitor.visit_u16(self.read_integer()?)
+  442 +    }
+  443 +
+  444 +    fn deserialize_u32<V>(self, visitor: V) -> Result<V::Value>
+  445 +    where
+  446 +        V: Visitor<'de>,
+  447 +    {
+  448 +        visitor.visit_u32(self.read_integer()?)
+  449 +    }
+  450 +
+  451 +    fn deserialize_u64<V>(self, visitor: V) -> Result<V::Value>
+  452 +    where
+  453 +        V: Visitor<'de>,
+  454 +    {
+  455 +        visitor.visit_u64(self.read_integer()?)
+  456 +    }
+  457 +
+  458 +    fn deserialize_f32<V>(self, visitor: V) -> Result<V::Value>
+  459 +    where
+  460 +        V: Visitor<'de>,
+  461 +    {
+  462 +        visitor.visit_f32(self.read_float()?)
+  463 +    }
+  464 +
+  465 +    fn deserialize_f64<V>(self, visitor: V) -> Result<V::Value>
+  466 +    where
+  467 +        V: Visitor<'de>,
+  468 +    {
+  469 +        visitor.visit_f64(self.read_float()?)
+  470 +    }
+  471 +
+  472 +    fn deserialize_char<V>(self, visitor: V) -> Result<V::Value>
+  473 +    where
+  474 +        V: Visitor<'de>,
+  475 +    {
+  476 +        let s = self.read_string()?;
+  477 +        if s.len() != 1 {
+  478 +            return Err(Error::Message("invalid string length for char".into()));
+  479 +        }
+  480 +        visitor.visit_char(s.chars().next().unwrap())
+  481 +    }
+  482 +
+  483 +    fn deserialize_str<V>(self, visitor: V) -> Result<V::Value>
+  484 +    where
+  485 +        V: Visitor<'de>,
+  486 +    {
+  487 +        visitor.visit_str(&self.read_str()?)
+  488 +    }
+  489 +
+  490 +    fn deserialize_string<V>(self, visitor: V) -> Result<V::Value>
+  491 +    where
+  492 +        V: Visitor<'de>,
+  493 +    {
+  494 +        visitor.visit_string(self.read_string()?)
+  495 +    }
+  496 +
+  497 +    fn deserialize_bytes<V>(self, visitor: V) -> Result<V::Value>
+  498 +    where
+  499 +        V: Visitor<'de>,
+  500 +    {
+  501 +        visitor.visit_string(self.read_string()?)
+  502 +    }
+  503 +
+  504 +    fn deserialize_byte_buf<V>(self, visitor: V) -> Result<V::Value>
+  505 +    where
+  506 +        V: Visitor<'de>,
+  507 +    {
+  508 +        visitor.visit_string(self.read_string()?)
+  509 +    }
+  510 +
+  511 +    fn deserialize_option<V>(self, visitor: V) -> Result<V::Value>
+  512 +    where
+  513 +        V: Visitor<'de>,
+  514 +    {
+  515 +        let origin_index = self.index;
+  516 +        if self.read_null().is_ok() {
+  517 +            visitor.visit_none()
+  518 +        } else {
+  519 +            self.index = origin_index;
+  520 +            visitor.visit_some(self)
+  521 +        }
+  522 +    }
+  523 +
+  524 +    fn deserialize_unit<V>(self, visitor: V) -> Result<V::Value>
+  525 +    where
+  526 +        V: Visitor<'de>,
+  527 +    {
+  528 +        self.read_null()?;
+  529 +        visitor.visit_unit()
+  530 +    }
+  531 +
+  532 +    fn deserialize_unit_struct<V>(self, _name: &'static str, visitor: V) -> Result<V::Value>
+  533 +    where
+  534 +        V: Visitor<'de>,
+  535 +    {
+  536 +        self.deserialize_unit(visitor)
+  537 +    }
+  538 +
+  539 +    fn deserialize_newtype_struct<V>(self, _name: &'static str, visitor: V) -> Result<V::Value>
+  540 +    where
+  541 +        V: Visitor<'de>,
+  542 +    {
+  543 +        visitor.visit_newtype_struct(self)
+  544 +    }
+  545 +
+  546 +    fn deserialize_seq<V>(self, visitor: V) -> Result<V::Value>
+  547 +    where
+  548 +        V: Visitor<'de>,
+  549 +    {
+  550 +        let (header_type, header_len) = self.read_header()?;
+  551 +        match header_type {
+  552 +            ARRAY_CONTAINER_TAG => {
+  553 +                let jentries = self.read_array_jentries(header_len)?;
+  554 +                visitor.visit_seq(ArrayDeserializer::new(self, jentries))
+  555 +            }
+  556 +            SCALAR_CONTAINER_TAG | OBJECT_CONTAINER_TAG => Err(Error::UnexpectedType),
+  557 +            _ => Err(Error::InvalidJsonb),
+  558 +        }
+  559 +    }
+  560 +
+  561 +    fn deserialize_tuple<V>(self, _len: usize, visitor: V) -> Result<V::Value>
+  562 +    where
+  563 +        V: Visitor<'de>,
+  564 +    {
+  565 +        self.deserialize_seq(visitor)
+  566 +    }
+  567 +
+  568 +    fn deserialize_tuple_struct<V>(
+  569 +        self,
+  570 +        _name: &'static str,
+  571 +        _len: usize,
+  572 +        visitor: V,
+  573 +    ) -> Result<V::Value>
+  574 +    where
+  575 +        V: Visitor<'de>,
+  576 +    {
+  577 +        self.deserialize_seq(visitor)
+  578 +    }
+  579 +
+  580 +    fn deserialize_map<V>(self, visitor: V) -> Result<V::Value>
+  581 +    where
+  582 +        V: Visitor<'de>,
+  583 +    {
+  584 +        let (header_type, header_len) = self.read_header()?;
+  585 +        match header_type {
+  586 +            OBJECT_CONTAINER_TAG => {
+  587 +                let (key_jentries, value_jentries) = self.read_object_jentries(header_len)?;
+  588 +
+  589 +                let origin_index = self.index;
+  590 +                let key_length: usize = key_jentries.iter().map(|j| j.length as usize).sum();
+  591 +                let value_length: usize = value_jentries.iter().map(|j| j.length as usize).sum();
+  592 +                let key_payload_offset = self.index;
+  593 +                let value_payload_offset = self.index + key_length;
+  594 +
+  595 +                let value = visitor.visit_map(ObjectDeserializer::new(
+  596 +                    self,
+  597 +                    key_payload_offset,
+  598 +                    key_jentries,
+  599 +                    value_payload_offset,
+  600 +                    value_jentries,
+  601 +                ))?;
+  602 +                self.index = origin_index + key_length + value_length;
+  603 +                Ok(value)
+  604 +            }
+  605 +            SCALAR_CONTAINER_TAG | ARRAY_CONTAINER_TAG => Err(Error::UnexpectedType),
+  606 +            _ => Err(Error::InvalidJsonb),
+  607 +        }
+  608 +    }
+  609 +
+  610 +    fn deserialize_struct<V>(
+  611 +        self,
+  612 +        _name: &'static str,
+  613 +        _fields: &'static [&'static str],
+  614 +        visitor: V,
+  615 +    ) -> Result<V::Value>
+  616 +    where
+  617 +        V: Visitor<'de>,
+  618 +    {
+  619 +        self.deserialize_map(visitor)
+  620 +    }
+  621 +
+  622 +    fn deserialize_enum<V>(
+  623 +        self,
+  624 +        _name: &'static str,
+  625 +        _variants: &'static [&'static str],
+  626 +        visitor: V,
+  627 +    ) -> Result<V::Value>
+  628 +    where
+  629 +        V: Visitor<'de>,
+  630 +    {
+  631 +        let (header_type, header_len) = self.read_header()?;
+  632 +        match header_type {
+  633 +            OBJECT_CONTAINER_TAG => {
+  634 +                if header_len != 1 {
+  635 +                    return Err(Error::UnexpectedType);
+  636 +                }
+  637 +                let key_jentry = self.read_jentry()?;
+  638 +                let value_jentry = self.read_jentry()?;
+  639 +
+  640 +                let origin_index = self.index;
+  641 +
+  642 +                let key_length = key_jentry.length as usize;
+  643 +                let value_length = value_jentry.length as usize;
+  644 +
+  645 +                self.set_jentry(key_jentry);
+  646 +                let key = self.read_string()?;
+  647 +                let value_payload_offset = self.index;
+  648 +                let value = visitor.visit_enum(EnumDeserializer::new(
+  649 +                    self,
+  650 +                    key,
+  651 +                    value_jentry,
+  652 +                    value_payload_offset,
+  653 +                ))?;
+  654 +                self.index = origin_index + key_length + value_length;
+  655 +                Ok(value)
+  656 +            }
+  657 +            SCALAR_CONTAINER_TAG | ARRAY_CONTAINER_TAG => Err(Error::UnexpectedType),
+  658 +            _ => Err(Error::InvalidJsonb),
+  659 +        }
+  660 +    }
+  661 +
+  662 +    fn deserialize_identifier<V>(self, visitor: V) -> Result<V::Value>
+  663 +    where
+  664 +        V: Visitor<'de>,
+  665 +    {
+  666 +        self.deserialize_str(visitor)
+  667 +    }
+  668 +
+  669 +    fn deserialize_ignored_any<V>(self, _visitor: V) -> Result<V::Value>
+  670 +    where
+  671 +        V: Visitor<'de>,
+  672 +    {
+  673 +        todo!()
+  674 +    }
+  675 +
+  676 +    #[inline]
+  677 +    fn is_human_readable(&self) -> bool {
+  678 +        false
+  679 +    }
+  680 +}
+  681 +
+  682 +struct ArrayDeserializer<'a, 'de: 'a> {
+  683 +    size: usize,
+  684 +    de: &'a mut Deserializer<'de>,
+  685 +    jentries: VecDeque<JEntry>,
+  686 +}
+  687 +
+  688 +impl<'a, 'de> ArrayDeserializer<'a, 'de> {
+  689 +    fn new(de: &'a mut Deserializer<'de>, jentries: VecDeque<JEntry>) -> Self {
+  690 +        let size = jentries.len();
+  691 +        ArrayDeserializer { size, de, jentries }
+  692 +    }
+  693 +}
+  694 +
+  695 +impl<'de> de::SeqAccess<'de> for ArrayDeserializer<'_, 'de> {
+  696 +    type Error = Error;
+  697 +
+  698 +    fn next_element_seed<T>(&mut self, seed: T) -> Result<Option<T::Value>>
+  699 +    where
+  700 +        T: de::DeserializeSeed<'de>,
+  701 +    {
+  702 +        if let Some(jentry) = self.jentries.pop_front() {
+  703 +            self.de.set_jentry(jentry);
+  704 +            // Deserialize an array element.
+  705 +            seed.deserialize(&mut *self.de).map(Some)
+  706 +        } else {
+  707 +            Ok(None)
+  708 +        }
+  709 +    }
+  710 +
+  711 +    #[inline]
+  712 +    fn size_hint(&self) -> Option<usize> {
+  713 +        Some(self.size)
+  714 +    }
+  715 +}
+  716 +
+  717 +struct ObjectDeserializer<'a, 'de: 'a> {
+  718 +    size: usize,
+  719 +    de: &'a mut Deserializer<'de>,
+  720 +    key_jentries: VecDeque<JEntry>,
+  721 +    key_payload_offset: usize,
+  722 +    value_jentries: VecDeque<JEntry>,
+  723 +    value_payload_offset: usize,
+  724 +}
+  725 +
+  726 +impl<'a, 'de> ObjectDeserializer<'a, 'de> {
+  727 +    fn new(
+  728 +        de: &'a mut Deserializer<'de>,
+  729 +        key_payload_offset: usize,
+  730 +        key_jentries: VecDeque<JEntry>,
+  731 +        value_payload_offset: usize,
+  732 +        value_jentries: VecDeque<JEntry>,
+  733 +    ) -> Self {
+  734 +        let size = key_jentries.len();
+  735 +        ObjectDeserializer {
+  736 +            size,
+  737 +            de,
+  738 +            key_payload_offset,
+  739 +            key_jentries,
+  740 +            value_payload_offset,
+  741 +            value_jentries,
+  742 +        }
+  743 +    }
+  744 +}
+  745 +
+  746 +impl<'de> de::MapAccess<'de> for ObjectDeserializer<'_, 'de> {
+  747 +    type Error = Error;
+  748 +
+  749 +    fn next_key_seed<K>(&mut self, seed: K) -> Result<Option<K::Value>>
+  750 +    where
+  751 +        K: de::DeserializeSeed<'de>,
+  752 +    {
+  753 +        if let Some(jentry) = self.key_jentries.pop_front() {
+  754 +            let key_payload_offset = self.key_payload_offset;
+  755 +            self.key_payload_offset += jentry.length as usize;
+  756 +            self.de.set_jentry_with_index(jentry, key_payload_offset);
+  757 +            // Deserialize an object key.
+  758 +            seed.deserialize(&mut *self.de).map(Some)
+  759 +        } else {
+  760 +            Ok(None)
+  761 +        }
+  762 +    }
+  763 +
+  764 +    fn next_value_seed<V>(&mut self, seed: V) -> Result<V::Value>
+  765 +    where
+  766 +        V: de::DeserializeSeed<'de>,
+  767 +    {
+  768 +        if let Some(jentry) = self.value_jentries.pop_front() {
+  769 +            let value_payload_offset = self.value_payload_offset;
+  770 +            self.value_payload_offset += jentry.length as usize;
+  771 +            self.de.set_jentry_with_index(jentry, value_payload_offset);
+  772 +            // Deserialize an object value.
+  773 +            seed.deserialize(&mut *self.de)
+  774 +        } else {
+  775 +            Err(Error::InvalidJsonb)
+  776 +        }
+  777 +    }
+  778 +
+  779 +    #[inline]
+  780 +    fn size_hint(&self) -> Option<usize> {
+  781 +        Some(self.size)
+  782 +    }
+  783 +}
+  784 +
+  785 +struct EnumDeserializer<'a, 'de: 'a> {
+  786 +    de: &'a mut Deserializer<'de>,
+  787 +    key: String,
+  788 +    jentry: JEntry,
+  789 +    payload_offset: usize,
+  790 +}
+  791 +
+  792 +impl<'a, 'de> EnumDeserializer<'a, 'de> {
+  793 +    fn new(
+  794 +        de: &'a mut Deserializer<'de>,
+  795 +        key: String,
+  796 +        jentry: JEntry,
+  797 +        payload_offset: usize,
+  798 +    ) -> Self {
+  799 +        EnumDeserializer {
+  800 +            de,
+  801 +            key,
+  802 +            jentry,
+  803 +            payload_offset,
+  804 +        }
+  805 +    }
+  806 +}
+  807 +
+  808 +impl<'de> de::EnumAccess<'de> for EnumDeserializer<'_, 'de> {
+  809 +    type Error = Error;
+  810 +    type Variant = Self;
+  811 +
+  812 +    fn variant_seed<V>(self, seed: V) -> Result<(V::Value, Self::Variant)>
+  813 +    where
+  814 +        V: de::DeserializeSeed<'de>,
+  815 +    {
+  816 +        let key_variant = self.key.clone().into_deserializer();
+  817 +        seed.deserialize(key_variant).map(|v| (v, self))
+  818 +    }
+  819 +}
+  820 +
+  821 +impl<'de> de::VariantAccess<'de> for EnumDeserializer<'_, 'de> {
+  822 +    type Error = Error;
+  823 +
+  824 +    fn unit_variant(self) -> Result<()> {
+  825 +        if self.jentry.type_code == NULL_TAG {
+  826 +            Ok(())
+  827 +        } else {
+  828 +            Err(Error::UnexpectedType)
+  829 +        }
+  830 +    }
+  831 +
+  832 +    fn newtype_variant_seed<T>(self, seed: T) -> Result<T::Value>
+  833 +    where
+  834 +        T: de::DeserializeSeed<'de>,
+  835 +    {
+  836 +        self.de
+  837 +            .set_jentry_with_index(self.jentry, self.payload_offset);
+  838 +        seed.deserialize(&mut *self.de)
+  839 +    }
+  840 +
+  841 +    fn tuple_variant<V>(self, _len: usize, visitor: V) -> Result<V::Value>
+  842 +    where
+  843 +        V: Visitor<'de>,
+  844 +    {
+  845 +        if self.jentry.type_code == CONTAINER_TAG {
+  846 +            let (header_type, header_len) = self.de.read_header()?;
+  847 +            match header_type {
+  848 +                ARRAY_CONTAINER_TAG => {
+  849 +                    let jentries = self.de.read_array_jentries(header_len)?;
+  850 +                    visitor.visit_seq(ArrayDeserializer::new(self.de, jentries))
+  851 +                }
+  852 +                SCALAR_CONTAINER_TAG | OBJECT_CONTAINER_TAG => Err(Error::UnexpectedType),
+  853 +                _ => Err(Error::InvalidJsonb),
+  854 +            }
+  855 +        } else {
+  856 +            Err(Error::UnexpectedType)
+  857 +        }
+  858 +    }
+  859 +
+  860 +    fn struct_variant<V>(self, _fields: &'static [&'static str], visitor: V) -> Result<V::Value>
+  861 +    where
+  862 +        V: Visitor<'de>,
+  863 +    {
+  864 +        self.de
+  865 +            .set_jentry_with_index(self.jentry.clone(), self.payload_offset);
+  866 +        if self.jentry.type_code == CONTAINER_TAG {
+  867 +            let (header_type, header_len) = self.de.read_header()?;
+  868 +            match header_type {
+  869 +                OBJECT_CONTAINER_TAG => {
+  870 +                    let (key_jentries, value_jentries) =
+  871 +                        self.de.read_object_jentries(header_len)?;
+  872 +
+  873 +                    let origin_index = self.de.index;
+  874 +                    let key_length: usize = key_jentries.iter().map(|j| j.length as usize).sum();
+  875 +                    let value_length: usize =
+  876 +                        value_jentries.iter().map(|j| j.length as usize).sum();
+  877 +                    let key_payload_offset = self.de.index;
+  878 +                    let value_payload_offset = self.de.index + key_length;
+  879 +
+  880 +                    let value = visitor.visit_map(ObjectDeserializer::new(
+  881 +                        self.de,
+  882 +                        key_payload_offset,
+  883 +                        key_jentries,
+  884 +                        value_payload_offset,
+  885 +                        value_jentries,
+  886 +                    ))?;
+  887 +                    self.de.index = origin_index + key_length + value_length;
+  888 +                    Ok(value)
+  889 +                }
+  890 +                SCALAR_CONTAINER_TAG | ARRAY_CONTAINER_TAG => Err(Error::UnexpectedType),
+  891 +                _ => Err(Error::UnexpectedType),
+  892 +            }
+  893 +        } else {
+  894 +            Err(Error::UnexpectedType)
+  895 +        }
+  896 +    }
+  897 +}

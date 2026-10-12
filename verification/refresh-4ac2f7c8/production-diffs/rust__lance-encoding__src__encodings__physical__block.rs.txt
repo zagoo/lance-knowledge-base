@@ -1,0 +1,185 @@
+@@ -141,6 +141,23 @@ impl FromStr for CompressionScheme {
+  141  pub trait BufferCompressor: std::fmt::Debug + Send + Sync {
+  142      fn compress(&self, input_buf: &[u8], output_buf: &mut Vec<u8>) -> Result<()>;
+  143      fn decompress(&self, input_buf: &[u8], output_buf: &mut Vec<u8>) -> Result<()>;
+  144 +
+  145 +    fn decompress_exact(
+  146 +        &self,
+  147 +        input_buf: &[u8],
+  148 +        output_buf: &mut Vec<u8>,
+  149 +        expected_bytes: usize,
+  150 +    ) -> Result<()> {
+  151 +        self.decompress(input_buf, output_buf)?;
+  152 +        if output_buf.len() != expected_bytes {
+  153 +            return Err(Error::invalid_input(format!(
+  154 +                "General compression produced {} bytes, expected {expected_bytes}",
+  155 +                output_buf.len()
+  156 +            )));
+  157 +        }
+  158 +        Ok(())
+  159 +    }
+  160 +
+  161      fn config(&self) -> CompressionConfig;
+  162  }
+  163  
+
+@@ -290,6 +307,65 @@ mod zstd {
+  307              Ok(())
+  308          }
+  309  
+  310 +        fn decompress_exact(
+  311 +            &self,
+  312 +            input_buf: &[u8],
+  313 +            output_buf: &mut Vec<u8>,
+  314 +            expected_bytes: usize,
+  315 +        ) -> Result<()> {
+  316 +            if input_buf.is_empty() {
+  317 +                if expected_bytes == 0 {
+  318 +                    return Ok(());
+  319 +                }
+  320 +                return Err(Error::invalid_input(format!(
+  321 +                    "Zstd payload is empty, expected {expected_bytes} output bytes"
+  322 +                )));
+  323 +            }
+  324 +            let compressed = if self.is_raw_stream_format(input_buf) {
+  325 +                input_buf
+  326 +            } else {
+  327 +                let declared = u64::from_le_bytes(input_buf[..8].try_into().map_err(|_| {
+  328 +                    Error::invalid_input("Zstd payload is shorter than its 8-byte length prefix")
+  329 +                })?);
+  330 +                let declared = usize::try_from(declared).map_err(|_| {
+  331 +                    Error::invalid_input("Zstd declared output length does not fit usize")
+  332 +                })?;
+  333 +                if declared != expected_bytes {
+  334 +                    return Err(Error::invalid_input(format!(
+  335 +                        "Zstd declares {declared} output bytes, expected {expected_bytes}"
+  336 +                    )));
+  337 +                }
+  338 +                &input_buf[8..]
+  339 +            };
+  340 +            let start = output_buf.len();
+  341 +            let end = start
+  342 +                .checked_add(expected_bytes)
+  343 +                .ok_or_else(|| Error::invalid_input("Zstd output buffer length overflows usize"))?;
+  344 +            output_buf
+  345 +                .try_reserve_exact(expected_bytes)
+  346 +                .map_err(|error| {
+  347 +                    Error::invalid_input(format!(
+  348 +                        "Zstd could not reserve {expected_bytes} output bytes: {error}"
+  349 +                    ))
+  350 +                })?;
+  351 +            output_buf.resize(end, 0);
+  352 +            let decoded = decompress_to_buffer(compressed, &mut output_buf[start..]);
+  353 +            let decoded = match decoded {
+  354 +                Ok(decoded) => decoded,
+  355 +                Err(error) => {
+  356 +                    output_buf.truncate(start);
+  357 +                    return Err(error.into());
+  358 +                }
+  359 +            };
+  360 +            if decoded != expected_bytes {
+  361 +                output_buf.truncate(start);
+  362 +                return Err(Error::invalid_input(format!(
+  363 +                    "Zstd produced {decoded} bytes, expected {expected_bytes}"
+  364 +                )));
+  365 +            }
+  366 +            Ok(())
+  367 +        }
+  368 +
+  369          fn config(&self) -> CompressionConfig {
+  370              CompressionConfig {
+  371                  scheme: CompressionScheme::Zstd,
+
+@@ -333,7 +409,9 @@ mod lz4 {
+  409              // When prepend_size is true, LZ4 stores the uncompressed size in the first 4 bytes
+  410              // We can read this to know exactly how much space we need
+  411              if input_buf.len() < 4 {
+  336 -                return Err(Error::internal("LZ4 compressed data too short".to_string()));
+  412 +                return Err(Error::invalid_input(
+  413 +                    "LZ4 buffer is missing its length prefix",
+  414 +                ));
+  415              }
+  416  
+  417              // Read the uncompressed size from the first 4 bytes (little-endian)
+
+@@ -358,6 +436,56 @@ mod lz4 {
+  436              Ok(())
+  437          }
+  438  
+  439 +        fn decompress_exact(
+  440 +            &self,
+  441 +            input_buf: &[u8],
+  442 +            output_buf: &mut Vec<u8>,
+  443 +            expected_bytes: usize,
+  444 +        ) -> Result<()> {
+  445 +            let declared = input_buf.get(..4).ok_or_else(|| {
+  446 +                Error::invalid_input("LZ4 payload is shorter than its 4-byte length prefix")
+  447 +            })?;
+  448 +            let declared =
+  449 +                u32::from_le_bytes(declared.try_into().map_err(|_| {
+  450 +                    Error::invalid_input("LZ4 payload has an invalid length prefix")
+  451 +                })?) as usize;
+  452 +            if declared != expected_bytes {
+  453 +                return Err(Error::invalid_input(format!(
+  454 +                    "LZ4 declares {declared} output bytes, expected {expected_bytes}"
+  455 +                )));
+  456 +            }
+  457 +            let start = output_buf.len();
+  458 +            let end = start
+  459 +                .checked_add(expected_bytes)
+  460 +                .ok_or_else(|| Error::invalid_input("LZ4 output buffer length overflows usize"))?;
+  461 +            output_buf
+  462 +                .try_reserve_exact(expected_bytes)
+  463 +                .map_err(|error| {
+  464 +                    Error::invalid_input(format!(
+  465 +                        "LZ4 could not reserve {expected_bytes} output bytes: {error}"
+  466 +                    ))
+  467 +                })?;
+  468 +            output_buf.resize(end, 0);
+  469 +            let decoded =
+  470 +                ::lz4::block::decompress_to_buffer(input_buf, None, &mut output_buf[start..]);
+  471 +            let decoded = match decoded {
+  472 +                Ok(decoded) => decoded,
+  473 +                Err(error) => {
+  474 +                    output_buf.truncate(start);
+  475 +                    return Err(Error::invalid_input(format!(
+  476 +                        "LZ4 decompression error: {error}"
+  477 +                    )));
+  478 +                }
+  479 +            };
+  480 +            if decoded != expected_bytes {
+  481 +                output_buf.truncate(start);
+  482 +                return Err(Error::invalid_input(format!(
+  483 +                    "LZ4 produced {decoded} bytes, expected {expected_bytes}"
+  484 +                )));
+  485 +            }
+  486 +            Ok(())
+  487 +        }
+  488 +
+  489          fn config(&self) -> CompressionConfig {
+  490              CompressionConfig {
+  491                  scheme: CompressionScheme::Lz4,
+
+@@ -381,6 +509,22 @@ impl BufferCompressor for NoopBufferCompressor {
+  509          Ok(())
+  510      }
+  511  
+  512 +    fn decompress_exact(
+  513 +        &self,
+  514 +        input_buf: &[u8],
+  515 +        output_buf: &mut Vec<u8>,
+  516 +        expected_bytes: usize,
+  517 +    ) -> Result<()> {
+  518 +        if input_buf.len() != expected_bytes {
+  519 +            return Err(Error::invalid_input(format!(
+  520 +                "Uncompressed payload has {} bytes, expected {expected_bytes}",
+  521 +                input_buf.len()
+  522 +            )));
+  523 +        }
+  524 +        output_buf.extend_from_slice(input_buf);
+  525 +        Ok(())
+  526 +    }
+  527 +
+  528      fn config(&self) -> CompressionConfig {
+  529          CompressionConfig {
+  530              scheme: CompressionScheme::None,

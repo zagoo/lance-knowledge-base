@@ -1,0 +1,101 @@
+[
+  {
+    "id": 1,
+    "path": "rust/lance-core/src/utils/cpu.rs",
+    "start": 56,
+    "end": 73,
+    "unit": "lines",
+    "read_at": "2026-10-04T07:32:17.112Z",
+    "evidence": "56 | \n57 | /// Snapshot of the SIMD tier lance dispatches to on the current host, plus the\n58 | /// raw CPU features detected for diagnostic purposes.\n59 | ///\n60 | /// Mirrors the role of `pyarrow.runtime_info()`: a single, cheap call users can\n61 | /// make to verify which SIMD tier the runtime selected and what underlying\n62 | /// features the host advertises. Obtain one with [`simd_info()`].\n63 | #[derive(Debug, Clone)]\n64 | pub struct SimdInfo {\n65 |     /// The SIMD tier lance dispatches to at runtime on this host.\n66 |     pub tier: SimdSupport,\n67 |     /// The architecture name (e.g. \"x86_64\", \"aarch64\", \"loongarch64\").\n68 |     pub target_arch: &'static str,\n69 |     /// Raw CPU feature flags detected on this host (x86_64 only; empty on\n70 |     /// other architectures). Each entry is a feature name like \"avx2\",\n71 |     /// \"fma\", \"avx512f\", \"popcnt\", etc.\n72 |     pub host_features: Vec<&'static str>,\n73 | }"
+  },
+  {
+    "id": 2,
+    "path": "rust/lance-file/src/versions/v2_2/mod.rs",
+    "start": 48,
+    "end": 61,
+    "unit": "lines",
+    "read_at": "2026-10-04T07:32:17.113Z",
+    "evidence": "48 | /// Count physical columns represented by a field in a v2.2 footer.\n49 | pub fn physical_column_count(field: &Field) -> usize {\n50 |     structural::physical_column_count(field)\n51 | }\n52 | \n53 | /// Build persisted field-to-column entries for a v2.2 data file.\n54 | pub fn data_file_columns(schema: &Schema) -> (Vec<i32>, Vec<i32>) {\n55 |     structural::data_file_columns(schema)\n56 | }\n57 | \n58 | pub(super) fn field_id_to_column_index(schema: &Schema) -> BTreeMap<u32, u32> {\n59 |     structural::field_id_to_column_index(schema)\n60 | }\n61 | "
+  },
+  {
+    "id": 4,
+    "path": "rust/lance-encoding/src/data.rs",
+    "start": 2166,
+    "end": 2210,
+    "unit": "lines",
+    "read_at": "2026-10-04T07:32:17.113Z",
+    "evidence": "2166 |     #[test]\n2167 |     fn test_string_to_data_block() {\n2168 |         // Converting string arrays that contain nulls to DataBlock\n2169 |         let strings1 = StringArray::from(vec![Some(\"hello\"), None, Some(\"world\")]);\n2170 |         let strings2 = StringArray::from(vec![Some(\"a\"), Some(\"b\")]);\n2171 |         let strings3 = StringArray::from(vec![Option::<&'static str>::None, None]);\n2172 | \n2173 |         let arrays = &[strings1, strings2, strings3]\n2174 |             .iter()\n2175 |             .map(|arr| Arc::new(arr.clone()) as ArrayRef)\n2176 |             .collect::<Vec<_>>();\n2177 | \n2178 |         let block = DataBlock::from_arrays(arrays, 7);\n2179 | \n2180 |         assert_eq!(block.num_values(), 7);\n2181 |         let block = block.as_nullable().unwrap();\n2182 | \n2183 |         assert_eq!(block.nulls, LanceBuffer::from(vec![0b00011101]));\n2184 | \n2185 |         let data = block.data.as_variable_width().unwrap();\n2186 |         assert_eq!(\n2187 |             data.offsets,\n2188 |             LanceBuffer::reinterpret_vec(vec![0, 5, 5, 10, 11, 12, 12, 12])\n2189 |         );\n2190 | \n2191 |         assert_eq!(data.data, LanceBuffer::copy_slice(b\"helloworldab\"));\n2192 | \n2193 |         // Converting string arrays that do not contain nulls to DataBlock\n2194 |         let strings1 = StringArray::from(vec![Some(\"a\"), Some(\"bc\")]);\n2195 |         let strings2 = StringArray::from(vec![Some(\"def\")]);\n2196 | \n2197 |         let arrays = &[strings1, strings2]\n2198 |             .iter()\n2199 |             .map(|arr| Arc::new(arr.clone()) as ArrayRef)\n2200 |             .collect::<Vec<_>>();\n2201 | \n2202 |         let block = DataBlock::from_arrays(arrays, 3);\n2203 | \n2204 |         assert_eq!(block.num_values(), 3);\n2205 |         // Should be no nullable wrapper\n2206 |         let data = block.as_variable_width().unwrap();\n2207 |         assert_eq!(data.offsets, LanceBuffer::reinterpret_vec(vec![0, 1, 3, 6]));\n2208 |         assert_eq!(data.data, LanceBuffer::copy_slice(b\"abcdef\"));\n2209 |     }\n2210 | "
+  },
+  {
+    "id": 5,
+    "path": "rust/lance-table/src/io/commit/dynamodb.rs",
+    "start": 33,
+    "end": 71,
+    "unit": "lines",
+    "read_at": "2026-10-04T07:32:17.113Z",
+    "evidence": "33 | #[derive(Debug)]\n34 | struct WrappedSdkError<E>(SdkError<E>);\n35 | \n36 | impl<E> From<WrappedSdkError<E>> for Error\n37 | where\n38 |     E: std::error::Error + Send + Sync + 'static,\n39 | {\n40 |     fn from(e: WrappedSdkError<E>) -> Self {\n41 |         Self::io_source(box_error(e))\n42 |     }\n43 | }\n44 | \n45 | impl<E> std::fmt::Display for WrappedSdkError<E>\n46 | where\n47 |     E: std::error::Error + Send + Sync + 'static,\n48 | {\n49 |     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n50 |         let request_id = self.0.request_id().unwrap_or(\"unknown\");\n51 |         let service_err = &self.0.raw_response();\n52 |         write!(f, \"WrappedSdkError: request_id: {}\", request_id)?;\n53 |         if let Some(err) = service_err {\n54 |             write!(f, \", service_error: {:?}\", err)\n55 |         } else {\n56 |             write!(f, \", no service error\")\n57 |         }\n58 |     }\n59 | }\n60 | \n61 | impl<E> std::error::Error for WrappedSdkError<E>\n62 | where\n63 |     E: std::error::Error + Send + Sync + 'static,\n64 | {\n65 |     // Implement the necessary methods for the Error trait here.\n66 |     // For example, you can delegate to the inner SdkError:\n67 | \n68 |     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {\n69 |         Some(&self.0)\n70 |     }\n71 | }"
+  },
+  {
+    "id": 8,
+    "path": "rust/lance-table/src/transaction/row_version.rs",
+    "start": 241,
+    "end": 257,
+    "unit": "lines",
+    "read_at": "2026-10-04T07:32:17.113Z",
+    "evidence": "241 |             (Some(RowIdMeta::Column), None) => {\n242 |                 // Resolving the versions needs the row ids, which this\n243 |                 // commit-time path cannot read back from a data file; a writer\n244 |                 // that spills them has to place the created-at versions too.\n245 |                 return Err(Error::not_supported(format!(\n246 |                     \"fragment {} stores its row ids outside the manifest but carries no \\\n247 |                      created-at version metadata; a writer that spills row ids must place \\\n248 |                      the created-at versions with them\",\n249 |                     fragment.id\n250 |                 )));\n251 |             }\n252 |             // Inline created-at versions next to inline row ids are resolved\n253 |             // again below, overwriting whatever the caller supplied.\n254 |             (Some(RowIdMeta::Inline(data)), _) => read_row_ids(data).ok(),\n255 |             (None, _) => None,\n256 |         };\n257 | "
+  },
+  {
+    "id": 9,
+    "path": "rust/lance-file/src/concat.rs",
+    "start": 93,
+    "end": 139,
+    "unit": "lines",
+    "read_at": "2026-10-04T07:32:17.113Z",
+    "evidence": "93 | \n94 | /// A complete ordinary Lance file validated for data-file concatenation.\n95 | ///\n96 | /// A part is independently readable and is not an incomplete file-format\n97 | /// fragment or a persisted Manifest entity. Opening one reads its real footer,\n98 | /// verifies that its physical columns form a complete rectangular file, and\n99 | /// checks Blob v2 descriptors against the caller-provided ID lease. Parts with\n100 | /// Blob v2 columns are also bound to the caller-provided [`BlobTargetId`].\n101 | ///\n102 | /// This runtime value has no fragment, source-row, range, dataset, or storage\n103 | /// identity. Lance defines no serialization or recovery contract for it. The\n104 | /// caller owns the input storage and must keep every Blob-bearing part associated\n105 | /// with the dataset and base where its managed payloads were written. The order\n106 | /// passed to [`concat_data_file_parts`] determines final physical row order.\n107 | ///\n108 | /// # Example\n109 | ///\n110 | /// ```\n111 | /// use lance_file::concat::{DataFilePart, EncodedFileInput};\n112 | /// use lance_io::scheduler::FileScheduler;\n113 | ///\n114 | /// # async fn open_part(file: FileScheduler) -> lance_core::Result<()> {\n115 | /// let part = DataFilePart::open(EncodedFileInput::new(file), None, None).await?;\n116 | /// println!(\"part rows: {}\", part.num_rows());\n117 | /// # Ok(())\n118 | /// # }\n119 | /// ```\n120 | #[derive(Clone)]\n121 | pub struct DataFilePart {\n122 |     input: EncodedFileInput,\n123 |     metadata: Arc<CachedFileMetadata>,\n124 |     schema: Arc<Schema>,\n125 |     blob_ids: Option<Range<u32>>,\n126 |     blob_target_id: Option<BlobTargetId>,\n127 | }\n128 | \n129 | impl fmt::Debug for DataFilePart {\n130 |     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {\n131 |         f.debug_struct(\"DataFilePart\")\n132 |             .field(\"path\", &self.input.path())\n133 |             .field(\"version\", &self.metadata.version)\n134 |             .field(\"num_rows\", &self.metadata.num_rows)\n135 |             .field(\"blob_ids\", &self.blob_ids)\n136 |             .field(\"blob_target_id\", &self.blob_target_id)\n137 |             .finish()\n138 |     }\n139 | }"
+  },
+  {
+    "id": 11,
+    "path": "rust/lance-file/src/versions/v1/writer/statistics.rs",
+    "start": 661,
+    "end": 672,
+    "unit": "lines",
+    "read_at": "2026-10-04T07:32:17.114Z",
+    "evidence": "661 |         let schema = Arc::new(ArrowSchema::new(fields));\n662 |         let batch = RecordBatch::try_new(schema, arrays);\n663 |         match batch {\n664 |             Ok(batch) => Ok(batch),\n665 |             _ => Err(ArrowError::SchemaError(\n666 |                 \"all columns in a record batch must have the same length\".to_string(),\n667 |             )\n668 |             .into()),\n669 |         }\n670 |     }\n671 | }\n672 | "
+  },
+  {
+    "id": 12,
+    "path": "protos/encodings_v2_0.proto",
+    "start": 173,
+    "end": 195,
+    "unit": "lines",
+    "read_at": "2026-10-04T07:32:17.114Z",
+    "evidence": "173 | // Fixed width items placed contiguously in a buffer\n174 | message Flat {\n175 |   /* the number of bits per value, must be greater than 0, does\n176 |    * not need to be a multiple of 8\n177 |    */\n178 |   uint64 bits_per_value = 1;\n179 |   // the buffer of values\n180 |   Buffer buffer = 2;\n181 |   /* The Compression message can specify the compression scheme (e.g. zstd) and any\n182 |    * other information that is needed for decompression.\n183 |    *\n184 |    * If this array is compressed then the bits_per_value refers to the uncompressed\n185 |    * data.\n186 |    */\n187 |   Compression compression = 3;\n188 | }\n189 | \n190 | // Compression algorithm where all values have a constant value\n191 | message Constant {\n192 |   // The value (TODO: define encoding for literals?)\n193 |   bytes value = 1;\n194 | }\n195 | "
+  },
+  {
+    "id": 16,
+    "path": "rust/lance-file/src/versions/v2_1/mod.rs",
+    "start": 35,
+    "end": 49,
+    "unit": "lines",
+    "read_at": "2026-10-04T07:32:17.185Z",
+    "evidence": "35 | pub use reader::{\n36 |     projection_from_column_names, projection_from_field_ids, projection_from_whole_schema,\n37 | };\n38 | pub use writer::Writer;\n39 | \n40 | #[cfg(test)]\n41 | pub(crate) use reader::test_projection_length;\n42 | pub(crate) use reader::{\n43 |     decode_column_metadata, finish_metadata, finish_metadata_index, validate_global_buffers,\n44 | };\n45 | \n46 | pub(crate) fn read_projection() -> Arc<dyn ReadProjection> {\n47 |     structural::read_projection(reader::decode_column)\n48 | }\n49 | "
+  },
+  {
+    "id": 17,
+    "path": "rust/lance-table/src/format/row_ids.rs",
+    "start": 60,
+    "end": 74,
+    "unit": "lines",
+    "read_at": "2026-10-04T07:32:17.185Z",
+    "evidence": "60 | \n61 | impl InlineRowIds {\n62 |     /// Digest of the encoded bytes, computed on first use and shared by clones.\n63 |     pub fn digest(&self) -> &[u8; 32] {\n64 |         self.inner\n65 |             .digest\n66 |             .get_or_init(|| blake3::hash(&self.inner.data).into())\n67 |     }\n68 | \n69 |     /// The encoded bytes, sharing the underlying allocation.\n70 |     pub fn bytes(&self) -> &Bytes {\n71 |         &self.inner.data\n72 |     }\n73 | }\n74 | "
+  },
+  {
+    "id": 20,
+    "path": "rust/lance-core/src/utils/aimd.rs",
+    "start": 204,
+    "end": 221,
+    "unit": "lines",
+    "read_at": "2026-10-04T07:32:17.185Z",
+    "evidence": "204 | /// AIMD rate controller.\n205 | ///\n206 | /// Thread-safe: uses an internal `Mutex` to protect state. The lock is held\n207 | /// only briefly during `record_outcome` and `current_rate`.\n208 | pub struct AimdController {\n209 |     config: AimdConfig,\n210 |     state: Mutex<AimdState>,\n211 | }\n212 | \n213 | impl std::fmt::Debug for AimdController {\n214 |     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n215 |         f.debug_struct(\"AimdController\")\n216 |             .field(\"config\", &self.config)\n217 |             .field(\"rate\", &self.current_rate())\n218 |             .finish()\n219 |     }\n220 | }\n221 | "
+  }
+]

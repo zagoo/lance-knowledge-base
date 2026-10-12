@@ -1,0 +1,81 @@
+{
+  "iteration": 77,
+  "note": "Fresh supporting source for sampled claims/corrections and full no-item regression corpus. Symlink read separately as ../../protos/. No source promoted by acceptance reads.",
+  "files": [
+    {
+      "path": "rust/lance-encoding/src/lib.rs",
+      "ranges": [
+        {
+          "start": 27,
+          "end": 31,
+          "text": "27 | // We can definitely add support for big-endian machines someday.  However, it's not a priority and\n28 | // would involve extensive testing (probably through emulation) to ensure that the encodings are\n29 | // correct.\n30 | #[cfg(not(target_endian = \"little\"))]\n31 | compile_error!(\"Lance encodings only support little-endian systems.\");"
+        }
+      ]
+    },
+    {
+      "path": "rust/lance-encoding/src/data.rs",
+      "ranges": [
+        {
+          "start": 965,
+          "end": 978,
+          "text": "965 |             data: offsets,\n966 |             bits_per_value: self.bits_per_offset as u64,\n967 |             num_values: self.num_values + 1,\n968 |             block_info: BlockInfo::new(),\n969 |         })\n970 |     }\n971 | \n972 |     pub fn data_size(&self) -> u64 {\n973 |         (self.data.len() + self.offsets.len()) as u64\n974 |     }\n975 | }\n976 | \n977 | /// A data block representing a struct\n978 | #[derive(Debug, Clone)]"
+        }
+      ]
+    },
+    {
+      "path": "rust/lance-file/src/versions/v2_3/reader.rs",
+      "ranges": [
+        {
+          "start": 66,
+          "end": 90,
+          "text": "66 |             \"general-compression values\",\n67 |         )?),\n68 |         Some(Compression::FixedSizeList(list)) => validate_compressive_encoding(required(\n69 |             list.values.as_deref(),\n70 |             \"fixed-size-list values\",\n71 |         )?),\n72 |         Some(Compression::PackedStruct(packed)) => validate_compressive_encoding(required(\n73 |             packed.values.as_deref(),\n74 |             \"packed-struct values\",\n75 |         )?),\n76 |         Some(Compression::VariablePackedStruct(packed)) => {\n77 |             for field in &packed.fields {\n78 |                 validate_compressive_encoding(required(\n79 |                     field.value.as_ref(),\n80 |                     \"variable packed-struct field\",\n81 |                 )?)?;\n82 |             }\n83 |             Ok(())\n84 |         }\n85 |         None => Err(Error::invalid_input_source(\n86 |             \"Lance v2.3 compressive encoding is missing its compression variant\".into(),\n87 |         )),\n88 |     }\n89 | }\n90 | "
+        },
+        {
+          "start": 317,
+          "end": 341,
+          "text": "317 |     #[test]\n318 |     fn accepts_nested_variable_width_rle() {\n319 |         let rle = CompressiveEncoding {\n320 |             compression: Some(Compression::Rle(Box::new(Rle {\n321 |                 values: Some(Box::new(flat(32))),\n322 |                 run_lengths: Some(Box::new(flat(16))),\n323 |             }))),\n324 |         };\n325 |         let dictionary = CompressiveEncoding {\n326 |             compression: Some(Compression::Dictionary(Box::new(Dictionary {\n327 |                 indices: Some(Box::new(rle)),\n328 |                 items: Some(Box::new(flat(32))),\n329 |                 num_dictionary_items: 1,\n330 |             }))),\n331 |         };\n332 |         let layout = PageLayout {\n333 |             layout: Some(Layout::FullZipLayout(FullZipLayout {\n334 |                 value_compression: Some(dictionary),\n335 |                 ..Default::default()\n336 |             })),\n337 |         };\n338 | \n339 |         validate_page_layout(&layout).unwrap();\n340 |     }\n341 | }"
+        }
+      ]
+    },
+    {
+      "path": "rust/lance-file/src/versions/v2_1/mod.rs",
+      "ranges": [
+        {
+          "start": 48,
+          "end": 132,
+          "text": "48 | }\n49 | \n50 | /// Count physical columns represented by a field in a v2.1 footer.\n51 | pub fn physical_column_count(field: &Field) -> usize {\n52 |     structural::physical_column_count(field)\n53 | }\n54 | \n55 | /// Build persisted field-to-column entries for a v2.1 data file.\n56 | pub fn data_file_columns(schema: &Schema) -> (Vec<i32>, Vec<i32>) {\n57 |     structural::data_file_columns(schema)\n58 | }\n59 | \n60 | pub(super) fn field_id_to_column_index(schema: &Schema) -> BTreeMap<u32, u32> {\n61 |     structural::field_id_to_column_index(schema)\n62 | }\n63 | \n64 | #[derive(Debug)]\n65 | struct FieldStrategy {\n66 |     primitive: PrimitiveFieldEncoding,\n67 | }\n68 | \n69 | impl FieldEncodingStrategy for FieldStrategy {\n70 |     fn create_field_encoder(\n71 |         &self,\n72 |         field: &Field,\n73 |         column_index: &mut ColumnIndexSequence,\n74 |         context: &FieldEncodingContext<'_>,\n75 |     ) -> Result<Box<dyn FieldEncoder>> {\n76 |         if let Some(encoder) =\n77 |             try_create_binary_blob(&self.primitive, field, column_index, context)?\n78 |         {\n79 |             return Ok(encoder);\n80 |         }\n81 |         if field.is_blob() {\n82 |             return Err(Error::invalid_input_source(\n83 |                 format!(\n84 |                     \"Blob encoding is not available for field '{}' with data type {}\",\n85 |                     field.name,\n86 |                     field.data_type()\n87 |                 )\n88 |                 .into(),\n89 |             ));\n90 |         }\n91 |         if let Some(encoder) = self.primitive.try_create(field, column_index, context)? {\n92 |             return Ok(encoder);\n93 |         }\n94 |         if matches!(\n95 |             field.data_type(),\n96 |             arrow_schema::DataType::FixedSizeList(item, _)\n97 |                 if matches!(item.data_type(), arrow_schema::DataType::Struct(_))\n98 |         ) {\n99 |             return Err(Error::not_supported_source(\n100 |                 \"FixedSizeList<Struct> is not enabled by the selected file format\".into(),\n101 |             ));\n102 |         }\n103 |         if matches!(field.data_type(), arrow_schema::DataType::Map(_, _)) {\n104 |             return Err(Error::not_supported_source(\n105 |                 \"Map data type is not enabled by the selected file format\".into(),\n106 |             ));\n107 |         }\n108 |         if let Some(encoder) = try_create_list(field, column_index, context)? {\n109 |             return Ok(encoder);\n110 |         }\n111 |         if let Some(encoder) = try_create_struct(field, column_index, context)? {\n112 |             return Ok(encoder);\n113 |         }\n114 |         Err(Error::not_supported_source(\n115 |             format!(\n116 |                 \"Lance v2.1 has no field encoding for '{}' with data type {}\",\n117 |                 field.name,\n118 |                 field.data_type()\n119 |             )\n120 |             .into(),\n121 |         ))\n122 |     }\n123 | }\n124 | \n125 | /// Compose the v2.1 field encoding mechanisms.\n126 | pub fn encoding_strategy(params: CompressionParams) -> Arc<dyn FieldEncodingStrategy> {\n127 |     let compression = Arc::new(compression::Strategy::new(params));\n128 |     Arc::new(FieldStrategy {\n129 |         primitive: PrimitiveFieldEncoding::new([\n130 |             PrimitivePageEncoding::reject_sparse(),\n131 |             PrimitivePageEncoding::dense_u16(compression),\n132 |         ]),"
+        }
+      ]
+    },
+    {
+      "path": "rust/lance-table/src/transaction/validate.rs",
+      "ranges": [
+        {
+          "start": 516,
+          "end": 532,
+          "text": "516 |     fn fragment_with_file_fields(id: u64, path: &str, fields: Vec<i32>) -> Fragment {\n517 |         let mut fragment = Fragment::new(id);\n518 |         fragment\n519 |             .files\n520 |             .push(DataFile::new_legacy_from_fields(path, fields, None));\n521 |         fragment\n522 |     }\n523 | \n524 |     fn manifest_with_file_fields(schema: LanceSchema, fields: Vec<i32>) -> Manifest {\n525 |         Manifest::new(\n526 |             schema,\n527 |             Arc::new(vec![fragment_with_file_fields(0, \"f.lance\", fields)]),\n528 |             DataStorageFormat::new(ConcreteFileVersion::V2_0),\n529 |             HashMap::new(),\n530 |         )\n531 |     }\n532 | "
+        }
+      ]
+    },
+    {
+      "path": "rust/lance-table/src/format/overlay.rs",
+      "ranges": [
+        {
+          "start": 68,
+          "end": 131,
+          "text": "68 |     /// has a value for every field.\n69 |     Shared(Arc<RoaringBitmap>),\n70 |     /// One bitmap per field, in the same order as the overlay's\n71 |     /// `data_file.fields` (a sparse overlay): different fields may cover\n72 |     /// different offset sets.\n73 |     PerField(Vec<Arc<RoaringBitmap>>),\n74 | }\n75 | \n76 | /// Serialized form of [`OverlayCoverage`] — each bitmap as its 32-bit Roaring\n77 | /// byte encoding. The in-memory form parses these once at load.\n78 | #[derive(Debug, Clone, Serialize, Deserialize)]\n79 | enum OverlayCoverageBytes {\n80 |     Shared(Vec<u8>),\n81 |     PerField(Vec<Vec<u8>>),\n82 | }\n83 | \n84 | // The bytes come from a persisted overlay (the protobuf manifest or a\n85 | // serialized fragment), so a decode failure is on-disk corruption, not caller\n86 | // input. `path` locates the overlay's data file when known (empty on the serde\n87 | // path, which deserializes coverage in isolation).\n88 | fn deserialize_roaring(bytes: &[u8], path: &Path) -> Result<RoaringBitmap> {\n89 |     RoaringBitmap::deserialize_from(bytes).map_err(|e| {\n90 |         Error::corrupt_file(\n91 |             path.clone(),\n92 |             format!(\"failed to deserialize overlay coverage bitmap: {e}\"),\n93 |         )\n94 |     })\n95 | }\n96 | \n97 | fn serialize_roaring(bitmap: &RoaringBitmap) -> Vec<u8> {\n98 |     let mut bitmap = bitmap.clone();\n99 |     bitmap.optimize();\n100 |     let mut bytes = Vec::with_capacity(bitmap.serialized_size());\n101 |     // Writing to a Vec is infallible.\n102 |     bitmap.serialize_into(&mut bytes).unwrap();\n103 |     bytes\n104 | }\n105 | \n106 | impl From<OverlayCoverage> for OverlayCoverageBytes {\n107 |     fn from(coverage: OverlayCoverage) -> Self {\n108 |         match coverage {\n109 |             OverlayCoverage::Shared(bitmap) => Self::Shared(serialize_roaring(&bitmap)),\n110 |             OverlayCoverage::PerField(bitmaps) => {\n111 |                 Self::PerField(bitmaps.iter().map(|b| serialize_roaring(b)).collect())\n112 |             }\n113 |         }\n114 |     }\n115 | }\n116 | \n117 | impl TryFrom<OverlayCoverageBytes> for OverlayCoverage {\n118 |     type Error = Error;\n119 | \n120 |     fn try_from(bytes: OverlayCoverageBytes) -> Result<Self> {\n121 |         // Serde deserializes the coverage in isolation, so the owning data\n122 |         // file's path is not available here.\n123 |         let path = Path::default();\n124 |         Ok(match bytes {\n125 |             OverlayCoverageBytes::Shared(b) => {\n126 |                 Self::Shared(Arc::new(deserialize_roaring(&b, &path)?))\n127 |             }\n128 |             OverlayCoverageBytes::PerField(bs) => Self::PerField(\n129 |                 bs.iter()\n130 |                     .map(|b| deserialize_roaring(b, &path).map(Arc::new))\n131 |                     .collect::<Result<_>>()?,"
+        }
+      ]
+    },
+    {
+      "path": "rust/lance-core/proptest-regressions/io/writer/statistics.txt",
+      "ranges": [
+        {
+          "start": 1,
+          "end": 12,
+          "text": "1 | # Seeds for failure cases proptest has generated in the past. It is\n2 | # automatically read and these particular cases re-run before any\n3 | # novel cases are generated.\n4 | #\n5 | # It is recommended to check this file in to source control so that\n6 | # everyone who runs the test benefits from these saved cases.\n7 | cc d036403fe9f78dbff2c0719e2319e043d9fa1e95aeecd63f8e69593a22c10ea4 # shrinks to values = [\"\"]\n8 | cc e7d31563fa5d35fe809e639d776be444b6042700b05fe695a0f6adc14fb171f7 # shrinks to values = []\n9 | cc 6c525cb87c8a699c192a10bb4064837f4e91ca609cac82e3615da4776227b613 # shrinks to values = [[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]]\n10 | cc 6a1991927899b890de6623bf046ebd7e6fd512c73c854a21be5a947bf15f98dd # shrinks to values = [[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]]\n11 | cc 1436aa3ba65a78849c52480e744e8ed37a6eb64e793319f36f28e0ffd30c0f34 # shrinks to values = [\"𐀀 𐀀aA  \\u{80}aA\\u{b}A \\u{b}\\00  0𐀀0 A𐀀\\0ࠀaࠀAA0¡ 𐀀𐀀¡ 𐀀\"]\n12 | cc f1974dc3e72ef3d23ce7fd5a983f188a3f26bf9247f43dc25e7e71f46e0bedd9 # shrinks to values = [\"\\u{7f}\", \" \\u{80}𐀀𐀀\\0\\0  \\u{b}¡𐀀𐀀ࠀ\\0 a\\u{b} ¡𐀀𐀀0Aa𐀀a00 𐀀a𐀀A\"]"
+        }
+      ]
+    }
+  ]
+}

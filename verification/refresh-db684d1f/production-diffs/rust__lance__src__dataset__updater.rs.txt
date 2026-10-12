@@ -1,0 +1,735 @@
+@@ -1,7 +1,9 @@
+    1  // SPDX-License-Identifier: Apache-2.0
+    2  // SPDX-FileCopyrightText: Copyright The Lance Authors
+    3  
+    4 -use arrow_array::{RecordBatch, UInt32Array};
+    4 +use std::num::NonZeroU32;
+    5 +
+    6 +use arrow_array::RecordBatch;
+    7  use futures::StreamExt;
+    8  use lance_core::datatypes::{OnMissing, OnTypeMismatch};
+    9  use lance_core::utils::deletion::DeletionVector;
+
+@@ -17,6 +19,9 @@ use super::versions;
+   19  use super::write::{GenericWriter, cleanup_data_fragments};
+   20  use crate::dataset::FileFragment;
+   21  
+   22 +mod blanks;
+   23 +use blanks::{BlankPlan, add_blanks, add_blanks_with_plans, blank_plans, compact_blank_source};
+   24 +
+   25  /// Update or insert a new column.
+   26  ///
+   27  /// To use, call [`Updater::next`] to get the next [`RecordBatch`] as input,
+
+@@ -36,6 +41,10 @@ pub struct Updater {
+   41      /// The last batch read from the file, with deleted rows removed
+   42      last_input: Option<RecordBatch>,
+   43  
+   44 +    /// A batch discovered by `finish` while checking that the input stream is
+   45 +    /// exhausted. It has not been handed to the caller yet.
+   46 +    prefetched_input: Option<RecordBatch>,
+   47 +
+   48      writer: Option<Box<dyn GenericWriter>>,
+   49  
+   50      /// The final schema of the fragment after the update.
+
+@@ -51,6 +60,10 @@ pub struct Updater {
+   60      finished: bool,
+   61  
+   62      deletion_restorer: DeletionRestorer,
+   63 +
+   64 +    /// A live output row that can supply fixed-width values for later blank-only
+   65 +    /// batches. This keeps trailing deleted runs bounded without inventing values.
+   66 +    blank_source: Option<RecordBatch>,
+   67  }
+   68  
+   69  impl Updater {
+
+@@ -103,24 +116,53 @@ impl Updater {
+  116              // If this is a v2 dataset, let the user pick the batch size
+  117              (None, Some(user_specified_batch_size)) => user_specified_batch_size,
+  118              // Otherwise, default to 1024 if the user didn't specify anything
+  106 -            (None, None) => get_default_batch_size().unwrap_or(1024) as u32,
+  119 +            (None, None) => {
+  120 +                let default_batch_size = get_default_batch_size().unwrap_or(1024);
+  121 +                u32::try_from(default_batch_size).map_err(|_| {
+  122 +                    Error::invalid_input(format!(
+  123 +                        "Fragment Updater: default batch size {default_batch_size} exceeds the u32 row-address limit"
+  124 +                    ))
+  125 +                })?
+  126 +            }
+  127          };
+  128 +        // Blame whoever owns the zero: for a legacy file the size came from the file's
+  129 +        // own first row group, so an empty one is a file-integrity problem, not a bad
+  130 +        // argument.
+  131 +        let batch_size = NonZeroU32::new(batch_size).ok_or_else(|| {
+  132 +            if legacy_batch_size.is_some() {
+  133 +                Error::corrupt_file_named(
+  134 +                    "row group metadata",
+  135 +                    format!(
+  136 +                        "the first row group of fragment {} reports zero rows, so the updater \
+  137 +                         has no batch size to rewrite it with",
+  138 +                        fragment.id()
+  139 +                    ),
+  140 +                )
+  141 +            } else {
+  142 +                Error::invalid_input("Fragment Updater: batch size must be greater than zero")
+  143 +            }
+  144 +        })?;
+  145  
+  109 -        let input_stream = reader.read_all(batch_size).await?;
+  146 +        let input_stream = reader.read_all(batch_size.get()).await?;
+  147  
+  148          Ok(Self {
+  149              fragment,
+  150              input_stream,
+  151              last_input: None,
+  152 +            prefetched_input: None,
+  153              writer: None,
+  154              write_schema,
+  155              final_schema,
+  118 -            // The schema adapter needs the data schema, not the logical schema, so it can't be
+  119 -            // created until after the first batch is read.
+  156              allow_external_blob_outside_bases: false,
+  157              write_version,
+  158              finished: false,
+  123 -            deletion_restorer: DeletionRestorer::new(deletion_vector, legacy_batch_size),
+  159 +            deletion_restorer: DeletionRestorer::new(
+  160 +                deletion_vector,
+  161 +                legacy_batch_size,
+  162 +                batch_size,
+  163 +                write_version,
+  164 +            ),
+  165 +            blank_source: None,
+  166          })
+  167      }
+  168  
+
+@@ -141,6 +183,15 @@ impl Updater {
+  183          if self.finished {
+  184              return Ok(None);
+  185          }
+  186 +        if self.last_input.is_some() {
+  187 +            return Err(Error::invalid_input(
+  188 +                "Fragment Updater: the previous input batch must be updated before reading the next batch",
+  189 +            ));
+  190 +        }
+  191 +        if let Some(batch) = self.prefetched_input.take() {
+  192 +            self.last_input = Some(batch);
+  193 +            return Ok(self.last_input.as_ref());
+  194 +        }
+  195          let batch = self.input_stream.next().await;
+  196          match batch {
+  197              None => {
+
+@@ -200,7 +251,29 @@ impl Updater {
+  251          self.allow_external_blob_outside_bases = true;
+  252      }
+  253  
+  254 +    async fn write_batch(&mut self, batch: RecordBatch) -> Result<()> {
+  255 +        if self.writer.is_none() {
+  256 +            let write_schema = self
+  257 +                .write_schema
+  258 +                .as_ref()
+  259 +                .ok_or_else(|| Error::internal("Fragment Updater: missing write schema"))?
+  260 +                .clone();
+  261 +            self.writer = Some(self.new_writer(write_schema).await?);
+  262 +        }
+  263 +
+  264 +        self.writer
+  265 +            .as_mut()
+  266 +            .ok_or_else(|| Error::internal("Fragment Updater: missing writer"))?
+  267 +            .write(&[batch])
+  268 +            .await
+  269 +    }
+  270 +
+  271      /// Update one batch.
+  272 +    ///
+  273 +    /// An error leaves the updater in an unspecified state: the deletion restorer may
+  274 +    /// already have advanced past this batch's deleted rows, so retrying the same batch
+  275 +    /// would count them twice. After an error, drop the updater and start over rather
+  276 +    /// than calling `update` or `finish` again.
+  277      pub async fn update(&mut self, batch: RecordBatch) -> Result<()> {
+  278          let Some(last) = self.last_input.as_ref() else {
+  279              return Err(Error::invalid_input(
+
+@@ -216,43 +289,176 @@ impl Updater {
+  289              )));
+  290          };
+  291  
+  219 -        // Add back in deleted rows
+  220 -        let batch = self.deletion_restorer.restore(batch)?;
+  292 +        if self.write_schema.is_none() {
+  293 +            // Infer from the caller's batch even when it has no rows. A leading
+  294 +            // deleted run may not produce anything writable until a later batch.
+  295 +            let output_schema = batch.schema();
+  296 +            let mut final_schema = self.fragment.schema().merge(output_schema.as_ref())?;
+  297 +            final_schema.set_field_id(Some(self.fragment.dataset().manifest.max_field_id()));
+  298 +            final_schema.validate()?;
+  299 +            let write_schema = final_schema.project_by_schema(
+  300 +                output_schema.as_ref(),
+  301 +                OnMissing::Error,
+  302 +                OnTypeMismatch::Error,
+  303 +            )?;
+  304 +            self.final_schema = Some(final_schema);
+  305 +            self.write_schema = Some(write_schema);
+  306 +        }
+  307  
+  222 -        if self.writer.is_none() {
+  223 -            if self.write_schema.is_none() {
+  224 -                // Need to infer the schema.
+  225 -                let output_schema = batch.schema();
+  226 -                let mut final_schema = self.fragment.schema().merge(output_schema.as_ref())?;
+  227 -                final_schema.set_field_id(Some(self.fragment.dataset().manifest.max_field_id()));
+  228 -                self.final_schema = Some(final_schema);
+  229 -                self.final_schema.as_ref().unwrap().validate()?;
+  230 -                self.write_schema = Some(self.final_schema.as_ref().unwrap().project_by_schema(
+  231 -                    output_schema.as_ref(),
+  232 -                    OnMissing::Error,
+  233 -                    OnTypeMismatch::Error,
+  234 -                )?);
+  308 +        let current_blank_source = (batch.num_rows() > 0).then(|| batch.slice(0, 1));
+  309 +        let write_schema = self
+  310 +            .write_schema
+  311 +            .as_ref()
+  312 +            .ok_or_else(|| Error::internal("Fragment Updater: missing write schema"))?
+  313 +            .clone();
+  314 +
+  315 +        // Add back deletions that belong to this input batch. Blanks deferred by
+  316 +        // earlier empty batches are emitted separately below so each write stays
+  317 +        // bounded by the updater's chosen batch size.
+  318 +        let restored = self.deletion_restorer.restore(batch, Some(&write_schema))?;
+  319 +
+  320 +        // A slice would keep all of the source batch's buffers alive until this
+  321 +        // fragment finishes. Materialize the single row only when a later batch can
+  322 +        // still need it. The temporary slice above lives only for this update.
+  323 +        // Legacy files never defer, so they never need a source at all.
+  324 +        let retained_blank_source = if self.deletion_restorer.can_defer()
+  325 +            && !self.deletion_restorer.is_exhausted()
+  326 +            && self.blank_source.is_none()
+  327 +        {
+  328 +            current_blank_source
+  329 +                .as_ref()
+  330 +                .map(|source| {
+  331 +                    compact_blank_source(
+  332 +                        source,
+  333 +                        self.deletion_restorer.storage_version,
+  334 +                        Some(&write_schema),
+  335 +                    )
+  336 +                })
+  337 +                .transpose()?
+  338 +        } else {
+  339 +            None
+  340 +        };
+  341 +        let blank_source = retained_blank_source
+  342 +            .as_ref()
+  343 +            .or(self.blank_source.as_ref())
+  344 +            .cloned();
+  345 +
+  346 +        if let Some(blank_source) = blank_source
+  347 +            .as_ref()
+  348 +            .filter(|_| self.deletion_restorer.has_pending_blanks())
+  349 +        {
+  350 +            let plans = blank_plans(
+  351 +                blank_source,
+  352 +                self.deletion_restorer.storage_version,
+  353 +                Some(&write_schema),
+  354 +            )?;
+  355 +            while let Some(blanks) = self
+  356 +                .deletion_restorer
+  357 +                .take_pending_blanks_with_plans(blank_source, &plans)?
+  358 +            {
+  359 +                self.write_batch(blanks).await?;
+  360              }
+  236 -
+  237 -            self.writer = Some(
+  238 -                self.new_writer(self.write_schema.as_ref().unwrap().clone())
+  239 -                    .await?,
+  240 -            );
+  361          }
+  362  
+  243 -        let writer = self.writer.as_mut().unwrap();
+  244 -
+  245 -        writer.write(&[batch]).await?;
+  363 +        if let Some(restored) = restored {
+  364 +            self.write_batch(restored).await?;
+  365 +        }
+  366 +        if self.deletion_restorer.is_exhausted() {
+  367 +            self.blank_source = None;
+  368 +        } else if retained_blank_source.is_some() {
+  369 +            self.blank_source = retained_blank_source;
+  370 +        }
+  371 +        // `last_input` is the state token pairing one successful `next` with one
+  372 +        // successful `update`. Clearing it rejects duplicate updates and lets the
+  373 +        // next input batch advance the restorer exactly once.
+  374 +        self.last_input = None;
+  375  
+  376          Ok(())
+  377      }
+  378  
+  379      /// Finish updating this fragment, and returns the updated [`Fragment`].
+  380      pub async fn finish(&mut self) -> Result<Fragment> {
+  381 +        if self.last_input.is_some() {
+  382 +            return Err(Error::invalid_input(
+  383 +                "Fragment Updater: cannot finish while the last input batch has not been updated",
+  384 +            ));
+  385 +        }
+  386 +        // Probe the stream before blaming the deletion vector. A caller that simply
+  387 +        // stopped polling also leaves deleted rows unaccounted for, and telling it to run
+  388 +        // compaction would be the wrong remedy; which of the two conditions it hits
+  389 +        // otherwise depends only on where the deletions happen to fall. Some callers know
+  390 +        // their update fits in one batch and call `finish` without polling `next` once
+  391 +        // more, so preserve that usage rather than requiring a terminal `next`. Keep a
+  392 +        // batch found by the probe so the error is recoverable and repeated `finish`
+  393 +        // calls cannot discard the stream one batch at a time.
+  394 +        if !self.finished {
+  395 +            if self.prefetched_input.is_none()
+  396 +                && let Some(batch) = self.input_stream.next().await
+  397 +            {
+  398 +                self.prefetched_input = Some(batch.await?);
+  399 +            }
+  400 +            if self.prefetched_input.is_some() {
+  401 +                return Err(Error::invalid_input(
+  402 +                    "Fragment Updater: cannot finish while unread input batches remain; call next and update until the input stream ends",
+  403 +                ));
+  404 +            }
+  405 +        }
+  406 +
+  407 +        if !self.deletion_restorer.is_exhausted() {
+  408 +            // The stream really is exhausted and blanks are still owed, which is the same
+  409 +            // condition -- and the same remedy -- as the check in [`Self::next`].
+  410 +            return Err(Error::not_supported(format!(
+  411 +                "Fragment Updater: cannot finish fragment {} while deleted rows are still \
+  412 +                 unaccounted for, run compaction to materialize deletions first",
+  413 +                self.fragment.id(),
+  414 +            )));
+  415 +        }
+  416 +
+  417 +        // Every data file in a fragment must cover the same physical rows, and the
+  418 +        // restorer has counted exactly the rows handed to the writer. Compare the two
+  419 +        // rather than trust the deletion vector to have been well formed: an id at or
+  420 +        // past the fragment's last row would otherwise be restored as if it named a
+  421 +        // real row, and the file would be committed one row long.
+  422 +        //
+  423 +        // The guards above already reject every way a caller can end up short, so this
+  424 +        // one is only reachable from a deletion vector that names rows the fragment does
+  425 +        // not have -- state `Dataset::delete` cannot produce and only a corrupt or
+  426 +        // hand-written deletion file can. It therefore has no end-to-end test by
+  427 +        // construction; `test_restore_deletes_overshoots_when_deletion_vector_runs_one_past_the_end`
+  428 +        // pins the miscount it detects at the restorer level.
+  429 +        //
+  430 +        // Only the metadata count that `FileFragment::physical_rows` itself trusts is
+  431 +        // usable here. Datasets written before the writer version existed could record
+  432 +        // a wrong `physical_rows`, and the reader ignores it for exactly that reason, so
+  433 +        // comparing against it would reject sound updates. Those fragments keep the
+  434 +        // weaker checks above.
+  435 +        if self.dataset().manifest.writer_version.is_some()
+  436 +            && let Some(physical_rows) = self.fragment.metadata.physical_rows
+  437 +        {
+  438 +            let restored = self.deletion_restorer.current_row_id as usize;
+  439 +            if restored != physical_rows {
+  440 +                return Err(Error::internal(format!(
+  441 +                    "Fragment Updater: fragment {} has {physical_rows} physical rows but the \
+  442 +                     update produced {restored}; the fragment's deletion vector may name rows \
+  443 +                     it does not have",
+  444 +                    self.fragment.id(),
+  445 +                )));
+  446 +            }
+  447 +        }
+  448 +
+  449 +        // Only now is the stream known to be both exhausted and fully accounted for.
+  450 +        // Marking it finished any earlier would make a following `next` report a clean end
+  451 +        // of stream while blanks were still owed.
+  452 +        self.finished = true;
+  453 +
+  454          if let Some(writer) = self.writer.as_mut() {
+  455              let (_, data_file) = writer.finish().await?;
+  456              self.fragment.metadata.files.push(data_file);
+  457          }
+  458 +        // A finished writer is no longer an unfinished resource to clean up, and
+  459 +        // dropping it makes repeated `finish` calls idempotent instead of appending
+  460 +        // the same data file twice.
+  461 +        self.writer = None;
+  462  
+  463          Ok(self.fragment.metadata().clone())
+  464      }
+
+@@ -321,6 +527,9 @@ struct DeletionRestorer {
+  527      /// Number of rows in each batch, only used in legacy files for validation
+  528      legacy_batch_size: Option<u32>,
+  529  
+  530 +    /// Maximum number of rows materialized in one output batch.
+  531 +    max_output_rows: NonZeroU32,
+  532 +
+  533      deletion_vector_iter: Option<Box<dyn Iterator<Item = u32> + Send>>,
+  534  
+  535      last_deleted_row_id: Option<u32>,
+
+@@ -330,16 +539,29 @@ struct DeletionRestorer {
+  539      /// See [`Self::restore`] for why they are deferred instead of materialized.
+  540      /// Only ever non-zero for non-legacy files, which are the only ones that defer.
+  541      pending_blank_rows: u32,
+  542 +
+  543 +    /// The file version blanks will be written in, which decides whether a column
+  544 +    /// can take a null blank. See [`blank_plans`].
+  545 +    storage_version: ConcreteFileVersion,
+  546  }
+  547  
+  548  impl DeletionRestorer {
+  336 -    fn new(deletion_vector: DeletionVector, legacy_batch_size: Option<u32>) -> Self {
+  549 +    fn new(
+  550 +        deletion_vector: DeletionVector,
+  551 +        legacy_batch_size: Option<u32>,
+  552 +        max_output_rows: NonZeroU32,
+  553 +        storage_version: ConcreteFileVersion,
+  554 +    ) -> Self {
+  555 +        let deletion_vector_iter =
+  556 +            (!deletion_vector.is_empty()).then(|| deletion_vector.into_sorted_iter());
+  557          Self {
+  558              current_row_id: 0,
+  559              legacy_batch_size,
+  340 -            deletion_vector_iter: Some(deletion_vector.into_sorted_iter()),
+  560 +            max_output_rows,
+  561 +            deletion_vector_iter,
+  562              last_deleted_row_id: None,
+  563              pending_blank_rows: 0,
+  564 +            storage_version,
+  565          }
+  566      }
+  567  
+
+@@ -347,16 +569,16 @@ impl DeletionRestorer {
+  569          self.deletion_vector_iter.is_none() && self.pending_blank_rows == 0
+  570      }
+  571  
+  350 -    fn is_full(batch_size: Option<u32>, num_rows: u32) -> bool {
+  351 -        if let Some(legacy_batch_size) = batch_size {
+  352 -            // We should never encounter the case that `batch_size < num_rows` because
+  353 -            // that would mean we have a v1 writer and it generated a batch with more rows
+  354 -            // than expected
+  355 -            debug_assert!(legacy_batch_size >= num_rows);
+  356 -            legacy_batch_size == num_rows
+  357 -        } else {
+  358 -            false
+  359 -        }
+  572 +    fn has_pending_blanks(&self) -> bool {
+  573 +        self.pending_blank_rows != 0
+  574 +    }
+  575 +
+  576 +    /// Whether blanks owed by a batch with no live row can be deferred to a later one.
+  577 +    ///
+  578 +    /// Legacy files cannot: their output batches have to reproduce the original row
+  579 +    /// group size, which moving rows between batches would break.
+  580 +    fn can_defer(&self) -> bool {
+  581 +        self.legacy_batch_size.is_none()
+  582      }
+  583  
+  584      /// Given a batch of `num_rows`, walk through the deletion vector, and figure out where blanks
+
+@@ -371,20 +593,25 @@ impl DeletionRestorer {
+  593      /// where we want to match the original row group size (which is the batch size).  If the
+  594      /// batch size is 9 then we do not include 19 and return as above.
+  595      ///
+  374 -    /// If the batch size is 10 (or unset) then we do include 19 and the return will be [1, 2, 9]
+  596 +    /// If the maximum output size is 10 then we include 19 and return [1, 2, 9].
+  597      ///
+  376 -    /// In v2 files, since the batch size will be unset, we will always include as many deleted
+  377 -    /// rows at the end as we can.
+  378 -    fn deleted_batch_offsets_in_range(&mut self, mut num_rows: u32) -> Vec<u32> {
+  598 +    /// In v2 files we stop at the configured output batch size. Any remaining deleted rows
+  599 +    /// are handled by later input batches or emitted as bounded blank-only batches.
+  600 +    fn deleted_batch_offsets_in_range(&mut self, mut num_rows: u32) -> Result<Vec<u32>> {
+  601          let mut deleted = Vec::new();
+  602          let first_row_id = self.current_row_id;
+  603 +        let max_output_rows = self.max_output_rows.get();
+  604 +        debug_assert!(num_rows <= max_output_rows);
+  605          // The last row id (exclusive) in the batch
+  382 -        let mut last_row_id = first_row_id + num_rows;
+  606 +        let mut last_row_id = first_row_id.checked_add(num_rows).ok_or_else(|| {
+  607 +            Error::internal(format!(
+  608 +                "Fragment Updater: row range overflow for first row {first_row_id} and {num_rows} live rows"
+  609 +            ))
+  610 +        })?;
+  611          // If there are zero deleted rows then the range covered will be first_row_id..last_row_id
+  384 -        if self.deletion_vector_iter.is_none() {
+  385 -            return deleted;
+  386 -        }
+  387 -        let deletion_vector_iter = self.deletion_vector_iter.as_mut().unwrap();
+  612 +        let Some(deletion_vector_iter) = self.deletion_vector_iter.as_mut() else {
+  613 +            return Ok(deleted);
+  614 +        };
+  615  
+  616          // Now we need to walk through our deletion vector and figure out where to insert blanks
+  617          // Take the stashed id rather than peeking at it: leaving a consumed id in the
+
+@@ -398,26 +625,43 @@ impl DeletionRestorer {
+  625          loop {
+  626              if let Some(next_deleted_id) = next_deleted_id {
+  627                  if next_deleted_id > last_row_id
+  401 -                    || (next_deleted_id == last_row_id
+  402 -                        && Self::is_full(self.legacy_batch_size, num_rows))
+  628 +                    || (next_deleted_id == last_row_id && num_rows >= max_output_rows)
+  629                  {
+  630                      // Either the next deleted id is out of range or it is the next row but
+  631                      // we are full.  Either way, stash it and return
+  632                      self.last_deleted_row_id = Some(next_deleted_id);
+  407 -                    return deleted;
+  633 +                    return Ok(deleted);
+  634                  }
+  635 +                // We only fold an in-range deleted row here, and the reader chunks by
+  636 +                // physical range so a batch's live rows plus its in-range deleted rows
+  637 +                // never exceed `max_output_rows`. Assert that real invariant: folding a row
+  638 +                // once `num_rows` already hit the cap would push this output batch past the
+  639 +                // bound (a contiguous run stops on the `>=` branch above once it does), so a
+  640 +                // future change to how the reader batches must not silently reach here.
+  641 +                debug_assert!(
+  642 +                    num_rows < max_output_rows,
+  643 +                    "Fragment Updater: restored batch would exceed max_output_rows ({num_rows} >= {max_output_rows})"
+  644 +                );
+  645                  // Otherwise, the deleted row is in range, and we have space in our batch
+  646                  // and so we include it
+  411 -                deleted.push(next_deleted_id - first_row_id);
+  412 -                last_row_id += 1;
+  413 -                num_rows += 1;
+  647 +                deleted.push(next_deleted_id.checked_sub(first_row_id).ok_or_else(|| {
+  648 +                    Error::internal(format!(
+  649 +                        "Fragment Updater: deletion row id {next_deleted_id} is before the current row {first_row_id}"
+  650 +                    ))
+  651 +                })?);
+  652 +                last_row_id = last_row_id.checked_add(1).ok_or_else(|| {
+  653 +                    Error::internal("Fragment Updater: deleted row range overflow")
+  654 +                })?;
+  655 +                num_rows = num_rows.checked_add(1).ok_or_else(|| {
+  656 +                    Error::internal("Fragment Updater: restored batch row count overflow")
+  657 +                })?;
+  658              } else {
+  659                  // Deleted row ids iterator is exhausted
+  660                  self.deletion_vector_iter = None;
+  661                  // `is_exhausted` reads these two together, so a stash left behind here
+  662                  // would make it report exhaustion while a deleted row is still owed.
+  663                  debug_assert!(self.last_deleted_row_id.is_none());
+  420 -                return deleted;
+  664 +                return Ok(deleted);
+  665              }
+  666              next_deleted_id = deletion_vector_iter.next();
+  667          }
+
+@@ -425,54 +669,66 @@ impl DeletionRestorer {
+  669  
+  670      /// Restore the deleted rows for one batch of live rows.
+  671      ///
+  428 -    /// Blanks are materialized by copying the batch's first live row (see
+  429 -    /// [`add_blanks`]), so a batch with no live rows has nothing to copy from. That
+  430 -    /// happens when a deleted run starts at physical row 0: there is no preceding
+  431 -    /// batch for [`Self::deleted_batch_offsets_in_range`] to append the run to, so
+  432 -    /// the run arrives as an empty batch carrying every one of its offsets.
+  672 +    /// A blank is the cheapest value its column can hold (see [`add_blanks`]), and
+  673 +    /// for a column that has no such value it is a copy of the batch's first live
+  674 +    /// row, so a batch with no live rows may have nothing to copy from. That happens
+  675 +    /// when a deleted run starts at physical row 0: there is no preceding batch for
+  676 +    /// [`Self::deleted_batch_offsets_in_range`] to append the run to, so the run
+  677 +    /// arrives as an empty batch carrying every one of its offsets.
+  678      ///
+  679      /// Rather than invent placeholder values for an arbitrary schema, we remember
+  435 -    /// how many blanks we owe and prepend them to the next batch that does have a
+  436 -    /// live row. Deleted rows sort before the live rows that follow them, so the
+  437 -    /// physical row order is preserved either way.
+  438 -    fn restore(&mut self, batch: RecordBatch) -> Result<RecordBatch> {
+  680 +    /// how many blanks we owe. [`Self::take_pending_blanks_with_plans`] later
+  681 +    /// materializes them in bounded batches using a live row as the source for
+  682 +    /// fixed-width values.
+  683 +    fn restore(
+  684 +        &mut self,
+  685 +        batch: RecordBatch,
+  686 +        write_schema: Option<&Schema>,
+  687 +    ) -> Result<Option<RecordBatch>> {
+  688          // Holds by construction today — deferring is the only thing that sets
+  689          // pending_blank_rows and it is gated on non-legacy — so this documents the
+  690          // invariant the legacy row-count check below depends on rather than guarding
+  691          // against a state we can reach.
+  443 -        debug_assert!(self.pending_blank_rows == 0 || self.legacy_batch_size.is_none());
+  692 +        debug_assert!(self.pending_blank_rows == 0 || self.can_defer());
+  693  
+  694          // Because of deleted rows, the number of row ids in the batch might not
+  695          // match the length.
+  447 -        let deleted_batch_offsets = self.deleted_batch_offsets_in_range(batch.num_rows() as u32);
+  696 +        let num_live_rows = u32::try_from(batch.num_rows()).map_err(|_| {
+  697 +            Error::internal(format!(
+  698 +                "Fragment Updater: input batch has {} rows, exceeding the u32 row-address limit",
+  699 +                batch.num_rows()
+  700 +            ))
+  701 +        })?;
+  702 +        let deleted_batch_offsets = self.deleted_batch_offsets_in_range(num_live_rows)?;
+  703  
+  704          // Legacy files must reproduce the original row group size, which deferring
+  705          // would break, so they keep reporting the pre-existing error instead.
+  451 -        if batch.num_rows() == 0 && self.legacy_batch_size.is_none() {
+  452 -            let deferred = deleted_batch_offsets.len() as u32;
+  453 -            self.pending_blank_rows += deferred;
+  454 -            self.current_row_id += deferred;
+  455 -            return Ok(batch);
+  706 +        if batch.num_rows() == 0 && self.can_defer() {
+  707 +            let deferred = u32::try_from(deleted_batch_offsets.len()).map_err(|_| {
+  708 +                Error::internal(format!(
+  709 +                    "Fragment Updater: {} deferred blanks exceed the u32 row-address limit",
+  710 +                    deleted_batch_offsets.len()
+  711 +                ))
+  712 +            })?;
+  713 +            self.pending_blank_rows =
+  714 +                self.pending_blank_rows
+  715 +                    .checked_add(deferred)
+  716 +                    .ok_or_else(|| {
+  717 +                        Error::internal("Fragment Updater: pending blank row count overflow")
+  718 +                    })?;
+  719 +            self.current_row_id = self
+  720 +                .current_row_id
+  721 +                .checked_add(deferred)
+  722 +                .ok_or_else(|| Error::internal("Fragment Updater: restored row id overflow"))?;
+  723 +            return Ok(None);
+  724          }
+  725  
+  458 -        let pending_blank_rows = self.pending_blank_rows;
+  459 -        let batch_offsets = if pending_blank_rows == 0 {
+  460 -            deleted_batch_offsets
+  461 -        } else {
+  462 -            // The deferred blanks take the front of the batch, pushing the offsets
+  463 -            // computed for this batch back by that many rows.
+  464 -            let mut batch_offsets =
+  465 -                Vec::with_capacity(pending_blank_rows as usize + deleted_batch_offsets.len());
+  466 -            batch_offsets.extend(0..pending_blank_rows);
+  467 -            batch_offsets.extend(
+  468 -                deleted_batch_offsets
+  469 -                    .iter()
+  470 -                    .map(|offset| offset + pending_blank_rows),
+  471 -            );
+  472 -            batch_offsets
+  473 -        };
+  474 -
+  475 -        let batch = add_blanks(batch, &batch_offsets)?;
+  726 +        let batch = add_blanks(
+  727 +            batch,
+  728 +            &deleted_batch_offsets,
+  729 +            self.storage_version,
+  730 +            write_schema,
+  731 +        )?;
+  732  
+  733          if let Some(batch_size) = self.legacy_batch_size {
+  734              // validation just in case, when the input has a fixed batch size then the
+
+@@ -487,134 +743,158 @@ impl DeletionRestorer {
+  743              }
+  744          }
+  745  
+  490 -        // The deferred blanks were counted when they were deferred.
+  491 -        self.current_row_id += batch.num_rows() as u32 - pending_blank_rows;
+  492 -        self.pending_blank_rows = 0;
+  493 -        Ok(batch)
+  494 -    }
+  495 -}
+  496 -
+  497 -/// Add blank rows where there are deleted rows
+  498 -///
+  499 -/// `batch_offsets` must be strictly increasing, and no offset may require more
+  500 -/// live rows before it than the batch has left: an offset is the position a blank
+  501 -/// takes in the output, so either kind of violation asks for an impossible number
+  502 -/// of live rows in between.
+  503 -///
+  504 -/// Blanks copy the batch's first row, so the batch must have at least one row.
+  505 -/// [`DeletionRestorer::restore`] defers blanks past an empty batch to keep that
+  506 -/// true; only legacy files, which cannot defer, can still reach the error below.
+  507 -pub(crate) fn add_blanks(batch: RecordBatch, batch_offsets: &[u32]) -> Result<RecordBatch> {
+  508 -    // Fast early return
+  509 -    if batch_offsets.is_empty() {
+  510 -        return Ok(batch);
+  511 -    }
+  512 -
+  513 -    if batch.num_rows() == 0 {
+  514 -        return Err(Error::not_supported(
+  515 -            "Fragment Updater: missing too many rows in merge, run compaction to materialize \
+  516 -             deletions first",
+  517 -        ));
+  518 -    }
+  519 -
+  520 -    let num_live_rows = batch.num_rows() as u32;
+  521 -    let mut selection_vector = Vec::<u32>::with_capacity(batch.num_rows() + batch_offsets.len());
+  522 -    let mut batch_pos = 0;
+  523 -    let mut next_id = 0;
+  524 -    for (idx, batch_offset) in batch_offsets.iter().enumerate() {
+  525 -        // A non-increasing offset panics in debug and wraps in release; reject it
+  526 -        // up front so the error names the real problem.
+  527 -        let num_rows = batch_offset.checked_sub(next_id).ok_or_else(|| {
+  746 +        let restored_rows = u32::try_from(batch.num_rows()).map_err(|_| {
+  747              Error::internal(format!(
+  529 -                "Fragment Updater: blank offsets must be strictly increasing, but offset \
+  530 -                 {batch_offset} (entry {idx} of {}) is below the expected minimum {next_id}",
+  531 -                batch_offsets.len()
+  748 +                "Fragment Updater: restored batch has {} rows, exceeding the u32 row-address limit",
+  749 +                batch.num_rows()
+  750              ))
+  751          })?;
+  534 -        // An offset needing more live rows than remain would index past the batch:
+  535 -        // `take` runs unchecked below, so catch it here rather than letting it
+  536 -        // panic inside arrow or, worse, read the wrong rows.
+  537 -        if num_rows > num_live_rows - batch_pos {
+  538 -            return Err(Error::internal(format!(
+  539 -                "Fragment Updater: blank offset {batch_offset} (entry {idx} of \
+  540 -                 {}) needs {num_rows} more live rows before it, but {} of the batch's \
+  541 -                 {num_live_rows} are still unused",
+  542 -                batch_offsets.len(),
+  543 -                num_live_rows - batch_pos
+  544 -            )));
+  545 -        }
+  546 -        selection_vector.extend(batch_pos..batch_pos + num_rows);
+  547 -        // For simplicity, we just use the first value for deleted rows
+  548 -        // TODO: optimize this to use small value for each column.
+  549 -        selection_vector.push(0);
+  550 -        next_id = *batch_offset + 1;
+  551 -        batch_pos += num_rows;
+  552 -    }
+  553 -    selection_vector.extend(batch_pos..num_live_rows);
+  554 -    let selection_vector = UInt32Array::from(selection_vector);
+  555 -
+  556 -    let arrays = batch
+  557 -        .columns()
+  558 -        .iter()
+  559 -        .map(|array| {
+  560 -            arrow::compute::take(array.as_ref(), &selection_vector, None)
+  561 -                .map_err(|e| Error::arrow(format!("Failed to add blanks: {}", e)))
+  562 -        })
+  563 -        .collect::<Result<Vec<_>>>()?;
+  564 -
+  565 -    let batch = RecordBatch::try_new(batch.schema(), arrays)?;
+  752 +        self.current_row_id = self
+  753 +            .current_row_id
+  754 +            .checked_add(restored_rows)
+  755 +            .ok_or_else(|| Error::internal("Fragment Updater: restored row id overflow"))?;
+  756 +        Ok(Some(batch))
+  757 +    }
+  758  
+  567 -    Ok(batch)
+  759 +    /// Materialize one bounded chunk of blanks deferred by empty input batches.
+  760 +    ///
+  761 +    /// `source` supplies values for layouts that have no cheaper synthetic blank.
+  762 +    /// `plans` must have been produced by [`blank_plans`] for `source`.
+  763 +    fn take_pending_blanks_with_plans(
+  764 +        &mut self,
+  765 +        source: &RecordBatch,
+  766 +        plans: &[BlankPlan],
+  767 +    ) -> Result<Option<RecordBatch>> {
+  768 +        if self.pending_blank_rows == 0 {
+  769 +            return Ok(None);
+  770 +        }
+  771 +        debug_assert_eq!(source.num_rows(), 1);
+  772 +
+  773 +        let chunk_size = self.pending_blank_rows.min(self.max_output_rows.get());
+  774 +        let batch_offsets = (0..chunk_size).collect::<Vec<_>>();
+  775 +        let with_source = add_blanks_with_plans(source.clone(), &batch_offsets, plans)?;
+  776 +        // Offsets `0..n` put the blanks first and append the whole source, so exactly
+  777 +        // one row -- the source itself -- has to come back off the end. Check the
+  778 +        // coupling rather than only documenting it in `add_blanks`.
+  779 +        debug_assert_eq!(with_source.num_rows(), chunk_size as usize + 1);
+  780 +        self.pending_blank_rows -= chunk_size;
+  781 +        Ok(Some(with_source.slice(0, chunk_size as usize)))
+  782 +    }
+  783  }
+  784  

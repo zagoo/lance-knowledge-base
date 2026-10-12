@@ -1,0 +1,927 @@
+@@ -0,0 +1,1238 @@
+    1 +// SPDX-License-Identifier: Apache-2.0
+    2 +// SPDX-FileCopyrightText: Copyright The Lance Authors
+    3 +// SPDX-FileCopyrightText: Copyright 2023 Datafuse Labs
+    4 +// Adapted from databendlabs/jsonb at commit fba895c5ebe77ce2539e187f9c652f51cbf195c3.
+    5 +
+    6 +use std::borrow::Cow;
+    7 +
+    8 +use super::constants::*;
+    9 +use super::error::Error;
+   10 +use super::error::ParseErrorCode;
+   11 +use super::error::Result;
+   12 +use super::number::Number;
+   13 +use super::util::parse_string;
+   14 +use super::value::Object;
+   15 +use super::value::Value;
+   16 +
+   17 +use crate::constants::MAX_DECIMAL128_PRECISION;
+   18 +use crate::constants::MAX_DECIMAL256_PRECISION;
+   19 +
+   20 +use crate::constants::INT64_MAX;
+   21 +use crate::constants::INT64_MIN;
+   22 +use crate::constants::UINT64_MAX;
+   23 +use crate::constants::UINT64_MIN;
+   24 +
+   25 +// JSON literal constants
+   26 +const NULL_LOWERCASE: [u8; 4] = *b"null";
+   27 +const NULL_UPPERCASE: [u8; 4] = *b"NULL";
+   28 +const TRUE_LOWERCASE: [u8; 4] = *b"true";
+   29 +const TRUE_UPPERCASE: [u8; 4] = *b"TRUE";
+   30 +const FALSE_LOWERCASE: [u8; 5] = *b"false";
+   31 +const FALSE_UPPERCASE: [u8; 5] = *b"FALSE";
+   32 +
+   33 +const NAN_LOWERCASE: [u8; 3] = *b"nan";
+   34 +const NAN_UPPERCASE: [u8; 3] = *b"NAN";
+   35 +const INFINITY_LOWERCASE: [u8; 8] = *b"infinity";
+   36 +const INFINITY_UPPERCASE: [u8; 8] = *b"INFINITY";
+   37 +
+   38 +/// Intermediate Abstract Syntax Tree representation of JSON values optimized for parsing performance.
+   39 +///
+   40 +/// `JsonAst` serves as an efficient intermediate representation during the JSON parsing process,
+   41 +/// providing several performance optimizations:
+   42 +///
+   43 +/// 1. **Zero-copy string handling**: Uses `Cow<'a, str>` to avoid unnecessary string allocations
+   44 +///    when the input can be directly borrowed, for both string values and object keys.
+   45 +///
+   46 +/// 2. **Efficient object representation**: Stores object entries as a vector of tuples with
+   47 +///    keys using the same zero-copy `Cow<'a, str>` approach, reducing memory overhead and
+   48 +///    avoiding unnecessary allocations during parsing.
+   49 +///
+   50 +/// 3. **Immediate validation**: Performs object key uniqueness validation and sorting during
+   51 +///    the parsing process, eliminating the need for a separate validation pass and reducing
+   52 +///    overall processing time.
+   53 +///
+   54 +/// 4. **Lifetime preservation**: Maintains the lifetime of the original input buffer throughout
+   55 +///    the parsing process, minimizing unnecessary copying of data.
+   56 +///
+   57 +/// 5. **Direct conversion path**: Provides an optimized conversion to the final `OwnedJsonb` type
+   58 +///    through the `into_owned_jsonb` method.
+   59 +///
+   60 +/// This approach separates the parsing concerns from the final representation concerns,
+   61 +/// allowing each to be optimized independently.
+   62 +#[derive(Clone, PartialEq, Default, Eq, Debug)]
+   63 +pub enum JsonAst<'a> {
+   64 +    #[default]
+   65 +    Null,
+   66 +    Bool(bool),
+   67 +    String(Cow<'a, str>),
+   68 +    Number(Number),
+   69 +    Array(Vec<Self>),
+   70 +    Object(Vec<(Cow<'a, str>, Self, usize)>),
+   71 +}
+   72 +
+   73 +impl<'a> JsonAst<'a> {
+   74 +    /// Converts the intermediate `JsonAst` representation to the final `Value` type.
+   75 +    fn into_value(self) -> Result<Value<'a>> {
+   76 +        let value = match self {
+   77 +            JsonAst::Null => Value::Null,
+   78 +            JsonAst::Bool(v) => Value::Bool(v),
+   79 +            JsonAst::String(v) => Value::String(v),
+   80 +            JsonAst::Number(v) => Value::Number(v),
+   81 +            JsonAst::Array(vals) => {
+   82 +                let mut values = Vec::with_capacity(vals.len());
+   83 +                for val in vals.into_iter() {
+   84 +                    let value = val.into_value()?;
+   85 +                    values.push(value);
+   86 +                }
+   87 +                Value::Array(values)
+   88 +            }
+   89 +            JsonAst::Object(kvs) => {
+   90 +                let mut object = Object::new();
+   91 +                for (key, val, _) in kvs.into_iter() {
+   92 +                    let key_str = key.to_string();
+   93 +                    let value = val.into_value()?;
+   94 +                    object.insert(key_str, value);
+   95 +                }
+   96 +                Value::Object(object)
+   97 +            }
+   98 +        };
+   99 +        Ok(value)
+  100 +    }
+  101 +}
+  102 +
+  103 +/// Parse JSON text to JSONB Value with extended mode.
+  104 +/// The parser will follow extended JSON syntax rules like leading plus signs,
+  105 +/// multiple leading zeros, decimal points without digits, and empty array elements.
+  106 +/// Numeric values are preferentially parsed as decimal values to ensure that precision is not lost.
+  107 +///
+  108 +/// Inspired by `https://github.com/jorgecarleitao/json-deserializer`
+  109 +/// Thanks Jorge Leitao.
+  110 +pub fn parse_value(buf: &[u8]) -> Result<Value<'_>> {
+  111 +    let mut parser = Parser::new(buf);
+  112 +    let json_ast = parser.parse()?;
+  113 +    json_ast.into_value()
+  114 +}
+  115 +
+  116 +/// JSON parser with optimized parsing strategies.
+  117 +///
+  118 +/// This parser implements both standard JSON parsing and an extended syntax with additional features.
+  119 +/// It uses a single-pass approach for better performance and provides detailed error reporting.
+  120 +struct Parser<'a> {
+  121 +    /// Input buffer containing the JSON text to parse
+  122 +    buf: &'a [u8],
+  123 +    /// Current position in the buffer
+  124 +    idx: usize,
+  125 +    /// Function pointer for parsing json value based on the mode
+  126 +    parse_value_fn: fn(&mut Self) -> Result<JsonAst<'a>>,
+  127 +    /// Function pointer for parsing array value based on the mode
+  128 +    parse_array_value_fn: fn(&mut Self) -> Result<JsonAst<'a>>,
+  129 +    /// Function pointer for parsing object_key based on the mode
+  130 +    parse_object_key_fn: fn(&mut Self) -> Result<Cow<'a, str>>,
+  131 +}
+  132 +
+  133 +impl<'a> Parser<'a> {
+  134 +    fn new(buf: &'a [u8]) -> Self {
+  135 +        Self {
+  136 +            buf,
+  137 +            idx: 0,
+  138 +            parse_value_fn: Self::parse_json_value,
+  139 +            parse_array_value_fn: Self::parse_array_value,
+  140 +            parse_object_key_fn: Self::parse_object_key,
+  141 +        }
+  142 +    }
+  143 +
+  144 +    /// Parse a complete JSON document from the input buffer.
+  145 +    fn parse(&mut self) -> Result<JsonAst<'a>> {
+  146 +        let value = (self.parse_value_fn)(self)?;
+  147 +
+  148 +        self.skip_unused();
+  149 +        if self.idx < self.buf.len() {
+  150 +            self.step();
+  151 +            return Err(self.error(ParseErrorCode::UnexpectedTrailingCharacters));
+  152 +        }
+  153 +        Ok(value)
+  154 +    }
+  155 +
+  156 +    /// Parse a JSON value in extended mode with more lenient syntax rules
+  157 +    #[inline]
+  158 +    fn parse_json_value(&mut self) -> Result<JsonAst<'a>> {
+  159 +        self.skip_unused();
+  160 +        // Parse empty string to Null value
+  161 +        let Ok(c) = self.next() else {
+  162 +            return Ok(JsonAst::Null);
+  163 +        };
+  164 +        match c {
+  165 +            b'n' | b'N' => self.parse_json_null_or_nan(),
+  166 +            b't' | b'T' => self.parse_json_true(),
+  167 +            b'f' | b'F' => self.parse_json_false(),
+  168 +            b'i' | b'I' => self.parse_json_infinity(),
+  169 +            b'0'..=b'9' | b'-' | b'+' | b'.' => self.parse_json_number(),
+  170 +            b'"' | b'\'' => self.parse_json_string(),
+  171 +            b'[' => self.parse_json_array(),
+  172 +            b'{' => self.parse_json_object(),
+  173 +            _ => {
+  174 +                self.step();
+  175 +                Err(self.error(ParseErrorCode::ExpectedSomeValue))
+  176 +            }
+  177 +        }
+  178 +    }
+  179 +
+  180 +    #[inline]
+  181 +    fn next(&mut self) -> Result<u8> {
+  182 +        match self.buf.get(self.idx) {
+  183 +            Some(c) => Ok(*c),
+  184 +            None => Err(self.error(ParseErrorCode::InvalidEOF)),
+  185 +        }
+  186 +    }
+  187 +
+  188 +    #[inline]
+  189 +    fn must_is(&mut self, c: &u8) -> Result<()> {
+  190 +        match self.buf.get(self.idx) {
+  191 +            Some(v) => {
+  192 +                self.step();
+  193 +                if v == c {
+  194 +                    Ok(())
+  195 +                } else {
+  196 +                    Err(self.error(ParseErrorCode::ExpectedSomeIdent))
+  197 +                }
+  198 +            }
+  199 +            None => Err(self.error(ParseErrorCode::InvalidEOF)),
+  200 +        }
+  201 +    }
+  202 +
+  203 +    #[inline]
+  204 +    fn must_either(&mut self, c1: &u8, c2: &u8) -> Result<u8> {
+  205 +        match self.buf.get(self.idx) {
+  206 +            Some(v) => {
+  207 +                self.step();
+  208 +                if v == c1 || v == c2 {
+  209 +                    Ok(*v)
+  210 +                } else {
+  211 +                    Err(self.error(ParseErrorCode::ExpectedSomeIdent))
+  212 +                }
+  213 +            }
+  214 +            None => Err(self.error(ParseErrorCode::InvalidEOF)),
+  215 +        }
+  216 +    }
+  217 +
+  218 +    #[inline]
+  219 +    fn check_next(&mut self, c: &u8) -> bool {
+  220 +        if let Some(v) = self.buf.get(self.idx)
+  221 +            && v == c
+  222 +        {
+  223 +            return true;
+  224 +        }
+  225 +        false
+  226 +    }
+  227 +
+  228 +    #[inline]
+  229 +    fn check_next_either(&mut self, c1: &u8, c2: &u8) -> Option<u8> {
+  230 +        if let Some(v) = self.buf.get(self.idx)
+  231 +            && (v == c1 || v == c2)
+  232 +        {
+  233 +            return Some(*v);
+  234 +        }
+  235 +        None
+  236 +    }
+  237 +
+  238 +    #[inline]
+  239 +    fn check_digit(&mut self) -> Option<u8> {
+  240 +        if let Some(v) = self.buf.get(self.idx)
+  241 +            && v.is_ascii_digit()
+  242 +        {
+  243 +            let digit = v - b'0';
+  244 +            return Some(digit);
+  245 +        }
+  246 +        None
+  247 +    }
+  248 +
+  249 +    #[inline]
+  250 +    fn step_digits(&mut self) -> usize {
+  251 +        let mut len = 0;
+  252 +        while let Some(v) = self.buf.get(self.idx) {
+  253 +            if !v.is_ascii_digit() {
+  254 +                break;
+  255 +            }
+  256 +            len += 1;
+  257 +            self.step();
+  258 +        }
+  259 +        len
+  260 +    }
+  261 +
+  262 +    #[inline]
+  263 +    fn step_hexdigits(&mut self) -> usize {
+  264 +        let mut len = 0;
+  265 +        while let Some(v) = self.buf.get(self.idx) {
+  266 +            if !v.is_ascii_hexdigit() {
+  267 +                break;
+  268 +            }
+  269 +            len += 1;
+  270 +            self.step();
+  271 +        }
+  272 +        len
+  273 +    }
+  274 +
+  275 +    #[inline]
+  276 +    fn step(&mut self) {
+  277 +        self.idx += 1;
+  278 +    }
+  279 +
+  280 +    #[inline]
+  281 +    fn step_by(&mut self, n: usize) {
+  282 +        self.idx += n;
+  283 +    }
+  284 +
+  285 +    fn error(&self, code: ParseErrorCode) -> Error {
+  286 +        let pos = self.idx;
+  287 +        Error::Syntax(code, pos)
+  288 +    }
+  289 +
+  290 +    #[inline]
+  291 +    fn skip_unused(&mut self) {
+  292 +        while self.idx < self.buf.len() {
+  293 +            let c = self.buf[self.idx];
+  294 +
+  295 +            // Fast path: handle common whitespace characters
+  296 +            if c.is_ascii_whitespace() {
+  297 +                self.idx += 1;
+  298 +                continue;
+  299 +            }
+  300 +
+  301 +            // Slow path: handle escape sequences
+  302 +            if c == b'\\' && self.idx + 1 < self.buf.len() {
+  303 +                let next_c = self.buf[self.idx + 1];
+  304 +
+  305 +                // Handle simple escapes \n, \r, \t
+  306 +                let simple_escape = matches!(next_c, b'n' | b'r' | b't');
+  307 +                if simple_escape {
+  308 +                    self.idx += 2;
+  309 +                    continue;
+  310 +                }
+  311 +
+  312 +                // Handle \x0C escape
+  313 +                let hex_escape = self.idx + 3 < self.buf.len()
+  314 +                    && next_c == b'x'
+  315 +                    && self.buf[self.idx + 2] == b'0'
+  316 +                    && self.buf[self.idx + 3] == b'C';
+  317 +                if hex_escape {
+  318 +                    self.idx += 4;
+  319 +                    continue;
+  320 +                }
+  321 +            }
+  322 +
+  323 +            break;
+  324 +        }
+  325 +    }
+  326 +
+  327 +    /// Parse a JSON null or NaN literal in extended mode with case-insensitivity
+  328 +    #[inline]
+  329 +    fn parse_json_null_or_nan(&mut self) -> Result<JsonAst<'a>> {
+  330 +        let idx = self.idx;
+  331 +        if let Ok(null) = self.parse_json_null() {
+  332 +            Ok(null)
+  333 +        } else {
+  334 +            // fallback idx to check if it is NaN
+  335 +            self.idx = idx;
+  336 +            self.parse_json_nan()
+  337 +        }
+  338 +    }
+  339 +
+  340 +    /// Parse a JSON null literal in extended mode with case-insensitivity
+  341 +    /// Accepts any case variation of "null" (e.g., "Null", "NULL", "nUlL").
+  342 +    #[inline]
+  343 +    fn parse_json_null(&mut self) -> Result<JsonAst<'a>> {
+  344 +        for (v1, v2) in NULL_LOWERCASE.iter().zip(NULL_UPPERCASE.iter()) {
+  345 +            self.must_either(v1, v2)?;
+  346 +        }
+  347 +        Ok(JsonAst::Null)
+  348 +    }
+  349 +
+  350 +    /// Parse a JSON true literal in extended mode with case-insensitivity
+  351 +    /// Accepts any case variation of "true" (e.g., "True", "TRUE", "tRuE").
+  352 +    #[inline]
+  353 +    fn parse_json_true(&mut self) -> Result<JsonAst<'a>> {
+  354 +        for (v1, v2) in TRUE_LOWERCASE.iter().zip(TRUE_UPPERCASE.iter()) {
+  355 +            self.must_either(v1, v2)?;
+  356 +        }
+  357 +        Ok(JsonAst::Bool(true))
+  358 +    }
+  359 +
+  360 +    /// Parse a JSON false literal in extended mode with case-insensitivity
+  361 +    /// Accepts any case variation of "false" (e.g., "False", "FALSE", "fAlSe").
+  362 +    #[inline]
+  363 +    fn parse_json_false(&mut self) -> Result<JsonAst<'a>> {
+  364 +        for (v1, v2) in FALSE_LOWERCASE.iter().zip(FALSE_UPPERCASE.iter()) {
+  365 +            self.must_either(v1, v2)?;
+  366 +        }
+  367 +        Ok(JsonAst::Bool(false))
+  368 +    }
+  369 +
+  370 +    /// Parse a JSON infinity literal in extended mode with case-insensitivity
+  371 +    /// Accepts any case variation of "infinity" (e.g., "Infinity", "INFINITY").
+  372 +    #[inline]
+  373 +    fn parse_json_infinity(&mut self) -> Result<JsonAst<'a>> {
+  374 +        for (v1, v2) in INFINITY_LOWERCASE.iter().zip(INFINITY_UPPERCASE.iter()) {
+  375 +            self.must_either(v1, v2)?;
+  376 +        }
+  377 +        Ok(JsonAst::Number(Number::Float64(f64::INFINITY)))
+  378 +    }
+  379 +
+  380 +    /// Parse a JSON NaN literal in extended mode with case-insensitivity
+  381 +    /// Accepts any case variation of "NaN" (e.g., "nan", "NAN").
+  382 +    #[inline]
+  383 +    fn parse_json_nan(&mut self) -> Result<JsonAst<'a>> {
+  384 +        for (v1, v2) in NAN_LOWERCASE.iter().zip(NAN_UPPERCASE.iter()) {
+  385 +            self.must_either(v1, v2)?;
+  386 +        }
+  387 +        Ok(JsonAst::Number(Number::Float64(f64::NAN)))
+  388 +    }
+  389 +
+  390 +    /// Parse extended JSON numbers (supporting non-standard syntax)
+  391 +    ///
+  392 +    /// This function implements a high-performance JSON number parsing algorithm with extended syntax:
+  393 +    /// 1. Support for leading plus sign (e.g., `+123`)
+  394 +    /// 2. Support for multiple leading zeros (e.g., `000123`)
+  395 +    /// 3. Support for decimal point without digits on either side (e.g., `.123` or `123.`)
+  396 +    /// 4. Support for special values like `NaN`, `Infinity`, and `-Infinity` (case-insensitive)
+  397 +    /// 5. Support for hexadecimal notation with optional fractional part (e.g., `0xFF`, `0x1A.B`)
+  398 +    ///
+  399 +    /// Zero-allocation parsing strategy:
+  400 +    /// 1. Uses direct digit accumulation without intermediate string conversions
+  401 +    /// 2. For standard numeric types (Int64/UInt64), directly builds the value during parsing
+  402 +    /// 3. For hexadecimal numbers, uses specialized parsing with support for fractional parts
+  403 +    /// 4. Falls back to Float64 parsing for fractions, exponents, and integers outside the i64/u64 range
+  404 +    ///
+  405 +    /// This implementation prioritizes performance through:
+  406 +    /// - Single-pass approach with minimal branching
+  407 +    /// - Avoiding heap allocations and string conversions
+  408 +    /// - Optimized handling of common number formats
+  409 +    /// - Specialized handling for extended syntax elements
+  410 +    fn parse_json_number(&mut self) -> Result<JsonAst<'a>> {
+  411 +        // Store the starting position for potential fallback parsing
+  412 +        let start_idx = self.idx;
+  413 +
+  414 +        let mut negative = false;
+  415 +        let mut leading_zeros = 0;
+  416 +
+  417 +        // Handle sign prefix (+ or -), extending JSON to support leading plus sign
+  418 +        let c = self.next()?;
+  419 +        if c == b'-' {
+  420 +            negative = true;
+  421 +            self.step();
+  422 +        } else if c == b'+' {
+  423 +            // Extended syntax: Support for leading plus sign
+  424 +            self.step();
+  425 +        }
+  426 +
+  427 +        // Extended syntax: Support for multiple leading zeros (e.g., 000123)
+  428 +        loop {
+  429 +            if self.check_next(&b'0') {
+  430 +                leading_zeros += 1;
+  431 +                self.step();
+  432 +            } else {
+  433 +                break;
+  434 +            }
+  435 +        }
+  436 +
+  437 +        // Initialize parsing state
+  438 +        let mut hi_value = 0_i128; // Stores high digits (for large values)
+  439 +        let mut lo_value = 0_i128; // Stores low digits (for very large values)
+  440 +        let mut scale = 0_u32; // Tracks decimal places
+  441 +        let mut precision = 0; // Count of significant digits
+  442 +        let mut has_fraction = false; // Whether the number has an fraction part
+  443 +        let mut has_exponent = false; // Whether the number has an exponent part
+  444 +
+  445 +        // Parse digits, supporting up to MAX_DECIMAL256_PRECISION digits
+  446 +        while precision < MAX_DECIMAL256_PRECISION {
+  447 +            if let Some(digit) = self.check_digit() {
+  448 +                // Parse digit and accumulate value
+  449 +                // Store in hi_value or lo_value based on precision
+  450 +                if precision < MAX_DECIMAL128_PRECISION {
+  451 +                    hi_value = unsafe { hi_value.unchecked_mul(10_i128) };
+  452 +                    hi_value = unsafe { hi_value.unchecked_add(digit as i128) };
+  453 +                } else {
+  454 +                    lo_value = unsafe { lo_value.unchecked_mul(10_i128) };
+  455 +                    lo_value = unsafe { lo_value.unchecked_add(digit as i128) };
+  456 +                }
+  457 +                self.step();
+  458 +            } else if self.check_next(&b'.') {
+  459 +                // Handle decimal point - can only appear once
+  460 +                if has_fraction {
+  461 +                    return Err(self.error(ParseErrorCode::InvalidNumberValue));
+  462 +                }
+  463 +                has_fraction = true;
+  464 +                self.step();
+  465 +                // Continue to next iteration without incrementing precision
+  466 +                continue;
+  467 +            } else {
+  468 +                // Not a digit or decimal point, exit the parsing loop
+  469 +                break;
+  470 +            }
+  471 +            precision += 1;
+  472 +            // Track scale (number of digits after decimal point)
+  473 +            if has_fraction {
+  474 +                scale += 1;
+  475 +            }
+  476 +        }
+  477 +
+  478 +        // Handle numbers that exceed MAX_DECIMAL256_PRECISION
+  479 +        if precision == MAX_DECIMAL256_PRECISION {
+  480 +            // If we haven't seen a decimal point yet, continue parsing integer part
+  481 +            if !has_fraction {
+  482 +                let len = self.step_digits();
+  483 +                precision += len;
+  484 +                if self.check_next(&b'.') {
+  485 +                    has_fraction = true;
+  486 +                    self.step();
+  487 +                }
+  488 +            }
+  489 +            // Parse fractional part if decimal point exists
+  490 +            if has_fraction {
+  491 +                let len = self.step_digits();
+  492 +                precision += len;
+  493 +                scale += len as u32;
+  494 +            }
+  495 +        }
+  496 +
+  497 +        if leading_zeros == 0 && precision == 0 {
+  498 +            // Handle special values
+  499 +            if !has_fraction && let Ok(c) = self.next() {
+  500 +                match c {
+  501 +                    b'i' | b'I' => {
+  502 +                        let val = self.parse_json_infinity()?;
+  503 +                        if negative {
+  504 +                            return Ok(JsonAst::Number(Number::Float64(f64::NEG_INFINITY)));
+  505 +                        } else {
+  506 +                            return Ok(val);
+  507 +                        }
+  508 +                    }
+  509 +                    b'n' | b'N' => {
+  510 +                        let val = self.parse_json_nan()?;
+  511 +                        if negative {
+  512 +                            // `-Nan` is not allowed
+  513 +                            return Err(self.error(ParseErrorCode::InvalidNumberValue));
+  514 +                        } else {
+  515 +                            return Ok(val);
+  516 +                        }
+  517 +                    }
+  518 +                    _ => {}
+  519 +                }
+  520 +            }
+  521 +            return Err(self.error(ParseErrorCode::InvalidNumberValue));
+  522 +        } else if leading_zeros == 1 && precision == 0 && !has_fraction {
+  523 +            // Handle hexadecimal number (0x...)
+  524 +            if self.check_next_either(&b'x', &b'X').is_some() {
+  525 +                self.step();
+  526 +
+  527 +                // Mark the start position of hex digits
+  528 +                let hex_start = self.idx;
+  529 +                let int_len = self.step_hexdigits();
+  530 +                if int_len == 0 {
+  531 +                    return Err(self.error(ParseErrorCode::InvalidNumberValue));
+  532 +                }
+  533 +
+  534 +                // Check if we have a fractional part
+  535 +                if self.check_next(&b'.') {
+  536 +                    // Skip the decimal point
+  537 +                    self.step();
+  538 +
+  539 +                    // Mark the start of fractional digits
+  540 +                    let frac_start = self.idx;
+  541 +                    let frac_len = self.step_hexdigits();
+  542 +                    if frac_len == 0 {
+  543 +                        return Err(self.error(ParseErrorCode::InvalidNumberValue));
+  544 +                    }
+  545 +
+  546 +                    let int_str = std::str::from_utf8(&self.buf[hex_start..hex_start + int_len])
+  547 +                        .map_err(|_| self.error(ParseErrorCode::InvalidNumberValue))?;
+  548 +                    let frac_str =
+  549 +                        std::str::from_utf8(&self.buf[frac_start..frac_start + frac_len])
+  550 +                            .map_err(|_| self.error(ParseErrorCode::InvalidNumberValue))?;
+  551 +
+  552 +                    // Parse integer part
+  553 +                    let int_val = u128::from_str_radix(int_str, 16)
+  554 +                        .map_err(|_| self.error(ParseErrorCode::InvalidNumberValue))?;
+  555 +
+  556 +                    // Parse fractional part and calculate its value
+  557 +                    let frac_val = u128::from_str_radix(frac_str, 16)
+  558 +                        .map_err(|_| self.error(ParseErrorCode::InvalidNumberValue))?;
+  559 +                    let frac_divisor = 16.0_f64.powi(frac_len as i32);
+  560 +
+  561 +                    // Combine integer and fractional parts
+  562 +                    let mut final_val = int_val as f64 + (frac_val as f64 / frac_divisor);
+  563 +                    if negative {
+  564 +                        final_val = -final_val;
+  565 +                    }
+  566 +                    return Ok(JsonAst::Number(Number::Float64(final_val)));
+  567 +                } else {
+  568 +                    // Integer-only hex value
+  569 +                    let int_str = std::str::from_utf8(&self.buf[hex_start..self.idx])
+  570 +                        .map_err(|_| self.error(ParseErrorCode::InvalidNumberValue))?;
+  571 +
+  572 +                    // Parse the hex value
+  573 +                    let value = u128::from_str_radix(int_str, 16)
+  574 +                        .map_err(|_| self.error(ParseErrorCode::InvalidNumberValue))?;
+  575 +
+  576 +                    // Convert to appropriate number type based on size
+  577 +                    if negative {
+  578 +                        // Handle negative values
+  579 +                        if value <= (i64::MAX as u128 + 1) {
+  580 +                            let i_val = -(value as i64);
+  581 +                            return Ok(JsonAst::Number(Number::Int64(i_val)));
+  582 +                        }
+  583 +                        {
+  584 +                            return Ok(JsonAst::Number(Number::Float64(-(value as f64))));
+  585 +                        }
+  586 +                    } else {
+  587 +                        // Handle positive values
+  588 +                        if value <= u64::MAX as u128 {
+  589 +                            return Ok(JsonAst::Number(Number::UInt64(value as u64)));
+  590 +                        }
+  591 +                        {
+  592 +                            return Ok(JsonAst::Number(Number::Float64(value as f64)));
+  593 +                        }
+  594 +                    }
+  595 +                }
+  596 +            }
+  597 +        }
+  598 +
+  599 +        // Handle exponent notation (e.g., 1e10, 1.5E-7)
+  600 +        if self.check_next_either(&b'E', &b'e').is_some() {
+  601 +            has_exponent = true;
+  602 +            self.step();
+  603 +            // Handle exponent sign
+  604 +            if self.check_next_either(&b'+', &b'-').is_some() {
+  605 +                self.step();
+  606 +            }
+  607 +            // Parse exponent digits
+  608 +            let len = self.step_digits();
+  609 +            if len == 0 {
+  610 +                return Err(self.error(ParseErrorCode::InvalidNumberValue));
+  611 +            }
+  612 +        }
+  613 +
+  614 +        // If no exponent and precision is within limits, try to return the most appropriate numeric type
+  615 +        if !has_exponent && precision <= MAX_DECIMAL128_PRECISION {
+  616 +            let value = if negative { -hi_value } else { hi_value };
+  617 +
+  618 +            // Try to fit the value into the most appropriate numeric type
+  619 +            if scale == 0 && (UINT64_MIN..=UINT64_MAX).contains(&value) {
+  620 +                return Ok(JsonAst::Number(Number::UInt64(
+  621 +                    u64::try_from(value).unwrap(),
+  622 +                )));
+  623 +            } else if scale == 0 && (INT64_MIN..=INT64_MAX).contains(&value) {
+  624 +                return Ok(JsonAst::Number(Number::Int64(
+  625 +                    i64::try_from(value).unwrap(),
+  626 +                )));
+  627 +            }
+  628 +        }
+  629 +
+  630 +        // Second parsing strategy: Try to parse as i256 for very large numbers
+  631 +
+  632 +        // Final fallback strategy: Parse as Float64 using fast_float2 library
+  633 +        // This handles scientific notation and very large/small numbers
+  634 +        let s = unsafe { std::str::from_utf8_unchecked(&self.buf[start_idx..self.idx]) };
+  635 +        match fast_float2::parse(s) {
+  636 +            Ok(v) => Ok(JsonAst::Number(Number::Float64(v))),
+  637 +            Err(_) => Err(self.error(ParseErrorCode::InvalidNumberValue)),
+  638 +        }
+  639 +    }
+  640 +
+  641 +    /// Parse a JSON string with extended syntax support
+  642 +    ///
+  643 +    /// Extended syntax allows both double quotes (") and single quotes (')
+  644 +    /// as string delimiters, which is not allowed in standard JSON.
+  645 +    #[inline]
+  646 +    fn parse_json_string(&mut self) -> Result<JsonAst<'a>> {
+  647 +        let end_quote = self.must_either(&b'"', &b'\'')?;
+  648 +        let val = self.parse_quoted_string(end_quote)?;
+  649 +        Ok(JsonAst::String(val))
+  650 +    }
+  651 +
+  652 +    /// Parse a quoted string with support for escape sequences
+  653 +    ///
+  654 +    /// Handles both standard and extended Unicode escape sequences:
+  655 +    /// - Standard: \uXXXX (4 hex digits)
+  656 +    /// - Extended: \u{XXXX} (variable number of hex digits in braces)
+  657 +    ///
+  658 +    /// Uses a two-pass approach for efficiency:
+  659 +    /// 1. First pass: Find string boundaries and count escapes
+  660 +    /// 2. Second pass: Process escapes only when necessary
+  661 +    fn parse_quoted_string(&mut self, end_quote: u8) -> Result<Cow<'a, str>> {
+  662 +        // Mark the starting position (after the opening quote)
+  663 +        let start_idx = self.idx;
+  664 +        let mut escapes = 0;
+  665 +
+  666 +        // First pass: Scan the string to find the end and count escape sequences
+  667 +        loop {
+  668 +            let c = self.next()?;
+  669 +            match c {
+  670 +                b'\\' => {
+  671 +                    // Handle escape sequence
+  672 +                    self.step();
+  673 +                    escapes += 1;
+  674 +                    let next_c = self.next()?;
+  675 +                    if next_c == b'u' {
+  676 +                        // Handle Unicode escape sequence
+  677 +                        self.step();
+  678 +                        let next_c = self.next()?;
+  679 +                        if next_c == b'{' {
+  680 +                            // Extended Unicode format: \u{XXXX}
+  681 +                            self.step_by(UNICODE_LEN + 2);
+  682 +                        } else {
+  683 +                            // Standard Unicode format: \uXXXX
+  684 +                            self.step_by(UNICODE_LEN);
+  685 +                        }
+  686 +                    } else {
+  687 +                        // Simple escape sequence like \n, \t, etc.
+  688 +                        self.step();
+  689 +                    }
+  690 +                }
+  691 +                _ => {
+  692 +                    self.step();
+  693 +                    if c == end_quote {
+  694 +                        break;
+  695 +                    }
+  696 +                }
+  697 +            }
+  698 +        }
+  699 +
+  700 +        // Get the string data (excluding quotes)
+  701 +        let data = &self.buf[start_idx..self.idx - 1];
+  702 +
+  703 +        // Second pass: Process the string based on whether it contains escape sequences
+  704 +        let val = if escapes > 0 {
+  705 +            // String contains escape sequences, need to process them
+  706 +            let len = self.idx - 1 - start_idx - escapes;
+  707 +            let mut idx = start_idx + 1;
+  708 +            let s = parse_string(data, len, &mut idx)?;
+  709 +            Cow::Owned(s)
+  710 +        } else {
+  711 +            // Fast path: No escape sequences, can use the string as-is
+  712 +            std::str::from_utf8(data)
+  713 +                .map(Cow::Borrowed)
+  714 +                .map_err(|_| self.error(ParseErrorCode::InvalidStringValue))?
+  715 +        };
+  716 +        Ok(val)
+  717 +    }
+  718 +
+  719 +    /// Parse an unquoted string literal for object keys
+  720 +    ///
+  721 +    /// Extended syntax feature that allows object keys without quotes.
+  722 +    ///
+  723 +    /// Restrictions:
+  724 +    /// - Only letters, numbers, underscore, dollar and UTF-8 multi-byte characters are allowed
+  725 +    /// - First character cannot be a number
+  726 +    /// - Must contain at least one character
+  727 +    fn parse_unquoted_string(&mut self) -> Result<Cow<'a, str>> {
+  728 +        let start_idx = self.idx;
+  729 +
+  730 +        let c = self.next()?;
+  731 +        if c.is_ascii_digit() {
+  732 +            self.step();
+  733 +            return Err(self.error(ParseErrorCode::ObjectKeyInvalidNumber));
+  734 +        }
+  735 +
+  736 +        loop {
+  737 +            let c = self.next()?;
+  738 +            if c.is_ascii_alphanumeric() || matches!(c, b'_' | b'$') {
+  739 +                self.step();
+  740 +            } else if c >= 0x80 {
+  741 +                // Handle UTF-8 multi-byte characters (including Chinese)
+  742 +                // UTF-8 continuation bytes start with binary 10xxxxxx (0x80-0xBF)
+  743 +                // Determine how many continuation bytes to expect based on the first byte
+  744 +                let continuation_bytes = if c >= 0xF0 {
+  745 +                    4 // 4-byte sequence (U+10000 to U+10FFFF)
+  746 +                } else if c >= 0xE0 {
+  747 +                    3 // 3-byte sequence (U+0800 to U+FFFF) - includes most Chinese characters
+  748 +                } else if c >= 0xC0 {
+  749 +                    2 // 2-byte sequence (U+0080 to U+07FF)
+  750 +                } else {
+  751 +                    // Invalid UTF-8 start byte
+  752 +                    return Err(self.error(ParseErrorCode::ObjectKeyInvalidCharacter));
+  753 +                };
+  754 +
+  755 +                // Consume the expected continuation bytes
+  756 +                self.step_by(continuation_bytes);
+  757 +            } else {
+  758 +                break;
+  759 +            }
+  760 +        }
+  761 +        if self.idx == start_idx {
+  762 +            return Err(self.error(ParseErrorCode::ObjectKeyInvalidCharacter));
+  763 +        }
+  764 +
+  765 +        // Get the string data
+  766 +        let data = &self.buf[start_idx..self.idx];
+  767 +        let val = std::str::from_utf8(data)
+  768 +            .map(Cow::Borrowed)
+  769 +            .map_err(|_| self.error(ParseErrorCode::InvalidStringValue))?;
+  770 +        Ok(val)
+  771 +    }
+  772 +
+  773 +    /// Parse an array value with support for empty elements
+  774 +    ///
+  775 +    /// Extended syntax feature that treats empty elements as null:
+  776 +    /// - [1,,3] is parsed as [1,null,3]
+  777 +    /// - [1,2,] is parsed as [1,2,null]
+  778 +    ///
+  779 +    /// This is not allowed in standard JSON but supported in extended mode.
+  780 +    #[inline]
+  781 +    fn parse_array_value(&mut self) -> Result<JsonAst<'a>> {
+  782 +        if self.check_next_either(&b',', &b']').is_some() {
+  783 +            Ok(JsonAst::Null)
+  784 +        } else {
+  785 +            self.parse_json_value()
+  786 +        }
+  787 +    }
+  788 +
+  789 +    /// Parse a JSON array with support for extended syntax
+  790 +    ///
+  791 +    /// - Parses arrays enclosed in square brackets [...]
+  792 +    /// - Handles comma-separated values
+  793 +    /// - Validates proper syntax for separators and closing brackets
+  794 +    /// - Allows empty elements, which are treated as null
+  795 +    ///
+  796 +    /// Examples of valid arrays:
+  797 +    /// - [1,2,3]     (standard JSON)
+  798 +    /// - [1,,3]      (empty element treated as null)
+  799 +    /// - [1,2,]      (trailing comma treated as null element)
+  800 +    fn parse_json_array(&mut self) -> Result<JsonAst<'a>> {
+  801 +        // Ensure the array starts with an opening bracket
+  802 +        self.must_is(&b'[')?;
+  803 +
+  804 +        let mut first = true;
+  805 +        let mut values = Vec::with_capacity(8);
+  806 +
+  807 +        // Parse array elements until closing bracket is found
+  808 +        loop {
+  809 +            self.skip_unused();
+  810 +            let c = self.next()?;
+  811 +
+  812 +            // Check for end of array
+  813 +            if c == b']' {
+  814 +                self.step();
+  815 +                break;
+  816 +            }
+  817 +
+  818 +            // Handle comma separator between elements (not for the first element)
+  819 +            if !first {
+  820 +                if c != b',' {
+  821 +                    return Err(self.error(ParseErrorCode::ExpectedArrayCommaOrEnd));
+  822 +                }
+  823 +                self.step();
+  824 +            }
+  825 +            first = false;
+  826 +
+  827 +            self.skip_unused();
+  828 +            // Parse a regular array element
+  829 +            let value = (self.parse_array_value_fn)(self)?;
+  830 +            values.push(value);
+  831 +        }
+  832 +        Ok(JsonAst::Array(values))
+  833 +    }
+  834 +
+  835 +    /// Parse an object key with extended syntax support
+  836 +    ///
+  837 +    /// Extended syntax allows:
+  838 +    /// 1. Double-quoted strings (")
+  839 +    /// 2. Single-quoted strings (')
+  840 +    /// 3. Unquoted identifiers (letters, numbers, underscore, dollar and UTF-8 characters)
+  841 +    ///    with the restriction that they cannot start with a number
+  842 +    #[inline]
+  843 +    fn parse_object_key(&mut self) -> Result<Cow<'a, str>> {
+  844 +        if let Some(end_quote) = self.check_next_either(&b'"', &b'\'') {
+  845 +            self.step();
+  846 +            self.parse_quoted_string(end_quote)
+  847 +        } else {
+  848 +            self.parse_unquoted_string()
+  849 +        }
+  850 +    }
+  851 +
+  852 +    /// Parse a JSON object with support for both standard and extended syntax
+  853 +    ///
+  854 +    /// - Parses objects enclosed in curly braces {...}
+  855 +    /// - Handles key-value pairs separated by colons
+  856 +    /// - Validates proper syntax for separators and closing braces
+  857 +    /// - Detects and reports duplicate keys
+  858 +    /// - Accepts quoted (double/single) and unquoted keys, and extended syntax for values
+  859 +    ///
+  860 +    /// Examples of valid objects:
+  861 +    /// - {"key": "value"}      (standard JSON)
+  862 +    /// - {'key': 'value'}      (single quotes)
+  863 +    /// - {key: "value"}        (unquoted key)
+  864 +    /// - {_user123: 'value'}   (unquoted key with underscore)
+  865 +    fn parse_json_object(&mut self) -> Result<JsonAst<'a>> {
+  866 +        // Ensure the object starts with an opening brace
+  867 +        self.must_is(&b'{')?;
+  868 +
+  869 +        let mut first = true;
+  870 +        let mut obj = Vec::with_capacity(16);
+  871 +
+  872 +        // Parse key-value pairs until closing brace is found
+  873 +        loop {
+  874 +            self.skip_unused();
+  875 +            let c = self.next()?;
+  876 +
+  877 +            // Check for end of object
+  878 +            if c == b'}' {
+  879 +                self.step();
+  880 +                break;
+  881 +            }
+  882 +
+  883 +            // Handle comma separator between key-value pairs (not for the first pair)
+  884 +            if !first {
+  885 +                if c != b',' {
+  886 +                    return Err(self.error(ParseErrorCode::ExpectedObjectCommaOrEnd));
+  887 +                }
+  888 +                self.step();
+  889 +            }
+  890 +            first = false;
+  891 +
+  892 +            self.skip_unused();
+  893 +            let key_str = (self.parse_object_key_fn)(self)?;
+  894 +            let pos = self.idx;
+  895 +
+  896 +            self.skip_unused();
+  897 +
+  898 +            // Ensure key and value are separated by a colon
+  899 +            let c = self.next()?;
+  900 +            if c != b':' {
+  901 +                return Err(self.error(ParseErrorCode::ExpectedColon));
+  902 +            }
+  903 +            self.step();
+  904 +
+  905 +            // Parse the value
+  906 +            let value = (self.parse_value_fn)(self)?;
+  907 +
+  908 +            // Add the key-value pair to the object
+  909 +            obj.push((key_str, value, pos));
+  910 +        }
+  911 +
+  912 +        // Sort the Object fields by key and check for duplicate keys.
+  913 +        // Returns an error if duplicate keys are found.
+  914 +        obj.sort_by(|a, b| a.0.cmp(&b.0));
+  915 +        for i in 1..obj.len() {
+  916 +            if obj[i - 1].0 == obj[i].0 {
+  917 +                let key_str = obj[i].0.clone().to_string();
+  918 +                let pos = obj[i].2;
+  919 +                let code = ParseErrorCode::ObjectDuplicateKey(key_str);
+  920 +                return Err(Error::Syntax(code, pos));
+  921 +            }
+  922 +        }
+  923 +        Ok(JsonAst::Object(obj))
+  924 +    }
+  925 +}
+  926 +

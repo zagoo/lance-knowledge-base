@@ -1,0 +1,68 @@
+[
+  {
+    "path": "rust/lance-core/src/utils/tempfile.rs",
+    "start": 26,
+    "end": 87,
+    "evidence": "26 | /// A temporary directory\n27 | ///\n28 | /// This create a temporary directory using [`tempfile::tempdir`].  It will\n29 | /// generally be cleaned up when the object is dropped.\n30 | ///\n31 | /// This type is primarily useful when you need multiple representations (string,\n32 | /// path, object store path) of the same temporary directory.  If you only need\n33 | /// a single representation you can use the [`TempStdDir`], [`TempStrDir`], or\n34 | /// [`TempObjDir`] types.\n35 | #[derive(Debug)]\n36 | pub struct TempDir {\n37 |     tempdir: tempfile::TempDir,\n38 | }\n39 | \n40 | impl TempDir {\n41 |     fn new() -> Self {\n42 |         let tempdir = tempfile::tempdir().unwrap();\n43 |         Self { tempdir }\n44 |     }\n45 | \n46 |     /// Create a temporary directory, exposing any potential errors.\n47 |     ///\n48 |     /// For most test cases you should use the [`Default`] implementation instead.\n49 |     /// However, when we use this type in production code, we may want to return\n50 |     /// errors gracefully instead of panicking.\n51 |     pub fn try_new() -> Result<Self> {\n52 |         let tempdir = tempfile::tempdir()?;\n53 |         Ok(Self { tempdir })\n54 |     }\n55 | \n56 |     /// Get the path as a string\n57 |     ///\n58 |     /// This path will be safe to use as a URI on Windows\n59 |     pub fn path_str(&self) -> String {\n60 |         if cfg!(windows) {\n61 |             self.tempdir.path().to_str().unwrap().replace(\"\\\\\", \"/\")\n62 |         } else {\n63 |             self.tempdir.path().to_str().unwrap().to_owned()\n64 |         }\n65 |     }\n66 | \n67 |     /// Get the path as a standard library path\n68 |     ///\n69 |     /// If you convert this to a string, it will NOT be safe to use as a URI on Windows.\n70 |     /// Use [`TempDir::path_str`] instead.\n71 |     ///\n72 |     /// It is safe to use this as a standard path on Windows.\n73 |     pub fn std_path(&self) -> &StdPath {\n74 |         self.tempdir.path()\n75 |     }\n76 | \n77 |     /// Get the path as an object store path\n78 |     ///\n79 |     /// This path will be safe to use as a URI on Windows\n80 |     pub fn obj_path(&self) -> ObjPath {\n81 |         ObjPath::parse(self.path_str()).unwrap()\n82 |     }\n83 | }\n84 | \n85 | impl Default for TempDir {\n86 |     fn default() -> Self {\n87 |         Self::new()"
+  },
+  {
+    "path": "rust/lance-core/src/cache/codec.rs",
+    "start": 122,
+    "end": 137,
+    "evidence": "122 | fn write_envelope(writer: &mut dyn Write, type_id: &str, type_version: u32) -> Result<usize> {\n123 |     let type_id_len = u16::try_from(type_id.len()).map_err(|_| {\n124 |         Error::io(format!(\n125 |             \"cache codec type_id too long ({} bytes, max {})\",\n126 |             type_id.len(),\n127 |             u16::MAX\n128 |         ))\n129 |     })?;\n130 | \n131 |     writer.write_all(&MAGIC)?;\n132 |     writer.write_all(&[ENVELOPE_VERSION])?;\n133 |     writer.write_all(&type_id_len.to_le_bytes())?;\n134 |     writer.write_all(type_id.as_bytes())?;\n135 |     writer.write_all(&type_version.to_le_bytes())?;\n136 | \n137 |     Ok(4 + 1 + 2 + type_id.len() + 4)"
+  },
+  {
+    "path": "rust/lance-core/src/cache/codec.rs",
+    "start": 260,
+    "end": 280,
+    "evidence": "260 | \n261 | fn serialize_via_impl<T: CacheCodecImpl + 'static>(\n262 |     any: &ArcAny,\n263 |     writer: &mut CacheEntryWriter<'_>,\n264 | ) -> Result<()> {\n265 |     let val = any\n266 |         .downcast_ref::<T>()\n267 |         .expect(\"CacheCodec::serialize called with wrong type (this is a bug in the cache layer)\");\n268 |     val.serialize(writer)\n269 | }\n270 | \n271 | fn deserialize_via_impl<T: CacheCodecImpl + 'static>(\n272 |     reader: &mut CacheEntryReader<'_>,\n273 | ) -> Result<ArcAny> {\n274 |     let val = T::deserialize(reader)?;\n275 |     Ok(Arc::new(val) as ArcAny)\n276 | }\n277 | \n278 | impl CacheCodec {\n279 |     /// Create a `CacheCodec` from explicit body function pointers.\n280 |     ///"
+  },
+  {
+    "path": "rust/lance-core/src/utils/stable_partition.rs",
+    "start": 122,
+    "end": 160,
+    "evidence": "122 |     }\n123 | \n124 |     /// The block containing physical source row `row`.\n125 |     pub fn block_of(&self, row: u64) -> usize {\n126 |         (row / u64::from(self.block_rows)) as usize\n127 |     }\n128 | \n129 |     /// The physical source row range covered by `block`.\n130 |     pub fn block_range(&self, block: usize) -> std::ops::Range<u64> {\n131 |         let start = block as u64 * u64::from(self.block_rows);\n132 |         let end = (start + u64::from(self.block_rows)).min(self.total_rows);\n133 |         start..end\n134 |     }\n135 | \n136 |     fn block_row(&self, block: usize) -> &[u32] {\n137 |         let m = self.num_destinations as usize;\n138 |         &self.cumulative[block * m..(block + 1) * m]\n139 |     }\n140 | \n141 |     /// Rows labeled `label` in blocks before `block`: the destination offset\n142 |     /// of the first `label`-row inside `block`.\n143 |     pub fn count_before(&self, block: usize, label: u16) -> u32 {\n144 |         if block == 0 {\n145 |             0\n146 |         } else {\n147 |             self.block_row(block - 1)[label as usize]\n148 |         }\n149 |     }\n150 | \n151 |     /// Per-label counters at the start of `block`, seeding a\n152 |     /// [`SweepTranslator`].\n153 |     pub fn counters_at_block(&self, block: usize) -> Vec<u32> {\n154 |         if block == 0 {\n155 |             vec![0; self.num_destinations as usize]\n156 |         } else {\n157 |             self.block_row(block - 1).to_vec()\n158 |         }\n159 |     }\n160 | "
+  },
+  {
+    "path": "rust/lance-table/src/transaction/row_version.rs",
+    "start": 1209,
+    "end": 1244,
+    "evidence": "1209 |         let (result, _) = update_txn(vec![new_fragment])\n1210 |             .build_manifest(Some(&manifest), vec![], \"txn\", &default_build_config())\n1211 |             .unwrap();\n1212 | \n1213 |         // Corrupt metadata causes decode to fail → falls back to UNKNOWN_CREATED_AT_VERSION (1)\n1214 |         assert_eq!(created_at_versions(&result, 10), vec![1]);\n1215 |         assert_eq!(last_updated_at_versions(&result, 10), vec![5]);\n1216 |     }\n1217 | \n1218 |     /// Fragments whose row-ID range lies entirely outside the needed set must not\n1219 |     /// affect the result.  Here fragment 1 has IDs [1000, 1001] which are far above\n1220 |     /// the needed range [10, 11]; it is skipped by the range pre-filter and its\n1221 |     /// created_at version (version 99) must never appear in the output.\n1222 |     #[test]\n1223 |     fn test_update_version_tracking_range_filter_skips_non_overlapping_fragment() {\n1224 |         // Fragment in range – IDs [10, 11], created_at = 5\n1225 |         let in_range_seq = RowIdSequence::from([10u64, 11].as_slice());\n1226 |         let in_range_created = RowDatasetVersionSequence {\n1227 |             runs: vec![RowDatasetVersionRun {\n1228 |                 span: U64Segment::Range(0..2),\n1229 |                 version: 5,\n1230 |             }],\n1231 |         };\n1232 |         let in_range_frag = Fragment {\n1233 |             id: 1,\n1234 |             files: vec![],\n1235 |             overlays: vec![],\n1236 |             deletion_file: None,\n1237 |             row_id_meta: Some(RowIdMeta::Inline(write_row_ids(&in_range_seq).into())),\n1238 |             physical_rows: Some(2),\n1239 |             created_at_version_meta: Some(\n1240 |                 RowDatasetVersionMeta::from_sequence(&in_range_created).unwrap(),\n1241 |             ),\n1242 |             last_updated_at_version_meta: None,\n1243 |         };\n1244 | "
+  },
+  {
+    "path": "rust/lance-table/src/utils/stream.rs",
+    "start": 681,
+    "end": 711,
+    "evidence": "681 |     let mut last_updated_cursor = config\n682 |         .last_updated_at_sequence\n683 |         .as_ref()\n684 |         .filter(|sequence| config.with_row_last_updated_at_version && sequence.runs.len() > 1)\n685 |         .map(|sequence| sequence.cursor());\n686 |     let mut created_cursor = config\n687 |         .created_at_sequence\n688 |         .as_ref()\n689 |         .filter(|sequence| config.with_row_created_at_version && sequence.runs.len() > 1)\n690 |         .map(|sequence| sequence.cursor());\n691 |     let mut offset = 0;\n692 |     stream\n693 |         .map(move |batch_task| {\n694 |             let config = config.clone();\n695 |             let this_offset = offset;\n696 |             let num_rows = batch_task.num_rows;\n697 |             offset += num_rows;\n698 |             let logical_offset = this_offset as usize;\n699 |             let num_rows_usize = num_rows as usize;\n700 |             if num_rows_usize != 0 && use_uniform_batch_fast_paths {\n701 |                 if let Some(batch_size) = uniform_batch_size {\n702 |                     // A shorter final batch is expected. Any other task-size change can\n703 |                     // repeatedly straddle read-ahead boundaries. Drain the current row-ID\n704 |                     // cache, then use exact per-task decoding and the original incremental\n705 |                     // system-column assembly from this point forward.\n706 |                     if num_rows_usize != batch_size\n707 |                         && logical_offset + num_rows_usize < selected_rows\n708 |                     {\n709 |                         use_uniform_batch_fast_paths = false;\n710 |                     }\n711 |                 } else {"
+  },
+  {
+    "path": "rust/lance-table/src/utils/stream.rs",
+    "start": 829,
+    "end": 848,
+    "evidence": "829 |             batch_task\n830 |                 .task\n831 |                 .map(move |batch| {\n832 |                     apply_row_id_and_deletes_with_system_columns(\n833 |                         batch?,\n834 |                         this_offset,\n835 |                         fragment_id,\n836 |                         config.as_ref(),\n837 |                         PrecomputedSystemColumns {\n838 |                             row_ids,\n839 |                             last_updated_versions,\n840 |                             created_versions,\n841 |                         },\n842 |                         output_schema_cache.as_deref(),\n843 |                     )\n844 |                 })\n845 |                 .boxed()\n846 |         })\n847 |         .boxed()\n848 | }"
+  },
+  {
+    "path": "rust/lance-core/src/cache/mod.rs",
+    "start": 189,
+    "end": 192,
+    "evidence": "189 | /// Size of a cached `Arc<T>`, accounting for the Arc overhead (two atomic counters).\n190 | fn cache_entry_size<T: DeepSizeOf + ?Sized>(value: &T) -> usize {\n191 |     value.deep_size_of() + std::mem::size_of::<std::sync::atomic::AtomicUsize>() * 2\n192 | }"
+  },
+  {
+    "path": "rust/lance-core/src/cache/moka.rs",
+    "start": 34,
+    "end": 46,
+    "evidence": "34 | /// Number of physical bytes represented by one Moka weight unit.\n35 | ///\n36 | /// Moka limits each entry's weight to `u32`, so capacities above 4 GiB need\n37 | /// coarser units to account for a single large entry without undercharging it.\n38 | fn weight_unit(capacity: usize) -> usize {\n39 |     capacity.div_ceil(u32::MAX as usize).max(1)\n40 | }\n41 | \n42 | fn entry_weight(key: &InternalCacheKey, size_bytes: usize, weight_unit: usize) -> u32 {\n43 |     physical_size(key, size_bytes)\n44 |         .div_ceil(weight_unit)\n45 |         .try_into()\n46 |         .unwrap_or(u32::MAX)"
+  },
+  {
+    "path": "rust/lance-core/src/cache/key.rs",
+    "start": 265,
+    "end": 278,
+    "evidence": "265 |     #[inline]\n266 |     pub fn write_some(&mut self) {\n267 |         self.hasher.update(&[FieldTag::Some.as_u8()]);\n268 |     }\n269 | \n270 |     /// Append a tagged enum variant ordinal.\n271 |     #[inline]\n272 |     pub fn write_variant(&mut self, variant: u32) {\n273 |         let mut encoded = [0; 5];\n274 |         encoded[0] = FieldTag::Variant.as_u8();\n275 |         encoded[1..].copy_from_slice(&variant.to_le_bytes());\n276 |         self.hasher.update(&encoded);\n277 |     }\n278 | "
+  },
+  {
+    "path": "rust/lance-encoding/src/encodings/logical/primitive.rs",
+    "start": 4752,
+    "end": 4781,
+    "evidence": "4752 |             self.column_index,\n4753 |             self.page_index,\n4754 |             self.view.cache_tag(),\n4755 |             self.target_data_type_tag\n4756 |         )\n4757 |         .into()\n4758 |     }\n4759 | \n4760 |     fn type_name() -> &'static str {\n4761 |         \"PageData\"\n4762 |     }\n4763 | \n4764 |     fn schema() -> CacheKeySchema {\n4765 |         CacheKeySchema::new(\"lance.encoding.logical.primitive.page-data-key\", 2)\n4766 |     }\n4767 | \n4768 |     fn write_key(&self, builder: &mut KeyBuilder) {\n4769 |         builder.write_u32(self.column_index);\n4770 |         builder.write_u32(self.page_index);\n4771 |         builder.write_variant(match self.view {\n4772 |             PageCacheView::Native => 0,\n4773 |             PageCacheView::BlobDescriptor => 1,\n4774 |             PageCacheView::BlobPayload => 2,\n4775 |         });\n4776 |         builder.write_str(&self.target_data_type_tag);\n4777 |     }\n4778 | }\n4779 | \n4780 | /// One page's slice of a scheduling request: the page's index and the\n4781 | /// page-local row sub-ranges (relative to the page's first row) of the request"
+  }
+]

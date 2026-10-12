@@ -1,0 +1,657 @@
+@@ -11,20 +11,22 @@
+   11  
+   12  use arrow_array::OffsetSizeTrait;
+   13  use byteorder::{ByteOrder, LittleEndian};
+   14 -use core::panic;
+   14 +use prost::Message;
+   15  
+   16  use crate::compression::{
+   17      BlockCompressor, BlockDecompressor, MiniBlockDecompressor, VariablePerValueDecompressor,
+   18 -    require_block_payload,
+   18 +    create_fixed_width_block_decompressor, infer_fixed_width_block_bits, require_block_payload,
+   19  };
+   20  
+   21  use crate::buffer::LanceBuffer;
+   22 -use crate::data::{BlockInfo, DataBlock, VariableWidthBlock};
+   22 +use crate::compression_config::CompressionFieldParams;
+   23 +use crate::data::{BlockInfo, DataBlock, FixedWidthDataBlock, VariableWidthBlock};
+   24  use crate::encodings::logical::primitive::fullzip::{PerValueCompressor, PerValueDataBlock};
+   25  use crate::encodings::logical::primitive::miniblock::{
+   26      MAX_MINIBLOCK_VALUES, MiniBlockChunk, MiniBlockCompressed, MiniBlockCompressionContext,
+   27      MiniBlockCompressor,
+   28  };
+   29 +use crate::encodings::physical::checked_fixed_values;
+   30  use crate::format::pb21::CompressiveEncoding;
+   31  use crate::format::pb21::compressive_encoding::Compression;
+   32  use crate::format::{ProtobufUtils21, pb21};
+
+@@ -32,15 +34,19 @@ use crate::format::{ProtobufUtils21, pb21};
+   34  use lance_core::utils::bit::pad_bytes_to;
+   35  use lance_core::{Error, Result};
+   36  
+   37 +use super::sequence::{BlockCost, SequenceBlockCodec, select_block_codec};
+   38 +
+   39  #[derive(Debug)]
+   40  pub struct BinaryMiniBlockEncoder {
+   41      minichunk_size: i64,
+   42 +    generic_offsets: Option<CompressionFieldParams>,
+   43  }
+   44  
+   45  impl Default for BinaryMiniBlockEncoder {
+   46      fn default() -> Self {
+   47          Self {
+   48              minichunk_size: *AIM_MINICHUNK_SIZE,
+   49 +            generic_offsets: None,
+   50          }
+   51      }
+   52  }
+
+@@ -54,6 +60,31 @@ pub static AIM_MINICHUNK_SIZE: std::sync::LazyLock<i64> = std::sync::LazyLock::n
+   60          .unwrap_or(DEFAULT_AIM_MINICHUNK_SIZE)
+   61  });
+   62  
+   63 +#[derive(Debug, Clone, Copy)]
+   64 +struct BinaryChunkRange {
+   65 +    start_offset_index: usize,
+   66 +    end_offset_index: usize,
+   67 +}
+   68 +
+   69 +fn binary_chunk_ranges<N: OffsetSizeTrait>(
+   70 +    offsets: &[N],
+   71 +    minichunk_size: i64,
+   72 +) -> Vec<BinaryChunkRange> {
+   73 +    let mut ranges = Vec::new();
+   74 +    let mut start = 0;
+   75 +    loop {
+   76 +        let end = search_next_offset_idx(offsets, start, minichunk_size);
+   77 +        ranges.push(BinaryChunkRange {
+   78 +            start_offset_index: start,
+   79 +            end_offset_index: end,
+   80 +        });
+   81 +        if end == offsets.len() - 1 {
+   82 +            return ranges;
+   83 +        }
+   84 +        start = end;
+   85 +    }
+   86 +}
+   87 +
+   88  // Make it to support both u32 and u64
+   89  fn chunk_offsets<N: OffsetSizeTrait>(
+   90      offsets: &[N],
+
+@@ -201,47 +232,278 @@ fn search_next_offset_idx<N: OffsetSizeTrait>(
+  232      last_offset_idx + num_values
+  233  }
+  234  
+  235 +fn validate_variable_offsets<N: OffsetSizeTrait>(
+  236 +    offsets: &[N],
+  237 +    num_values: u64,
+  238 +    data_len: usize,
+  239 +) -> Result<()> {
+  240 +    let expected_offsets = usize::try_from(num_values)
+  241 +        .ok()
+  242 +        .and_then(|num_values| num_values.checked_add(1))
+  243 +        .ok_or_else(|| Error::invalid_input("Variable-width offset count overflows usize"))?;
+  244 +    if offsets.len() != expected_offsets {
+  245 +        return Err(Error::invalid_input(format!(
+  246 +            "Variable-width block has {} offsets, expected {expected_offsets}",
+  247 +            offsets.len()
+  248 +        )));
+  249 +    }
+  250 +    let mut previous = None;
+  251 +    for (index, offset) in offsets.iter().enumerate() {
+  252 +        let offset = offset.to_usize().ok_or_else(|| {
+  253 +            Error::invalid_input(format!(
+  254 +                "Variable-width offset at index {index} is negative or does not fit usize"
+  255 +            ))
+  256 +        })?;
+  257 +        if previous.is_some_and(|previous| offset < previous) {
+  258 +            return Err(Error::invalid_input(format!(
+  259 +                "Variable-width offsets decrease at index {index}"
+  260 +            )));
+  261 +        }
+  262 +        previous = Some(offset);
+  263 +    }
+  264 +    if offsets[0].to_usize() != Some(0) {
+  265 +        return Err(Error::invalid_input(
+  266 +            "Variable-width offsets must start at zero",
+  267 +        ));
+  268 +    }
+  269 +    if previous != Some(data_len) {
+  270 +        return Err(Error::invalid_input(format!(
+  271 +            "Final variable-width offset {:?} does not equal {data_len} data bytes",
+  272 +            previous
+  273 +        )));
+  274 +    }
+  275 +    Ok(())
+  276 +}
+  277 +
+  278 +fn chunk_value_range<N: OffsetSizeTrait>(
+  279 +    offsets: &[N],
+  280 +    range: BinaryChunkRange,
+  281 +) -> Result<std::ops::Range<usize>> {
+  282 +    let start = offsets[range.start_offset_index]
+  283 +        .to_usize()
+  284 +        .ok_or_else(|| Error::invalid_input("Variable chunk start offset does not fit usize"))?;
+  285 +    let end = offsets[range.end_offset_index]
+  286 +        .to_usize()
+  287 +        .ok_or_else(|| Error::invalid_input("Variable chunk end offset does not fit usize"))?;
+  288 +    if start > end {
+  289 +        return Err(Error::invalid_input(
+  290 +            "Variable chunk offsets are decreasing",
+  291 +        ));
+  292 +    }
+  293 +    Ok(start..end)
+  294 +}
+  295 +
+  296 +fn serialized_variable_cost(
+  297 +    compressed: &MiniBlockCompressed,
+  298 +    encoding: &CompressiveEncoding,
+  299 +    context: MiniBlockCompressionContext,
+  300 +) -> u64 {
+  301 +    compressed
+  302 +        .chunks
+  303 +        .iter()
+  304 +        .fold(encoding.encoded_len() as u64, |total, chunk| {
+  305 +            chunk.buffer_sizes.iter().fold(
+  306 +                total.saturating_add(context.chunk_header_bytes(chunk.buffer_sizes.len() as u64)),
+  307 +                |total, size| total.saturating_add(u64::from(*size).next_multiple_of(8)),
+  308 +            )
+  309 +        })
+  310 +}
+  311 +
+  312 +fn build_generic_chunks<N: OffsetSizeTrait>(
+  313 +    data: &VariableWidthBlock,
+  314 +    offsets: &[N],
+  315 +    ranges: &[BinaryChunkRange],
+  316 +    codec: &SequenceBlockCodec,
+  317 +) -> Result<(MiniBlockCompressed, CompressiveEncoding)> {
+  318 +    let bytes_per_offset = (data.bits_per_offset / 8) as usize;
+  319 +    let mut offset_data = Vec::new();
+  320 +    let mut value_data = Vec::new();
+  321 +    let mut chunks = Vec::with_capacity(ranges.len());
+  322 +    let mut actual_encoding = None;
+  323 +
+  324 +    for (index, range) in ranges.iter().enumerate() {
+  325 +        let num_offsets = range.end_offset_index - range.start_offset_index + 1;
+  326 +        let offset_start = range
+  327 +            .start_offset_index
+  328 +            .checked_mul(bytes_per_offset)
+  329 +            .ok_or_else(|| Error::invalid_input("Offset chunk start overflows usize"))?;
+  330 +        let offset_bytes = num_offsets
+  331 +            .checked_mul(bytes_per_offset)
+  332 +            .ok_or_else(|| Error::invalid_input("Offset chunk size overflows usize"))?;
+  333 +        let offset_block = FixedWidthDataBlock {
+  334 +            bits_per_value: data.bits_per_offset as u64,
+  335 +            data: data.offsets.slice_with_length(offset_start, offset_bytes),
+  336 +            num_values: num_offsets as u64,
+  337 +            block_info: BlockInfo::default(),
+  338 +        };
+  339 +        let (payload, encoding) = codec.compress(offset_block)?;
+  340 +        if actual_encoding
+  341 +            .as_ref()
+  342 +            .is_some_and(|actual| actual != &encoding)
+  343 +        {
+  344 +            return Err(Error::internal(format!(
+  345 +                "Offset codec produced inconsistent descriptors for chunk {index}"
+  346 +            )));
+  347 +        }
+  348 +        actual_encoding.get_or_insert(encoding);
+  349 +
+  350 +        let value_range = chunk_value_range(offsets, *range)?;
+  351 +        let value_bytes = data.data.get(value_range.clone()).ok_or_else(|| {
+  352 +            Error::invalid_input(format!(
+  353 +                "Variable chunk range {}..{} exceeds {} bytes",
+  354 +                value_range.start,
+  355 +                value_range.end,
+  356 +                data.data.len()
+  357 +            ))
+  358 +        })?;
+  359 +        let mut buffer_sizes = Vec::with_capacity(1 + usize::from(codec.has_payload()));
+  360 +        if let Some(payload) = payload {
+  361 +            buffer_sizes.push(
+  362 +                u32::try_from(payload.len())
+  363 +                    .map_err(|_| Error::invalid_input("Offset payload exceeds u32::MAX bytes"))?,
+  364 +            );
+  365 +            offset_data.extend_from_slice(&payload);
+  366 +        }
+  367 +        buffer_sizes.push(
+  368 +            u32::try_from(value_bytes.len()).map_err(|_| {
+  369 +                Error::invalid_input("Variable value payload exceeds u32::MAX bytes")
+  370 +            })?,
+  371 +        );
+  372 +        value_data.extend_from_slice(value_bytes);
+  373 +        let num_values = range.end_offset_index - range.start_offset_index;
+  374 +        chunks.push(MiniBlockChunk {
+  375 +            log_num_values: if index + 1 == ranges.len() {
+  376 +                0
+  377 +            } else {
+  378 +                num_values.trailing_zeros() as u8
+  379 +            },
+  380 +            buffer_sizes,
+  381 +        });
+  382 +    }
+  383 +
+  384 +    let mut buffers = Vec::with_capacity(1 + usize::from(codec.has_payload()));
+  385 +    if codec.has_payload() {
+  386 +        buffers.push(LanceBuffer::from(offset_data));
+  387 +    }
+  388 +    buffers.push(LanceBuffer::from(value_data));
+  389 +    let offsets_encoding = actual_encoding.ok_or_else(|| {
+  390 +        Error::internal("Variable-width page did not contain an offset chunk".to_string())
+  391 +    })?;
+  392 +    Ok((
+  393 +        MiniBlockCompressed {
+  394 +            data: buffers,
+  395 +            chunks,
+  396 +            num_values: data.num_values,
+  397 +        },
+  398 +        ProtobufUtils21::variable(offsets_encoding, None),
+  399 +    ))
+  400 +}
+  401 +
+  402  impl BinaryMiniBlockEncoder {
+  403      pub fn new(minichunk_size: Option<i64>) -> Self {
+  404          Self {
+  405              minichunk_size: minichunk_size.unwrap_or(*AIM_MINICHUNK_SIZE),
+  406 +            generic_offsets: None,
+  407 +        }
+  408 +    }
+  409 +
+  410 +    pub fn with_generic_offsets(
+  411 +        minichunk_size: Option<i64>,
+  412 +        field_params: CompressionFieldParams,
+  413 +    ) -> Self {
+  414 +        Self {
+  415 +            minichunk_size: minichunk_size.unwrap_or(*AIM_MINICHUNK_SIZE),
+  416 +            generic_offsets: Some(field_params),
+  417          }
+  418      }
+  419  
+  420      // put binary data into chunks, every chunk is less than or equal to `minichunk_size`.
+  421      // In each chunk, offsets are put first then followed by binary bytes data, each chunk is padded to 8 bytes.
+  422      // the offsets in the chunk points to the bytes offset in this chunk.
+  214 -    fn chunk_data(&self, data: VariableWidthBlock) -> (MiniBlockCompressed, CompressiveEncoding) {
+  215 -        // TODO: Support compression of offsets
+  216 -        // TODO: Support general compression of data
+  423 +    fn chunk_data(
+  424 +        &self,
+  425 +        data: VariableWidthBlock,
+  426 +        context: MiniBlockCompressionContext,
+  427 +    ) -> Result<(MiniBlockCompressed, CompressiveEncoding)> {
+  428          match data.bits_per_offset {
+  429              32 => {
+  219 -                let offsets = data.offsets.borrow_to_typed_slice::<i32>();
+  220 -                let (buffers, chunks) =
+  221 -                    chunk_offsets(offsets.as_ref(), &data.data, 4, self.minichunk_size);
+  222 -                (
+  223 -                    MiniBlockCompressed {
+  224 -                        data: buffers,
+  225 -                        chunks,
+  226 -                        num_values: data.num_values,
+  227 -                    },
+  228 -                    ProtobufUtils21::variable(ProtobufUtils21::flat(32, None), None),
+  229 -                )
+  430 +                let offsets_buffer = data.offsets.clone();
+  431 +                let offsets = offsets_buffer.borrow_to_typed_slice::<i32>();
+  432 +                self.chunk_typed_data(offsets.as_ref(), data, 4, context)
+  433              }
+  434              64 => {
+  232 -                let offsets = data.offsets.borrow_to_typed_slice::<i64>();
+  233 -                let (buffers, chunks) =
+  234 -                    chunk_offsets(offsets.as_ref(), &data.data, 8, self.minichunk_size);
+  235 -                (
+  236 -                    MiniBlockCompressed {
+  237 -                        data: buffers,
+  238 -                        chunks,
+  239 -                        num_values: data.num_values,
+  240 -                    },
+  241 -                    ProtobufUtils21::variable(ProtobufUtils21::flat(64, None), None),
+  242 -                )
+  435 +                let offsets_buffer = data.offsets.clone();
+  436 +                let offsets = offsets_buffer.borrow_to_typed_slice::<i64>();
+  437 +                self.chunk_typed_data(offsets.as_ref(), data, 8, context)
+  438              }
+  244 -            _ => panic!("Unsupported bits_per_offset={}", data.bits_per_offset),
+  439 +            _ => Err(Error::invalid_input(format!(
+  440 +                "Unsupported bits_per_offset={}",
+  441 +                data.bits_per_offset
+  442 +            ))),
+  443 +        }
+  444 +    }
+  445 +
+  446 +    fn chunk_typed_data<N: OffsetSizeTrait>(
+  447 +        &self,
+  448 +        offsets: &[N],
+  449 +        data: VariableWidthBlock,
+  450 +        legacy_alignment: usize,
+  451 +        context: MiniBlockCompressionContext,
+  452 +    ) -> Result<(MiniBlockCompressed, CompressiveEncoding)> {
+  453 +        validate_variable_offsets(offsets, data.num_values, data.data.len())?;
+  454 +        let bits_per_offset = data.bits_per_offset as u64;
+  455 +        let legacy_encoding =
+  456 +            ProtobufUtils21::variable(ProtobufUtils21::flat(bits_per_offset, None), None);
+  457 +        let (legacy_buffers, legacy_chunks) =
+  458 +            chunk_offsets(offsets, &data.data, legacy_alignment, self.minichunk_size);
+  459 +        let legacy = MiniBlockCompressed {
+  460 +            data: legacy_buffers,
+  461 +            chunks: legacy_chunks,
+  462 +            num_values: data.num_values,
+  463 +        };
+  464 +        let Some(field_params) = self
+  465 +            .generic_offsets
+  466 +            .as_ref()
+  467 +            .filter(|_| context.allows_generic_offsets())
+  468 +        else {
+  469 +            return Ok((legacy, legacy_encoding));
+  470 +        };
+  471 +
+  472 +        let ranges = binary_chunk_ranges(offsets, self.minichunk_size);
+  473 +        let member_ranges = ranges
+  474 +            .iter()
+  475 +            .map(|range| range.start_offset_index..range.end_offset_index + 1)
+  476 +            .collect::<Vec<_>>();
+  477 +        let offsets_block = FixedWidthDataBlock {
+  478 +            bits_per_value: bits_per_offset,
+  479 +            data: data.offsets.clone(),
+  480 +            num_values: offsets.len() as u64,
+  481 +            block_info: BlockInfo::default(),
+  482 +        };
+  483 +        let extra_payload_header = context
+  484 +            .chunk_header_bytes(2)
+  485 +            .saturating_sub(context.chunk_header_bytes(1));
+  486 +        let codec = select_block_codec(
+  487 +            &offsets_block,
+  488 +            &member_ranges,
+  489 +            field_params,
+  490 +            BlockCost::new(extra_payload_header, 8),
+  491 +            true,
+  492 +        )?;
+  493 +        if matches!(
+  494 +            codec.expected_encoding().compression.as_ref(),
+  495 +            Some(Compression::Flat(_))
+  496 +        ) {
+  497 +            return Ok((legacy, legacy_encoding));
+  498 +        }
+  499 +
+  500 +        let (generic, generic_encoding) = build_generic_chunks(&data, offsets, &ranges, &codec)?;
+  501 +        if serialized_variable_cost(&generic, &generic_encoding, context)
+  502 +            < serialized_variable_cost(&legacy, &legacy_encoding, context)
+  503 +        {
+  504 +            Ok((generic, generic_encoding))
+  505 +        } else {
+  506 +            Ok((legacy, legacy_encoding))
+  507          }
+  508      }
+  509  }
+
+@@ -249,11 +511,11 @@ impl BinaryMiniBlockEncoder {
+  511  impl MiniBlockCompressor for BinaryMiniBlockEncoder {
+  512      fn compress(
+  513          &self,
+  252 -        _context: MiniBlockCompressionContext,
+  514 +        context: MiniBlockCompressionContext,
+  515          data: DataBlock,
+  516      ) -> Result<(MiniBlockCompressed, CompressiveEncoding)> {
+  517          match data {
+  256 -            DataBlock::VariableWidth(variable_width) => Ok(self.chunk_data(variable_width)),
+  518 +            DataBlock::VariableWidth(variable_width) => self.chunk_data(variable_width, context),
+  519              _ => Err(Error::invalid_input_source(
+  520                  format!(
+  521                      "Cannot compress a data block of type {} with BinaryMiniBlockEncoder",
+
+@@ -267,31 +529,173 @@ impl MiniBlockCompressor for BinaryMiniBlockEncoder {
+  529  
+  530  #[derive(Debug)]
+  531  pub struct BinaryMiniBlockDecompressor {
+  270 -    bits_per_offset: u8,
+  532 +    layout: BinaryMiniBlockLayout,
+  533 +}
+  534 +
+  535 +#[derive(Debug)]
+  536 +enum BinaryMiniBlockLayout {
+  537 +    Legacy {
+  538 +        bits_per_offset: u8,
+  539 +    },
+  540 +    Generic {
+  541 +        bits_per_offset: u8,
+  542 +        offsets: Box<dyn BlockDecompressor>,
+  543 +        offsets_have_payload: bool,
+  544 +    },
+  545  }
+  546  
+  547  impl BinaryMiniBlockDecompressor {
+  274 -    pub fn new(bits_per_offset: u8) -> Self {
+  275 -        assert!(bits_per_offset == 32 || bits_per_offset == 64);
+  276 -        Self { bits_per_offset }
+  548 +    pub fn new(bits_per_offset: u8) -> Result<Self> {
+  549 +        if !matches!(bits_per_offset, 32 | 64) {
+  550 +            return Err(Error::invalid_input(format!(
+  551 +                "Binary mini-block offsets require 32 or 64 bits, got {bits_per_offset}"
+  552 +            )));
+  553 +        }
+  554 +        Ok(Self {
+  555 +            layout: BinaryMiniBlockLayout::Legacy { bits_per_offset },
+  556 +        })
+  557      }
+  558  
+  279 -    pub fn from_variable(variable: &pb21::Variable) -> Self {
+  280 -        if let Compression::Flat(flat) = variable
+  281 -            .offsets
+  282 -            .as_ref()
+  283 -            .unwrap()
+  284 -            .compression
+  285 -            .as_ref()
+  286 -            .unwrap()
+  287 -        {
+  288 -            Self {
+  289 -                bits_per_offset: flat.bits_per_value as u8,
+  559 +    pub fn from_variable(variable: &pb21::Variable) -> Result<Self> {
+  560 +        if variable.values.is_some() {
+  561 +            return Err(Error::invalid_input(
+  562 +                "Binary mini-block Variable encoding cannot contain a values codec",
+  563 +            ));
+  564 +        }
+  565 +        let offsets = variable.offsets.as_deref().ok_or_else(|| {
+  566 +            Error::invalid_input("Binary mini-block Variable encoding is missing offsets")
+  567 +        })?;
+  568 +        let compression = offsets.compression.as_ref().ok_or_else(|| {
+  569 +            Error::invalid_input("Binary mini-block offsets are missing a compression variant")
+  570 +        })?;
+  571 +        if let Compression::Flat(flat) = compression {
+  572 +            if flat.data.is_some() || !matches!(flat.bits_per_value, 32 | 64) {
+  573 +                return Err(Error::invalid_input(format!(
+  574 +                    "Legacy binary mini-block offsets require plain 32 or 64-bit Flat encoding, got {} bits",
+  575 +                    flat.bits_per_value
+  576 +                )));
+  577 +            }
+  578 +            return Self::new(flat.bits_per_value as u8);
+  579 +        }
+  580 +
+  581 +        let bits_per_offset = infer_fixed_width_block_bits(offsets)?;
+  582 +        let offsets = create_fixed_width_block_decompressor(offsets, bits_per_offset)?;
+  583 +        let offsets_have_payload = offsets.requires_payload();
+  584 +        Ok(Self {
+  585 +            layout: BinaryMiniBlockLayout::Generic {
+  586 +                bits_per_offset: bits_per_offset as u8,
+  587 +                offsets,
+  588 +                offsets_have_payload,
+  589 +            },
+  590 +        })
+  591 +    }
+  592 +}
+  593 +
+  594 +fn decode_generic_binary_miniblock(
+  595 +    bits_per_offset: u8,
+  596 +    offsets: &dyn BlockDecompressor,
+  597 +    offsets_have_payload: bool,
+  598 +    data: Vec<LanceBuffer>,
+  599 +    num_values: u64,
+  600 +) -> Result<DataBlock> {
+  601 +    let expected_buffers = 1 + usize::from(offsets_have_payload);
+  602 +    if data.len() != expected_buffers {
+  603 +        return Err(Error::corrupt_file_named(
+  604 +            "binary mini-block",
+  605 +            format!(
+  606 +                "generic chunk has {} buffers, expected {expected_buffers}",
+  607 +                data.len()
+  608 +            ),
+  609 +        ));
+  610 +    }
+  611 +    let mut buffers = data.into_iter();
+  612 +    let offset_payload =
+  613 +        offsets_have_payload.then(|| buffers.next().expect("buffer count was checked"));
+  614 +    let values = buffers.next().expect("buffer count was checked");
+  615 +    let num_offsets = num_values.checked_add(1).ok_or_else(|| {
+  616 +        Error::corrupt_file_named(
+  617 +            "binary mini-block",
+  618 +            format!("cannot decode offsets for {num_values} values"),
+  619 +        )
+  620 +    })?;
+  621 +    let decoded = offsets.decompress(offset_payload, num_offsets)?;
+  622 +    let DataBlock::FixedWidth(offsets) = decoded else {
+  623 +        return Err(Error::corrupt_file_named(
+  624 +            "binary mini-block",
+  625 +            "generic offset codec did not produce fixed-width offsets",
+  626 +        ));
+  627 +    };
+  628 +    if offsets.bits_per_value != u64::from(bits_per_offset) || offsets.num_values != num_offsets {
+  629 +        return Err(Error::corrupt_file_named(
+  630 +            "binary mini-block",
+  631 +            format!(
+  632 +                "generic offset codec produced {} {}-bit offsets, expected {num_offsets} {bits_per_offset}-bit offsets",
+  633 +                offsets.num_values, offsets.bits_per_value
+  634 +            ),
+  635 +        ));
+  636 +    }
+  637 +
+  638 +    match bits_per_offset {
+  639 +        32 => {
+  640 +            let typed = checked_fixed_values::<u32>(&offsets, "Binary mini-block offsets")?;
+  641 +            let mut previous = 0_u32;
+  642 +            for (position, &offset) in typed.iter().enumerate() {
+  643 +                if (position == 0 && offset != 0) || offset < previous || offset > i32::MAX as u32 {
+  644 +                    return Err(Error::corrupt_file_named(
+  645 +                        "binary mini-block",
+  646 +                        format!("invalid 32-bit generic offset {offset} at position {position}"),
+  647 +                    ));
+  648 +                }
+  649 +                previous = offset;
+  650 +            }
+  651 +            if previous as usize != values.len() {
+  652 +                return Err(Error::corrupt_file_named(
+  653 +                    "binary mini-block",
+  654 +                    format!(
+  655 +                        "final generic offset {previous} does not equal the {}-byte value buffer",
+  656 +                        values.len()
+  657 +                    ),
+  658 +                ));
+  659 +            }
+  660 +        }
+  661 +        64 => {
+  662 +            let typed = checked_fixed_values::<u64>(&offsets, "Binary mini-block offsets")?;
+  663 +            let mut previous = 0_u64;
+  664 +            for (position, &offset) in typed.iter().enumerate() {
+  665 +                if (position == 0 && offset != 0) || offset < previous || offset > i64::MAX as u64 {
+  666 +                    return Err(Error::corrupt_file_named(
+  667 +                        "binary mini-block",
+  668 +                        format!("invalid 64-bit generic offset {offset} at position {position}"),
+  669 +                    ));
+  670 +                }
+  671 +                previous = offset;
+  672 +            }
+  673 +            let value_len = u64::try_from(values.len()).map_err(|_| {
+  674 +                Error::corrupt_file_named(
+  675 +                    "binary mini-block",
+  676 +                    "value buffer length does not fit u64",
+  677 +                )
+  678 +            })?;
+  679 +            if previous != value_len {
+  680 +                return Err(Error::corrupt_file_named(
+  681 +                    "binary mini-block",
+  682 +                    format!(
+  683 +                        "final generic offset {previous} does not equal the {}-byte value buffer",
+  684 +                        values.len()
+  685 +                    ),
+  686 +                ));
+  687              }
+  291 -        } else {
+  292 -            panic!("Unsupported offsets compression: {:?}", variable.offsets);
+  688          }
+  689 +        _ => unreachable!("generic offset width was validated during decoder construction"),
+  690      }
+  691 +
+  692 +    Ok(DataBlock::VariableWidth(VariableWidthBlock {
+  693 +        data: values,
+  694 +        offsets: offsets.data,
+  695 +        bits_per_offset,
+  696 +        num_values,
+  697 +        block_info: BlockInfo::new(),
+  698 +    }))
+  699  }
+  700  
+  701  /// Cold path: pinpoint why the chunk-relative offsets of a binary mini-block
+
+@@ -318,6 +722,16 @@ fn chunk_offset_violation_error<T: Copy + Into<u64>>(offsets: &[T], chunk_len: u
+  722  }
+  723  
+  724  impl MiniBlockDecompressor for BinaryMiniBlockDecompressor {
+  725 +    fn num_buffers(&self) -> usize {
+  726 +        match self.layout {
+  727 +            BinaryMiniBlockLayout::Legacy { .. } => 1,
+  728 +            BinaryMiniBlockLayout::Generic {
+  729 +                offsets_have_payload,
+  730 +                ..
+  731 +            } => 1 + usize::from(offsets_have_payload),
+  732 +        }
+  733 +    }
+  734 +
+  735      // decompress a MiniBlock of binary data, the num_values must be less than or equal
+  736      // to the number of values this MiniBlock has, BinaryMiniBlock doesn't store `the number of values`
+  737      // it has so assertion can not be done here and the caller of `decompress` must ensure
+
+@@ -329,10 +743,31 @@ impl MiniBlockDecompressor for BinaryMiniBlockDecompressor {
+  743      // read.  The monotonicity check rides along the existing rebase loop (the
+  744      // `&=` accumulation keeps it branchless) so validation adds no extra pass.
+  745      fn decompress(&self, data: Vec<LanceBuffer>, num_values: u64) -> Result<DataBlock> {
+  332 -        assert_eq!(data.len(), 1);
+  333 -        let data = data.into_iter().next().unwrap();
+  746 +        let bits_per_offset = match &self.layout {
+  747 +            BinaryMiniBlockLayout::Legacy { bits_per_offset } => *bits_per_offset,
+  748 +            BinaryMiniBlockLayout::Generic {
+  749 +                bits_per_offset,
+  750 +                offsets,
+  751 +                offsets_have_payload,
+  752 +            } => {
+  753 +                return decode_generic_binary_miniblock(
+  754 +                    *bits_per_offset,
+  755 +                    offsets.as_ref(),
+  756 +                    *offsets_have_payload,
+  757 +                    data,
+  758 +                    num_values,
+  759 +                );
+  760 +            }
+  761 +        };
+  762 +        if data.len() != 1 {
+  763 +            return Err(Error::corrupt_file_named(
+  764 +                "binary mini-block",
+  765 +                format!("legacy chunk has {} buffers, expected 1", data.len()),
+  766 +            ));
+  767 +        }
+  768 +        let data = data.into_iter().next().expect("buffer count was checked");
+  769  
+  335 -        let bytes_per_offset = self.bits_per_offset as usize / 8;
+  770 +        let bytes_per_offset = bits_per_offset as usize / 8;
+  771          if !data.len().is_multiple_of(bytes_per_offset) {
+  772              return Err(Error::corrupt_file_named(
+  773                  "binary mini-block",
+
+@@ -377,7 +812,7 @@ impl MiniBlockDecompressor for BinaryMiniBlockDecompressor {
+  812              )
+  813          };
+  814  
+  380 -        if self.bits_per_offset == 64 {
+  815 +        if bits_per_offset == 64 {
+  816              let offsets_buffer = data.borrow_to_typed_slice::<u64>();
+  817              let offsets = &offsets_buffer.as_ref()[..num_offsets];
+  818  

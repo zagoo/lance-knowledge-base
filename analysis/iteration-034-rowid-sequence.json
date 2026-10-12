@@ -1,0 +1,1451 @@
+{
+  "iteration": 34,
+  "files": [
+    {
+      "path": "rust/lance-table/src/rowids.rs",
+      "module": "L1-modules/rust-lance-table.md",
+      "reviewed": true,
+      "role": "Row-ID sequence facade, construction and mutation, stateful selection, ID-mask to positional-range conversion, set conversion, slicing, rechunking and ReadBatchParams selection.",
+      "ranges": [
+        [
+          1,
+          38,
+          "SPDX/module docs describe fragment-order row IDs and dataset-wide RowIdIndex. bitmap,encoded_array,index,runs,serde modules are private; segment/version are public despite the preceding all-private comment. Reexports expose FragmentRowIdIndex,RowIdIndex,read_row_ids,write_row_ids. Imports connect DeepSizeOf,core errors,ReadBatchParams,RowAddrMask/TreeMap/RowSetOps,exact-size iterator adapter,segment cursor and tracing. No storage IO is performed by this file; serialization is a reexport from serde."
+        ],
+        [
+          39,
+          66,
+          "Public RowIdSequence is a private Vec<U64Segment> tuple field, deriving Debug,Clone,DeepSizeOf,PartialEq,Eq,Default. Equality compares representations, not only yielded IDs. Type contract assumes table-wide unique u64 IDs except tombstones, without requiring global order/contiguity. Crate-visible Debug/Default RowIdSequenceCursor stores segment index, preceding row count, optional cached segment length, SegmentCursorState and last requested index; it owns no sequence reference or identity."
+        ],
+        [
+          67,
+          91,
+          "Private advance_segment adds cached length (or0), increments segment index, clears length and resets segment cursor. get resets the whole cursor if index precedes rows_passed or last_index, then remembers the request. It scans segments, lazily caches len, delegates local rank to SegmentCursorState or advances. Empty segments are skipped; exhaustion returns None. Arithmetic is unchecked usize. Switching source/mutating it without a reset is unsupported by the state assumptions but not prevented by a lifetime tie."
+        ],
+        [
+          92,
+          130,
+          "extend_range returns immediately for empty/reversed selection, leaving state/output unchanged. Otherwise it resets on backward start, stores requested end-1 even if beyond EOF, walks segments and appends clipped local subranges. End exhaustion truncates silently. Finishing a segment advances and resets the bitmap state. It advances logical count by requested count, assuming segment extension emitted exactly that many valid values; malformed segment invariants are not revalidated."
+        ],
+        [
+          131,
+          172,
+          "extend_dense_range duplicates the sparse sequence traversal but calls SegmentCursorState::extend_dense_range. Comment says sharing the loop measurably slowed sparse system-only scans; this is source rationale, not a benchmark measured here. Empty/backward/EOF/segment-reset behavior matches the ordinary path. No density test occurs inside this method."
+        ],
+        [
+          173,
+          208,
+          "Display reads up to11 front values and11 back values because break is after len>10, reverses the back vector and probes one remaining item to choose ellipsis. Front values are written without separators; last values use comma-space; ellipsis is comma-space-dot-dot-dot. Thus Range0..3 displays [012], not a conventional comma-separated list. At most23 values are consumed, but underlying sparse-span iteration may scan more slots. It is diagnostic text, not a parsable canonical serialization."
+        ],
+        [
+          209,
+          236,
+          "From<Range<u64>> wraps one raw range without validation; From<&[u64]> wraps one selected segment even for empty input and assumes uniqueness. Private find_duplicate first checks strictly increasing adjacent pairs without allocating; if that fails, clones/sorts all values and returns the first equal pair, hence the smallest duplicate value after sorting. Unsorted unique inputs pay the sorting copy; empty/singleton input passes the fast check."
+        ],
+        [
+          237,
+          266,
+          "new uses empty Vec Default. try_from_iter collects all input into Vec, returns canonical empty sequence for empty input, rejects a duplicate with InvalidInput including duplicate ID and total count, then constructs one U64Segment from the original order. It validates uniqueness only within this input. Comment says commit does not recheck dataset-wide uniqueness; that downstream claim remains pending commit analysis. Segment constructor is another collection stage, though moving a Vec iterator can permit allocation reuse; no streaming interface or global uniqueness proof."
+        ],
+        [
+          267,
+          278,
+          "iter flat_maps boxed segment iterators and exposes DoubleEndedIterator, preserving segment order. len sums segment.len as u64 with ordinary addition, inheriting per-segment usize casts/popcount work. is_empty checks only whether the segment Vec is empty, not whether total len is0. From(0..0), From(empty slice) and delete-all can therefore have len0 but is_empty false, unlike new/try_from_iter(empty)."
+        ],
+        [
+          279,
+          301,
+          "row_id_range scans segment bounds twice for minimum start and maximum end and returns inclusive bounds, or None if no segment supplies bounds. It is conservative and does not test membership. The comment that no values implies None has a caveat: a nonempty enclosing bitmap range with zero present bits still supplies bounds via segment.range (rust/lance-table/src/rowids/segment.rs:360-376). It does not canonicalize malformed compressed array bases."
+        ],
+        [
+          302,
+          320,
+          "extend consumes another sequence, merging only the existing final plain Range and incoming first plain Range when their endpoints touch. It replaces the final segment then moves remaining incoming segments; otherwise appends all. No overlap/duplicate/order validation, empty-segment cleanup, total-length overflow check or other representation optimization. Existing internal adjacent ranges are not swept."
+        ],
+        [
+          321,
+          339,
+          "use_range_segments visits every segment and replaces each successful as_ranges result, reporting whether any changed. No config/version gate exists in this public method. Comment explains reader performance motivation and intended table opt-in. A contextual caller in transaction/manifest_build.rs75-122 gates through lance.row_ids.range_segments and read/rewrites changed inline sequences; full transaction integration remains pending. Wire expansion is the existing sequence serde path, not a new protobuf arm."
+        ],
+        [
+          340,
+          366,
+          "delete first find_ids orders matching requested values by segment/local position. It replaces the backing Vec with a new Vec of equal capacity, clones unaffected segments from old storage, rebuilds affected ones through segment.delete and clones the tail. Even no matching IDs clones every segment. Empty results are retained as segments, so delete-all differs from mask-all. Duplicate requests are not deduplicated and may violate segment.delete preconditions; panic during rebuilding can leave self partially reconstructed."
+        ],
+        [
+          367,
+          397,
+          "mask accepts u32 physical positions and returns Result but has no Err branch. It walks original segment cutoffs using unchecked len-as-u32 and additions, consumes each position below cutoff, subtracts original offset and passes local positions to segment.mask. Inputs are assumed ordered/unique: descending positions can underflow after crossing a segment, duplicates can trigger segment count shortcuts, and an out-of-range front can hide later smaller positions. Remaining past-end positions are ignored. Segments mutate incrementally, then empty segments are removed even for an empty mask."
+        ],
+        [
+          398,
+          430,
+          "find_ids allocates one match Vec per segment and cycles segment enumeration. Despite the optimization comment, each input ID always scans exactly all segments because there is no break after a match; the iterator returns to its initial position for the next input. It first checks segment.range then segment.position, recording each matching local ordinal, including repeated requests and IDs present in multiple segments. Missing IDs are ignored. It sorts every segment match list but does not deduplicate."
+        ],
+        [
+          431,
+          455,
+          "find_ids computes contiguous slices into its eventual output for nonempty match lists, then converts each ordinal back to an ID with segment.get(...).unwrap. Output is segment order then local ordinal order, preserving duplicate requested matches. Position/get consistency is assumed; inconsistent public segment state can panic. Work includes all-segment searches plus sorting and another get for every match."
+        ],
+        [
+          456,
+          494,
+          "slice(len0) returns an empty borrowed RowIdSeqSlice regardless of offset. Positive len subtracts segment lengths to locate start and endpoint, then forms an inclusive segment slice. It does not return Result or clamp: offset at/past total or excessive positive len leads to slice-index panic; offset_start+len can overflow. A boundary end remains in the preceding segment because comparison is<=. Empty intermediate segments are traversed. Values are not copied at construction."
+        ],
+        [
+          495,
+          515,
+          "segments exposes immutable &[U64Segment]. The preceding get/out-of-bounds/None doc lines are misplaced on this accessor; it always returns a slice. Public get instead scans segment lengths from the beginning, returns delegated local get at first containing ordinal or None after EOF. Offsets/additions are unchecked usize; bitmap len recomputation can scan its storage on every independent get."
+        ],
+        [
+          516,
+          541,
+          "select creates a private cursor and last-index tracker and returns a lazy filter_map iterator. On consumption, strict decrease panics with Selection is not sorted; equal indices are allowed and repeat values. Out-of-bounds requests are dropped but still become last_index, so a later lower valid request panics. Crate-visible cursor() merely creates default state without binding its lifetime to self."
+        ],
+        [
+          542,
+          558,
+          "cursor_with_dense_range_expansion chooses dense mode only for exactly one RangeWithBitmap segment. It computes segment.len once, seeds cached length and calls segment density advisory; other shapes return an uncached default cursor/false. The threshold is segment.len>=bitmap.len-floor(bitmap.len/4), from segment.rs346-354. This avoids repeating initial popcount but does not validate storage or select among multiple dense segments."
+        ],
+        [
+          559,
+          593,
+          "select_range_with_cursor and dense counterpart preallocate Vec to selection.len before delegating; oversized requested ranges can allocate far beyond available output even though EOF is clipped. select_with_cursor returns lazy filter_map over the reusable cursor and permits decreasing indices via rewind. All three are pub(crate). Dense method trusts the caller policy. Cursor lifetime in the iterator borrows the supplied state and sequence only during that call, not across calls."
+        ],
+        [
+          594,
+          620,
+          "mask_to_offset_ranges is public and instrumented at debug with skip_all. It translates selected row IDs to present ordinal ranges, preserving sequence order and separate segment boundaries. Extracts finite allow-list with RowSetOps::len; bitmap segment count/total span and optional shared sorted-ID Vec are computed lazily. RowAddrMask is an exclusive AllowList/BlockList enum, so this fast path omits no simultaneous block list (context: rust/lance-select/src/mask.rs:24-79)."
+        ],
+        [
+          621,
+          646,
+          "Plain Range path constructs RowAddrTreeMap, applies mask, walks inclusive low32 runs, recombines high32 fragment and offsets, subtracts range.start/adds prior sequence offset, and coalesces adjacent runs within this segment. End reconstruction uses bitwise OR of frag<<32 and low_end+1. At low_end=u32MAX with odd fragment, carry bit overlaps existing high bits: for singleton ID8589934591 in range8589934591..8589934592, computed end is4294967296 and subtraction underflows instead of producing ordinal1. This is source-derived, unexecuted; iter_runs exposes inclusive u32 runs and insert_range can store that singleton (rust/lance-select/src/mask.rs:545-588; rust/lance-select/src/mask.rs:801-810)."
+        ],
+        [
+          647,
+          674,
+          "Holes path creates full range set, removes each hole and subtracts only successful removals from total offset, applies mask, clones/decodes/sorts holes and walks selected addresses. For each address it subtracts count of holes strictly below it, then groups ordinals. Sorting permits the tested unsorted unique hole list here, unlike several segment methods. Duplicate/outside holes can disagree with the successful-removal count and rank subtraction; valid unique in-range holes are assumed."
+        ],
+        [
+          675,
+          705,
+          "Bitmap fast path applies only with finite allow count. On first such bitmap, scans all sequence segments to cache bitmap count and summed enclosing numeric span, using ordinary u64 additions/subtractions. Uses direct selected-ID processing only if total selected count<=total bitmap span; otherwise fallback. This is a global heuristic, not each segment density. One bitmap streams allowed IDs; multiple bitmaps materialize allowed IDs once for binary-search slicing."
+        ],
+        [
+          706,
+          740,
+          "For multiple bitmap segments, lazily call allow_list.row_addrs once and cache Some(Vec<sorted IDs>) or None. For each applicable segment increment offset by bitmap.count_ones, binary-search the cached IDs at start/end and feed that subrange to bitmap_selected_offsets; single bitmap filters streamed addresses by range containment. If row_addrs unavailable, fall through. Contextual row_addrs collects an iterator per tree entry before flattening, so streaming avoids copying all IDs but is not allocation-free (rust/lance-select/src/mask.rs:497-515)."
+        ],
+        [
+          741,
+          763,
+          "Bitmap fallback materializes full range set, scans every numeric slot, removes missing bits while reducing total count, applies mask, then incrementally consumes bitmap logical iterator to count earlier holes for selected addresses. Iterator unwrap relies on valid bitmap length. This path scales with enclosing span plus selected values, whereas fast path popcounts intervening prefixes and selected IDs. No errors are returned locally; malformed padding/span can make fast and fallback lengths disagree."
+        ],
+        [
+          764,
+          781,
+          "Ranges path advances total by runs.present_len, inserts each base-adjusted present gap into a new tree map, applies mask and translates each address through runs.position(relative as u32).expect before grouping. HoleRuns invariants and inserted-set containment justify expect for valid data. It does not coalesce output with a prior segment."
+        ],
+        [
+          782,
+          800,
+          "SortedArray and Array both enumerate values in stored order and use mask.selected, producing ordinal=local index+prior count through GroupingIterator; sorting the IDs is neither required nor performed. Then advance by array length. Method returns accumulated Vec with no cross-segment range merge. Comment suggests sorted-array optimization but no separate algorithm exists."
+        ],
+        [
+          801,
+          839,
+          "Private GroupingIterator stores inner iterator and optional current half-open range. next extends only when next ID equals current end; otherwise yields old range and starts ID..ID+1. At inner EOF it takes the remaining range. It assumes appropriate order/distinctness for nonoverlapping increasing output; does not validate either, and ID+1 is unchecked at u64MAX. No FusedIterator/ExactSizeIterator guarantee is added."
+        ],
+        [
+          840,
+          864,
+          "bitmap_selected_offsets assumes sorted in-range IDs. Missing bitmap bits return None without advancing prefix state. Present IDs add popcount over bitmap slice previous_position..position, leave previous_position at the selected position, and emit offset_start+live_before. Including the previous selected bit in the next slice gives correct rank increments; repeated IDs repeat offsets. Relative subtraction/casts and sorted-delta subtraction are unchecked. GroupingIterator collects the local output Vec."
+        ],
+        [
+          865,
+          907,
+          "From<&RowIdSequence> for RowAddrTreeMap builds each segment in a fresh temporary set, then unions it into aggregate. Range inserts bounds; bitmap removes every absent slot; holes remove listed values; Ranges inserts present gaps; arrays insert each value. Isolating removals per segment preserves values present in overlapping other segments. Set conversion loses sequence order/duplicate multiplicity. It inherits tree-map edge behavior: contextual insert_range saturates excluded end0 to0, so Range0..0 inserts ID0 rather than nothing (rust/lance-select/src/mask.rs:545-588; rust/lance-select/src/mask.rs:1014-1019); full dependency analysis remains pending."
+        ],
+        [
+          908,
+          945,
+          "Public Debug RowIdSeqSlice has private borrowed segment slice, first start offset and last end offset. iter computes exact remaining size from sum of segment lengths minus trimmed prefixes/suffixes, then boxes iterators using skip/take for edge segments and full iteration for middle segments. One-segment case takes offset_last-offset_start. Calls exact_size adapter but return type advertises only Iterator; size_hint still reflects supplied count and decrements through that adapter. Arithmetic assumes valid slice; source borrow forbids ordinary mutation while view lives."
+        ],
+        [
+          946,
+          987,
+          "Public rechunk_sequences consumes sequence and u64 size iterables plus allow_incomplete, collecting all sizes/output upfront. Flattens owned segment vectors into Peekable and tracks u64 offset within current segment. InvalidInput closures include chunk index/expected size/remaining count or processed/expected chunk counts. Docs motivate later allocation of IDs for inserted rows, but this function never creates those IDs itself and returns a Vec, not a stream."
+        ],
+        [
+          988,
+          1013,
+          "For each requested chunk create an empty sequence. While remaining>0, inspect current segment length minus segment_offset. Empty/exhausted segments are consumed and offset reset; if no segment remains, allow_incomplete breaks with a short chunk, otherwise error. Later requested chunks still appear as empty when exhausted and incomplete allowed. A zero-sized chunk skips this loop and emits an empty Vec-backed sequence without consuming empty input segments."
+        ],
+        [
+          1014,
+          1043,
+          "If segment has more remaining values than requested, slice requested ordinal range, extend output and keep current segment with increased offset. Equal/less consumes segment, slices remaining values and extends, resetting offset and subtracting count. Even a whole uncut segment is rebuilt through U64Segment::slice, which materializes/re-encodes values; plain range input can cost proportional rows. u64-to-usize casts are unchecked. Adjacent plain output ranges may merge through extend."
+        ],
+        [
+          1044,
+          1053,
+          "After all chunk sizes, any peeked segment produces too-many error regardless of its length or allow_incomplete. Thus leftover empty segments cause an error even when total row cardinalities match; zero chunk sizes do not drain them. allow_incomplete allows shortages only, never excess input. Earlier output allocations are discarded on Result error; consumed inputs cannot be recovered."
+        ],
+        [
+          1054,
+          1089,
+          "select_row_ids accepts borrowed sequence and ReadBatchParams and returns owned Vec. Error closure includes u32 index and freshly computed sequence.len. Indices reads Arrow values buffer directly, without inspecting validity. Nondecreasing values check only last against length then use cursor-based select; arbitrary order uses independent get per index and errors at first missing. Duplicates preserve repeated output; empty values return empty. Nullable index-array policy belongs to ReadBatchParams producers and is not enforced here."
+        ],
+        [
+          1090,
+          1113,
+          "Range checks only end<=sequence.len as usize then slices start,end-start. Ranges sums lengths with unchecked subtraction/casts, preallocates full requested count before per-range end checks, then slices/extends in supplied order. Neither rejects reverse bounds explicitly; arithmetic/panics can precede an InvalidInput. Error offset casts end to u32 and can truncate diagnostic values. A zero-length range accepted by end check uses slice empty shortcut."
+        ],
+        [
+          1114,
+          1129,
+          "RangeFull collects every ID. RangeTo checks end, then slices0..end. RangeFrom performs sequence.len as usize minus start with no explicit start bound check; excessive start can underflow/panic rather than return InvalidInput. All returned data is materialized; no IO, schema conversion or cancellation handling occurs here."
+        ],
+        [
+          1130,
+          1157,
+          "cfg(test) imports module, pretty_assertions and Bitmap. Range fixture asserts len10/nonempty/exact iteration. rstest checked-constructor cases cover sorted contiguous, sorted gapped, sparse and reverse inputs, checking exact order and length. These tests were read, not executed."
+        ],
+        [
+          1158,
+          1190,
+          "Checked construction tests pin contiguous input to one Range and empty input to len0/is_empty true. Three duplicate patterns (adjacent,separated,unsorted) require InvalidInput and must-be-unique substring. No global cross-sequence duplicate or infallible constructor rejection is asserted."
+        ],
+        [
+          1191,
+          1233,
+          "Extend test pins adjacent plain range merge and disjoint range retention. Delete test pins alternating survivors to bitmap, cross-segment deletion with missing requested IDs ignored, and delete-all to one Range0..0. It does not assert is_empty after delete-all or test duplicate deletion requests."
+        ],
+        [
+          1234,
+          1284,
+          "Slice fixture uses six segments spanning Range,holes,sorted array,bitmap,general array and final Range. Nested offset/len loops keep only valid bounds, compare values with full-iteration skip/take and check equal size-hint bounds/actual length. Loops exclude len==total and offset==total; separate test covers offset10,len0. Ranges representation and invalid positive bounds are absent."
+        ],
+        [
+          1285,
+          1334,
+          "Nested assert_rechunked compares exact sequence structures for small-to-large, large-to-small and equal chunks, including adjacency coalescing. Too-few and too-many cases assert only is_err, not error variants/messages. All chunks here are positive and valid total counts except deliberate mismatches."
+        ],
+        [
+          1335,
+          1401,
+          "select_row_ids fixture covers sorted/unsorted Indices, Range,Full,To,From and multiple Ranges across two mixed segment sequences. It constructs a flattened-values/explicit-index oracle and checks exact output. No compact Ranges segment, nullable indices, reverse bounds or oversized From case appears."
+        ],
+        [
+          1402,
+          1446,
+          "Bounds fixture checks InvalidInput for sorted/unsorted index1000, Range end1000 and RangeTo1000 over ten IDs; omits Ranges/RangeFrom. Treemap conversion fixture asserts explicit sorted union of six mixed segments. It does not assert sequence order survives set conversion."
+        ],
+        [
+          1447,
+          1467,
+          "Overlapping-bounds regression uses complementary even/odd bitmaps over0..6 and requires the aggregate set contain all six IDs, preventing one segment missing-bit removal from erasing another segment live ID. Oracle includes both explicit0..6 and collected sequence membership."
+        ],
+        [
+          1468,
+          1523,
+          "Position-mask fixture derives ordered positions for one removal from each of five representation segments, applies mask and asserts exact survivor segment encodings. It covers valid unique offsets, not malformed ordering/duplicates or Result failure."
+        ],
+        [
+          1524,
+          1558,
+          "Mask-all fixture over Range and SortedArray requires an empty segment Vec, unlike delete-all. Selection fixture constructs five mixed segments and checks sorted picks including past-end57 drop against flattened expected values."
+        ],
+        [
+          1559,
+          1583,
+          "Ordinary cursor selection tests chunk sizes1/3/7/16 across all values, a forward6..19 request, rewind1..8 and a tail request extending five past EOF. Results match independent slices of the flattened sequence; they do not reuse a cursor on a different sequence."
+        ],
+        [
+          1584,
+          1620,
+          "Bitmap40 with holes3/4/17/39 plus a plain five-row segment yields41 values. Tests full selection, sparse/repeated/past-end picks, sequential range chunks and rewind2..6 against flattened values. This covers bitmap byte boundaries and segment transition but not cached-length invalidation after mutation."
+        ],
+        [
+          1621,
+          1665,
+          "Dense cursor fixture uses one90%-present bitmap and asserts dense selection plus seeded len. Sequential chunks (including byte boundary and past-end) and rewind match expected. Half-full bitmap chooses sparse while still caching20; adding another segment disables dense and leaves lenNone. Threshold equality and all-zero nonempty bitmap are not tested."
+        ],
+        [
+          1666,
+          1697,
+          "Large cursor regression creates one-million-slot bitmap with every17th bit cleared after initial Range0..8. It compares full selection and sorted boundary/stride9973/tail/past-end picks to a flattened oracle. Comment predicts a restart-per-index slowdown, but no elapsed-time assertion or benchmark measurement is performed."
+        ],
+        [
+          1698,
+          1730,
+          "Large fixture additionally reads final100,000 values in one range and chunks1/7/8/9/1024/4097, checking exact concatenation. Separate should_panic test consumes public selection[2,4,3] and requires Selection is not sorted. Internal select_with_cursor decreasing-index iterator is not directly tested by this case."
+        ],
+        [
+          1731,
+          1774,
+          "Mask-to-offset examples cover even selection in Range0..10, allow/block54 within40..60, holes2/6, and an intentionally unsorted hole array[47,43] with allow/block44. Exact expected ordinal ranges demonstrate holes sorted locally for rank correction. These low-value fixtures do not reach high32 boundaries."
+        ],
+        [
+          1775,
+          1804,
+          "Bitmap mask examples cover live0/1/4/5/6/7 with even allowed IDs and separate40..45 bitmap allow/block44. Expected ranges pin omitted holes and present ordinal rank; only allow-list case takes the finite-ID optimization."
+        ],
+        [
+          1805,
+          1839,
+          "Sparse bitmap1024 with holes3/7/64/1000 follows a five-row segment. Mask includes live/hole/outside boundary IDs and expected offsets7..8,66..68,1024..1025. Empty and all-missing masks yield empty. Full-fragment allow marker forces fallback and preserves adjacent segment boundary ranges0..5,5..1025."
+        ],
+        [
+          1840,
+          1879,
+          "Sorted/general array masks check stored-order ordinal grouping, mixed-segment example preserves global offsets, default mask selects full Range and allow_nothing selects none. No empty Range0..0/high32 carry case is included."
+        ],
+        [
+          1880,
+          1901,
+          "Brute-force oracle enumerates each segment values, tests mask.selected and groups resulting ordinals separately per segment. Comment claims no shared logic, but it reuses GroupingIterator and segment.iter/len, so it is independent of optimized mask branches rather than wholly independent. Agreement on fixtures cannot prove all-input equivalence."
+        ],
+        [
+          1902,
+          1924,
+          "Private TestRng holds u64 state. next replaces zero with1, performs xorshift12/25/27 and wrapping multiplication0x2545_F491_4F6C_DD1D; below debug-asserts positive bound then modulo. Seeds0 and1 start identically; modulo sampling is not claimed unbiased. Generator comments introduce disjoint-range fixtures and missing-ID lists."
+        ],
+        [
+          1925,
+          1955,
+          "random_sequence chooses1..4 segments with initial cursor<1000. Kind0 is Range span1..300; kind1/2 bitmap span50..1999 with random hole probability10..90 percent but first slot forced live. Records missing IDs and advances cursor; these generated segments never have empty presence."
+        ],
+        [
+          1956,
+          1996,
+          "Kind3 builds range span20..199 with1..5 sampled holes, sorts/deduplicates them and records them. Final kind makes1..8 sampled IDs within span3*count+1, deduplicates then chooses shuffled Array or SortedArray; advances cursor by full span. No Ranges form, overlapping ranges, huge IDs, empty segments or malformed storage. Returns sequence, recorded holes and next cursor."
+        ],
+        [
+          1997,
+          2019,
+          "random_allow_mask chooses mainly live IDs, sometimes known holes, lower-outside IDs when live[0]>0, or IDs at/past past_end. It preallocates requested count then converts through TreeMap, so duplicates collapse and actual allowed cardinality can be smaller. It assumes live nonempty; random_sequence guarantees that for its fixtures."
+        ],
+        [
+          2020,
+          2043,
+          "Fifty seeded randomized cases generate sequence/live IDs, assert nonempty, and compare allow_nothing,allow_all-live,default,empty/nonempty block masks, three small mixed allow masks and one medium mask. Seeds0/1 duplicate initial generator state. Assertions verify equality to the local brute-force oracle, not timing or a formal proof."
+        ],
+        [
+          2044,
+          2071,
+          "Further randomized masks add a broad allowed region beyond every segment to force fallback and masks containing only holes/outside IDs. Each mask compares optimized result and oracle with seed/mask-index context. The generator restricts ID domains to small values, so u32/u64 boundary arithmetic is not exercised."
+        ],
+        [
+          2072,
+          2105,
+          "Two-bitmap regression follows Range0..5 with100..110 missing102/107 and200..205 missing200. Selected/live/hole/outside IDs yield explicit split ranges0..1,4..5,5..6,7..8,12..13,13..14,16..17 plus oracle equality. All-missing mask yields empty. This pins shared finite-selection cache semantics and lack of cross-segment merging."
+        ],
+        [
+          2106,
+          2118,
+          "Broad two-bitmap allow list includes all live IDs and100 outside IDs, requiring equality with oracle through fallback. It does not measure one-time materialization or assert how many dependency iterators were created."
+        ],
+        [
+          2119,
+          2152,
+          "Rechunk empty-segment test begins with exact-fit two chunks and a smaller-segment accumulation into one chunk, asserting both counts and concrete values. These first scenarios contain no empty segments despite the test name."
+        ],
+        [
+          2153,
+          2186,
+          "Rechunk fixtures then place one empty Range between live runs with split3/1 and multiple consecutive empties while building a three-row chunk. Both assert output cardinality and values. Empty segments are consumed only while some requested chunk still needs rows."
+        ],
+        [
+          2187,
+          2219,
+          "Boundary empty between two positive chunks is skipped when filling the next chunk. Incomplete fixture has two live IDs then trailing empty and requested5, returning only those two. It does not cover trailing empty after an exactly filled final chunk, zero-sized chunks or excess input with allow_incomplete."
+        ],
+        [
+          2220,
+          2250,
+          "row_id_range tests cover empty raw Range returningNone, exact10..=19, unsorted input bounded around10/50 and disjoint-range union0..=104. They do not test is_empty consistency, all-missing nonzero bitmap bounds or noncanonical relative array bases."
+        ],
+        [
+          2251,
+          2271,
+          "Clustered live values0..600 excluding50..250 and300..310 initially select bitmap. use_range_segments returns true and yields one Ranges; second call returns false and preserves exact equality. It validates local idempotence, not manifest configuration or on-disk reader performance."
+        ],
+        [
+          2272,
+          2309,
+          "Compact Ranges fixture compares full values/count, cursor chunks37, selected indices, allow/block masks and treemap conversion against bitmap; protobuf encode/decode must equal the compact sequence. It exercises serde folding but does not establish historical released compatibility. File ends here; no direct Display, invalid mask, duplicate delete, source-switch cursor or high-domain range regression is present. All tests are source-read only."
+        ]
+      ],
+      "limits": "All2,309 physical lines read in ten bounded numbered chunks. This file is synchronous; no storage reads/writes, task scheduling, cancellation or commit occurs locally. Segment/serde/version primitives are fully analyzed. Contextual snippets in lance-select mask.rs, table utils/stream.rs and transaction/manifest_build.rs establish limited dependencies/callers only; those full files remain pending and their snippets do not count as completed coverage. Dataset compaction/update/merge-insert rechunk callers were located lexically, not fully traced. No source edits, network, build/test/benchmark execution or measured performance claims."
+    },
+    {
+      "path": "protos/rowids.proto",
+      "reviewed": true,
+      "role": "Public persisted schema in lance.table for row-ID segments and run-length encoded dataset-version lineage. It declares serialized alternatives without choosing an encoding or performing validation.",
+      "ranges": [
+        [
+          1,
+          10,
+          "License, proto3, and lance.table namespace establish the schema. The LanceV2-versus-flatbuffers question is explicitly a TODO, not the present representation or an authorization to migrate it."
+        ],
+        [
+          11,
+          29,
+          "RowIdSequence.segments tag 1 is an ordered repeated U64Segment sequence. Segment encodings favor sorted and differently sparse IDs. Nested U64Segment.Range uses uint64 start=1 inclusive and end=2 exclusive; empty or reversed-range validation is not encoded here."
+        ],
+        [
+          30,
+          44,
+          "RangeWithHoles has start=1 inclusive, end=2 exclusive, and EncodedU64Array holes=3 storing sorted omitted values. Binary search can determine exclusion and the count of preceding holes, enabling logical offset calculation. Sorting is a semantic requirement in the comment, not a protobuf-enforced property."
+        ],
+        [
+          45,
+          61,
+          "RangeWithBitmap uses start=1/end=2 half-open bounds and bitmap bytes=3. Comment specifies MSB-first and set means present. This contradicts current implementation: Bitmap uses bit i%8 from LSB and codec byte-exact fixture asserts[0xfb,0x03] for length10 with bit2 cleared (rust/lance-table/src/rowids/bitmap.rs:67-77; rust/lance-table/src/rowids/serde.rs:436-451). Decoder requires ceiling byte length and zero high padding (rust/lance-table/src/rowids/serde.rs:132-155). Schema-only MSB interpretation must not be treated as observed writer behavior; historical compatibility remains unverified."
+        ],
+        [
+          62,
+          75,
+          "U64Segment.segment chooses Range tag 1 for sorted-contiguous values, RangeWithHoles tag 2 for few gaps, RangeWithBitmap tag 3 for many gaps, EncodedU64Array sorted_array tag 4 for sparse sorted values, or EncodedU64Array array tag 5 for general unsorted values. Order must be retained in the general case. The trailing comment says RowIdSegment but the declared type is U64Segment; this is a naming discrepancy in a comment, not a second type."
+        ],
+        [
+          76,
+          105,
+          "EncodedU64Array contains U16Array(base uint64=1, offsets bytes=2), U32Array(base uint64=1, offsets bytes=2), and U64Array(values bytes=2). Offsets are unsigned 16- or 32-bit deltas; bytes avoid unsupported uint16 and uint32 varint overhead, while full u64 bytes avoid varints. The array oneof selects u16_array=1, u32_array=2, or u64_array=3. Endianness, alignment, and overflow checks are not stated, so exact byte decoding requires the Rust implementation. The heading calls this bitpacked, whereas declarations explicitly provide fixed-width byte variants; retain that distinction."
+        ],
+        [
+          106,
+          120,
+          "RowDatasetVersionSequence stores repeated RowDatasetVersionRun runs=1 for runs of equal dataset versions. Each run carries U64Segment span=1 and uint64 version=2. The span comment describes the number of consecutive rows, but its declared type is a segment rather than a scalar count; do not replace it with a count or assume how it is interpreted without checking the converter."
+        ]
+      ],
+      "limits": "Schema arms/tags and comment contracts are preserved here. Actual arrays use LE bytes, bitmap uses LSB contrary to the comment, and validation/folding is covered by rust/lance-table/src/rowids/serde.rs:1-884. Exact segment selection and complete local sequence operations are covered at rust/lance-table/src/rowids/segment.rs:1-1624 and rust/lance-table/src/rowids.rs:1-2309; released compatibility remains pending. Version positional behavior is covered at rust/lance-table/src/rowids/version.rs:44-391."
+    },
+    {
+      "path": "rust/lance-table/src/rowids/bitmap.rs",
+      "module": "L1-modules/rust-lance-table.md",
+      "reviewed": true,
+      "role": "Internal LSB-first owned bitmap, borrowed slices, popcounts and bitwise materialization.",
+      "ranges": [
+        [
+          1,
+          10,
+          "SPDX/import and Debug-independent Bitmap declaration derive equality/clone/deep size. Public data:Vec<u8> and len:usize allow arbitrary backing length and padding state; the enclosing bitmap module is private (rust/lance-table/src/rowids.rs:17-24), so pub here is not a public module route."
+        ],
+        [
+          11,
+          22,
+          "pub(super) count_ones processes complete eight-byte chunks as little-endian u64 popcounts, then remaining bytes. It counts every supplied storage bit, not a logical-length mask; popcount is independent of endianness although conversion is explicitly LE. Empty input sums to zero."
+        ],
+        [
+          23,
+          32,
+          "Debug writes Bitmap with data as successive logical bits from index0 through len-1 followed by len. Bit order is LSB first. Formatting errors propagate; invalid backing can panic via get. It prints logical bits rather than raw hexadecimal bytes or allocation capacity."
+        ],
+        [
+          33,
+          38,
+          "new_empty allocates len.div_ceil(8) zero bytes and stores length through from_parts. Zero length gives empty data; allocation failure is not a Result error."
+        ],
+        [
+          39,
+          53,
+          "new_full allocates ceiling byte count filled with0xff, then clears all high padding bits in the final partial byte. len0 has no last-byte access. Both constructors establish zero padding, unlike direct field mutation or from_parts."
+        ],
+        [
+          54,
+          66,
+          "pub(crate) from_parts accepts raw bytes and length without checking shape or padding. bytes borrows the entire backing slice; into_bytes consumes bitmap, returns all backing bytes and discards logical length. Neither truncates or masks malformed storage."
+        ],
+        [
+          67,
+          78,
+          "set, clear and get index data[i/8] with mask1<<(i%8). There is no i<len guard: padding bits in an allocated final byte are accessible, while indices beyond storage panic. Mutators return unit, get returns bool; no checked alternative or resize occurs."
+        ],
+        [
+          79,
+          90,
+          "len returns stored logical length. slice constructs borrowing BitmapSlice with self/start/len and performs no bounds or overflow validation. Mutation is excluded while this immutable borrow lives, but stored slice coordinates can be invalid."
+        ],
+        [
+          91,
+          106,
+          "count_ones counts all stored bytes, including extra bytes or nonzero padding. count_zeros subtracts it from logical len with ordinary usize arithmetic, which can underflow for malformed state. iter emits each stored byte low bit first and takes at most len; too-short backing silently yields fewer than len values, unlike get/debug. It does not allocate or advertise exact size."
+        ],
+        [
+          107,
+          118,
+          "From<&[bool]> allocates an empty bitmap of the input length and sets exactly true positions in input order. It preserves length and zero padding, scanning every boolean."
+        ],
+        [
+          119,
+          125,
+          "BitmapSlice retains private borrowed Bitmap, start and len. It owns no backing storage and has no exposed constructor except Bitmap::slice in this file."
+        ],
+        [
+          126,
+          163,
+          "Slice count_ones returns0 immediately for zero length, even with invalid start. Otherwise computes first/last bytes using start+len-1, then tests a single-byte interval or first/last partial bytes and counts middle whole bytes with the helper. Bounds are enforced only by backing indexing/slicing, not bitmap logical length. Coordinates can count padding; arithmetic overflow or storage bounds panic is possible. Work is proportional to covered bytes plus at most edge bits."
+        ],
+        [
+          164,
+          180,
+          "Slice count_zeros subtracts selected ones from its len. From<BitmapSlice> allocates a new empty bitmap and loops every selected bit, get(start+i) then set(i), compacting into a fresh zero-padded backing. This is a copying O(bits) conversion, not a zero-copy offset view; zero length performs no source access. Invalid coordinates follow get/ordinary-addition behavior."
+        ],
+        [
+          181,
+          214,
+          "cfg(test) test_bitmap checks len10 initially empty, sets0,1,4,5,9, verifies counts and exact debug bitstring1100110001, clears1,4 then checks1000010001 and a five-bit slice count. It exercises LSB logical order across the second byte."
+        ],
+        [
+          215,
+          237,
+          "Count fixture tests lengths1,7,8,63,64,65,130 with every third bit set against div_ceil(3). Direct-storage mutation fixture changes two bytes and checks immediate popcount updates, proving no count cache. No malformed padding/length case is asserted."
+        ],
+        [
+          238,
+          258,
+          "Equality fixture builds alternating bitmaps of lengths48 through55 from both full and empty constructors and asserts equality. This covers final-byte padding normalization together with logical bits; equality derives over both data and len."
+        ],
+        [
+          259,
+          280,
+          "Property fixture creates boolean arrays of length0..100, clamps start and length to valid coordinates, and compares slice popcount/zero count against the boolean subslice. It deliberately generates valid slices only."
+        ],
+        [
+          281,
+          294,
+          "Iteration fixture checks empty length10 emits ten false values and full length10 emits ten true values; it tests logical truncation of final-byte padding."
+        ],
+        [
+          295,
+          318,
+          "Iteration fixture sets0,3,7,9 in length10 and asserts the complete ten-boolean output, covering the byte boundary and final valid bit."
+        ],
+        [
+          319,
+          347,
+          "Iteration fixture for length15 sets0,7,14 and asserts all fifteen booleans in order, crossing bytes while omitting final padding bit."
+        ],
+        [
+          348,
+          358,
+          "Property fixture converts arbitrary boolean arrays of length0..100 into Bitmap and asserts iterator equality with original values. No direct slice-copy, invalid from_parts, overflow, logical out-of-range access or malformed-short iterator test appears locally."
+        ]
+      ],
+      "limits": "All358 physical lines read in bounded chunks. Private parent-module visibility matters. Behavior described from source; no tests executed. Enclosing segment selection/masking is now covered at rust/lance-table/src/rowids/segment.rs:126-299 and rust/lance-table/src/rowids/segment.rs:694-746; full local sequence behavior is covered at rust/lance-table/src/rowids.rs:1-2309; stream/dataset callers remain pending."
+    },
+    {
+      "path": "rust/lance-table/src/rowids/encoded_array.rs",
+      "module": "L1-modules/rust-lance-table.md",
+      "reviewed": true,
+      "role": "Internal owned u64 arrays with optional u16/u32 base-relative deltas and conversion/search/slicing operations.",
+      "ranges": [
+        [
+          1,
+          7,
+          "SPDX and Range/DeepSizeOf imports. No IO, Arrow, async or external encoding library is used in this implementation."
+        ],
+        [
+          8,
+          28,
+          "EncodedU64Array derives Debug/Clone/PartialEq/Eq/DeepSizeOf with U16{base:u64,offsets:Vec<u16>}, U32 with u32 offsets, and U64(Vec<u64>). Parent encoded_array module is private (rust/lance-table/src/rowids.rs:17-24). Documentation notes u16 saves memory only beyond two values, but constructors do not enforce that size threshold. Direct construction can violate nonoverflowing/minimum-base assumptions."
+        ],
+        [
+          29,
+          48,
+          "len is backing element count. iter returns a boxed borrowing DoubleEndedIterator, decoding base+offset with ordinary u64 addition or copying U64 values. Boxing allocates iterator storage; values are lazy and order-preserving, not sorted automatically. Malformed delta overflow is unchecked here."
+        ],
+        [
+          49,
+          68,
+          "get returns None for absent index; present delta values add base, plain values copy. Bounds checks use Vec::get; addition can overflow for directly constructed malformed arrays."
+        ],
+        [
+          69,
+          88,
+          "min returns None for empty arrays, otherwise returns base directly for U16/U32 and scans values for U64. Thus a nonempty delta vector without offset0 has reported min below its actual minimum; serde validates overflow but does not require offset0 (rust/lance-table/src/rowids/serde.rs:174-214). Vec construction rebases to actual min, but direct/protobuf construction need not."
+        ],
+        [
+          89,
+          108,
+          "max returns None for empty arrays; otherwise scans maximum delta and adds base, or scans U64. Guards make local unwrap safe for nonempty vectors; ordinary addition still depends on valid delta bounds."
+        ],
+        [
+          109,
+          148,
+          "first and last preserve stored order, returning None for empty, base+endpoint delta for compressed variants or copied endpoint for U64. They do not use min/max or assume ascending order."
+        ],
+        [
+          149,
+          174,
+          "binary_search delegates to sorted typed backing vectors. For deltas, a value below base returns Err(0), above representable delta maximum returns Err(len), otherwise searches cast delta. U64 searches directly. Sortedness is a caller precondition, not validated; duplicate match selection follows the standard library."
+        ],
+        [
+          175,
+          192,
+          "slice(offset,len) uses native offset..offset+len slicing, so invalid bounds/overflow can panic. U16/U32 slices decode all selected values and collect through FromIterator, rebasing/reselecting compressed representation. U64 slices copy directly into U64 even if narrow. All variants allocate owned storage; no shared view."
+        ],
+        [
+          193,
+          213,
+          "From<Vec<u64>> scans min/max, defaults extrema to0 for empty, returns U64(empty) for no values. For nonempty max-min<=u16::MAX choose U16; else <=u32::MAX choose U32; else retain original U64 vector. Compressed forms allocate offsets and preserve order/duplicates. A singleton is U16 despite allocation/size tradeoff in doc. No sortedness check or deduplication."
+        ],
+        [
+          214,
+          232,
+          "From<Range<u64>> computes end-start with ordinary subtraction then materializes every value. It chooses U16 when length<u16::MAX, U32 when length<u32::MAX, else U64: strict length thresholds differ from inclusive max-minus-min thresholds of Vec conversion. Empty42..42 is U16{base42,empty}; length65535 already uses U32 even though largest delta65534 fits u16. Reversed range can underflow; very wide input can require enormous allocation."
+        ],
+        [
+          233,
+          255,
+          "FromIterator first collects all u64 values into a Vec then delegates From<Vec>; compression is not streaming. IntoIterator consumes storage and returns boxed owned DoubleEndedIterator decoding ordinary base+offset or moving plain values. Borrowed and owned iteration share ordering/overflow rules."
+        ],
+        [
+          256,
+          282,
+          "cfg(test) roundtrip helper asserts exact variant, length, first/last, scanned expected min/max, complete borrowed iteration, every valid get and FromIterator equality. It is local to test_encoded_array_from_vec; no invalid get or malformed-base contract is tested."
+        ],
+        [
+          283,
+          319,
+          "Roundtrip fixtures cover emptyU64, singleton42U16, unsorted u16 offsets including0/MAX with base2*u16MAX, analogous u32 offsets/base, and plain[42,0,43,u64MAX,99]. No sortedness assumption in roundtrip."
+        ],
+        [
+          320,
+          358,
+          "Double-ended fixture tests all three variants with five values/base42, compares forward and reversed reverse traversal, and alternates next/next_back against get positions. It checks value order across both ends, not allocation cost or fused/exhaustion guarantees."
+        ],
+        [
+          359,
+          392,
+          "Range fixture materializes forty values above2*u16MAX into U16 and u16MAX+10 values above2*u32MAX into U32, checks exact representation and consuming roundtrip. These are source tests, not measured subsecond performance evidence."
+        ],
+        [
+          393,
+          400,
+          "Comment declines a U64 range fixture because it would be very large; empty42..42 checks len0 only. Local tests do not cover binary_search, slice representation changes, exact encoding thresholds, reversed ranges, offset overflow or noncanonical min behavior."
+        ]
+      ],
+      "limits": "All400 physical lines read. No source tests/builds executed. Encoded arrays are internal to the private module; enclosing segment selection is covered at rust/lance-table/src/rowids/segment.rs:126-299; complete public sequence contracts are covered at rust/lance-table/src/rowids.rs:1-2309. Allocation/arithmetic observations are source-derived, not benchmarks."
+    },
+    {
+      "path": "rust/lance-table/src/rowids/runs.rs",
+      "module": "L1-modules/rust-lance-table.md",
+      "reviewed": true,
+      "role": "Private-module HoleRuns encoding of missing u32 offsets, validated construction, rank/select conversion and batched present-value expansion.",
+      "ranges": [
+        [
+          1,
+          13,
+          "SPDX/module docs identify run-length holes for U64Segment::Ranges; imports Range,Result,DeepSizeOf, sibling Bitmap and corrupt_row_id_metadata. runs is a private child module with no facade reexport (rust/lance-table/src/rowids.rs:17-24); pub declarations here are not a publicly nameable module route. Error helper returns CorruptFile named row ID metadata (rust/lance-table/src/rowids/serde.rs:13-17)."
+        ],
+        [
+          14,
+          35,
+          "HoleRuns derives Debug/Clone/PartialEq/Eq/DeepSizeOf with private span:u32, starts:Vec<u32> and present_before:Vec<u32>. Offsets are relative to enclosing range base. present_before[k] counts present offsets before missing run k; terminal element counts all present. Ends are reconstructed, not retained. Doc8 bytes/run compares raw two-u32 arrays, not Vec capacity/struct overhead or serialized wire size; storage also has one terminal u32."
+        ],
+        [
+          36,
+          61,
+          "try_new(span,starts,ends) first rejects differing list lengths, then each empty/reversed run and end>span through corrupt metadata error with lengths/index/bounds. Allocates present_before capacity starts.len()+1 and tracks total missing and previous end. Zero span with no runs is valid; a nonempty run in it fails."
+        ],
+        [
+          62,
+          82,
+          "Reject previous_end>=start, covering unsorted, overlapping and adjacent runs; adjacency is invalid because runs must be maximal. Append start-missing before each hole, add end-start and finally span-total_missing. Valid disjoint bounded runs make u32 subtraction/addition fit; starts.len()+1/capacity allocation remain ordinary usize operations. Returns owned starts/prefix table, dropping input ends. No external bitmap/IO needed."
+        ],
+        [
+          83,
+          105,
+          "from_bitmap assumes bitmap.len fits u32 but does not checked-convert it. Iterates bytes with valid_bits=min(span-offset,8); ORs bits beyond logical length to present via checked_shl so padding cannot open a hole. All-present byte closes an open run at byte start; all-missing byte opens/continues a run. The compacted-table byte distribution is a performance rationale in comments, not measured here."
+        ],
+        [
+          106,
+          131,
+          "Mixed bytes scan valid low-order bits, opening missing and closing present transitions at offset+bit. Advance offset8 and stop once>=span, then close a trailing hole at span. Cast all bounds to u32 and call try_new(...).expect; violating length/bitmap assumptions can truncate or panic. Two temporary bounds vectors coexist with constructed prefix vector; no unsafe block. Under valid input cost O(bytes+edge bits+runs)."
+        ],
+        [
+          132,
+          155,
+          "num_runs returns starts.len; present_len directly indexes terminal prefix. Private start_or_span returns supplied run start or span sentinel; missing_before(k)=start_or_span(k)-present_before[k]; end(k)=starts[k]+missing_before(k+1)-missing_before(k). These O(1) helpers assume constructor invariants and valid private indices."
+        ],
+        [
+          156,
+          172,
+          "position(offset) rejects offset>=span, upper-bounds starts<=offset, rejects membership in preceding missing run, otherwise subtracts missing_before(k) to produce present ordinal. runs_before_position upper-bounds present_before excluding terminal by <=position; this skips missing runs before the selected present value. Partition operations are O(log number of runs) under sorted invariants."
+        ],
+        [
+          173,
+          181,
+          "offset_at(position) rejects position>=total present, counts preceding runs and returns position+missing_before(k). It is inverse of position for present offsets under validated state; empty/all-missing spans return None for every input. No Result/error for out-of-range lookup."
+        ],
+        [
+          182,
+          191,
+          "present_ranges lazily iterates k=0..=num_runs, constructs gap from0 or preceding hole end to next hole start/span, and filters empty gaps. Returns a borrowing DoubleEndedIterator; leading/trailing holes disappear naturally and no per-offset Vec is allocated."
+        ],
+        [
+          192,
+          216,
+          "extend_values appends base+offset for an ordinal Range<u32>. Silently clamps end to present_len; start>=clamped end/reversed range emits nothing. One upper-bound search locates initial gap, then walks gaps, appending contiguous u64 ranges and advancing ordinal position. Existing Vec contents remain. Ordinary base+offset+length arithmetic can overflow, including exclusive endpoint when a final actual value would be u64::MAX; no checked error channel. Runtime cost O(log runs+visited gaps+emitted values), plus Vec growth."
+        ],
+        [
+          217,
+          242,
+          "cfg(test) helper span20 holes3..7 and8..15; counts/ranges test asserts11missing/9present, reconstructed ends[7,15], and present gaps[0..3,7..8,15..20] in forward and reversed order."
+        ],
+        [
+          243,
+          265,
+          "Rank/select fixture materializes exact present offsets[0,1,2,7,15,16,17,18,19], asserts both lookup directions for all nine, and None for listed missing/out-of-range offsets3,4,6,8,14,20,100 plus ordinal9."
+        ],
+        [
+          266,
+          279,
+          "Expansion fixture with base100 checks ordinal1..7 ->[101,102,107,115,116,117], clipped4..40 ->[115..119], and9..12 ->empty. It clears the vector between calls, so append preservation is implementation-derived, not tested here."
+        ],
+        [
+          280,
+          310,
+          "Bitmap conversion matrix uses lengths20,1,9,17,64,70 and explicit cleared sets covering clustered/all/none/edge bits. Reconstructs every missing offset using position, compares to cleared list, checks total missing and strictly separated runs. No zero-length or wider-than-u32 fixture. Tests read only."
+        ],
+        [
+          311,
+          325,
+          "Malformed-constructor cases are unequal counts, empty run,beyond span,overlap,adjacency. Each asserts returned diagnostic contains Ranges, without asserting CorruptFile variant. No separate reverse-order/reversed-range, arithmetic-max or base overflow fixture locally."
+        ]
+      ],
+      "limits": "All325 lines fully read. Parent routing and corruption helper are now covered in the fully analyzed rowids.rs and serde.rs. HoleRuns methods are pub in a private module; bitmap storage and wire serde are now covered at rust/lance-table/src/rowids/bitmap.rs:1-358 and rust/lance-table/src/rowids/serde.rs:1-884. Segment selection is now covered at rust/lance-table/src/rowids/segment.rs:245-289; local sequence behavior is covered at rust/lance-table/src/rowids.rs:1-2309; full transaction integration remains pending. Source-derived costs/counterexamples are not executed benchmark or test results."
+    },
+    {
+      "path": "rust/lance-table/src/rowids/segment.rs",
+      "module": "L1-modules/rust-lance-table.md",
+      "reviewed": true,
+      "role": "Public row-ID segment representations, selection/cost policy, positional operations, append/delete/mask and bitmap scan cursors.",
+      "ranges": [
+        [
+          1,
+          15,
+          "SPDX/imports Range/RangeInclusive, sibling Bitmap/EncodedU64Array/HoleRuns and DeepSizeOf. Private inline u128_byte_cost_to_usize uses checked conversion with usize::MAX fallback for infeasible estimated costs. This saturates a cost, not an input row value or validated length."
+        ],
+        [
+          16,
+          39,
+          "Type docs assume distinct u64s and describe sorted/contiguous/dense/sparse selection with approximate storage formulas. These are estimates and rationale, not actual serialized lengths, heap bounds or enforced uniqueness. Runtime cost formulas below use inclusive total_slots and fixed assumed offset widths; no benchmark is supplied here."
+        ],
+        [
+          40,
+          63,
+          "Public U64Segment derives Debug/equality/Clone and exposes Range half-open u64 bounds, RangeWithHoles with EncodedU64Array, and RangeWithBitmap. Hole payload is a sorted array of absolute missing values despite comment calling it a bitmap of offsets; membership code compares values directly (rust/lance-table/src/rowids/segment.rs:398-410). Bitmap set means present. Size/threshold comments are heuristic and not authoritative selection conditions. Public segment module route is rust/lance-table/src/rowids.rs:17-24; field types from private modules can still be observed through public variants."
+        ],
+        [
+          64,
+          83,
+          "Ranges stores enclosing Range plus HoleRuns; SortedArray and Array store encoded arrays. Ranges doc describes compact in-memory grouping and repeated plain wire Range representation; serde implements flattening only at sequence level (rust/lance-table/src/rowids/serde.rs:232-299). Comment says opted-in tables and fewer than one range/128 slots, but no table/config argument exists here. from_slice never selects Ranges; actual admission through as_ranges uses a strict byte estimate. The heap-enum and wire-byte statements are comment-level motivation, not allocation measurements."
+        ],
+        [
+          84,
+          96,
+          "DeepSizeOf children returns0 for Range and delegates to owned holes/bitmap/runs/array for all other arms using shared Context. It omits inline enum size because the trait outer method accounts for it, and does not compute serialized protobuf size."
+        ],
+        [
+          97,
+          125,
+          "Private Debug SegmentStats stores min/max/count u64 and sorted bool. n_holes debug-asserts sorted, returns0 for count0, otherwise computes (max-min+1)-count in u128 so the full u64 domain has representable slot count. It assumes count<=slots and min<=max; duplicate-derived count can underflow despite u128. No Result or duplicate validation."
+        ],
+        [
+          126,
+          143,
+          "Private holes_in_slice returns lazy inclusive-range filter with one peekable existing iterator. A matching next existing value is consumed and excluded; every other range value is yielded as missing. Correctness assumes existing values appear in increasing order without duplicates and within the range. A stale unmatched peek can cause later existing values to be reported as holes. Iteration work visits all numeric slots, not just holes."
+        ],
+        [
+          144,
+          175,
+          "compute_stats scans all values, updates min/max and count, then marks sorted=false if a later value is below running maximum. Equal adjacent values remain sorted; this detects nondecreasing order, not strict uniqueness. Empty stats are min0/max0/count0/sortedtrue. Ordinary u64 count increment has no overflow error."
+        ],
+        [
+          176,
+          195,
+          "sorted_sequence_sizes returns [holes,bitmap,array] estimates using u128:24+4*n_holes,24+ceil(total_slots/8),24+2*count, each saturating and then converting to usize with MAX fallback. Assumed four-byte holes and two-byte array entries need not match selected EncodedU64Array width/base or actual protobuf tags/lengths. Return order matters for ties. This function expects valid sorted stats."
+        ],
+        [
+          196,
+          219,
+          "from_stats_and_sequence for sorted stats computes holes and checked max+1 exclusive end. Empty yields Range0..0; zero holes with representable end yields Range(min..end) without consuming the supplied sequence. Otherwise choose minimum estimated size; ties favor holes first. Hole path scans all slots, collects/sorts missing absolute values and compresses them through EncodedU64Array. Distinctness is only a precondition: sorted[0,0,2] has slots3/count3 and becomes Range0..3, replacing the duplicate with1. This counterexample is source-derived, not executed."
+        ],
+        [
+          220,
+          240,
+          "Bitmap wins when its estimate equals remaining minimum: allocate full bitmap for max-min+1 (unchecked usize cast/add), enumerate every missing value and clear relative bit. Otherwise create SortedArray from sequence. If max==u64MAX, all range-backed forms are excluded and SortedArray used; unsorted stats choose Array regardless of extrema/count. Costs do not add an allocation budget or checked32-bit span guard here."
+        ],
+        [
+          241,
+          267,
+          "from_slice delegates to FromIterator and therefore copies input values before selection. from_sorted_ranges requires at least two inputs through slice pattern, computes last.end-first.start then checked u32 span conversion, builds gap starts/ends with unchecked subtractions/casts and calls HoleRuns::try_new(...).ok(). Invalid holes become None, but malformed interval order/bounds can panic or truncate before validation; it does not independently check every input range is nonempty/forward. Valid sorted separated ranges produce Ranges even when a byte-cost comparison would not favor it."
+        ],
+        [
+          268,
+          292,
+          "as_ranges handles only RangeWithBitmap; bitmap.len>u32MAX returns None. It first builds HoleRuns from the entire bitmap, then accepts only (num_missing_runs+1)*16 < bitmap.bytes().len. This compares estimated plain-range bytes to bitmap payload bytes, not equal full-wire overhead, and can overcount present ranges at missing endpoints. It clones bounds, does not validate range span against bitmap length, and supplies no feature opt-in check. All other variants return None; even a rejected bitmap conversion paid temporary HoleRuns construction."
+        ],
+        [
+          293,
+          300,
+          "FromIterator materializes all u64 values into Vec, scans stats over a copied iterator, then moves Vec into selection. This is not a streaming compression interface; compressed array paths can allocate additional backing. A selected contiguous Range drops the collected Vec without using sequence contents again."
+        ],
+        [
+          301,
+          329,
+          "iter returns a boxed DoubleEndedIterator. Range clones its bounds; holes scan every value with binary_search per slot; bitmap scans every value with get at relative offset; Ranges flat_maps HoleRuns present gaps with base-adjusted half-open ranges; arrays wrap their already boxed iterators in another Box. Range-backed iteration uses ordinary base/offset arithmetic. Costs for holes/bitmap scale with numeric span, not only present count; Ranges skips holes as intervals."
+        ],
+        [
+          330,
+          345,
+          "len returns range.end-start as usize, subtracting hole count or bitmap.count_zeros for holes/bitmap; Ranges returns runs.present_len, arrays own len. Thus holes count is O(1), bitmap count scans bytes, other counts constant. Range subtraction/casts and missing-count subtraction are unchecked. Inconsistent public bounds/backing can make len disagree with iteration or underflow; this is not an invariant validator."
+        ],
+        [
+          346,
+          359,
+          "pub(crate) use_dense_range_expansion only accepts bitmap segments and compares caller-supplied segment_len against bitmap.len - floor(bitmap.len/4), using saturating_sub. This is ceil(3*logical_len/4) without multiplication overflow. It trusts segment_len rather than recomputing popcount; other variants false. is_empty delegates len==0 and inherits its arithmetic/precondition behavior."
+        ],
+        [
+          360,
+          377,
+          "range returns stored start..=end-1 whenever the enclosing Range is nonempty for Range/holes/bitmap/Ranges. It does not inspect presence bits/holes; despite doc saying excludes tombstones and no extrema for empty segments, an all-zero bitmap on0..8 has len0 but rangeSome0..=7. SortedArray uses first/last, general Array min/max (noncanonical compressed min caveat applies). Reversed/zero stored bounds return None. Counterexample is source-derived, unexecuted."
+        ],
+        [
+          378,
+          388,
+          "slice with requested len0 returns canonical Range0..0 without checking offset. Otherwise collects iter.skip(offset).take(len) then from_slice, allocating selected Vec plus the constructor copy before re-encoding. Excess length silently truncates; offset past end yields empty; no bounds Result. It retains numeric values rather than rebasing positions, and never emits Ranges because from_slice does not."
+        ],
+        [
+          389,
+          432,
+          "position maps value to present ordinal: Range containment then subtraction; holes containment then binary search (found means absent; insertion index counts earlier holes); Ranges containment then runs.position on relative u32 cast; bitmap containment/get then counts zeros before offset and subtracts; sorted array binary search, general array first linear match. No validation of sortedness, uniqueness, bitmap shape or u32 fit for direct malformed variants. Bitmap rank scans prefix bytes; holes/Ranges use logarithmic lookup."
+        ],
+        [
+          433,
+          461,
+          "get Range uses checked start+i then end guard, returning None on overflow/bounds. Holes first computes unchecked length and bounds-checks i, then binary-searches smallest k with holes[k].saturating_sub(k)>start+i, returning start+i+k. Assumes unique sorted bounded holes; ordinary final arithmetic and usize/u64 casts are not checked, but valid invariants make ordinal select correct. This avoids scanning every numeric slot."
+        ],
+        [
+          462,
+          479,
+          "Bitmap get creates a fresh cursor then selects index, so separate get calls do not retain progress. Ranges checked-converts i to u32, asks runs.offset_at and adds range base; arrays delegate get. cursor returns public borrowing SegmentCursor with default byte state, binding that wrapper to one immutable segment."
+        ],
+        [
+          480,
+          506,
+          "contains uses bounds for Range; holes checks bounds then linearly searches decoded hole values (unlike logarithmic position); bitmap checks bounds then bit; Ranges uses bounds plus runs.position; SortedArray binary search; Array linear any. It performs no IO/allocation of result collections but array iterators are boxed. Invalid direct backing follows delegated panic/arithmetic behavior."
+        ],
+        [
+          507,
+          519,
+          "with_new_high consumes self and returns Result. It obtains range() and rejects val<=reported end with InvalidInput text giving new/current values. Empty reported range skips guard. For range-backed missing endpoints, reported stored end can exceed actual greatest present value and reject an otherwise greater present value. Error consumes ownership; it does not return the original segment."
+        ],
+        [
+          520,
+          563,
+          "Append to Range handles empty, adjacent and gapped values. Gaps allocate U64 holes across old end..val; holes variant retains storage for adjacent append, otherwise decodes all old holes and appends every gap into plain U64. Every range-backed branch uses unchecked val+1, so appending u64MAX can overflow despite Result and despite safe max handling in constructors. No cost reselection for these two variants."
+        ],
+        [
+          564,
+          588,
+          "Bitmap append builds new end=val+1, computes unchecked gap usize, collects old logical bools plus false gap plus true into Vec<bool>, then copies into Bitmap; memory scales with expanded span. Ranges append expands all current values into Vec, pushes val and from_slice copies/reselects, dropping compact-Ranges representation until a caller optimizes again. Commit re-encoding in comment is not a traced caller guarantee here."
+        ],
+        [
+          589,
+          628,
+          "SortedArray append keeps U64 backing with push. U16 retains base/width when checked delta fits, widens all offsets to U32 if it fits there, otherwise decodes all old values and recompresses with EncodedU64Array::from. U32 retains if delta fits, else decode/recompress. On normal valid nonempty sorted input the higher-value guard implies no base decrease, but empty/direct malformed state can enter fallback. It keeps SortedArray variant rather than reselecting dense segment representation."
+        ],
+        [
+          629,
+          669,
+          "Array append mirrors U64 push, U16 keep/widen/fallback and U32 keep/fallback, preserving Array even if values become sorted. It adds only a value greater than reported maximum, never arbitrary insertion. Delta checks avoid subtraction overflow, while decoding existing malformed offsets still uses ordinary addition. Every retained/widened path returns Ok early; outer match wraps other successful paths in Ok."
+        ],
+        [
+          670,
+          693,
+          "delete borrows self and expects supplied values to exist and follow appearance order. Debug assertion checks only range().unwrap().contains for each requested value, not actual presence or order, and may panic for nonempty deletion from empty segment. A peekable requested-value filter removes a value only when it equals the current front request; missing/duplicate/out-of-order requests can block later removals. It scans once to compute surviving stats and again to reconstruct representation, with no Result or runtime validation in release. Empty request still rebuilds/reselects."
+        ],
+        [
+          694,
+          710,
+          "mask mutates self using u32 positions. Empty list returns immediately. If positions.len()==self.len(), it replaces with empty Range regardless of position values; e.g.Range0..2 masked by[0,0] clears both. Larger list can underflow count. It infers sortedness from variant and trusts positions are valid/unique/ordered without checking. Counterexample is source-only, not executed."
+        ],
+        [
+          711,
+          734,
+          "mask finds first/last presumed unmasked ordinal by zipping forward/reverse ordinal ranges with cycling position lists, then unwraps get for extrema and constructs stats with old length minus requested count. This assumes an ascending distinct in-bounds mask. For Array the first/last surviving numeric values are not necessarily min/max, but sorted=false makes reconstruction ignore these stats. Ordinary casts can truncate huge ordinals."
+        ],
+        [
+          735,
+          748,
+          "mask enumerates current values and advances a single peekable positions iterator only on exact ordinal equality, retaining all others. It assigns reconstructed segment only after construction finishes. Wrong masks can produce inconsistent stats versus filtered sequence, wrong reconstruction or panic; there is no partial in-place per-bit mutation/rollback API. Successful mask reselects one of five constructor forms and never Ranges."
+        ],
+        [
+          749,
+          769,
+          "Public SegmentCursor borrows a U64Segment and owns private SegmentCursorState. Crate-visible Debug/Default state has private byte_idx and ones_before, counting set bits in preceding bytes; default zero. Public cursor.get simply delegates state.get with its bound segment. State itself accepts arbitrary segments on calls, with no identity/lifetime binding or automatic reset between sources."
+        ],
+        [
+          770,
+          803,
+          "Crate-visible state.extend_range appends to caller Vec. Non-bitmap Range clips selection.end to segment length and extends base-adjusted interval if start<end; Ranges clamps both ordinals to u32MAX and delegates runs.extend_values; other variants loop every requested ordinal and filter_map get, omitting out-of-bounds entries. Non-bitmap calls leave bitmap scan state untouched. Empty/reversed selections append nothing on valid state; no Result or reserve."
+        ],
+        [
+          804,
+          839,
+          "Bitmap extend_range rewinds only when selection.start<ones_before, then scans bytes. Skip bytes whose cumulative set-bit count is<=selection.start. Within selected byte repeatedly extract trailing set bit in LSB order, append base+byte*8+bit for ranks in selection and clear lowest bit. A return inside a byte leaves state at that byte start; completing a byte updates both counters. Requests past end emit only available values, with no error. Empty/reversed selections may still advance scan state before emitting nothing. Logical length/range end are not checked; valid zero padding is assumed."
+        ],
+        [
+          840,
+          856,
+          "extend_dense_range delegates nonbitmap segments to ordinary extension. Bitmap rewinds by same ones_before condition then calls private dense helper with range.start and entire byte slice. No density check occurs in this method; use_dense_range_expansion is a separate caller advisory."
+        ],
+        [
+          857,
+          902,
+          "Dense helper skips by popcount. If selection includes every set bit of a byte and popcount>=6, full0xff byte appends one interval of eight values; otherwise it skips zero runs and appends consecutive one-bit intervals. Nonfull branch cannot have eight trailing ones, avoiding shift-by8; full-byte branch handles that case. It updates state after complete byte and stops when reaching requested end. Ordinary base+offset/exclusive-end arithmetic remains unchecked."
+        ],
+        [
+          903,
+          924,
+          "Dense helper fallback handles partial selected bytes or fewer than six set bits with the same trailing-zero/per-set-bit rank loop as ordinary extension. Early return preserves byte-start state; full completion advances counters. It visits bytes and emitted values, but no runtime performance measurement proves the threshold optimal. Malformed nonzero padding can be emitted beyond logical range."
+        ],
+        [
+          925,
+          956,
+          "State.get delegates nonbitmap to segment.get. Bitmap rewinds if i<ones_before, computes remaining rank and scans byte popcounts; in target byte clear remaining lowest set bits and return base+byte*8+trailing_zeros. It retains target byte state so repeated/reversed indices within it need no reset. Exhaustion advances to byte end and returns None; a later smaller request resets as needed. No bitmap.len/range.end guard: it relies on deserializer zero-padding contract, while direct fields are mutable."
+        ],
+        [
+          957,
+          975,
+          "cfg(test) module plus public-mutability fixture pattern-matches bitmap arm, overwrites raw byte with0b10100101 and asserts stored length8/popcount4. This tests mutability and immediate popcount, not malformed padding/shape or cursor invalidation."
+        ],
+        [
+          976,
+          1011,
+          "Dense-extension fixture uses24 bits, clears10/17/22 and asserts density advisory true, while three separated bits give false. It compares sequential selections0..8,8..15,15..21 and partial9..20 against ordinary iterator values. No timing or rewind/source-reuse behavior is asserted."
+        ],
+        [
+          1012,
+          1067,
+          "Nested check_segment helper asserts exact selected representation, count, full iteration, numeric extrema and get/position inverses for every supplied value. Nested check_segment_iter compares forward/reverse and alternating next/next_back against get. It does not test duplicate inputs or iterator exhaustion guarantees."
+        ],
+        [
+          1068,
+          1112,
+          "Selection fixtures cover empty Range, singleton42, contiguous100..200, one missing100 from0..1000 as holes, alternating even values as bitmap0..999, sparse sorted[1,7000,24000] and unsorted[7000,1,24000] as array forms. Exact representation assertions pin current heuristic choices."
+        ],
+        [
+          1113,
+          1136,
+          "Empty range fixture includes Range5..5, zero-span holes/bitmap and empty sorted/general arrays, requiring rangeNone. It omits Ranges and nonzero enclosing ranges with no present values, so it does not establish the broad comment for every empty segment shape."
+        ],
+        [
+          1137,
+          1195,
+          "Overflow-boundary fixture asserts SortedArray for sparse span to i64MAX, [0,u64MAX], dense values ending u64MAX and singletonu64MAX, with lengths/value roundtrips. Three contiguous values ending u64MAX-1 must remain Range ending u64MAX. This covers constructor exclusive-end safety, not append-to-u64MAX."
+        ],
+        [
+          1196,
+          1221,
+          "Further constructor regressions retain RangeWithHoles for one missing500 in100..1100 and bitmap for five values with one gap100..105. Exact/value assertions protect cost selection while u128 overflow handling changes."
+        ],
+        [
+          1222,
+          1242,
+          "Hole-length fixture uses50,000 holes at3*i+1 over150,000 slots and a wide-base ten-slot range with two holes, comparing len against count and iterator. Comment says every encoding width, but first input selects U32 offsets and wide-base pair selects U16; there is no forced plain-U64 hole representation in this test. It is correctness evidence, not a measured time bound."
+        ],
+        [
+          1243,
+          1280,
+          "Cost tests require helper map0/42/usizeMAX exactly and u128MAX to usizeMAX, sparse-hole estimate saturation, and huge array estimate saturation. Synthetic stats avoid allocating those spans. Tests assert sizes, not actual serialized lengths or allocations."
+        ],
+        [
+          1281,
+          1295,
+          "Full-span synthetic bitmap-cost fixture compares bitmap estimate with saturated holes and requires bitmap cost<usizeMAX. Its comment explicitly assumes64-bit; no target-width cfg guards the test. On32-bit that estimate would saturate too, so this assertion is not portable as written; source deduction only, no32-bit execution."
+        ],
+        [
+          1296,
+          1340,
+          "with_new_high test starts Range10..20, appends adjacent20 or gap25, and checks exact Range/U64-hole forms; repeats existing holes15/17 with adjacent/gapped append. It pins lack of re-compression on holes append."
+        ],
+        [
+          1341,
+          1385,
+          "Bitmap append tests range10..20 with missing13/17, adjacent20 and gap25; constructs expected bitmaps length11/16 and verifies full structural equality including added gap bits."
+        ],
+        [
+          1386,
+          1421,
+          "Append fixtures for plain-U64 SortedArray/Array verify push15, empty Range appends5, and singleton42 appends50 with explicit holes43..49. No compressed widening, standalone Ranges max boundary or u64MAX append case is tested here."
+        ],
+        [
+          1422,
+          1449,
+          "Two append rejection fixtures pass value below/equal current max and assert is_err plus exact diagnostic substring. They do not assert Error::InvalidInput variant, although implementation selects it."
+        ],
+        [
+          1450,
+          1501,
+          "Membership tests cover Range boundaries, holes15/17, bitmap-cleared13/17 and out-of-range20, with explicit positive/negative assertions. These use plainU64 holes and valid padding."
+        ],
+        [
+          1502,
+          1531,
+          "Membership fixtures test sparse SortedArray/general Array and empty Range, asserting absent gaps/extremes. No malformed direct storage or noncanonical relative base is covered."
+        ],
+        [
+          1532,
+          1564,
+          "clustered_values returns1000..2000 excluding1100..1300,1500..1650 and1999. Semantic comparison constructs bitmap then as_ranges, asserts two missing runs, same length/range/forward/reverse values and all position/get/contains inverses. Highest present is1998, so constructed bounding span is999, not1000."
+        ],
+        [
+          1565,
+          1602,
+          "Ranges comparison checks selected missing/outside IDs and out-of-bounds get, slice95..115, deletes[1000,1050,1400] and mask[0,1,7] compared to bitmap path. Cursor extension tests90..110 then300..len+10 truncation and get400; append2500 checks last value/count. Delete/mask comparisons share implementation paths rather than independent expected survivors; no malformed inputs or cursor rewind assertions."
+        ],
+        [
+          1603,
+          1624,
+          "as_ranges rejects alternating bitmap, plain Range, SortedArray and holes form. No local direct from_sorted_ranges invalid-input test, duplicate-constructor test, arbitrary mask validation, empty-presence bounding range or same-state source-switch regression appears. These tests were fully read, not run."
+        ]
+      ],
+      "limits": "All1,624 physical lines read in bounded numbered chunks. Public U64Segment/SegmentCursor versus pub(crate) SegmentCursorState are distinguished. Array/bitmap/HoleRuns/serde/version helpers are already analyzed; full local RowIdSequence cursor/reset behavior is covered at rust/lance-table/src/rowids.rs:54-170 and rust/lance-table/src/rowids.rs:538-592; its conversion has no opt-in gate, while full dataset/transaction consumers remain pending. Caller references from searches are lexical evidence, not a completed resolved call graph. No source edits, network, build/test/benchmark execution or measured performance claims."
+    },
+    {
+      "path": "rust/lance-table/src/rowids/serde.rs",
+      "module": "L1-modules/rust-lance-table.md",
+      "reviewed": true,
+      "role": "Row-ID protobuf conversion and handwritten top-level decoder, validated segment/array payloads, compact range folding and wire flattening.",
+      "ranges": [
+        [
+          1,
+          18,
+          "SPDX/imports connect generated protobuf, internal bitmap/array, U64Segment/RowIdSequence, prost Message and raw key/varint/WireType helpers. ROW_ID_METADATA is row ID metadata; pub(super) corrupt_row_id_metadata returns Error::corrupt_file_named with that name. The private serde module publicly reexports read/write through rowids (rust/lance-table/src/rowids.rs:17-33)."
+        ],
+        [
+          19,
+          31,
+          "validate_range checked-subtracts end-start, rejecting reversed bounds as CorruptFile with context/start/end; converts resulting length to usize with contextual overflow error. Empty ranges are permitted. This helper is used by protobuf conversion paths, not the successful plain_range fast path."
+        ],
+        [
+          32,
+          40,
+          "validate_packed_array_length rejects byte lengths not divisible by width, reporting context, actual length and element width. All local callers supply constant nonzero2/4/8. It returns unit without decoding any values."
+        ],
+        [
+          41,
+          59,
+          "first_non_increasing_pair obtains an array iterator, returns None for empty/singleton or strict ascent, otherwise returns the first adjacent pair previous>=next with left index/values. It rejects duplicates as well as descent; source comment ties duplicate holes to invalid missing-count subtraction. Iteration arithmetic assumes decoded arrays already passed overflow checks."
+        ],
+        [
+          60,
+          78,
+          "push_range merges immediate adjacency by extending the last pending end. If previous end>new start, it first flushes pending, covering overlaps and out-of-order segments; it does not reject them. Disjoint ascending ranges accumulate. Numeric ID order is preserved in the resulting segment stream. Comment motivates reducing per-segment storage, but no allocation benchmark appears here."
+        ],
+        [
+          79,
+          87,
+          "flush_ranges asks U64Segment::from_sorted_ranges for a compact segment; Some is pushed, None extends one Range per pending range, then pending.clear retains capacity. Eligibility is at least two ranges, enclosing span fitting u32 and valid HoleRuns gaps; no cost threshold is used (rust/lance-table/src/rowids/segment.rs:245-266)."
+        ],
+        [
+          88,
+          97,
+          "TryFrom<pb::RowIdSequence> serializes the already decoded protobuf with encode_to_vec then calls read_row_ids, deliberately sharing folding behavior. This allocates a complete temporary encoded sequence and loses any unknown fields already discarded by prost before entry. It is not a direct per-element conversion."
+        ],
+        [
+          98,
+          108,
+          "TryFrom<pb::U64Segment> plain Range validates bounds/usize length then preserves start/end, including empty range. The conversion returns core Error."
+        ],
+        [
+          109,
+          131,
+          "RangeWithHoles validates range, requires holes message, decodes array, rejects non-strict order with adjacent indices/values, then rejects any hole outside half-open range. It preserves encoded array representation/base; no canonical rebasing or requirement for nonempty holes. Errors are CorruptFile with detailed range/hole context."
+        ],
+        [
+          132,
+          155,
+          "RangeWithBitmap validates bounds/usize length, requires exact ceil(length/8) backing bytes and zero unused high bits of a partial final byte. It then uses unchecked Bitmap::from_parts because those invariants are established. Empty range with empty bitmap is accepted. Error messages include expected/actual bytes or padding requirement."
+        ],
+        [
+          156,
+          173,
+          "SortedArray decodes the array and rejects first duplicate/descent with index/value context. Array merely decodes and permits arbitrary order/duplicates. Missing segment oneof is CorruptFile. Commented non-exhaustive TODO has no runtime arm; current match enumerates generated variants. No cross-segment disjointness or unique-ID check is made here."
+        ],
+        [
+          174,
+          197,
+          "EncodedU16 conversion requires byte multiple2, reads little-endian chunks into Vec<u16>, then checked-adds maximum offset to base, rejecting u64 overflow. Empty offsets accept any base. It does not require offset0 or normalize base; this matters because EncodedU64Array::min returns base directly."
+        ],
+        [
+          198,
+          214,
+          "EncodedU32 repeats width4 little-endian decoding and maximum-offset overflow validation. It retains original base/order/duplicates and accepts empty or noncanonical offsets. Local unwraps operate on exact-width chunks after divisibility check."
+        ],
+        [
+          215,
+          231,
+          "EncodedU64 requires byte multiple8 and decodes each little-endian u64; every u64 value, including MAX, is accepted. Missing array oneof is CorruptFile. Entire offset/value vectors are allocated; no zero-copy packed-byte view or element count cap appears."
+        ],
+        [
+          232,
+          256,
+          "From<RowIdSequence> flattens in-memory Ranges: iterate runs.present_ranges, add enclosing base to each u32 start/end and emit separate protobuf plain Range segments. Other variants become one-element Vec; flat_map collects all. There is no Ranges wire arm. Additions are ordinary unchecked arithmetic; enclosing range end is ignored by this arm, and no payload validation is performed."
+        ],
+        [
+          257,
+          300,
+          "From<U64Segment> writes Range bounds, RangeWithHoles with present array, RangeWithBitmap raw into_bytes, SortedArray and Array through encoded-array conversion. Standalone Ranges is unreachable! and panics with explanation that only sequence serialization handles it. Therefore write_dataset_versions cloning a directly constructed Ranges span into pb::U64Segment can panic (rust/lance-table/src/rowids/version.rs:520-535); this is a source deduction, not an executed case. from_slice/slice/mask indeed do not emit Ranges (rust/lance-table/src/rowids/segment.rs:196-243; rust/lance-table/src/rowids/segment.rs:378-387; rust/lance-table/src/rowids/segment.rs:694-746)."
+        ],
+        [
+          301,
+          339,
+          "From<EncodedU64Array> preserves variant/base and packs offsets/values as little-endian bytes. Each element uses to_le_bytes().to_vec() inside flat_map before final collect, creating a tiny temporary Vec in source; compiler optimization is not measured. Input vectors remain owned during borrowed iteration. Writer does not validate overflow, sortedness, canonical base or collection length."
+        ],
+        [
+          340,
+          345,
+          "Public write_row_ids borrows the sequence but clones it entirely, converts to protobuf and encode_to_vec. Returns owned bytes directly with no Result, IO, framing magic, checksum or format version prefix. Cloned storage, protobuf collections and final encoded output can coexist."
+        ],
+        [
+          346,
+          375,
+          "Public read_row_ids walks a borrowed byte slice using prost low-level key/varint decoding and wraps DecodeError as CorruptFile. Every outer key must be field1/LengthDelimited, so unknown top-level fields or wrong wire type are rejected rather than skipped. Length varint is cast as usize without checked conversion, then compared to remaining bytes; on a32-bit target the cast can truncate, a source-only portability observation. Complete segment bytes are borrowed with split_at."
+        ],
+        [
+          376,
+          400,
+          "Each segment tries plain_range; successful ranges accumulate/fold, fallback first flushes pending then prost-decodes U64Segment and invokes validated TryFrom. Final flush precedes checked u64 aggregate sum of segment.len() as u64; overflow reports CorruptFile including segment count. No cross-segment overlap/duplicates or version alignment validation. Fast-path ranges bypass validate_range/usize conversion; segment.len casts range spans to usize before aggregate summation, so32-bit truncation is not prevented here (rust/lance-table/src/rowids/segment.rs:330-344)."
+        ],
+        [
+          401,
+          427,
+          "plain_range recognizes only a sole length-delimited Range arm whose nested encoded length equals all remaining bytes. Inner fields must be varint tags1/2; start/end default0, repeated fields overwrite earlier values, unknown/nonvarint fields return None. It returns Some only for start<end; zero/reversed/other shapes fall back to prost conversion. Nested lengths also use unchecked usize casts. No explicit usize fit validation occurs on success."
+        ],
+        [
+          428,
+          452,
+          "cfg(test) imports pretty assertions, proptest and rstest. Byte-exact bitmap fixture creates full length10, clears bit2, uses range100..110, asserts len9, encoded bytes[0xfb,0x03], and protobuf conversion equality. This checks LSB order and zero padding."
+        ],
+        [
+          453,
+          470,
+          "Private read_segment wraps one generated segment in a protobuf sequence then uses public decoder. assert_corrupt_segment requires Error::CorruptFile and a supplied diagnostic substring; it supports malformed-payload tests without relying only on panic/print output."
+        ],
+        [
+          471,
+          496,
+          "Overflow fixture constructs two Range(0..u64MAX) segments, decodes and requires CorruptFile containing total length exceeding u64::MAX. It asserts aggregate overflow rejection; no32-bit target run is recorded."
+        ],
+        [
+          497,
+          534,
+          "Mixed roundtrip combines two leading ranges, holes, one-present-bit bitmap, compressed sorted array and arbitrary[3,1,2]. It expects leading ranges fold to Ranges, all other segments equal original tail and complete values remain identical. It deliberately does not assert structural identity of the whole sequence."
+        ],
+        [
+          535,
+          607,
+          "Properties roundtrip a sorted unique btree_set of arbitrary u64 values with length0..128, compare sequence len and values; generate range lengths1..512 with one-too-short/long bitmaps; generate nonzero high padding; and reversed bitmap ranges. They assert CorruptFile plus relevant message substrings where malformed. Successful arbitrary Array duplicate behavior is covered only indirectly by other examples, not this sorted-unique generator."
+        ],
+        [
+          608,
+          639,
+          "Misaligned-byte property selects width2/4/8 and element_count0..16, appends one byte beyond multiple, wraps as Array and requires CorruptFile containing byte length. This covers every packed representation."
+        ],
+        [
+          640,
+          662,
+          "Offset overflow fixture uses baseu64MAX plus offset1 for both U16/U32 arrays and requires corrupt-file overflow diagnostic. It does not test a legal maximum sum or arbitrary empty base."
+        ],
+        [
+          663,
+          694,
+          "Parameterized holes tests reject descending[6,5], duplicate[5,5], below-range4 and exclusive-end7 for range5..7; separate fixture rejects absent holes array. They use U64 storage for values and verify error variant/message through helper."
+        ],
+        [
+          695,
+          726,
+          "Explicit width-specific misalignment fixtures use byte lengths1/3/7 and assert exact descriptive substrings for widths2/4/8. This overlaps the property with stable diagnostic examples rather than testing only creation failure."
+        ],
+        [
+          727,
+          767,
+          "Parameterized reverse-range fixtures cover plain, holes and bitmap forms with10..9, requiring range start10 exceeds end9. Bitmap length fixtures supply one/three bytes for a nine-position span and require expected2 diagnostic."
+        ],
+        [
+          768,
+          779,
+          "Padding fixture uses range5..14 and bytes[0xff,0x03], where bit9 is beyond the nine logical positions, and requires zero-padding diagnostic."
+        ],
+        [
+          780,
+          821,
+          "SortedArray parameterization rejects descending and duplicate values for each U16/U32/U64 representation. Exact message identifies adjacent indices0/1. It does not test unsorted arbitrary Array rejection because that form intentionally permits order."
+        ],
+        [
+          822,
+          884,
+          "Ranges roundtrip fixture compacts three disjoint intervals, asserts wire is exactly three plain ranges and decode restores sequence/value equality. Mixed fixture checks adjacent ranges merge to one Range, SortedArray interrupts grouping, and three following ranges fold to Ranges. Wire comment claims compatibility with any version, but this fixture runs only current generated protobuf; released historical compatibility remains unverified. No local unknown-field, malformed-varint/length, missing oneof, empty-range, overlapping-order, noncanonical-base or standalone-Ranges panic regression is present."
+        ]
+      ],
+      "limits": "All884 physical lines read in bounded chunks. Segment/array/bitmap/HoleRuns operations are now covered; local RowIdSequence is covered at rust/lance-table/src/rowids.rs:1-2309; dataset integration remains pending. Tests were read, not run; released interoperability and32-bit concerns remain unverified. Source remained read-only."
+    },
+    {
+      "path": "rust/lance-table/src/rowids/version.rs",
+      "module": "L1-modules/rust-lance-table.md",
+      "reviewed": true,
+      "role": "Public positional dataset-version runs, inline/column metadata codecs and synchronous fragment-update helpers; crate-internal range cursor.",
+      "ranges": [
+        [
+          1,
+          24,
+          "SPDX/module purpose and imports: HashMap, Range, Arc, core Error/Result/DeepSizeOf, prost Message, custom serde traits, Fragment/generated protobuf, U64Segment, RowIdSequence and read_row_ids. Dataset update version is not a file-format version or stable row ID. The module is public through rowids::version (rust/lance-table/src/rowids.rs:17-24)."
+        ],
+        [
+          25,
+          43,
+          "LoadedRowLineage is public Debug/Clone/Default with optional Arc row_ids, created_at and last_updated_at sequences. SpilledRowLineage aliases HashMap<u64,LoadedRowLineage> keyed by fragment ID. The contract says an IO-capable caller preloads spilled sequences because synchronous manifest construction has no store; inline sequences need not be included. Defaults are all None/empty map; no loader, validation, timestamp or IO is implemented by these declarations."
+        ],
+        [
+          44,
+          71,
+          "RowDatasetVersionRun derives Debug/Clone/PartialEq/Eq/DeepSizeOf with public span:U64Segment and version:u64. Docs define span over positional offsets rather than stable IDs, enabling alignment with RowIdSequence order. len()->usize and is_empty delegate to span; version copies the scalar. Direct construction permits arbitrary segment shape/values, including empty runs; no invariant validator here."
+        ],
+        [
+          72,
+          99,
+          "RowDatasetVersionSequence derives Debug/Clone/PartialEq/Eq/DeepSizeOf/Default around public Vec<RowDatasetVersionRun>. RowDatasetVersionCursor is pub(crate), Debug/Default, with private run index, intra-run offset, absolute position, optional cached run length, optional Vec run starts and indexed total; tests add seek counter. Cursor does not borrow, identify or hash its source sequence, so reuse assumes the same unchanged sequence."
+        ],
+        [
+          100,
+          120,
+          "Private seek_indexed lazily builds one start offset per run and total length by ordinary usize additions. This allocates O(number of runs) memory once; it does not rebuild when another/mutated sequence is supplied. Empty runs produce duplicate starts. Construction calls general run.len, and overflow/malformed segment arithmetic is not checked here."
+        ],
+        [
+          121,
+          146,
+          "Indexed seek rejects position>=cached total with Internal text containing position and total. Otherwise unwrap cached starts, binary-search position or take preceding start, then advance across every following start<=position to skip duplicate starts/empty runs. Sets run index, relative offset and position, clears cached length, increments test counter. Bounds failure may leave a newly built index installed but does not set a new position."
+        ],
+        [
+          147,
+          167,
+          "current_run repeatedly gets the current run, caching its length. Range fast path uses (end-start) as usize; all other spans delegate len. If offset>=length, advance run and reset offset/cache until a usable run or None. It skips any number of empty runs and never consults absolute span positions for ordering. Range subtraction/cast and index increments are ordinary arithmetic; malformed reverse ranges are not rejected here."
+        ],
+        [
+          168,
+          195,
+          "extend_range appends to caller Vec. Empty or reversed Range<usize> returns Ok immediately without validating bounds or moving cursor. A backwards start triggers indexed seek; after an index exists, every non-adjacent start in either direction uses it. Before indexing, forward gaps advance run lengths in place without output, returning Internal if exhausted. Existing cursor/output is not reset or cleared."
+        ],
+        [
+          196,
+          211,
+          "For each selected portion, current_run yields version/length and repeat_n appends count=min(request remainder,run remainder), then advances position/offset. Exhaustion returns Internal at current consumed position; output and cursor may already contain partial progress. No reserve, cancellation or async boundary. Adjacent traversal costs visited runs plus emitted values; repeated unindexed forward scanning is monotonic, indexed jumps add binary-search work."
+        ],
+        [
+          212,
+          229,
+          "new returns no runs. from_uniform_row_count(row_count:u64,version) returns empty for zero, otherwise exactly one Range(0..row_count) run. It neither checks fragment maximum count/usize fit nor rejects any version, and allocates only the run vector rather than per-row versions."
+        ],
+        [
+          230,
+          251,
+          "from_versions scans adjacent u64 values, emits a Range for each change and one final run if nonempty. Spans use global slice positions starting0, versions are exact values; empty input gives empty, uniform input one run. O(input rows) scan and up to O(rows) runs; usize indices/length cast to u64 without checked conversion. It merges adjacent equal values only, not equal values separated by others."
+        ],
+        [
+          252,
+          271,
+          "len sums run.len() cast to u64 with ordinary addition. is_empty is true for no runs or all-empty runs. versions constructs a borrowing VersionsIter; cursor returns a default unbound cursor and does not inspect self. Public runs remain mutable and no cached index lives in the sequence itself."
+        ],
+        [
+          272,
+          284,
+          "version_at linearly accumulates usize run lengths and returns the first run whose cumulative end exceeds index, else None. It ignores span numeric values and gaps, using concatenated positional lengths; zero-length runs contribute nothing. Cost O(visited runs), ordinary offset+length arithmetic, no random-access index in this method."
+        ],
+        [
+          285,
+          300,
+          "get_version_for_row_id scans RowIdSequence segments in stored order, first checks segment bounding range contains the ID and then position(row_id). On first match it calls version_at(prefix lengths+local position), otherwise adds segment length and continues. It does not assert equal row-ID/version lengths or unique IDs. Segment range supplies stored bounds and position then checks actual presence (rust/lance-table/src/rowids/segment.rs:360-431); no whole-dataset lookup or IO occurs."
+        ],
+        [
+          301,
+          313,
+          "rows_with_version_greater_than zips row_ids.iter with lazy versions, filters strictly greater than threshold and collects owned Vec IDs. Zip silently stops at the shorter iterator, with no alignment error. It preserves row-ID iteration order and includes no deletion filtering beyond what supplied sequences already encode. VersionsIter empty-run caveat applies."
+        ],
+        [
+          314,
+          342,
+          "mask consumes u32 positions once, tracks cumulative original run lengths before mutating each run and passes relative positions to span.mask. It implicitly needs ascending valid positions, but does not sort, deduplicate or validate them; a later position below the current run start can underflow subtraction. Remaining positions at/above final cutoff are ignored. Removes empty spans afterward, does not merge equal-version neighbors or rebase surviving span values, and always returns Ok locally. Segment mask is now covered: list cardinality equal to segment length clears all regardless of entries, and other paths assume ordered unique in-bounds positions (rust/lance-table/src/rowids/segment.rs:694-746)."
+        ],
+        [
+          343,
+          374,
+          "Public VersionsIter borrows runs and stores private run index, remaining count and current value. new initializes zeros then advance_run loads only the current run, or leaves remaining0 at exhaustion. It does not skip empty runs in advance_run. No allocation, size_hint override or ExactSize/DoubleEnded/FusedIterator implementation appears."
+        ],
+        [
+          375,
+          391,
+          "Iterator::next advances by at most one run when remaining count is0, returning None if beyond the list; otherwise it loads that run, saturating-decrements count and returns the version even if the loaded run is empty. Thus [length1/version7,length0/version9] expands to [7,9], a source-derived counterexample not executed here. Consecutive empty runs can likewise emit phantom values. This differs from cursor/version_at, which skip empty spans."
+        ],
+        [
+          392,
+          419,
+          "RowDatasetVersionMeta derives Debug/Clone/equality/DeepSizeOf: Inline(Arc<[u8]>) shares encoded bytes; Column is an empty marker locating reserved creation/update hidden fields via Fragment::row_lineage_file. Column requires IO through a dataset loader; this type stores no path or count. Private serde ColumnMarker has no fields, defining the empty-object column arm."
+        ],
+        [
+          420,
+          442,
+          "Serialize creates an untagged local Helper: Inline {inline:&[u8]} or Column {column:ColumnMarker}. JSON inline is a numeric byte sequence under inline; column is {column:{}}. Bytes are borrowed for serialization, not decoded. Serializer failures propagate; local helper variants exist only within serialize."
+        ],
+        [
+          443,
+          462,
+          "Deserialize uses untagged local Helper with Vec<u8> or empty marker, then allocates Arc::from(inline) or returns Column. It does not decode/validate version bytes, intern equivalent payloads or require a dataset context. No deny_unknown_fields annotation is present; exact unknown-field/ambiguous-arm acceptance delegates serde."
+        ],
+        [
+          463,
+          484,
+          "from_sequence writes protobuf bytes and wraps Arc, returning Ok with no explicit Result error branch. load_sequence decodes Inline; Column returns NotSupported explaining fragment metadata alone cannot decode a data-file column. These synchronous methods perform no IO and no physical-row count validation."
+        ],
+        [
+          485,
+          503,
+          "last_updated_at_version_meta_to_pb maps None to absent, Inline to copied Vec bytes under InlineLastUpdatedAtVersions, and Column to an empty RowLineageColumn under ColumnLastUpdatedAtVersions. It returns Option directly, with no validation, feature flag setting or version restamping."
+        ],
+        [
+          504,
+          519,
+          "created_at_version_meta_to_pb mirrors the same mapping under creation-version oneof alternatives. Inline bytes are copied and column carries no file metadata. Correct carrier/feature validation belongs to separate metadata and transaction paths."
+        ],
+        [
+          520,
+          536,
+          "write_dataset_versions clones every run.span into pb::U64Segment, stores Some(span) and exact version, collects all protobuf runs then encode_to_vec. It returns owned protobuf bytes directly without format prefix, separate version discriminator, checksum or validation. Segment conversion is covered at rust/lance-table/src/rowids/serde.rs:257-299 and panics for standalone Ranges; a directly constructed version span with that variant reaches this panic. This source-derived case was not executed. Clone+protobuf+output buffers can coexist."
+        ],
+        [
+          537,
+          560,
+          "read_dataset_versions uses prost decode, mapping malformed protobuf to Internal with Failed to decode RowDatasetVersionSequence text. Every run must have span or Internal Missing positions in RowDatasetVersionRun; U64Segment::try_from errors propagate. Collects decoded runs, preserving order/versions. No cross-run positional normalization, equal-neighbor merge, empty-run filter, unique-row or length-alignment check is performed here."
+        ],
+        [
+          561,
+          589,
+          "rechunk_version_sequences consumes owned sequences and u64 chunk sizes plus allow_incomplete. Collects all sizes first and allocates result Vec to that count; flattens owned run vectors through Peekable. Private closures build InvalidInput diagnostics for too few (chunk index, expected size, remaining) and too many runs (processed/expected chunk counts). It returns all output sequences, not a streaming interface."
+        ],
+        [
+          590,
+          612,
+          "For each requested chunk create empty output and remaining size, tracking an offset into the current input run across chunks. A zero remaining input length consumes that run and retries. At true exhaustion allow_incomplete breaks, otherwise returns too-few error. Zero-size output chunks skip this loop entirely. Empty input runs are skipped only while a positive output remainder is being filled."
+        ],
+        [
+          613,
+          639,
+          "If input remainder exceeds chunk remainder, slice that positional portion, copy its version and retain input run with increased segment_offset. Otherwise consume run, slice its remainder, reset offset and reduce needed count. Slicing delegates U64Segment::slice with unchecked u64->usize casts. No adjacent equal-version coalescing or explicit span rebasing; actual sliced span values follow the segment implementation. Segment slicing retains numeric values through skip/take and reconstruction, silently truncates excess selection and never selects Ranges (rust/lance-table/src/rowids/segment.rs:378-387)."
+        ],
+        [
+          640,
+          653,
+          "Every requested size produces one output sequence, including short/empty sequences under allow_incomplete and zero-size chunks. After all chunks, any peeked run causes too-many error even if it is empty; allow_incomplete does not permit excess input. Errors discard local outputs but consumed owned input/iterator progress is not recoverable from Result. No checked arithmetic or aggregate length prevalidation."
+        ],
+        [
+          654,
+          679,
+          "build_version_meta returns uniform inline metadata only for known positive physical_rows. It panics if row_id_meta is absent, treating presence as stable-ID sanity check without decoding it. physical_rows is authoritative even if row-ID bytes disagree. from_sequence is unwrapped although locally always Ok. Leading comment says no existing metadata, but body never checks existing creation/update metadata; caller decides whether to replace. Zero/unknown physical rows yield None."
+        ],
+        [
+          680,
+          712,
+          "Full-fragment rewrite refresh chooses any Some physical_rows first (including0), otherwise inline row-ID decode length using unwrap, Column/absent row IDs as0. Positive count replaces last_updated_at with uniform current version; zero count leaves existing metadata unchanged. It does not require row-ID metadata when count is known, use spilled sequences or touch creation versions. Malformed inline row IDs can panic despite Result return."
+        ],
+        [
+          713,
+          749,
+          "Partial refresh documents updated local offsets and preserving untouched versions/default prev_version. Count selection prefers physical_rows, else inline row-ID decode unwrap; unlike full refresh, Column row IDs without physical_rows return NotSupported, and missing row IDs imply0. It does not consult spilled.row_ids to recover unknown count. Zero count later causes a no-op."
+        ],
+        [
+          750,
+          782,
+          "Positive-count partial refresh allocates per-row Vec<u64>. Existing Column last-updated metadata requires spilled[fragment.id].last_updated_at or contextual NotSupported; loaded Arc payload is deep-cloned to an owned sequence. Existing Inline decode uses load_sequence().ok(), silently replacing a decode error with prev_version defaults. A decoded/loaded sequence is lazily expanded, truncated to count and padded with prev_version; no length mismatch error. Missing metadata also defaults every row."
+        ],
+        [
+          783,
+          816,
+          "Partial refresh assigns current_version only for offsets<len, silently ignores out-of-range positions, and tolerates duplicates/unsorted input. It scans the full version Vec into maximal equal-version Range runs and serializes to Inline before assigning last_updated_at. No monotonic version check, creation metadata change or column-file deletion. Empty updated_offsets still recompresses/replaces metadata when row count>0. Allocation is O(rows+runs+encoded bytes); returned errors before final assignment leave fragment unchanged, though unwrap/allocation panic is possible."
+        ],
+        [
+          817,
+          833,
+          "TryFrom last-updated protobuf arm declares Error but both arms return Ok: copied/moved Vec becomes new Arc or empty marker becomes Column. It validates neither payload bytes nor field carrier/flags/count."
+        ],
+        [
+          834,
+          848,
+          "TryFrom creation-version protobuf arm has the same infallible local control flow and allocation/validation boundaries. Separate implementations are needed because protobuf uses distinct oneof types."
+        ],
+        [
+          849,
+          864,
+          "Private cfg(test) imports parent; JSON test asserts exact column object string and roundtrips it, then roundtrips inline bytes[1,2,3] without interpreting those bytes as a valid sequence."
+        ],
+        [
+          865,
+          889,
+          "from_versions fixture checks empty input, uniform[3,3,3] one run/version3/len3, and alternating[1,2,1,2] run versions plus expanded values. It does not directly assert span coordinates."
+        ],
+        [
+          890,
+          915,
+          "Random-access fixture uses run spans0..3,0..2,0..1 with versions1/2/3, proving the reader uses concatenated lengths rather than absolute span positions. Checks positions0,2,3,4,5 and out-of-range6."
+        ],
+        [
+          916,
+          952,
+          "Partial-refresh fixture creates10,000 alternating single-row runs inline, updates only final offset to3, then asserts length and first two/last two values. Despite test name streams, implementation materializes the per-row vector. This is a correctness fixture, not timing/memory measurement; source tests were not executed."
+        ],
+        [
+          953,
+          975,
+          "Protobuf roundtrip uses two overlapping-coordinate Range runs of lengths4 and3 with versions42/99. Asserts two runs,total7,versions at0/5, not exact byte equality or every span field. No corrupt/missing-span case here."
+        ],
+        [
+          976,
+          997,
+          "Row-ID lookup fixture pairs IDs10..14 with length2 version8 then length2 version9; asserts all four and absent99. No unsorted/sparse/duplicate/mismatched-length ID fixture locally."
+        ],
+        [
+          998,
+          1035,
+          "Cursor fixture includes an empty middle run version99. Adjacent0..2/2..5 plus forward gap7..9 produce exact versions without99; backward1..6 matches expected slice and empty6..6 changes nothing. This exercises cursor empty-run handling, not VersionsIter."
+        ],
+        [
+          1036,
+          1059,
+          "Descending cursor fixture creates10,000 single-row runs and reads one position at a time in reverse, asserting exact reversed values and a10,000-entry index. Does not measure latency or assert seek counter."
+        ],
+        [
+          1060,
+          1098,
+          "Alternating cursor fixture repeatedly selects last then first position over10,000 runs, asserts exact values/index length and RUNS-1 indexed seeks. First forward read scans without building index; first rewind creates it and subsequent nonadjacent jumps use it."
+        ],
+        [
+          1099,
+          1113,
+          "Out-of-bounds cursor fixture selects4..5 from length4 and asserts Internal, exact position4/total_len4 diagnostic substring and unchanged empty output. It does not cover a selection that first appends valid values then overflows."
+        ],
+        [
+          1114,
+          1134,
+          "Non-range cursor fixture constructs span from[0,2,4,6,8], asserts it is not Range, pairs with three-row version8 span and expects five4s then three8s. Local suite lacks direct mask/rechunk/build/full-refresh, corrupt-inline fallback, unloaded Column, length mismatch, invalid offsets, stale cursor source and VersionsIter empty-run tests; other files may test these but remain pending."
+        ]
+      ],
+      "limits": "All1,134 lines read in bounded chunks. Public rowids::version and selected format facade reexports are distinguished from pub(crate) cursor. Local RowIdSequence is covered at rust/lance-table/src/rowids.rs:1-2309; dataset loaders, stream consumers and transaction call sites remain pending full analysis; lexical references are not a completed call graph. No source edits, network, builds, tests or benchmarks."
+    }
+  ]
+}

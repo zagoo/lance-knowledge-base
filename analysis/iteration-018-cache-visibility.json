@@ -1,0 +1,110 @@
+{
+  "iteration": 18,
+  "correction_only": true,
+  "files": [
+    {
+      "path": "rust/lance-core/src/cache/registry.rs",
+      "module": "L1-modules/rust-lance-core-cache.md",
+      "reviewed": true,
+      "role": "Global process-local registry of synchronous backend constructor function pointers, validated BackendConfig, lazy built-in Moka installation, override rules and isolated registry tests.",
+      "limits": "Constructor discovery/locking is established; build_moka option parsing and concrete backend operations are now documented. (rust/lance-core/src/cache/moka.rs:108-201; rust/lance-core/src/cache/moka.rs:328-366; rust/lance-core/src/cache/quick.rs:158-231) Public functions contain no unregister/enumerate API. Tests show source assertions only and were not run. The registry permits deliberate replacement of built-in moka independently of the root repository guidance for public API evolution. (rust/lance-core/src/cache/registry.rs:24-193; rust/lance-core/src/cache/registry.rs:218-372)",
+      "ranges": [
+        [
+          1,
+          23,
+          "SPDX/module overview assigns kind/options and startup registration to extensions, with HashMap<String,String> chosen for FFI representation. Imports global synchronization primitives, Moka built-in identifiers/constructor and Error/Result. Actual Python/Java bindings are not in this file."
+        ],
+        [
+          24,
+          35,
+          "Public BackendConfig derives Debug/Clone/PartialEq/Eq with mutable public kind:String and options:HashMap<String,String>. Direct struct construction bypasses new validation, so build_from_config normalizes again. HashMap order is unspecified."
+        ],
+        [
+          36,
+          51,
+          "new accepts impl AsRef<str>, validates/normalizes kind and creates empty map. with_option consumes self, converts key/value Into<String>, inserts and returns it; repeated keys overwrite unlike URI parser duplicate rejection. No option name/value validation or error return exists in this builder method."
+        ],
+        [
+          52,
+          79,
+          "normalize_backend_kind iterates chars; empty or non-ASCII-letter first errors with supplied kind. Subsequent chars must ASCII alphanumeric or+,-,.; anything else reports kind and invalid char. Returns lowercase ASCII without trimming. Thus case-insensitive registrations/config/URI converge while options remain untouched. Although declared pub, this helper is inside private registry and is not facade-reexported. (rust/lance-core/src/cache/mod.rs:48-66)"
+        ],
+        [
+          80,
+          90,
+          "BackendBuildFn is a plain synchronous fn(&BackendConfig)->Result<Arc<dyn CacheBackend>>, not a capturing closure/async future. Docs suggest blocking shim for async initialization but no runtime shim is implemented. Private registry uses local-static OnceLock<Mutex<HashMap<String,BackendBuildFn>>> initialized empty."
+        ],
+        [
+          91,
+          103,
+          "Production registry_lock converts mutex poison to Error::internal with fixed message. Test-only lock helper recovers inner guard from poison instead; that does not clear the mutex poison flag. Global state and poisoning effects are process-wide."
+        ],
+        [
+          104,
+          130,
+          "Public register_backend normalizes kind then calls insert_backend with allow_replace determined by builtin_backend existence. Non-built-in duplicate names error; built-in moka may be repeatedly replaced even before lazy registration. Doc example wraps a1024-byte Moka backend under my-backend; constructor behavior is now documented at rust/lance-core/src/cache/moka.rs:67-83."
+        ],
+        [
+          131,
+          142,
+          "insert_backend holds registry mutex only while checking duplicate policy and inserting owned kind/function pointer. Disallowed replacement errors InvalidInput with kind, preserves existing registration; allowed insert replaces old pointer. Lock acquisition can return poison Internal error first."
+        ],
+        [
+          143,
+          149,
+          "builtin_backend recognizes only MOKA_BACKEND_KIND and returns build_moka; all other kinds None. No dynamic plugin scan, aliases or additional built-ins are declared here. Literal identifier value is supplied by the sibling Moka module, while local docs/tests call it moka."
+        ],
+        [
+          150,
+          172,
+          "build_from_config first ensures built-ins (so even an invalid requested kind may have the side effect of populating registry), then normalizes public kind again and clones whole option map into a new config. Copies constructor pointer under a short mutex guard, drops guard before invocation, returns constructor Result unchanged or InvalidInput unknown kind. Constructors may reenter registry without this lookup guard causing self-deadlock; concurrent replacement can race but copied pointer remains the selected constructor."
+        ],
+        [
+          173,
+          194,
+          "ensure_builtin_backends checks current map on every call, inserts built-in only if absent, preserving overrides. It intentionally uses no process-once installed flag so test snapshot/restore remains valid. Initialization of the registry itself remains OnceLock. No constructors run while this helper holds mutex."
+        ],
+        [
+          195,
+          209,
+          "cfg(test) parent-visible take_registry_for_test swaps map with empty; restore replaces map with supplied saved state. Both recover poisoned lock through test helper. These mutate global state and require separate test serialization discipline."
+        ],
+        [
+          210,
+          218,
+          "cfg(test) parent-visible registry_test_lock uses an independent OnceLock<Mutex<()>> and recovers poisoned inner guard. Returned static guard serializes tests for its holding lifetime. It does not automatically wrap production APIs."
+        ],
+        [
+          219,
+          243,
+          "Test module imports async_trait/Pin/Future and cache entry/key/codec. Private Debug/Default NullBackend get always returns None. It provides an operational dummy for registry construction, not a stored cache."
+        ],
+        [
+          244,
+          271,
+          "NullBackend insert/clear no-op, get_or_insert awaits caller loader, discards declared size, returns(entry,false) and propagates loader errors; num_entries/size_bytes return0. Approximation/capacity/deep-size use trait defaults. Contrary to the broad no-op comment, loader can have effects or fail."
+        ],
+        [
+          272,
+          294,
+          "build_null returns new Arc<NullBackend>. RegistryGuard holds serialization guard plus saved map; new acquires serialization lock before taking registry. Drop restores saved state via mem::take. Lock remains held through drop body then releases with fields. This is test isolation, not public state rollback."
+        ],
+        [
+          295,
+          320,
+          "Tests register/build custom null, reject duplicate dup, and register moka override before building. Success assertions only check Arc strong_count1, so the built-in override case does not independently distinguish NullBackend from another single-owner backend. They do not invoke cache methods."
+        ],
+        [
+          321,
+          350,
+          "Unknown-kind test checks message. Mixed-case registration then lowercase lookup tests normalization. Direct BackendConfig ECHO.Backend is passed to an inner constructor that asserts normalized echo.backend, proving normalization despite bypassing new. RegistryGuard scopes each state-changing test."
+        ],
+        [
+          351,
+          372,
+          "Invalid-kind test rejects a space-containing registration before insertion and digit-leading config; it needs no guard because these fail before mutation. Final test registers local build_echo that checks capacity string42 reaches it unchanged. No poison, recursive constructor, concurrent replacement or repeated built-in override test is present."
+        ]
+      ]
+    }
+  ]
+}

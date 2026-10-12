@@ -1,0 +1,550 @@
+{
+  "prepared_from": "Current KB only, before source confirmation",
+  "new_commit": "db684d1f0726c00b6defb7963a604a7719e82b5a",
+  "tasks": [
+    {
+      "id": "route-001",
+      "task": "Read and execute a query",
+      "ordered_read_sets": [
+        [
+          "rust/lance/src/dataset.rs:1687-1704",
+          "rust/lance/src/dataset/scanner.rs:2889-2932,3498-3663",
+          "rust/lance-datafusion/src/exec.rs:721-761",
+          "rust/lance-file/src/reader.rs:740-1028"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance/src/dataset/scanner.rs"
+      ],
+      "kb_section": "Read and execute a query\n\n[Contract and executable trace](../L0-orientation.md#read-path). Read in this order:\n\n1. `rust/lance/src/dataset.rs:1687-1704` \u2014 construct snapshot Scanner.\n2. `rust/lance/src/dataset/scanner.rs:2889-2932,3498-3663` \u2014 validate, choose source, build/execute plan.\n3. `rust/lance-datafusion/src/exec.rs:721-761` \u2014 partition/order handling.\n4. [Frozen reader](../L2-files/rust/lance-file/src/reader.rs.md) \u2192 `rust/lance-file/src/reader.rs:740-1028` \u2014 persisted metadata to prepared file reads.\n\n<a id=\"write\"></a>\n"
+    },
+    {
+      "id": "route-004",
+      "task": "Build or update an index",
+      "ordered_read_sets": [
+        [
+          "rust/lance/src/index/create.rs:167-242,658-734",
+          "rust/lance/src/index/scalar.rs:349-453",
+          "rust/lance/src/index/vector.rs:1199-1325",
+          "rust/lance/src/index/vector/builder.rs:553-594,729-830"
+        ],
+        [
+          "rust/lance/src/index.rs:2831-3002",
+          "rust/lance/src/index/append.rs:530-766,1052-1437",
+          "rust/lance-index-core/src/scalar.rs:531-564,628-762",
+          "rust/lance/src/io/commit/conflict_resolver.rs:985-1691"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-index-core/src/scalar.rs",
+        "rust/lance/src/index.rs",
+        "rust/lance/src/index/append.rs",
+        "rust/lance/src/index/create.rs",
+        "rust/lance/src/index/scalar.rs",
+        "rust/lance/src/index/vector.rs"
+      ],
+      "kb_section": "Build or update an index\n\n[Index lifecycle contract](../L3-symbols/protocol-index.md). First choose one subtask:\n\n**Build:** `rust/lance/src/index/create.rs:167-242,658-734` \u2192 `rust/lance/src/index/scalar.rs:349-453` for scalar, **or** `rust/lance/src/index/vector.rs:1199-1325` \u2192 `rust/lance/src/index/vector/builder.rs:553-594,729-830` for IVF-PQ. Maximum three files after choosing the branch.\n\n**Update:** `rust/lance/src/index.rs:2831-3002` \u2192 `rust/lance/src/index/append.rs:530-766,1052-1437` \u2192 `rust/lance-index-core/src/scalar.rs:531-564,628-762` for scalar filtering \u2192 `rust/lance/src/io/commit/conflict_resolver.rs:985-1691` for concurrent coverage changes.\n\n<a id=\"new-index\"></a>\n"
+    },
+    {
+      "id": "route-005",
+      "task": "Add a scalar index plugin",
+      "ordered_read_sets": [
+        [
+          "rust/lance-index-core/src/scalar.rs:398-762",
+          "rust/lance-index/src/scalar/registry.rs:29-367",
+          "rust/lance-index/src/registry.rs:26-177",
+          "rust/lance-index/src/scalar.rs:38-56"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-index-core/src/scalar.rs"
+      ],
+      "kb_section": "Add a scalar index plugin\n\n[Complete extension contract and separate persistence subtask](../L3-symbols/protocol-index.md#adding-a-scalar-index-bounded-subtasks).\n\n1. `rust/lance-index-core/src/scalar.rs:398-762` \u2014 result certainty, identity, training/update/filter obligations.\n2. `rust/lance-index/src/scalar/registry.rs:29-367` \u2014 plugin/trainer/parser/remapping/cache/seed interfaces.\n3. `rust/lance-index/src/registry.rs:26-177` \u2014 exact type identity and built-in registration.\n4. `rust/lance-index/src/scalar.rs:38-56` \u2014 implementation module exposure.\n5. [Frozen index schema](../L2-files/protos/index.proto.md) \u2014 new details and stable tag/package contract. Choose the new implementation's path only after this contract set; do not modify every existing algorithm.\n\n<a id=\"new-encoding\"></a>\n"
+    },
+    {
+      "id": "route-008",
+      "task": "Extend expression parsing or filter pushdown",
+      "ordered_read_sets": [
+        [
+          "rust/lance-datafusion/src/planner.rs:280-350",
+          "rust/lance/src/datafusion/dataframe.rs:132-197",
+          "rust/lance/src/dataset/scanner.rs:3498-3663",
+          "rust/lance-datafusion/src/exec.rs:721-761"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-datafusion/src/planner.rs",
+        "rust/lance/src/dataset/scanner.rs"
+      ],
+      "kb_section": "Extend expression parsing or filter pushdown\n\n[Query integration contract](../L3-symbols/public-api.md#readquery-contracts).\n\n1. `rust/lance-datafusion/src/planner.rs:280-350` \u2014 identifier resolution and qualification.\n2. `rust/lance/src/datafusion/dataframe.rs:132-197` \u2014 Exact TableProvider pushdown claim and scanner translation.\n3. `rust/lance/src/dataset/scanner.rs:3498-3663` \u2014 eligibility, residual filter and plan stage order.\n4. `rust/lance-datafusion/src/exec.rs:721-761` \u2014 output partition/order contract.\n\n<a id=\"python\"></a>\n"
+    },
+    {
+      "id": "route-009",
+      "task": "Extend a Python API or trace its Rust implementation",
+      "ordered_read_sets": [
+        [
+          "python/python/lance/dataset.py:1223-1565,7391-7428",
+          "python/src/dataset.rs:1244-1449",
+          "rust/lance/src/dataset/scanner.rs:3498-3663",
+          "python/src/scanner.rs:34-49",
+          "python/src/reader.rs:48-123"
+        ]
+      ],
+      "affected_paths": [
+        "python/python/lance/dataset.py",
+        "python/src/dataset.rs",
+        "rust/lance/src/dataset/scanner.rs"
+      ],
+      "kb_section": "Extend a Python API or trace its Rust implementation\n\n[API families and all local declarations](../L3-symbols/public-api.md#python-to-rust-ordered-read-maps). Concrete scanner-option task:\n\n1. `python/python/lance/dataset.py:1223-1565,7391-7428` \u2014 public argument/default and forwarding path.\n2. `python/src/dataset.rs:1244-1449` \u2014 PyO3 signature, conversion and builder call.\n3. `rust/lance/src/dataset/scanner.rs:3498-3663` plus the selected setter from the [declaration directory](../L3-symbols/api-reference/lance.md) \u2014 validation/planning.\n4. `python/src/scanner.rs:34-49` \u2192 `python/src/reader.rs:48-123` only if result streaming/lifetime changes. That expands to five unique files.\n\n<a id=\"java\"></a>\n"
+    },
+    {
+      "id": "route-010",
+      "task": "Extend Java scanner options \u2014 mapped only",
+      "ordered_read_sets": [
+        [
+          "java/src/main/java/org/lance/Dataset.java:834-858",
+          "java/src/main/java/org/lance/ipc/ScanOptions.java:353-362,601-710",
+          "java/src/main/java/org/lance/ipc/LanceScanner.java:57-101",
+          "java/lance-jni/src/blocking_scanner.rs:316-374,588-725"
+        ]
+      ],
+      "affected_paths": [
+        "java/src/main/java/org/lance/Dataset.java"
+      ],
+      "kb_section": "Extend Java scanner options \u2014 mapped only\n\n[Java Module Map and JNI route](../L1-modules/java.md). Navigation confirmation does not upgrade Java to deep verification.\n\n1. `java/src/main/java/org/lance/Dataset.java:834-858`.\n2. `java/src/main/java/org/lance/ipc/ScanOptions.java:353-362,601-710`.\n3. `java/src/main/java/org/lance/ipc/LanceScanner.java:57-101`.\n4. `java/lance-jni/src/blocking_scanner.rs:316-374,588-725`.\n\n<a id=\"io\"></a>\n"
+    },
+    {
+      "id": "route-018",
+      "task": "Open a Java dataset at a reference \u2014 mapped only",
+      "ordered_read_sets": [
+        [
+          "java/src/main/java/org/lance/ReadOptions.java:137-173,308-324",
+          "java/src/main/java/org/lance/OpenDatasetBuilder.java:231-247",
+          "java/src/main/java/org/lance/Dataset.java:458-499",
+          "java/lance-jni/src/blocking_dataset.rs:205-279,1727-1788",
+          "java/lance-jni/src/blocking_dataset.rs:255-267",
+          "rust/lance/src/dataset/builder.rs:734-866"
+        ]
+      ],
+      "affected_paths": [
+        "java/lance-jni/src/blocking_dataset.rs",
+        "java/src/main/java/org/lance/Dataset.java"
+      ],
+      "kb_section": "Open a Java dataset at a reference \u2014 mapped only\n\n[Changed Java interfaces](../L1-modules/java.md#refresh-reference-based-opening-and-value-identity--mapped-only). Keep Java boundary and Rust resolution as separate bounded subtasks.\n\n**Java forwarding (four files):** `java/src/main/java/org/lance/ReadOptions.java:137-173,308-324` \u2192 `java/src/main/java/org/lance/OpenDatasetBuilder.java:231-247` \u2192 `java/src/main/java/org/lance/Dataset.java:458-499` \u2192 `java/lance-jni/src/blocking_dataset.rs:205-279,1727-1788`.\n\n**Shared reference resolution (two files):** `java/lance-jni/src/blocking_dataset.rs:255-267` \u2192 `rust/lance/src/dataset/builder.rs:734-866`. Main/default-chain open semantics are URI-relative; use the canonical contract before treating open as equivalent to checkout.\n\n## Retained production recipe and scenario routes\n\n<a id=\"recipe-01\"></a>\n\n"
+    },
+    {
+      "id": "route-019",
+      "task": "Adding index metadata",
+      "ordered_read_sets": [
+        [
+          "protos/index.proto:17-383",
+          "protos/table.proto:303-418",
+          "rust/lance-table/src/format/index.rs:21-95",
+          "rust/lance-table/src/format/index.rs:161-364",
+          "rust/lance-index/src/scalar/registry.rs:29-367"
+        ]
+      ],
+      "affected_paths": [
+        "protos/index.proto"
+      ],
+      "kb_section": "Adding index metadata\n\n[Recipe](cookbook.md#adding-index-metadata-established-first-steps) \u00b7 [Decision contract](../L3-symbols/behavior-contracts.md)\n\n1. [Frozen current details schema](../L2-files/protos/index.proto.md) \u2192 protos/index.proto:17-383 \u2014 choose an existing detail shape or introduce a compatible new message. Historical namespace identities remain frozen; do not move old messages.\n2. [Frozen manifest index envelope](../L2-files/protos/table.proto.md) \u2192 protos/table.proto:303-418 \u2014 locate index metadata in the complete numbered declaration record.\n3. [Frozen metadata conversion](../L2-files/rust/lance-table/src/format/index.rs.md) \u2192 rust/lance-table/src/format/index.rs:21-95, rust/lance-table/src/format/index.rs:161-364 \u2014 identity, coverage, optional details and wire conversion.\n4. `rust/lance-index/src/scalar/registry.rs:29-367` \u2014 type-specific metadata load/validation; use [index extension](../L3-symbols/protocol-index.md#adding-a-scalar-index-bounded-subtasks) for a new algorithm rather than treating the metadata change as sufficient.\n\n<a id=\"recipe-03\"></a>\n\n"
+    },
+    {
+      "id": "route-050",
+      "task": "Modify manifest or deletion IO",
+      "ordered_read_sets": [
+        [
+          "rust/lance-table/src/io/manifest.rs:32-251",
+          "rust/lance-table/src/io/deletion.rs:25-216",
+          "rust/lance/src/io/deletion.rs:11-43",
+          "rust/lance/src/dataset/fragment.rs:3005-3036"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance/src/dataset/fragment.rs"
+      ],
+      "kb_section": "Modify manifest or deletion IO\n\n[Recipe](cookbook.md#modify-manifest-or-deletion-io) \u00b7 [Decision contract](../L3-symbols/behavior-contracts.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-table/src/io/manifest.rs.md) \u2192 rust/lance-table/src/io/manifest.rs:32-251.\n2. [frozen/Key File contract](../L2-files/rust/lance-table/src/io/deletion.rs.md) \u2192 rust/lance-table/src/io/deletion.rs:25-216.\n3. [Module Map](../L1-modules/rust-lance.md#rust-lance-src-io) \u2192 rust/lance/src/io/deletion.rs:11-43.\n4. [Module Map](../L1-modules/rust-lance.md#rust-lance-src-dataset) \u2192 rust/lance/src/dataset/fragment.rs:3005-3036.\n\n<a id=\"recipe-35\"></a>\n\n"
+    },
+    {
+      "id": "route-113",
+      "task": "Local MemWAL generation publication preparation",
+      "ordered_read_sets": [
+        [
+          "rust/lance-table/src/transaction/manifest_build.rs:453-577",
+          "rust/lance-table/src/transaction/manifest_build.rs:580-2000",
+          "rust/lance-table/src/system_index/mem_wal.rs:531-538",
+          "rust/lance-table/src/system_index/mem_wal.rs:540-585",
+          "rust/lance-table/src/system_index/mem_wal.rs:587-618",
+          "rust/lance/src/index.rs:4311-4341",
+          "rust/lance/src/io/commit.rs:1305-1378",
+          "rust/lance/src/io/commit.rs:1537-1581",
+          "rust/lance/src/io/commit.rs:1767-1851"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance/src/index.rs"
+      ],
+      "kb_section": "Local MemWAL generation publication preparation\n\n[Scenario](scenarios.md#local-memwal-generation-publication-preparation) \u00b7 [Decision contract](../L3-symbols/protocol-commit.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-table/src/transaction/manifest_build.rs.md) \u2192 rust/lance-table/src/transaction/manifest_build.rs:453-577, rust/lance-table/src/transaction/manifest_build.rs:580-2000.\n2. [frozen/Key File contract](../L2-files/rust/lance-table/src/system_index/mem_wal.rs.md) \u2192 rust/lance-table/src/system_index/mem_wal.rs:531-538, rust/lance-table/src/system_index/mem_wal.rs:540-585, rust/lance-table/src/system_index/mem_wal.rs:587-618.\n3. [Module Map](../L1-modules/rust-lance.md#rust-lance-src) \u2192 rust/lance/src/index.rs:4311-4341.\n4. [Module Map](../L1-modules/rust-lance.md#rust-lance-src-io) \u2192 rust/lance/src/io/commit.rs:1305-1378, rust/lance/src/io/commit.rs:1537-1581, rust/lance/src/io/commit.rs:1767-1851.\n\n<a id=\"scenario-33\"></a>\n\n"
+    },
+    {
+      "id": "route-114",
+      "task": "Manifest body write/read and deletion-object trace",
+      "ordered_read_sets": [
+        [
+          "rust/lance-table/src/transaction/manifest_build.rs:1984-2000",
+          "rust/lance-table/src/io/manifest.rs:32-175",
+          "rust/lance-table/src/io/manifest.rs:177-230",
+          "rust/lance-table/src/io/commit.rs:213-230",
+          "rust/lance-table/src/format/manifest.rs:396-424",
+          "rust/lance-table/src/io/deletion.rs:61-216"
+        ],
+        [
+          "rust/lance/src/dataset/fragment.rs:3005-3036",
+          "rust/lance/src/io/deletion.rs:11-43"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance/src/dataset/fragment.rs"
+      ],
+      "kb_section": "Manifest body write/read and deletion-object trace\n\n[Scenario](scenarios.md#manifest-body-writeread-and-deletion-object-trace) \u00b7 [Decision contract](../L3-symbols/protocol-commit.md)\n\n**Local subtask 1: manifest_build, manifest, commit, manifest, deletion.** Select this set only when changing those mechanisms; the other sets are separate subproblems.\n\n1. [frozen/Key File contract](../L2-files/rust/lance-table/src/transaction/manifest_build.rs.md) \u2192 rust/lance-table/src/transaction/manifest_build.rs:1984-2000.\n2. [frozen/Key File contract](../L2-files/rust/lance-table/src/io/manifest.rs.md) \u2192 rust/lance-table/src/io/manifest.rs:32-175, rust/lance-table/src/io/manifest.rs:177-230.\n3. [frozen/Key File contract](../L2-files/rust/lance-table/src/io/commit.rs.md) \u2192 rust/lance-table/src/io/commit.rs:213-230.\n4. [frozen/Key File contract](../L2-files/rust/lance-table/src/format/manifest.rs.md) \u2192 rust/lance-table/src/format/manifest.rs:396-424.\n5. [frozen/Key File contract](../L2-files/rust/lance-table/src/io/deletion.rs.md) \u2192 rust/lance-table/src/io/deletion.rs:61-216.\n\n**Local subtask 2: fragment, deletion.** Select this set only when changing those mechanisms; the other sets are separate subproblems.\n\n1. [Module Map](../L1-modules/rust-lance.md#rust-lance-src-dataset) \u2192 rust/lance/src/dataset/fragment.rs:3005-3036.\n2. [Module Map](../L1-modules/rust-lance.md#rust-lance-src-io) \u2192 rust/lance/src/io/deletion.rs:11-43.\n\n<a id=\"scenario-34\"></a>\n\n"
+    },
+    {
+      "id": "route-118",
+      "task": "Scheduled batches to visible rows",
+      "ordered_read_sets": [
+        [
+          "rust/lance/src/dataset/fragment.rs:3681-3720",
+          "rust/lance/src/dataset/fragment.rs:3873-3917",
+          "rust/lance-table/src/utils/stream.rs:489-641",
+          "rust/lance-table/src/utils/stream.rs:692-848"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance/src/dataset/fragment.rs"
+      ],
+      "kb_section": "Scheduled batches to visible rows\n\n[Scenario](scenarios.md#scheduled-batches-to-visible-rows) \u00b7 [Decision contract](../L3-symbols/behavior-contracts.md)\n\n1. [Module Map](../L1-modules/rust-lance.md#rust-lance-src-dataset) \u2192 rust/lance/src/dataset/fragment.rs:3681-3720, rust/lance/src/dataset/fragment.rs:3873-3917.\n2. [frozen/Key File contract](../L2-files/rust/lance-table/src/utils/stream.rs.md) \u2192 rust/lance-table/src/utils/stream.rs:489-641, rust/lance-table/src/utils/stream.rs:692-848.\n\n<a id=\"scenario-38\"></a>\n\n"
+    },
+    {
+      "id": "route-146",
+      "task": "Deep clone managed blob objects",
+      "ordered_read_sets": [
+        [
+          "rust/lance/src/dataset.rs:3299-3349,3418-3427",
+          "rust/lance/src/io/commit.rs:423-614",
+          "rust/lance/src/dataset/blob/clone.rs:1-259",
+          "rust/lance/src/dataset/blob.rs:5281-5437"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance/src/dataset/blob.rs",
+        "rust/lance/src/dataset/blob/clone.rs"
+      ],
+      "kb_section": "Deep clone managed blob objects\n\n[Contract](../L3-symbols/refresh-2026-10-07.md#clone-and-garbage-collection). Read in order: `rust/lance/src/dataset.rs:3299-3349,3418-3427` \u2192 `rust/lance/src/io/commit.rs:423-614` \u2192 [selected helper](../L2-files/rust/lance/src/dataset/blob/clone.rs.md) \u2192 `rust/lance/src/dataset/blob/clone.rs:1-259` \u2192 `rust/lance/src/dataset/blob.rs:5281-5437`. For tagged metadata relocation, use the next separate route.\n\n"
+    },
+    {
+      "id": "route-149",
+      "task": "Stream index remapping across tagged transitions",
+      "ordered_read_sets": [
+        [
+          "rust/lance/src/dataset/optimize/remapping.rs:486-604,864-1100",
+          "rust/lance-index-core/src/remapping.rs:92-218,259-362",
+          "rust/lance-index-core/src/scalar.rs:666-723",
+          "rust/lance-index/src/scalar/registry.rs:169-209"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-index-core/src/scalar.rs"
+      ],
+      "kb_section": "Stream index remapping across tagged transitions\n\n[Contract](../L3-symbols/refresh-2026-10-07.md#fragment-reuse-remapping-and-concurrency). Read `rust/lance/src/dataset/optimize/remapping.rs:486-604,864-1100` \u2192 `rust/lance-index-core/src/remapping.rs:92-218,259-362` \u2192 `rust/lance-index-core/src/scalar.rs:666-723` \u2192 `rust/lance-index/src/scalar/registry.rs:169-209`.\n\n"
+    },
+    {
+      "id": "route-151",
+      "task": "Extend public schema projection or count pushdown",
+      "ordered_read_sets": [
+        [
+          "rust/lance/src/dataset/scanner.rs:1855-1858,3034-3064",
+          "rust/lance-datafusion/src/projection.rs:311-315,351-355",
+          "rust/lance/src/io/exec/count_pushdown.rs:388-417",
+          "rust/lance/src/io/exec/filtered_read.rs:3411-3428"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance/src/dataset/scanner.rs",
+        "rust/lance/src/io/exec/filtered_read.rs"
+      ],
+      "kb_section": "Extend public schema projection or count pushdown\n\n[Contract](../L3-symbols/refresh-2026-10-07.md#query-and-public-api-changes). Read `rust/lance/src/dataset/scanner.rs:1855-1858,3034-3064` \u2192 `rust/lance-datafusion/src/projection.rs:311-315,351-355` \u2192 `rust/lance/src/io/exec/count_pushdown.rs:388-417` \u2192 `rust/lance/src/io/exec/filtered_read.rs:3411-3428`.\n\n## October 9 implementation routes\n\n"
+    },
+    {
+      "id": "route-152",
+      "task": "Count with selected scalar index segments",
+      "ordered_read_sets": [
+        [
+          "rust/lance/src/dataset/scanner.rs:1440-1649,3309-3361",
+          "rust/lance/src/io/exec/scalar_index.rs:1-300",
+          "rust/lance/src/index/scalar_logical.rs:270-425",
+          "java/src/main/java/org/lance/Dataset.java:1485-1559",
+          "java/lance-jni/src/blocking_dataset.rs:4016-4142"
+        ]
+      ],
+      "affected_paths": [
+        "java/lance-jni/src/blocking_dataset.rs",
+        "java/src/main/java/org/lance/Dataset.java",
+        "rust/lance/src/dataset/scanner.rs",
+        "rust/lance/src/index/scalar_logical.rs",
+        "rust/lance/src/io/exec/scalar_index.rs"
+      ],
+      "kb_section": "Count with selected scalar index segments\n\n[Contract](../L3-symbols/refresh-2026-10-09.md#indexed-counting-and-public-apis). Read `rust/lance/src/dataset/scanner.rs:1440-1649,3309-3361` \u2192 `rust/lance/src/io/exec/scalar_index.rs:1-300` \u2192 `rust/lance/src/index/scalar_logical.rs:270-425`. For Java forwarding, add `java/src/main/java/org/lance/Dataset.java:1485-1559` and `java/lance-jni/src/blocking_dataset.rs:4016-4142`; the native count methods parse UUIDs and delegate to Rust. Java remains mapped only.\n\n"
+    },
+    {
+      "id": "route-153",
+      "task": "Add or customize top-k late materialization",
+      "ordered_read_sets": [
+        [
+          "rust/lance/src/io/exec/topk_late_materialization.rs:67-440",
+          "rust/lance/src/io/exec/filtered_read.rs:2769-2810",
+          "rust/lance/src/io/exec/take.rs:572-617,691-695"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance/src/io/exec/filtered_read.rs",
+        "rust/lance/src/io/exec/take.rs",
+        "rust/lance/src/io/exec/topk_late_materialization.rs"
+      ],
+      "kb_section": "Add or customize top-k late materialization\n\n[Selected Key File](../L2-files/rust/lance/src/io/exec/topk_late_materialization.rs.md). Read `rust/lance/src/io/exec/topk_late_materialization.rs:67-440` \u2192 `rust/lance/src/io/exec/filtered_read.rs:2769-2810` \u2192 `rust/lance/src/io/exec/take.rs:572-617,691-695`. The filter-read projection helper is included in this route; do not infer that this rule is automatically registered.\n\n"
+    },
+    {
+      "id": "route-154",
+      "task": "Evolve a MemWAL writer schema",
+      "ordered_read_sets": [
+        [
+          "rust/lance/src/dataset/mem_wal/api.rs:832-900",
+          "rust/lance/src/dataset/mem_wal/write.rs:1824-1860,1948-1970,3847-3951",
+          "rust/lance/src/dataset/mem_wal/scanner/generation_read.rs:84-158,410-448",
+          "rust/lance/src/dataset/schema_evolution.rs:491-531,851-874",
+          "rust/lance/src/dataset/mem_wal/wal.rs:44-62,1117-1125",
+          "rust/lance/src/dataset/mem_wal/write.rs:1482-1510"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance/src/dataset/mem_wal/api.rs",
+        "rust/lance/src/dataset/mem_wal/scanner/generation_read.rs",
+        "rust/lance/src/dataset/mem_wal/wal.rs",
+        "rust/lance/src/dataset/mem_wal/write.rs",
+        "rust/lance/src/dataset/schema_evolution.rs"
+      ],
+      "kb_section": "Evolve a MemWAL writer schema\n\n[Contract](../L3-symbols/refresh-2026-10-09.md#memwal-schema-ownership-and-reads). Read `rust/lance/src/dataset/mem_wal/api.rs:832-900` \u2192 `rust/lance/src/dataset/mem_wal/write.rs:1824-1860,1948-1970,3847-3951` \u2192 `rust/lance/src/dataset/mem_wal/scanner/generation_read.rs:84-158,410-448` \u2192 `rust/lance/src/dataset/schema_evolution.rs:491-531,851-874`. WAL replay is a separate subtask: `rust/lance/src/dataset/mem_wal/wal.rs:44-62,1117-1125` \u2192 `rust/lance/src/dataset/mem_wal/write.rs:1482-1510`.\n\n"
+    },
+    {
+      "id": "route-155",
+      "task": "Preserve deleted physical rows during column updates",
+      "ordered_read_sets": [
+        [
+          "rust/lance/src/dataset/updater.rs:116-210,272-460,572-600,759-796",
+          "rust/lance/src/dataset/updater/blanks.rs:24-65,293-354,458-499,875-1059"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance/src/dataset/updater.rs",
+        "rust/lance/src/dataset/updater/blanks.rs"
+      ],
+      "kb_section": "Preserve deleted physical rows during column updates\n\n[Contract](../L3-symbols/refresh-2026-10-09.md#updater-and-cleanup). Read `rust/lance/src/dataset/updater.rs:116-210,272-460,572-600,759-796` \u2192 `rust/lance/src/dataset/updater/blanks.rs:24-65,293-354,458-499,875-1059`.\n\n"
+    },
+    {
+      "id": "route-156",
+      "task": "Change managed cleanup scanning or cascade throttling",
+      "ordered_read_sets": [
+        [
+          "rust/lance/src/dataset/cleanup.rs:313-339,594-681,1073-1085,1573-1584,1909-1917",
+          "rust/lance/src/dataset/blob.rs:5281-5346",
+          "rust/lance/src/dataset/blob/clone.rs:227-244"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance/src/dataset/blob.rs",
+        "rust/lance/src/dataset/blob/clone.rs",
+        "rust/lance/src/dataset/cleanup.rs"
+      ],
+      "kb_section": "Change managed cleanup scanning or cascade throttling\n\n[Contract](../L3-symbols/refresh-2026-10-09.md#updater-and-cleanup). Read `rust/lance/src/dataset/cleanup.rs:313-339,594-681,1073-1085,1573-1584,1909-1917` \u2192 `rust/lance/src/dataset/blob.rs:5281-5346` \u2192 `rust/lance/src/dataset/blob/clone.rs:227-244`.\n\n"
+    },
+    {
+      "id": "route-157",
+      "task": "Extend streaming coreset training",
+      "ordered_read_sets": [
+        [
+          "rust/lance/src/index/vector/ivf.rs:3837-3877,5033-5058",
+          "rust/lance/src/index/vector/ivf/coreset_algo/mod.rs:1-92",
+          "rust/lance/src/index/vector/ivf/coreset_algo/float_coreset.rs:1-174"
+        ],
+        [
+          "rust/lance/src/index/vector/ivf.rs:3837-3877,5033-5058",
+          "rust/lance/src/index/vector/ivf/coreset_algo/mod.rs:1-92",
+          "rust/lance/src/index/vector/ivf/coreset_algo/hamming_coreset.rs:1-140",
+          "rust/lance/src/index/vector/ivf/streaming_hamming.rs:1-180,423-492,714-854",
+          "rust/lance/src/index/vector/ivf/streaming_hamming/counter.rs:1-120"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance/src/index/vector/ivf.rs",
+        "rust/lance/src/index/vector/ivf/coreset_algo/float_coreset.rs",
+        "rust/lance/src/index/vector/ivf/coreset_algo/hamming_coreset.rs",
+        "rust/lance/src/index/vector/ivf/coreset_algo/mod.rs",
+        "rust/lance/src/index/vector/ivf/streaming_hamming.rs",
+        "rust/lance/src/index/vector/ivf/streaming_hamming/counter.rs"
+      ],
+      "kb_section": "Extend streaming coreset training\n\n[Contract and mapped-only boundary](../L3-symbols/refresh-2026-10-09.md#vector-training-maps). Read `rust/lance/src/index/vector/ivf.rs:3837-3877,5033-5058` \u2192 `rust/lance/src/index/vector/ivf/coreset_algo/mod.rs:1-92` \u2192 choose `rust/lance/src/index/vector/ivf/coreset_algo/float_coreset.rs:1-174` or `rust/lance/src/index/vector/ivf/coreset_algo/hamming_coreset.rs:1-140`. For Hamming details, read `rust/lance/src/index/vector/ivf/streaming_hamming.rs:1-180,423-492,714-854` \u2192 `rust/lance/src/index/vector/ivf/streaming_hamming/counter.rs:1-120`. Float and Hamming are separate branches, each at most five files.\n\n"
+    },
+    {
+      "id": "route-158",
+      "task": "Retrieve current Python version summary",
+      "ordered_read_sets": [
+        [
+          "python/python/lance/dataset.py:3163-3192,6133-6141",
+          "python/src/dataset.rs:924-934,2139-2151"
+        ]
+      ],
+      "affected_paths": [
+        "python/python/lance/dataset.py",
+        "python/src/dataset.rs"
+      ],
+      "kb_section": "Retrieve current Python version summary\n\n[Contract](../L3-symbols/refresh-2026-10-09.md#indexed-counting-and-public-apis). Read `python/python/lance/dataset.py:3163-3192,6133-6141` \u2192 `python/src/dataset.rs:924-934,2139-2151` \u2192 the retained Dataset version contract in [Dataset map](../L1-modules/rust-lance.md).\n"
+    }
+  ],
+  "unaffected_routes_skipped": [
+    "Create or append a dataset",
+    "Compact files after writing",
+    "Add an encoding or change structural selection",
+    "Add a transaction operation",
+    "Tune I/O scheduling without stalling dependent reads",
+    "Add an object-store provider \u2014 interface route",
+    "Add a namespace implementation \u2014 mapped only",
+    "Change or interpret exact version gates",
+    "Avoid resurrecting concurrently deleted rows during distributed compaction",
+    "Preserve the stable V2_0 writer/reader contract",
+    "Open a named branch or tag",
+    "Extend a logical type",
+    "Extend schema validation or selection",
+    "Core containers, memory and small utilities",
+    "Deletion vectors and single-rewrite mapping",
+    "Ordered and stable-partition row mapping",
+    "AIMD control",
+    "Generic split-block Bloom filters",
+    "Custom cache backend",
+    "A serializable cache value",
+    "Memory-backend selection and testing seam",
+    "Typed cache key/value extension seam",
+    "Interpreting an existing manifest feature word",
+    "Reading row-ID and transaction metadata without conflating layers",
+    "Extending metadata consumers conservatively",
+    "Local metadata extension checklist",
+    "File-version and overlay-staleness extension seams",
+    "Row-version metadata and selections",
+    "Row-ID wire payloads",
+    "Segment representation or cursor behavior",
+    "Row-ID sequence operations",
+    "Change transaction row lineage",
+    "New operation: definition and application",
+    "Extend transaction equality and metadata predicates",
+    "Change validation or add an operation guard",
+    "Extend a transaction payload through its codec",
+    "Modify index coverage during a transaction",
+    "Extend tagged-history operation policy",
+    "Extend supported fragment-reuse mappings",
+    "Modify MemWAL metadata or progress rules",
+    "Change candidate assembly safely",
+    "Add or change a commit handler",
+    "Implement an external manifest store",
+    "Modify DynamoDB coordination or row-ID lookup",
+    "Change task alignment or system-column materialization",
+    "File-level extension prerequisites",
+    "Current-format mechanism change: resolved local seams",
+    "Extending exact reader grammar: local touch set",
+    "Extend a current structural writer mechanism",
+    "V2_0 persistence persistence contract",
+    "Reader projection, metadata and selector changes",
+    "Changing encoded concatenation",
+    "Preserve frozen V1 boundaries during current-format work",
+    "Separately authorized V1 codec repair",
+    "Separately authorized V1 reader repair",
+    "Investigating a frozen V1 write regression",
+    "Investigating historical statistics regressions",
+    "Embedded V2_0 compatibility reader behavior",
+    "Encoding change: constructor and IO seam portion only",
+    "Extending compression policy or a general codec: known touch points",
+    "Changing a buffer operation or mini-block codec",
+    "Modifying current value or bitpacking codecs",
+    "Changing variable, FSST or BSS behavior",
+    "Extending packed structures or statistics",
+    "Changing a structural compression policy",
+    "Modifying modern RLE behavior",
+    "Extending DataBlock or its conversion boundary",
+    "Changing rep/def or control words",
+    "Extending a current field-encoding mechanism",
+    "Extending current decode planning",
+    "Changing primitive helper behavior",
+    "Changing Blob encoding or loading",
+    "Extending nested structural shapes",
+    "Distributed filtered-read serialization",
+    "State machines from schema contracts",
+    "In-memory blob projection trace",
+    "Deletion vectors and single-rewrite mapping",
+    "Ordered and stable-partition row mapping",
+    "AIMD control",
+    "Generic split-block Bloom filters",
+    "Configuring a cache backend",
+    "Serializing and decoding one cache entry",
+    "Memory backend miss and retry",
+    "One typed cached load",
+    "Local manifest capability walkthrough",
+    "Local row-ID metadata and transaction disposition traces",
+    "Decode, share, detach and clone a manifest",
+    "Local index-list cache and overlay reload traces",
+    "Local merge-insert key representation trace",
+    "Exact version and stale-index metadata traces",
+    "Refresh last-updated lineage during column rewrite",
+    "Read version batches and present row-ID offsets",
+    "Inline row-ID encode/decode",
+    "Construct, select and mutate a segment",
+    "Selection, deletion and rechunking",
+    "Local transaction trace: allocate IDs, preserve creation, stamp update",
+    "Transaction-attempt trace",
+    "Local config and metadata overlap examples",
+    "Local pre-commit validation trace",
+    "Local transaction protobuf trace",
+    "Local index invalidation and rewrite trace",
+    "Gate and clone-guard boundaries",
+    "Decode one fragment-reuse history",
+    "Single-attempt conditional and locked commit traces",
+    "External publication, repair and conditioned history",
+    "DynamoDB generic commit and stable-ID lookup traces",
+    "File runtime entry paths",
+    "Structural projection subtrace",
+    "Metadata finishing subtrace",
+    "Current structural file write subtrace",
+    "Shared reader open, prepare and consume",
+    "Local encoded-concatenation trace",
+    "Frozen V1 value roundtrip subtrace",
+    "Frozen V1 full local read trace",
+    "Complete local V1 write-to-read trace",
+    "Local V1 statistics trace",
+    "Read stable V2_0 through production code",
+    "Read stable V2_2 through production code",
+    "Local metadata and IO handoff",
+    "Local configuration-to-buffer trace",
+    "General mini-block subtrace",
+    "Raw FSL and bitpacking codec subtraces",
+    "Variable and BSS codec subtraces",
+    "Packed and statistics subtraces",
+    "Compression policy subtrace",
+    "RLE local write/read trace",
+    "Arrow array to physical block and back",
+    "Structural utility trace",
+    "In-memory batch encoding trace",
+    "Schedule and decode trace",
+    "Constant page selection and dictionary validity trace",
+    "Original Blob encode/read subtrace",
+    "Nested FSL/Map encode-decode subtrace",
+    "Relocate tagged FRI during clone",
+    "Trim or prune tagged fragment-reuse history",
+    "Evolve transaction history without blocking dataset opens"
+  ]
+}

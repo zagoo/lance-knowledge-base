@@ -1,0 +1,281 @@
+@@ -0,0 +1,280 @@
+    1 +// SPDX-License-Identifier: Apache-2.0
+    2 +// SPDX-FileCopyrightText: Copyright The Lance Authors
+    3 +// SPDX-FileCopyrightText: Copyright 2023 Datafuse Labs
+    4 +// Adapted from databendlabs/jsonb at commit fba895c5ebe77ce2539e187f9c652f51cbf195c3.
+    5 +
+    6 +use std::cmp::Ordering;
+    7 +use std::fmt::Debug;
+    8 +use std::fmt::Display;
+    9 +use std::fmt::Formatter;
+   10 +
+   11 +use jiff::SignedDuration;
+   12 +use jiff::civil::date;
+   13 +use jiff::fmt::strtime;
+   14 +use jiff::tz::Offset;
+   15 +
+   16 +const MICROS_PER_SEC: i64 = 1_000_000;
+   17 +const MICROS_PER_MINUTE: i64 = 60 * MICROS_PER_SEC;
+   18 +const MICROS_PER_HOUR: i64 = 60 * MICROS_PER_MINUTE;
+   19 +const MONTHS_PER_YEAR: i32 = 12;
+   20 +
+   21 +const TIMESTAMP_FORMAT: &str = "%Y-%m-%d %H:%M:%S%.6f";
+   22 +const TIMESTAMP_TIMEZONE_FORMAT: &str = "%Y-%m-%d %H:%M:%S%.6f %z";
+   23 +
+   24 +/// Represents extended JSON value types that are not supported in standard JSON.
+   25 +///
+   26 +/// Standard JSON only supports strings, numbers, booleans, null, arrays, and objects.
+   27 +/// This enum provides additional data types commonly needed in database systems and
+   28 +/// other applications that require more specialized data representations.
+   29 +#[derive(Debug, Clone)]
+   30 +pub enum ExtensionValue<'a> {
+   31 +    /// Binary data (byte array), allowing efficient storage of binary content
+   32 +    /// that would otherwise require base64 encoding in standard JSON
+   33 +    Binary(&'a [u8]),
+   34 +    /// Calendar date without time component (year, month, day)
+   35 +    Date(Date),
+   36 +    /// Timestamp with microsecond precision but without timezone information
+   37 +    Timestamp(Timestamp),
+   38 +    /// Timestamp with microsecond precision and timezone offset information
+   39 +    TimestampTz(TimestampTz),
+   40 +    /// Time interval representation for duration calculations
+   41 +    Interval(Interval),
+   42 +}
+   43 +
+   44 +/// Represents a calendar date (year, month, day) without time component.
+   45 +///
+   46 +/// The value is stored as days since the Unix epoch (January 1, 1970).
+   47 +/// This allows for efficient date arithmetic and comparison operations.
+   48 +/// Standard JSON has no native date type and typically uses ISO 8601 strings.
+   49 +#[derive(Debug, Clone, PartialEq, Eq, Ord, PartialOrd)]
+   50 +pub struct Date {
+   51 +    /// Days since Unix epoch (January 1, 1970)
+   52 +    /// Positive values represent dates after the epoch, negative values represent dates before
+   53 +    pub value: i32,
+   54 +}
+   55 +
+   56 +/// Represents a timestamp (date and time) without timezone information.
+   57 +///
+   58 +/// The value is stored as microseconds since the Unix epoch (January 1, 1970 00:00:00 UTC).
+   59 +/// This provides microsecond precision for timestamp operations.
+   60 +/// Standard JSON has no native timestamp type and typically uses ISO 8601 strings.
+   61 +#[derive(Debug, Clone, PartialEq, Eq, Ord, PartialOrd)]
+   62 +pub struct Timestamp {
+   63 +    /// Microseconds since Unix epoch (January 1, 1970 00:00:00 UTC)
+   64 +    pub value: i64,
+   65 +}
+   66 +
+   67 +/// Represents a timestamp with timezone information.
+   68 +///
+   69 +/// Combines a timestamp value with a timezone offset, allowing for
+   70 +/// timezone-aware datetime operations. The timestamp is stored in UTC,
+   71 +/// and the offset indicates the local timezone.
+   72 +/// Standard JSON has no native timezone-aware timestamp type.
+   73 +#[derive(Debug, Clone, PartialEq, Eq, Ord, PartialOrd)]
+   74 +pub struct TimestampTz {
+   75 +    /// Timezone offset in seconds from UTC
+   76 +    pub offset: i32,
+   77 +    /// Microseconds since Unix epoch (January 1, 1970 00:00:00 UTC)
+   78 +    pub value: i64,
+   79 +}
+   80 +
+   81 +/// Represents a time interval or duration.
+   82 +///
+   83 +/// This structure can represent complex time intervals with separate
+   84 +/// components for months, days, and microseconds, allowing for precise
+   85 +/// duration calculations that account for calendar irregularities.
+   86 +/// Standard JSON has no native interval/duration type.
+   87 +#[derive(Debug, Clone, PartialEq, Eq, Ord, PartialOrd)]
+   88 +pub struct Interval {
+   89 +    /// Number of months in the interval
+   90 +    pub months: i32,
+   91 +    /// Number of days in the interval
+   92 +    pub days: i32,
+   93 +    /// Number of microseconds in the interval
+   94 +    pub micros: i64,
+   95 +}
+   96 +
+   97 +impl Display for Date {
+   98 +    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+   99 +        let dur = SignedDuration::from_hours(self.value as i64 * 24);
+  100 +        let date = date(1970, 1, 1).checked_add(dur).unwrap();
+  101 +        write!(f, "{}", date)
+  102 +    }
+  103 +}
+  104 +
+  105 +impl Display for Timestamp {
+  106 +    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+  107 +        let micros = self.value;
+  108 +        let (mut secs, mut nanos) = (micros / MICROS_PER_SEC, (micros % MICROS_PER_SEC) * 1_000);
+  109 +        if nanos < 0 {
+  110 +            secs -= 1;
+  111 +            nanos += 1_000_000_000;
+  112 +        }
+  113 +
+  114 +        if secs > 253402207200 {
+  115 +            secs = 253402207200;
+  116 +            nanos = 0;
+  117 +        } else if secs < -377705023201 {
+  118 +            secs = -377705023201;
+  119 +            nanos = 0;
+  120 +        }
+  121 +        let ts = jiff::Timestamp::new(secs, nanos as i32).unwrap();
+  122 +
+  123 +        write!(f, "{}", strtime::format(TIMESTAMP_FORMAT, ts).unwrap())
+  124 +    }
+  125 +}
+  126 +
+  127 +impl Display for TimestampTz {
+  128 +    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+  129 +        let micros = self.value;
+  130 +        let (mut secs, mut nanos) = (micros / MICROS_PER_SEC, (micros % MICROS_PER_SEC) * 1_000);
+  131 +        if nanos < 0 {
+  132 +            secs -= 1;
+  133 +            nanos += 1_000_000_000;
+  134 +        }
+  135 +
+  136 +        if secs > 253402207200 {
+  137 +            secs = 253402207200;
+  138 +            nanos = 0;
+  139 +        } else if secs < -377705023201 {
+  140 +            secs = -377705023201;
+  141 +            nanos = 0;
+  142 +        }
+  143 +        let ts = jiff::Timestamp::new(secs, nanos as i32).unwrap();
+  144 +        let tz_offset = Offset::from_seconds(self.offset).expect("invalid timezone offset seconds");
+  145 +        let tz = tz_offset.to_time_zone();
+  146 +        let zoned = ts.to_zoned(tz);
+  147 +
+  148 +        write!(
+  149 +            f,
+  150 +            "{}",
+  151 +            strtime::format(TIMESTAMP_TIMEZONE_FORMAT, &zoned).unwrap()
+  152 +        )
+  153 +    }
+  154 +}
+  155 +
+  156 +impl Display for Interval {
+  157 +    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+  158 +        let mut wrote_date_part = false;
+  159 +        let years = self.months / MONTHS_PER_YEAR;
+  160 +        let months = self.months % MONTHS_PER_YEAR;
+  161 +
+  162 +        let mut write_component = |value: i32, singular: &str, plural: &str| -> std::fmt::Result {
+  163 +            if value != 0 {
+  164 +                if wrote_date_part {
+  165 +                    write!(f, " ")?;
+  166 +                }
+  167 +                let abs_val = value.abs();
+  168 +                let unit = if abs_val == 1 { singular } else { plural };
+  169 +                if value < 0 {
+  170 +                    write!(f, "-{} {}", abs_val, unit)?;
+  171 +                } else {
+  172 +                    write!(f, "{} {}", abs_val, unit)?;
+  173 +                }
+  174 +                wrote_date_part = true;
+  175 +            }
+  176 +            Ok(())
+  177 +        };
+  178 +
+  179 +        write_component(years, "year", "years")?;
+  180 +        write_component(months, "month", "months")?;
+  181 +        write_component(self.days, "day", "days")?;
+  182 +
+  183 +        if self.micros != 0 {
+  184 +            if wrote_date_part {
+  185 +                write!(f, " ")?;
+  186 +            }
+  187 +            let mut micros = self.micros;
+  188 +            if micros < 0 {
+  189 +                write!(f, "-")?;
+  190 +                micros = -micros;
+  191 +            }
+  192 +            let hour = micros / MICROS_PER_HOUR;
+  193 +            micros -= hour * MICROS_PER_HOUR;
+  194 +            let min = micros / MICROS_PER_MINUTE;
+  195 +            micros -= min * MICROS_PER_MINUTE;
+  196 +            let sec = micros / MICROS_PER_SEC;
+  197 +            micros -= sec * MICROS_PER_SEC;
+  198 +
+  199 +            if hour < 100 {
+  200 +                write!(f, "{:02}:{:02}:{:02}", hour, min, sec)?;
+  201 +            } else {
+  202 +                write!(f, "{}:{:02}:{:02}", hour, min, sec)?;
+  203 +            }
+  204 +            if micros != 0 {
+  205 +                write!(f, ".{:06}", micros)?;
+  206 +            }
+  207 +        } else if !wrote_date_part {
+  208 +            write!(f, "00:00:00")?;
+  209 +        }
+  210 +        Ok(())
+  211 +    }
+  212 +}
+  213 +
+  214 +impl Display for ExtensionValue<'_> {
+  215 +    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+  216 +        match self {
+  217 +            ExtensionValue::Binary(v) => {
+  218 +                for c in *v {
+  219 +                    write!(f, "{c:02X}")?;
+  220 +                }
+  221 +                Ok(())
+  222 +            }
+  223 +            ExtensionValue::Date(v) => write!(f, "{}", v),
+  224 +            ExtensionValue::Timestamp(v) => write!(f, "{}", v),
+  225 +            ExtensionValue::TimestampTz(v) => write!(f, "{}", v),
+  226 +            ExtensionValue::Interval(v) => write!(f, "{}", v),
+  227 +        }
+  228 +    }
+  229 +}
+  230 +
+  231 +impl Eq for ExtensionValue<'_> {}
+  232 +
+  233 +impl PartialEq for ExtensionValue<'_> {
+  234 +    fn eq(&self, other: &Self) -> bool {
+  235 +        self.partial_cmp(other) == Some(Ordering::Equal)
+  236 +    }
+  237 +}
+  238 +
+  239 +#[allow(clippy::non_canonical_partial_ord_impl)]
+  240 +impl PartialOrd for ExtensionValue<'_> {
+  241 +    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+  242 +        let self_level = match self {
+  243 +            ExtensionValue::Binary(_) => 0,
+  244 +            ExtensionValue::Date(_) => 1,
+  245 +            ExtensionValue::Timestamp(_) => 2,
+  246 +            ExtensionValue::TimestampTz(_) => 3,
+  247 +            ExtensionValue::Interval(_) => 4,
+  248 +        };
+  249 +        let other_level = match other {
+  250 +            ExtensionValue::Binary(_) => 0,
+  251 +            ExtensionValue::Date(_) => 1,
+  252 +            ExtensionValue::Timestamp(_) => 2,
+  253 +            ExtensionValue::TimestampTz(_) => 3,
+  254 +            ExtensionValue::Interval(_) => 4,
+  255 +        };
+  256 +        let res = self_level.cmp(&other_level);
+  257 +        if matches!(res, Ordering::Greater | Ordering::Less) {
+  258 +            return Some(res);
+  259 +        }
+  260 +
+  261 +        match (self, other) {
+  262 +            (ExtensionValue::Binary(self_data), ExtensionValue::Binary(other_data)) => {
+  263 +                Some(self_data.cmp(other_data))
+  264 +            }
+  265 +            (ExtensionValue::Date(self_data), ExtensionValue::Date(other_data)) => {
+  266 +                Some(self_data.cmp(other_data))
+  267 +            }
+  268 +            (ExtensionValue::Timestamp(self_data), ExtensionValue::Timestamp(other_data)) => {
+  269 +                Some(self_data.cmp(other_data))
+  270 +            }
+  271 +            (ExtensionValue::TimestampTz(self_data), ExtensionValue::TimestampTz(other_data)) => {
+  272 +                Some(self_data.cmp(other_data))
+  273 +            }
+  274 +            (ExtensionValue::Interval(self_data), ExtensionValue::Interval(other_data)) => {
+  275 +                Some(self_data.cmp(other_data))
+  276 +            }
+  277 +            (_, _) => None,
+  278 +        }
+  279 +    }
+  280 +}

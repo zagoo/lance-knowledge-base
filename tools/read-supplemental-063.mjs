@@ -1,0 +1,3 @@
+import fs from 'node:fs';import{root,linesOf}from'./inventory.mjs';
+const dest='verification/iteration-063-supplemental-source.json',e=fs.existsSync(dest)?JSON.parse(fs.readFileSync(dest)):[];
+for(const [path,start,end,claims]of JSON.parse(process.argv[2])){const all=linesOf(fs.readFileSync(root+'/'+path,'utf8'));if(start<1||end>all.length)throw Error(path);const evidence=all.slice(start-1,end).map((l,i)=>`${start+i} | ${l}`).join('\n');console.log(`\n${path}:${start}-${end} (claims ${claims})\n${evidence}`);e.push({path,start,end,claims,read_at:new Date().toISOString(),evidence});}fs.writeFileSync(dest,JSON.stringify(e,null,2)+'\n');

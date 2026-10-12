@@ -1,0 +1,72 @@
+@@ -3,6 +3,7 @@
+    3  
+    4  //! Abstract scalar index traits and types for Lance index plugins
+    5  
+    6 +use crate::remapping::{RowAddrTranslator, materialize_remap};
+    7  use arrow_array::{BooleanArray, RecordBatch, UInt64Array};
+    8  use arrow_schema::{DataType, Schema};
+    9  use async_trait::async_trait;
+
+@@ -665,12 +666,62 @@ pub trait ScalarIndex: Send + Sync + std::fmt::Debug + Index + DeepSizeOf {
+  666      fn can_remap(&self) -> bool;
+  667  
+  668      /// Remap the row ids, creating a new remapped version of this index in `dest_store`
+  669 +    ///
+  670 +    /// Legacy remapping API using an in-memory mapping. Retained for existing
+  671 +    /// callers and plugins; new tagged fragment reuse maintenance goes through
+  672 +    /// [`Self::remap_streaming`], whose default implementation prepares a
+  673 +    /// complete in-memory mapping and calls this method once.
+  674      async fn remap(
+  675          &self,
+  676          mapping: &RowAddrRemap,
+  677          dest_store: &dyn IndexStore,
+  678      ) -> Result<CreatedIndex>;
+  679  
+  680 +    /// The fragments whose row addresses this index's files may hold, or
+  681 +    /// `None` when the index cannot tell.
+  682 +    ///
+  683 +    /// Only the in-memory fallback of [`Self::remap_streaming`] reads it: an
+  684 +    /// address left out of the mapping it prepares stays unchanged through
+  685 +    /// [`Self::remap`], so the fallback maps every address of every listed
+  686 +    /// fragment explicitly, and declines when the list is unknown. An
+  687 +    /// implementation that overrides this must list every fragment its files
+  688 +    /// can hold addresses for, including fragments the index no longer claims
+  689 +    /// in its declared coverage (a retired source, or one withdrawn after an
+  690 +    /// in-place rewrite). Not needed by indices that implement
+  691 +    /// `remap_streaming` themselves.
+  692 +    fn stored_fragments(&self) -> Option<RoaringBitmap> {
+  693 +        None
+  694 +    }
+  695 +
+  696 +    /// Remap the row ids through a translator whose payload may need reads,
+  697 +    /// creating a new remapped version of this index in `dest_store`.
+  698 +    ///
+  699 +    /// The default implementation keeps existing indices working: a
+  700 +    /// synchronous translator is handed to [`Self::remap`] as it is, and a
+  701 +    /// batch translator is first materialized into a complete in-memory
+  702 +    /// mapping ([`materialize_remap`], bounded by the translator's budget and
+  703 +    /// requiring [`Self::stored_fragments`]) before one call to
+  704 +    /// [`Self::remap`]. That fallback costs the mapping's memory and reads the
+  705 +    /// index once more; it declines with a
+  706 +    /// [`RemapUnavailable`](crate::remapping::RemapUnavailable) it cannot
+  707 +    /// prove a complete mapping within budget. Built-in indices override this
+  708 +    /// to translate one unit of work at a time (a page, a partition, a spill
+  709 +    /// batch) without any map sized to the source rows.
+  710 +    async fn remap_streaming(
+  711 +        &self,
+  712 +        translator: &RowAddrTranslator,
+  713 +        dest_store: &dyn IndexStore,
+  714 +    ) -> Result<CreatedIndex> {
+  715 +        match translator {
+  716 +            RowAddrTranslator::Sync(mapping) => self.remap(mapping.as_ref(), dest_store).await,
+  717 +            RowAddrTranslator::Batch(remapper) => {
+  718 +                let mapping =
+  719 +                    materialize_remap(remapper.as_ref(), self.stored_fragments().as_ref()).await?;
+  720 +                self.remap(&mapping, dest_store).await
+  721 +            }
+  722 +        }
+  723 +    }
+  724 +
+  725      /// Add the new data into the index, creating an updated version of the index in `dest_store`
+  726      ///
+  727      /// If `old_data_filter` is provided, old index data will be filtered before

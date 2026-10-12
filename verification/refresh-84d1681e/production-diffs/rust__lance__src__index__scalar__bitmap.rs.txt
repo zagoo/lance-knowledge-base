@@ -1,0 +1,112 @@
+@@ -1,21 +1,60 @@
+    1  // SPDX-License-Identifier: Apache-2.0
+    2  // SPDX-FileCopyrightText: Copyright The Lance Authors
+    3  
+    4 +use datafusion::execution::SendableRecordBatchStream;
+    5  use lance_index::metrics::NoOpMetricsCollector;
+    6  use lance_index::scalar::bitmap::BitmapIndex;
+    7  use lance_index::scalar::index_files_to_table;
+    8  use lance_index::scalar::lance_format::LanceIndexStore;
+    9 +use lance_index::scalar::{CreatedIndex, OldIndexDataFilter};
+   10  use lance_table::format::IndexMetadata;
+    9 -use roaring::RoaringBitmap;
+   11  use std::sync::Arc;
+   12  use uuid::Uuid;
+   13  
+   14  use crate::{Dataset, Error, Result, dataset::index::LanceIndexStoreExt};
+   15  
+   16 +/// Open the given bitmap `segments` and k-way merge their postings, together
+   17 +/// with `new_data`, into a single bitmap index written to `new_store`.
+   18 +pub(in crate::index) async fn open_and_merge_segments(
+   19 +    dataset: &Dataset,
+   20 +    field_path: &str,
+   21 +    segments: &[&IndexMetadata],
+   22 +    new_data: SendableRecordBatchStream,
+   23 +    new_store: &LanceIndexStore,
+   24 +    old_data_filters: &[Option<OldIndexDataFilter>],
+   25 +    staged: Option<&crate::index::frag_reuse::StagedRemappingPlans>,
+   26 +) -> Result<CreatedIndex> {
+   27 +    let mut source_indices = Vec::with_capacity(segments.len());
+   28 +    for &segment in segments {
+   29 +        let scalar_index = super::open_scalar_index_with_plan(
+   30 +            dataset,
+   31 +            field_path,
+   32 +            segment,
+   33 +            staged.and_then(|plans| plans.get(&segment.uuid)),
+   34 +            crate::index::frag_reuse::OpenPurpose::Maintenance,
+   35 +            &NoOpMetricsCollector,
+   36 +        )
+   37 +        .await?;
+   38 +        let bitmap_index = scalar_index
+   39 +            .as_any()
+   40 +            .downcast_ref::<BitmapIndex>()
+   41 +            .ok_or_else(|| {
+   42 +                Error::index(format!(
+   43 +                    "Bitmap merge: expected bitmap segment {}, got {:?}",
+   44 +                    segment.uuid,
+   45 +                    scalar_index.index_type()
+   46 +                ))
+   47 +            })?;
+   48 +        source_indices.push(Arc::new(bitmap_index.clone()));
+   49 +    }
+   50 +    BitmapIndex::merge_segments(&source_indices, new_data, new_store, old_data_filters).await
+   51 +}
+   52 +
+   53  /// Merge one caller-defined group of source bitmap segments into a single segment.
+   54  pub(in crate::index) async fn merge_segments(
+   55      dataset: &Dataset,
+   56      segments: Vec<IndexMetadata>,
+   57 +    staged: Option<&crate::index::frag_reuse::StagedRemappingPlans>,
+   58  ) -> Result<IndexMetadata> {
+   59      if segments.is_empty() {
+   60          return Err(Error::index("No segment metadata was provided".to_string()));
+
+@@ -29,36 +68,22 @@ pub(in crate::index) async fn merge_segments(
+   68      })?;
+   69      let field_path = dataset.schema().field_path(field_id)?;
+   70  
+   32 -    let mut source_indices = Vec::with_capacity(segments.len());
+   33 -    let mut fragment_bitmap = RoaringBitmap::new();
+   34 -    for segment in &segments {
+   35 -        fragment_bitmap |= segment.fragment_bitmap.as_ref().cloned().ok_or_else(|| {
+   36 -            Error::invalid_input(format!(
+   37 -                "CreateIndex: segment {} is missing fragment coverage",
+   38 -                segment.uuid
+   39 -            ))
+   40 -        })?;
+   41 -        let scalar_index =
+   42 -            super::open_scalar_index(dataset, &field_path, segment, &NoOpMetricsCollector).await?;
+   43 -        let bitmap_index = scalar_index
+   44 -            .as_any()
+   45 -            .downcast_ref::<BitmapIndex>()
+   46 -            .ok_or_else(|| {
+   47 -                Error::index(format!(
+   48 -                    "merge_existing_index_segments: expected bitmap segment {}, got {:?}",
+   49 -                    segment.uuid,
+   50 -                    scalar_index.index_type()
+   51 -                ))
+   52 -            })?;
+   53 -        source_indices.push(Arc::new(bitmap_index.clone()));
+   54 -    }
+   71 +    let segment_refs: Vec<&IndexMetadata> = segments.iter().collect();
+   72 +    let (fragment_bitmap, old_data_filters) =
+   73 +        crate::index::append::build_per_segment_filters(dataset, &segment_refs, staged).await?;
+   74  
+   75      let new_uuid = Uuid::new_v4();
+   76      let new_store = LanceIndexStore::from_dataset_for_new(dataset, &new_uuid)?;
+   58 -    let created_index = lance_index::scalar::bitmap::merge_bitmap_indices(
+   59 -        &source_indices,
+   77 +    // Pure segment consolidation: no dataset scan, so `new_data` is an empty stream.
+   78 +    let empty_new_data = super::btree::empty_value_row_id_stream(dataset, field_id)?;
+   79 +    let created_index = open_and_merge_segments(
+   80 +        dataset,
+   81 +        &field_path,
+   82 +        &segment_refs,
+   83 +        empty_new_data,
+   84          &new_store,
+   61 -        lance_index::progress::noop_progress(),
+   85 +        &old_data_filters,
+   86 +        staged,
+   87      )
+   88      .await?;
+   89  

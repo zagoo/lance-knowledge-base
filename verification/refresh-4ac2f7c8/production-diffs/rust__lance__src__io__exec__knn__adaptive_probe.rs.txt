@@ -1,0 +1,177 @@
+@@ -13,21 +13,20 @@
+   13  //! The caller minimum takes precedence over the learned cap, while the caller
+   14  //! maximum and available candidate count limit the final initial budget.
+   15  //! Explicit fixed nprobes bypasses both the heuristic and these overrides.
+   16 -//! Only ordinary Float32 IVF_FLAT queries using L2, cosine, or dot with k <= 100
+   17 -//! use these profiles. Hamming, other index types, and explicitly bounded
+   18 -//! Auto queries retain their existing heuristic and ignore these overrides.
+   16 +//! Queries using L2, cosine, or dot with k <= 100000 use these profiles across IVF
+   17 +//! index types, vector types, and refinement factors. The policy selects partitions
+   18 +//! from centroid distances independently of query values, quantization, or the
+   19 +//! search within each partition.
+   20 +//! Explicit maximum bounds limit adaptive probing without disabling it.
+   21 +//! Larger k and Hamming retain their existing heuristic and ignore these overrides.
+   22  //! Dot uses the magnitude of the best centroid inner product to scale its gap,
+   23  //! rather than the signed `1 - dot` distance. Corpus and query norms are preserved.
+   24  //! No extra index statistics or file-format changes are needed.
+   25  
+   26  use std::env;
+   27  
+   25 -use arrow_array::{Array, cast::AsArray};
+   26 -use arrow_schema::DataType;
+   28  use datafusion::error::{DataFusionError, Result as DataFusionResult};
+   28 -use lance_index::vector::{
+   29 -    Query, VectorIndex, quantizer::QuantizationType, v3::subindex::SubIndexType,
+   30 -};
+   29 +use lance_index::vector::{Query, VectorIndex};
+   30  use lance_linalg::distance::DistanceType;
+   31  
+   32  const MARGIN_ENV: &str = "LANCE_AUTO_PROBE_MARGIN";
+
+@@ -43,49 +42,23 @@ pub(super) enum AutoProbePolicy {
+   42  }
+   43  
+   44  impl AutoProbePolicy {
+   46 -    pub(super) fn from_env(
+   47 -        query: &Query,
+   48 -        index: &dyn VectorIndex,
+   49 -        vector_type: &DataType,
+   50 -    ) -> DataFusionResult<Self> {
+   51 -        Self::select_with_config(query, index, vector_type, AutoProbeConfig::from_env)
+   45 +    pub(super) fn from_env(query: &Query, index: &dyn VectorIndex) -> DataFusionResult<Self> {
+   46 +        Self::select_with_config(query, index, AutoProbeConfig::from_env)
+   47      }
+   48  
+   49      pub(super) fn select_with_config(
+   50          query: &Query,
+   51          index: &dyn VectorIndex,
+   57 -        vector_type: &DataType,
+   52          read_config: impl FnOnce(&Query, DistanceType) -> DataFusionResult<Option<AutoProbeConfig>>,
+   53      ) -> DataFusionResult<Self> {
+   54 +        query.validate_search_effort()?;
+   55          if query.maximum_nprobes == Some(query.minimum_nprobes) {
+   56              return Ok(Self::Fixed);
+   57          }
+   63 -        // Legacy IVF indices do not expose sub-index metadata. Keep their
+   64 -        // original probing without calling those unsupported methods.
+   65 -        if !index.supports_prepared_partition_search() {
+   66 -            return Ok(Self::Legacy);
+   67 -        }
+   68 -        if query.maximum_nprobes.is_some()
+   69 -            || query.key.data_type() != &DataType::Float32
+   70 -            || query.key.null_count() != 0
+   71 -            || !matches!(vector_type, DataType::FixedSizeList(item, dimension)
+   72 -                if item.data_type() == &DataType::Float32 && *dimension as usize == query.key.len())
+   73 -            || !matches!(
+   74 -                index.sub_index_type(),
+   75 -                (SubIndexType::Flat, QuantizationType::Flat)
+   76 -            )
+   77 -            || !matches!(
+   78 -                index.metric_type(),
+   79 -                DistanceType::L2 | DistanceType::Cosine | DistanceType::Dot
+   80 -            )
+   81 -            || query.k > 100
+   82 -            || query.refine_factor.is_some_and(|factor| factor > 1)
+   83 -            || !query
+   84 -                .key
+   85 -                .as_primitive::<arrow_array::types::Float32Type>()
+   86 -                .values()
+   87 -                .iter()
+   88 -                .all(|x| x.is_finite())
+   58 +        if !matches!(
+   59 +            index.metric_type(),
+   60 +            DistanceType::L2 | DistanceType::Cosine | DistanceType::Dot
+   61 +        ) || query.k > 100_000
+   62          {
+   63              return Ok(Self::Legacy);
+   64          }
+
+@@ -93,11 +66,40 @@ impl AutoProbePolicy {
+   66      }
+   67  
+   68      pub(super) fn apply(self, query: &mut Query, distances: &[f32], metric: DistanceType) {
+   69 +        let caller_minimum = query.minimum_nprobes;
+   70          match self {
+   71              Self::Fixed => {}
+   72              Self::Legacy => apply_legacy_probes(query, distances),
+   73              Self::Adaptive(config) => config.apply(query, distances, metric),
+   74          }
+   75 +        // Preserve the original budget exactly, including legacy rounding and
+   76 +        // clipping behavior, when the new option is omitted or set to default.
+   77 +        if query.search_effort == 0.5 {
+   78 +            return;
+   79 +        }
+   80 +        let upper = distances
+   81 +            .len()
+   82 +            .min(query.maximum_nprobes.unwrap_or(distances.len()));
+   83 +        if upper == 0 {
+   84 +            query.minimum_nprobes = 0;
+   85 +            return;
+   86 +        }
+   87 +        let lower = caller_minimum.max(1).min(upper);
+   88 +        let auto = query.minimum_nprobes.clamp(lower, upper);
+   89 +        let effort = query.search_effort;
+   90 +        // Round-off near 0.5 can move the geometric budget past Auto. Bound
+   91 +        // each half separately so increasing effort preserves the midpoint.
+   92 +        query.minimum_nprobes = if effort == 0.0 {
+   93 +            lower
+   94 +        } else if effort == 1.0 {
+   95 +            upper
+   96 +        } else if effort < 0.5 {
+   97 +            let budget = lower as f64 * (auto as f64 / lower as f64).powf(2.0 * effort);
+   98 +            (budget.ceil() as usize).clamp(lower, auto)
+   99 +        } else {
+  100 +            let budget = auto as f64 * (upper as f64 / auto as f64).powf(2.0 * effort - 1.0);
+  101 +            (budget.ceil() as usize).clamp(auto, upper)
+  102 +        };
+  103      }
+  104  }
+  105  
+
+@@ -187,26 +189,36 @@ impl AutoProbeConfig {
+  189          let bucket = match query.k {
+  190              ..=1 => 0,
+  191              2..=10 => 1,
+  190 -            _ => 2,
+  192 +            11..=100 => 2,
+  193 +            101..=200 => 3,
+  194 +            201..=500 => 4,
+  195 +            501..=1000 => 5,
+  196 +            1001..=10_000 => 6,
+  197 +            _ => 7,
+  198          };
+  199          // Profiles depend only on metric and k; every index uses the same values.
+  200 +        // Larger-k buckets are calibrated at their upper endpoints on separate
+  201 +        // queries from the native evaluation (benchmarks/auto-ivf-large-k).
+  202 +        // Each bucket uses its measured upper-endpoint profile; measurements do
+  203 +        // not establish recall guarantees for every intermediate k. The policy
+  204 +        // gate retains legacy probing above the largest calibrated endpoint.
+  205          let (default_margin, default_minimum, cap) = match metric {
+  206              DistanceType::L2 => (
+  195 -                [0.2175, 0.265, 0.33][bucket],
+  196 -                [5, 6, 11][bucket],
+  197 -                [19, 24, 38][bucket],
+  207 +                [0.2175, 0.265, 0.33, 0.375, 0.3725, 0.4175, 0.57, 0.75][bucket],
+  208 +                [5, 6, 11, 15, 22, 29, 98, 463][bucket],
+  209 +                [19, 24, 38, 56, 81, 93, 238, 704][bucket],
+  210              ),
+  211              DistanceType::Cosine => (
+  200 -                [0.235, 0.2875, 0.38][bucket],
+  201 -                [3, 8, 7][bucket],
+  202 -                [50, 77, 106][bucket],
+  212 +                [0.235, 0.2875, 0.38, 0.415, 0.45, 0.47, 0.6475, 0.58][bucket],
+  213 +                [3, 8, 7, 18, 28, 34, 104, 738][bucket],
+  214 +                [50, 77, 106, 156, 192, 248, 447, 958][bucket],
+  215              ),
+  216              // Calibrated on unnormalized Wiki-Cohere and DPR vectors. An initial
+  217              // cap controls overscanning without limiting later filtered search.
+  218              DistanceType::Dot => (
+  207 -                [0.14, 0.055, 0.0625][bucket],
+  208 -                [56, 144, 200][bucket],
+  209 -                [112, 432, 768][bucket],
+  219 +                [0.14, 0.055, 0.0625, 0.0675, 0.07, 0.0725, 0.0825, 0.21][bucket],
+  220 +                [56, 144, 200, 211, 244, 279, 517, 1009][bucket],
+  221 +                [112, 432, 768, 833, 971, 1092, 1824, 2528][bucket],
+  222              ),
+  223              _ => return Ok(Some(Self::default())),
+  224          };

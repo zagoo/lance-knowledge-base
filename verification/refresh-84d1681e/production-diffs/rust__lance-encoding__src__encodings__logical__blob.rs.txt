@@ -1,0 +1,153 @@
+@@ -329,67 +329,95 @@ impl FieldEncoder for BlobV2StructuralEncoder {
+  329          let mut uri_builder = StringBuilder::with_capacity(row_count, row_count * 16);
+  330  
+  331          for i in 0..row_count {
+  332 -            let (kind_value, position_value, size_value, blob_id_value, uri_value) =
+  333 -                if struct_arr.is_null(i) || kind_col.is_null(i) {
+  334 -                    (BlobKind::Inline as u8, 0, 0, 0, "".to_string())
+  335 -                } else {
+  336 -                    let kind_val = BlobKind::try_from(kind_col.value(i))?;
+  337 -                    match kind_val {
+  338 -                        BlobKind::Dedicated => (
+  339 -                            BlobKind::Dedicated as u8,
+  340 -                            0,
+  341 -                            blob_size_col.value(i),
+  342 -                            blob_id_col.value(i),
+  343 -                            "".to_string(),
+  344 -                        ),
+  345 -                        BlobKind::External => {
+  346 -                            let uri = uri_col.value(i).to_string();
+  347 -                            let position = if packed_position_col.is_null(i) {
+  348 -                                0
+  349 -                            } else {
+  350 -                                packed_position_col.value(i)
+  351 -                            };
+  352 -                            let size = if blob_size_col.is_null(i) {
+  353 -                                0
+  332 +            let (kind_value, position_value, size_value, blob_id_value, uri_value) = if struct_arr
+  333 +                .is_null(i)
+  334 +                || kind_col.is_null(i)
+  335 +            {
+  336 +                (BlobKind::Inline as u8, 0, 0, 0, "".to_string())
+  337 +            } else {
+  338 +                let kind_val = BlobKind::try_from(kind_col.value(i))?;
+  339 +                match kind_val {
+  340 +                    BlobKind::Managed | BlobKind::ManagedWithBase => {
+  341 +                        if uri_col.is_null(i)
+  342 +                            || ((kind_val == BlobKind::ManagedWithBase) != blob_id_col.is_valid(i))
+  343 +                            || packed_position_col.is_null(i)
+  344 +                            || blob_size_col.is_null(i)
+  345 +                        {
+  346 +                            return Err(Error::invalid_input(format!(
+  347 +                                "Managed blob row {i} requires URI, position, and size, plus a base ID for an explicit base"
+  348 +                            )));
+  349 +                        }
+  350 +                        let uri = uri_col.value(i);
+  351 +                        let position = packed_position_col.value(i);
+  352 +                        let size = blob_size_col.value(i);
+  353 +                        lance_core::utils::blob::validate_managed_reference(uri, position, size)?;
+  354 +                        (
+  355 +                            kind_val as u8,
+  356 +                            position,
+  357 +                            size,
+  358 +                            if kind_val == BlobKind::ManagedWithBase {
+  359 +                                blob_id_col.value(i)
+  360                              } else {
+  355 -                                blob_size_col.value(i)
+  356 -                            };
+  357 -                            let external_base_id = if blob_id_col.is_null(i) {
+  361                                  0
+  359 -                            } else {
+  360 -                                blob_id_col.value(i)
+  361 -                            };
+  362 -                            (
+  363 -                                BlobKind::External as u8,
+  364 -                                position,
+  365 -                                size,
+  366 -                                external_base_id,
+  367 -                                uri,
+  368 -                            )
+  369 -                        }
+  370 -                        BlobKind::Packed => (
+  371 -                            BlobKind::Packed as u8,
+  372 -                            packed_position_col.value(i),
+  373 -                            blob_size_col.value(i),
+  374 -                            blob_id_col.value(i),
+  362 +                            },
+  363 +                            uri.to_string(),
+  364 +                        )
+  365 +                    }
+  366 +                    BlobKind::Dedicated => (
+  367 +                        BlobKind::Dedicated as u8,
+  368 +                        0,
+  369 +                        blob_size_col.value(i),
+  370 +                        blob_id_col.value(i),
+  371 +                        "".to_string(),
+  372 +                    ),
+  373 +                    BlobKind::External => {
+  374 +                        let uri = uri_col.value(i).to_string();
+  375 +                        let position = if packed_position_col.is_null(i) {
+  376 +                            0
+  377 +                        } else {
+  378 +                            packed_position_col.value(i)
+  379 +                        };
+  380 +                        let size = if blob_size_col.is_null(i) {
+  381 +                            0
+  382 +                        } else {
+  383 +                            blob_size_col.value(i)
+  384 +                        };
+  385 +                        let external_base_id = if blob_id_col.is_null(i) {
+  386 +                            0
+  387 +                        } else {
+  388 +                            blob_id_col.value(i)
+  389 +                        };
+  390 +                        (
+  391 +                            BlobKind::External as u8,
+  392 +                            position,
+  393 +                            size,
+  394 +                            external_base_id,
+  395 +                            uri,
+  396 +                        )
+  397 +                    }
+  398 +                    BlobKind::Packed => (
+  399 +                        BlobKind::Packed as u8,
+  400 +                        packed_position_col.value(i),
+  401 +                        blob_size_col.value(i),
+  402 +                        blob_id_col.value(i),
+  403 +                        "".to_string(),
+  404 +                    ),
+  405 +                    BlobKind::Inline => {
+  406 +                        let data_val = data_col.value(i);
+  407 +                        let blob_len = data_val.len() as u64;
+  408 +                        let position =
+  409 +                            external_buffers.add_buffer(LanceBuffer::from(Buffer::from(data_val)));
+  410 +
+  411 +                        (
+  412 +                            BlobKind::Inline as u8,
+  413 +                            position,
+  414 +                            blob_len,
+  415 +                            0,
+  416                              "".to_string(),
+  376 -                        ),
+  377 -                        BlobKind::Inline => {
+  378 -                            let data_val = data_col.value(i);
+  379 -                            let blob_len = data_val.len() as u64;
+  380 -                            let position = external_buffers
+  381 -                                .add_buffer(LanceBuffer::from(Buffer::from(data_val)));
+  382 -
+  383 -                            (
+  384 -                                BlobKind::Inline as u8,
+  385 -                                position,
+  386 -                                blob_len,
+  387 -                                0,
+  388 -                                "".to_string(),
+  389 -                            )
+  390 -                        }
+  417 +                        )
+  418                      }
+  392 -                };
+  419 +                }
+  420 +            };
+  421  
+  422              kind_builder.append_value(kind_value);
+  423              position_builder.append_value(position_value);

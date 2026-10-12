@@ -1,0 +1,29 @@
+@@ -353,7 +353,7 @@ pub(super) async fn build_scalar_index(
+  353      params: &ScalarIndexParams,
+  354      train: bool,
+  355      fragment_ids: Option<Vec<u32>>,
+  356 -    preprocessed_data: Option<SendableRecordBatchStream>,
+  356 +    preprocessed_data: Option<(SendableRecordBatchStream, TrainingCriteria)>,
+  357      progress: Arc<dyn IndexBuildProgress>,
+  358  ) -> Result<CreatedIndex> {
+  359      let inverted_params = (params.index_type.eq_ignore_ascii_case("inverted")
+
+@@ -404,7 +404,17 @@ pub(super) async fn build_scalar_index(
+  404  
+  405      progress.stage_start("load_data", None, "rows").await?;
+  406      let training_data = match (preprocessed_data, resolved_fts_field.as_ref()) {
+  407 -        (Some(preprocessed_data), _) => preprocessed_data,
+  407 +        (Some((preprocessed_data, declared)), _) => {
+  408 +            let required = training_request.criteria();
+  409 +            if declared != *required {
+  410 +                return Err(Error::invalid_input(format!(
+  411 +                    "preprocessed data for index type '{}' is {declared:?}, but it trains from \
+  412 +                     {required:?}",
+  413 +                    params.index_type
+  414 +                )));
+  415 +            }
+  416 +            preprocessed_data
+  417 +        }
+  418          (None, Some(resolved)) => {
+  419              load_fts_training_data(
+  420                  dataset,

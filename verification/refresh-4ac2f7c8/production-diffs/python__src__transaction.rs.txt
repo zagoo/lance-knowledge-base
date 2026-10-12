@@ -1,0 +1,35 @@
+@@ -11,7 +11,7 @@ use lance::dataset::transaction::{
+   11      DataOverlayGroup, DataReplacementGroup, Operation, RewriteGroup, RewrittenIndex, Transaction,
+   12      UpdateMap, UpdateMapEntry, UpdateMode, UpdatedFragmentOffsets,
+   13  };
+   14 -use lance::datatypes::Schema;
+   14 +use lance::datatypes::{Field, Schema};
+   15  use lance_table::format::overlay::{DataOverlayFile, OverlayCoverage};
+   16  use lance_table::format::{BasePath, DataFile, Fragment, IndexFile, IndexMetadata};
+   17  use pyo3::exceptions::PyValueError;
+
+@@ -1090,11 +1090,18 @@ fn extract_schema(schema: &Bound<'_, PyAny>) -> PyResult<Schema> {
+ 1090  }
+ 1091  
+ 1092  fn convert_schema(arrow_schema: &ArrowSchema) -> PyResult<Schema> {
+ 1093 -    // Note: the field ids here are wrong.
+ 1094 -    Schema::try_from(arrow_schema).map_err(|e| {
+ 1095 -        PyValueError::new_err(format!(
+ 1096 -            "Failed to convert Arrow schema to Lance schema: {}",
+ 1097 -            e
+ 1098 -        ))
+ 1093 +    let fields = arrow_schema
+ 1094 +        .fields
+ 1095 +        .iter()
+ 1096 +        .map(|field| Field::try_from(field.as_ref()))
+ 1097 +        .collect::<lance_core::Result<_>>()
+ 1098 +        .map_err(|e| {
+ 1099 +            PyValueError::new_err(format!(
+ 1100 +                "Failed to convert Arrow schema to Lance schema: {e}"
+ 1101 +            ))
+ 1102 +        })?;
+ 1103 +    Ok(Schema {
+ 1104 +        fields,
+ 1105 +        metadata: arrow_schema.metadata.clone(),
+ 1106      })
+ 1107  }

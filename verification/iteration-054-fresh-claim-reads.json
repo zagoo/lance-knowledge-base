@@ -1,0 +1,162 @@
+[
+  {
+    "id": 1,
+    "path": "rust/lance-file/src/versions/v2_0/reader.rs",
+    "start": 57,
+    "end": 76,
+    "read_at": "2026-10-03T18:51:33.578Z",
+    "evidence": "57 | pub fn decode_column(\n58 |     column_index: u32,\n59 |     metadata: &pbfile::ColumnMetadata,\n60 | ) -> Result<Arc<ColumnInfo>> {\n61 |     let page_infos = metadata\n62 |         .pages\n63 |         .iter()\n64 |         .enumerate()\n65 |         .map(|(page_index, page)| {\n66 |             let array_encoding =\n67 |                 fetch_encoding::<pb::ArrayEncoding>(page.encoding.as_ref().ok_or_else(|| {\n68 |                     Error::invalid_input_source(\n69 |                         format!(\n70 |                             \"Column {} page {} is missing its encoding\",\n71 |                             column_index, page_index\n72 |                         )\n73 |                         .into(),\n74 |                     )\n75 |                 })?)?;\n76 |             if page.buffer_offsets.len() != page.buffer_sizes.len() {"
+  },
+  {
+    "id": 2,
+    "path": "rust/lance-table/src/transaction/manifest_build.rs",
+    "start": 1920,
+    "end": 1943,
+    "read_at": "2026-10-03T18:51:33.579Z",
+    "evidence": "1920 | \n1921 |     /// Remove data files that only contain tombstoned fields (-2)\n1922 |     /// These files no longer contain any live data and can be safely dropped\n1923 |     fn remove_tombstoned_data_files(fragments: &mut [Fragment]) {\n1924 |         for fragment in fragments {\n1925 |             fragment.files.retain(|file| {\n1926 |                 // Keep file if it has at least one non-tombstoned field\n1927 |                 file.fields.iter().any(|&field_id| field_id != -2)\n1928 |             });\n1929 |         }\n1930 |     }\n1931 |     /// Coverage of an index that a rewrite invalidates: the rewritten fragments are\n1932 |     /// removed and the fragments they became are *not* added.\n1933 |     fn drop_rewritten_fragments(old: &RoaringBitmap, groups: &[RewriteGroup]) -> RoaringBitmap {\n1934 |         let mut new_bitmap = old.clone();\n1935 |         for group in groups {\n1936 |             for old_fragment in &group.old_fragments {\n1937 |                 new_bitmap.remove(old_fragment.id as u32);\n1938 |             }\n1939 |         }\n1940 |         new_bitmap\n1941 |     }\n1942 | }\n1943 | "
+  },
+  {
+    "id": 3,
+    "path": "rust/lance-table/src/io/commit.rs",
+    "start": 373,
+    "end": 386,
+    "read_at": "2026-10-03T18:51:33.579Z",
+    "evidence": "373 | /// Read the latest version from the hint file, or `None` if it does not exist\n374 | /// or cannot be parsed.\n375 | async fn read_version_from_hint(object_store: &ObjectStore, base: &Path) -> Option<u64> {\n376 |     let bytes = object_store\n377 |         .inner\n378 |         .get(&version_hint_path(base))\n379 |         .await\n380 |         .ok()?\n381 |         .bytes()\n382 |         .await\n383 |         .ok()?;\n384 |     Some(serde_json::from_slice::<VersionHint>(&bytes).ok()?.version)\n385 | }\n386 | "
+  },
+  {
+    "id": 4,
+    "path": "rust/lance-table/benches/manifest_intern.rs",
+    "start": 50,
+    "end": 79,
+    "read_at": "2026-10-03T18:51:33.579Z",
+    "evidence": "50 |     (0..n)\n51 |         .map(|i| pb::DataFragment {\n52 |             id: i,\n53 |             files: vec![pb::DataFile {\n54 |                 path: format!(\"data/{i}.lance\"),\n55 |                 fields: fields.clone(),\n56 |                 column_indices: column_indices.clone(),\n57 |                 file_major_version: 2,\n58 |                 file_minor_version: 0,\n59 |                 file_size_bytes: 0,\n60 |                 base_id: None,\n61 |             }],\n62 |             overlays: vec![],\n63 |             deletion_file: None,\n64 |             row_id_sequence: None,\n65 |             physical_rows: 1000,\n66 |             last_updated_at_version_sequence: Some(\n67 |                 pb::data_fragment::LastUpdatedAtVersionSequence::InlineLastUpdatedAtVersions(\n68 |                     version_bytes.clone(),\n69 |                 ),\n70 |             ),\n71 |             created_at_version_sequence: Some(\n72 |                 pb::data_fragment::CreatedAtVersionSequence::InlineCreatedAtVersions(\n73 |                     version_bytes.clone(),\n74 |                 ),\n75 |             ),\n76 |         })\n77 |         .collect()\n78 | }\n79 | "
+  },
+  {
+    "id": 5,
+    "path": "rust/lance-file/src/versions/v2_2/compression.rs",
+    "start": 103,
+    "end": 129,
+    "read_at": "2026-10-03T18:51:33.579Z",
+    "evidence": "103 |     fn create_block_compressor(\n104 |         &self,\n105 |         field: &Field,\n106 |         data: &DataBlock,\n107 |     ) -> Result<Box<dyn BlockCompressor>> {\n108 |         let params = self.field_params(field);\n109 |         if let Some(compressor) = try_fixed_u8_rle_block(data, &params)? {\n110 |             return Ok(compressor);\n111 |         }\n112 |         if let Some(compressor) = try_bitpacking_block(data) {\n113 |             return Ok(compressor);\n114 |         }\n115 |         if let Some(compressor) = try_general_block(data, &params)? {\n116 |             return Ok(compressor);\n117 |         }\n118 |         if let Some(compressor) = try_raw_block(data) {\n119 |             return Ok(compressor);\n120 |         }\n121 |         Err(Error::not_supported_source(\n122 |             format!(\n123 |                 \"Block compression not yet supported for block type {}\",\n124 |                 data.name()\n125 |             )\n126 |             .into(),\n127 |         ))\n128 |     }\n129 | }"
+  },
+  {
+    "id": 6,
+    "path": "rust/lance-table/src/rowids/segment.rs",
+    "start": 268,
+    "end": 292,
+    "read_at": "2026-10-03T18:51:40.940Z",
+    "evidence": "268 |     /// The same values as a run of ranges, when writing them as `Range`\n269 |     /// segments is smaller than the current encoding; `None` when it is not\n270 |     /// (or the span does not fit the compact form's 32-bit offsets).\n271 |     ///\n272 |     /// A `Range` segment costs about 16 bytes on the wire, so ranges beat a\n273 |     /// bitmap when there is less than one range per 128 slots. Hole arrays\n274 |     /// are small by construction and are left alone.\n275 |     pub fn as_ranges(&self) -> Option<Self> {\n276 |         const RANGE_BYTES: usize = 16;\n277 |         match self {\n278 |             Self::RangeWithBitmap { range, bitmap } => {\n279 |                 if bitmap.len() > u32::MAX as usize {\n280 |                     return None;\n281 |                 }\n282 |                 let runs = HoleRuns::from_bitmap(bitmap);\n283 |                 ((runs.num_runs() + 1) * RANGE_BYTES < bitmap.bytes().len()).then(|| Self::Ranges {\n284 |                     range: range.clone(),\n285 |                     runs,\n286 |                 })\n287 |             }\n288 |             _ => None,\n289 |         }\n290 |     }\n291 | }\n292 | "
+  },
+  {
+    "id": 7,
+    "path": "rust/lance-core/src/cache/quick.rs",
+    "start": 289,
+    "end": 306,
+    "read_at": "2026-10-03T18:51:40.940Z",
+    "evidence": "289 |     fn keys_in_shard(\n290 |         cache: &QuickCacheBackend,\n291 |         shard_index: usize,\n292 |         count: usize,\n293 |     ) -> Vec<InternalCacheKey> {\n294 |         let mut keys = Vec::with_capacity(count);\n295 |         for value in 0_u128.. {\n296 |             let key = InternalCacheKey::from_bytes(value.to_le_bytes());\n297 |             if cache.shard_index(&key) == shard_index {\n298 |                 keys.push(key);\n299 |                 if keys.len() == count {\n300 |                     return keys;\n301 |                 }\n302 |             }\n303 |         }\n304 |         unreachable!(\"the key space must contain enough keys for every shard\")\n305 |     }\n306 | "
+  },
+  {
+    "id": 8,
+    "path": "rust/lance-core/src/datatypes/schema.rs",
+    "start": 930,
+    "end": 981,
+    "read_at": "2026-10-03T18:51:40.941Z",
+    "evidence": "930 | pub fn compare_fields(\n931 |     fields: &[Field],\n932 |     expected: &[Field],\n933 |     options: &SchemaCompareOptions,\n934 | ) -> bool {\n935 |     if options.allow_missing_if_nullable || options.ignore_field_order || options.allow_subschema {\n936 |         let expected_names = expected\n937 |             .iter()\n938 |             .map(|f| f.name.as_str())\n939 |             .collect::<HashSet<_>>();\n940 |         for field in fields {\n941 |             if !expected_names.contains(field.name.as_str()) {\n942 |                 // Extra field\n943 |                 return false;\n944 |             }\n945 |         }\n946 | \n947 |         let field_mapping = fields\n948 |             .iter()\n949 |             .enumerate()\n950 |             .map(|(pos, f)| (f.name.as_str(), (f, pos)))\n951 |             .collect::<HashMap<_, _>>();\n952 |         let mut cumulative_position = 0;\n953 |         for expected_field in expected {\n954 |             if let Some((field, pos)) = field_mapping.get(expected_field.name.as_str()) {\n955 |                 if !field.compare_with_options(expected_field, options) {\n956 |                     return false;\n957 |                 }\n958 |                 if !options.ignore_field_order && *pos < cumulative_position {\n959 |                     return false;\n960 |                 }\n961 |                 cumulative_position = *pos;\n962 |             } else if options.allow_subschema {\n963 |                 // allow_subschema: allow missing any field\n964 |                 continue;\n965 |             } else if options.allow_missing_if_nullable && expected_field.nullable {\n966 |                 continue;\n967 |             } else {\n968 |                 return false;\n969 |             }\n970 |         }\n971 |         true\n972 |     } else {\n973 |         // Fast path: we can just zip\n974 |         fields.len() == expected.len()\n975 |             && fields\n976 |                 .iter()\n977 |                 .zip(expected.iter())\n978 |                 .all(|(lhs, rhs)| lhs.compare_with_options(rhs, options))\n979 |     }\n980 | }\n981 | "
+  },
+  {
+    "id": 9,
+    "path": "rust/lance-file/src/version.rs",
+    "start": 328,
+    "end": 342,
+    "read_at": "2026-10-03T18:51:40.941Z",
+    "evidence": "328 |     #[test]\n329 |     fn manifest_codec_only_accepts_canonical_exact_versions() {\n330 |         for version in EXACT_VERSIONS {\n331 |             let encoded = version.to_manifest_string();\n332 |             assert_eq!(\n333 |                 ConcreteFileVersion::from_manifest_string(encoded).unwrap(),\n334 |                 version\n335 |             );\n336 |         }\n337 | \n338 |         for selector_or_alias in [\"legacy\", \"0.3\", \"stable\", \"next\"] {\n339 |             assert!(ConcreteFileVersion::from_manifest_string(selector_or_alias).is_err());\n340 |         }\n341 |     }\n342 | "
+  },
+  {
+    "id": 10,
+    "path": "rust/lance-table/src/system_index/frag_reuse.rs",
+    "start": 330,
+    "end": 345,
+    "read_at": "2026-10-03T18:51:40.941Z",
+    "evidence": "330 | impl CompactFragReuseIndex {\n331 |     #[doc(hidden)]\n332 |     pub fn from_row_id_maps(\n333 |         uuid: Uuid,\n334 |         row_id_maps: Vec<HashMap<u64, Option<u64>>>,\n335 |         details: FragReuseIndexDetails,\n336 |     ) -> Self {\n337 |         Self {\n338 |             uuid,\n339 |             row_addr_remap: RowAddrRemap::chained(\n340 |                 row_id_maps.into_iter().map(RowAddrRemap::direct),\n341 |             ),\n342 |             details,\n343 |         }\n344 |     }\n345 | "
+  },
+  {
+    "id": 11,
+    "path": "rust/lance-core/src/utils/cpu.rs",
+    "start": 255,
+    "end": 266,
+    "read_at": "2026-10-03T18:51:41.016Z",
+    "evidence": "255 | \n256 | // Inspired by https://github.com/RustCrypto/utils/blob/master/cpufeatures/src/aarch64.rs\n257 | // aarch64 doesn't have userspace feature detection built in, so we have to call\n258 | // into OS-specific functions to check for features.\n259 | \n260 | #[cfg(all(target_arch = \"aarch64\", target_os = \"macos\"))]\n261 | mod aarch64 {\n262 |     pub fn has_neon_f16_support() -> bool {\n263 |         // Maybe we can assume it's there?\n264 |         true\n265 |     }\n266 | }"
+  },
+  {
+    "id": 12,
+    "path": "rust/lance-table/src/transaction/manifest_build.rs",
+    "start": 5421,
+    "end": 5440,
+    "read_at": "2026-10-03T18:51:41.016Z",
+    "evidence": "5421 |         /// A commit that changes nothing must not churn the system index: a new\n5422 |         /// UUID on every append would invalidate its cache entry fleet-wide.\n5423 |         #[test]\n5424 |         fn an_unchanged_commit_does_not_rewrite_the_system_index() {\n5425 |             let shard = Uuid::new_v4();\n5426 |             let uuid = Uuid::new_v4();\n5427 |             let before = table(&[0], uuid, progress_with_catchup(shard, 5, 5));\n5428 |             let mut after = before.clone();\n5429 |             apply(&mut after, &before, &[0], &before).unwrap();\n5430 | \n5431 |             let system_uuid = |indices: &[IndexMetadata]| {\n5432 |                 indices\n5433 |                     .iter()\n5434 |                     .find(|idx| idx.name == MEM_WAL_INDEX_NAME)\n5435 |                     .unwrap()\n5436 |                     .uuid\n5437 |             };\n5438 |             assert_eq!(system_uuid(&after), system_uuid(&before));\n5439 |         }\n5440 | "
+  },
+  {
+    "id": 13,
+    "path": "rust/lance-table/src/feature_flags.rs",
+    "start": 342,
+    "end": 378,
+    "read_at": "2026-10-03T18:51:41.017Z",
+    "evidence": "342 | \n343 | pub fn has_deprecated_v2_feature_flag(writer_flags: u64) -> bool {\n344 |     writer_flags & FLAG_USE_V2_FORMAT_DEPRECATED != 0\n345 | }\n346 | \n347 | /// Refuse a manifest whose paired reader and writer capability bits disagree.\n348 | ///\n349 | /// One word set and the other not is neither mode: it would let a legacy reader\n350 | /// or a legacy writer through on a table where the other half is enforcing. The\n351 | /// commit path refuses to *produce* this, so seeing it on read means the\n352 | /// manifest was written by something that did not.\n353 | pub fn validate_paired_feature_flags(manifest: &Manifest) -> Result<()> {\n354 |     if (manifest.reader_feature_flags ^ manifest.writer_feature_flags) & FLAG_FRAGMENT_REUSE_INDEX\n355 |         != 0\n356 |     {\n357 |         return Err(Error::corrupt_file_named(\n358 |             \"manifest\",\n359 |             \"FRI requires both reader and writer feature flags\",\n360 |         ));\n361 |     }\n362 | \n363 |     let reader = manifest.reader_feature_flags & FLAG_MIXED_DATA_FILE_VERSIONS != 0;\n364 |     let writer = manifest.writer_feature_flags & FLAG_MIXED_DATA_FILE_VERSIONS != 0;\n365 |     if reader != writer {\n366 |         return Err(Error::corrupt_file_named(\n367 |             \"manifest\",\n368 |             \"Manifest has only one of the mixed data-file-version reader and writer feature bits set, \\\n369 |              so its semantics are undefined\",\n370 |         ));\n371 |     }\n372 |     Ok(())\n373 | }\n374 | \n375 | fn validated_sticky_paired_flags(manifest: &Manifest) -> Result<u64> {\n376 |     validate_paired_feature_flags(manifest)?;\n377 |     Ok(manifest.reader_feature_flags & STICKY_PAIRED_FLAGS)\n378 | }"
+  },
+  {
+    "id": 14,
+    "path": "rust/lance-core/benches/cache_keys.rs",
+    "start": 86,
+    "end": 98,
+    "read_at": "2026-10-03T18:51:41.017Z",
+    "evidence": "86 | #[async_trait]\n87 | impl LegacyBackend for LegacyMokaBackend {\n88 |     async fn get(&self, key: &LegacyPhysicalKey) -> Option<LegacyEntryValue> {\n89 |         self.cache.get(key).await.map(|entry| entry.value)\n90 |     }\n91 | \n92 |     async fn insert(&self, key: &LegacyPhysicalKey, value: LegacyEntryValue, size_bytes: usize) {\n93 |         self.cache\n94 |             .insert(key.clone(), LegacyEntry { value, size_bytes })\n95 |             .await;\n96 |     }\n97 | }\n98 | "
+  },
+  {
+    "id": 15,
+    "path": "rust/lance-core/src/deepsize.rs",
+    "start": 165,
+    "end": 174,
+    "read_at": "2026-10-03T18:51:41.017Z",
+    "evidence": "165 | \n166 | impl<T: DeepSizeOf> DeepSizeOf for Vec<T> {\n167 |     fn deep_size_of_children(&self, context: &mut Context) -> usize {\n168 |         self.capacity() * size_of::<T>()\n169 |             + self\n170 |                 .iter()\n171 |                 .map(|item| item.deep_size_of_children(context))\n172 |                 .sum::<usize>()\n173 |     }\n174 | }"
+  },
+  {
+    "id": 16,
+    "path": "rust/lance-table/src/utils/stream.rs",
+    "start": 464,
+    "end": 488,
+    "read_at": "2026-10-03T18:52:03.328Z",
+    "evidence": "464 | \n465 | #[instrument(name = \"apply_row_id_and_deletes\", level = \"debug\", skip_all)]\n466 | fn apply_row_id_and_deletes_with_system_columns(\n467 |     batch: RecordBatch,\n468 |     batch_offset: u32,\n469 |     fragment_id: u32,\n470 |     config: &RowIdAndDeletesConfig,\n471 |     precomputed: PrecomputedSystemColumns,\n472 |     output_schema_cache: Option<&OnceLock<CachedOutputSchema>>,\n473 | ) -> Result<RecordBatch> {\n474 |     let PrecomputedSystemColumns {\n475 |         row_ids: precomputed_row_ids,\n476 |         last_updated_versions,\n477 |         created_versions,\n478 |     } = precomputed;\n479 |     let mut deletion_vector = config.deletion_vector.as_ref();\n480 |     // Convert Some(NoDeletions) into None to simplify logic below\n481 |     if let Some(deletion_vector_inner) = deletion_vector\n482 |         && matches!(deletion_vector_inner.as_ref(), DeletionVector::NoDeletions)\n483 |     {\n484 |         deletion_vector = None;\n485 |     }\n486 |     let has_deletions = deletion_vector.is_some();\n487 |     debug_assert!(batch.num_columns() > 0 || config.has_system_cols() || has_deletions);\n488 | "
+  },
+  {
+    "id": 17,
+    "path": "rust/lance-table/src/rowids/segment.rs",
+    "start": 293,
+    "end": 300,
+    "read_at": "2026-10-03T18:52:03.329Z",
+    "evidence": "293 | impl FromIterator<u64> for U64Segment {\n294 |     fn from_iter<T: IntoIterator<Item = u64>>(iter: T) -> Self {\n295 |         let values: Vec<u64> = iter.into_iter().collect();\n296 |         let stats = Self::compute_stats(values.iter().copied());\n297 |         Self::from_stats_and_sequence(stats, values)\n298 |     }\n299 | }\n300 | "
+  },
+  {
+    "id": 18,
+    "path": "protos/index_old.proto",
+    "start": 8,
+    "end": 24,
+    "read_at": "2026-10-03T18:52:03.329Z",
+    "evidence": "8 | /* NOTE: Do *NOT* add new index details here.  Add them to the index.proto file instead.\n9 |  * This file is in the lance.table package namespace while the index.proto file is in the\n10 |  * lance.index package namespace.\n11 |  *\n12 |  * These are only here for forward compatibility.  Older versions of Lance expect btree indexes\n13 |  * to have lance.table in the package namespace.\n14 |  *\n15 |  * If you need to modify these messages (e.g. to add new fields to btree or bitmap) then\n16 |  * it is ok to modify them here.\n17 |  */\n18 | \n19 | /* Currently many of these are empty messages because all needed details are either hard-coded (e.g.\n20 |  * filenames) or stored in the index itself.  However, we may want to add more details in the\n21 |  * future, in particular we can add details that may be useful for planning queries (e.g. don't\n22 |  * force us to load the index until we know we can make use of it)\n23 |  */\n24 | "
+  },
+  {
+    "id": 19,
+    "path": "rust/lance-core/src/utils/cpu.rs",
+    "start": 284,
+    "end": 297,
+    "read_at": "2026-10-03T18:52:03.329Z",
+    "evidence": "284 | \n285 | #[cfg(target_arch = \"loongarch64\")]\n286 | mod loongarch64 {\n287 |     pub fn has_lsx_support() -> bool {\n288 |         // See: https://github.com/rust-lang/libc/blob/7ce81ca7aeb56aae7ca0237ef9353d58f3d7d2f1/src/unix/linux_like/linux/gnu/b64/loongarch64/mod.rs#L263\n289 |         let flags = unsafe { libc::getauxval(libc::AT_HWCAP) };\n290 |         flags & libc::HWCAP_LOONGARCH_LSX != 0\n291 |     }\n292 |     pub fn has_lasx_support() -> bool {\n293 |         // See: https://github.com/rust-lang/libc/blob/7ce81ca7aeb56aae7ca0237ef9353d58f3d7d2f1/src/unix/linux_like/linux/gnu/b64/loongarch64/mod.rs#L264\n294 |         let flags = unsafe { libc::getauxval(libc::AT_HWCAP) };\n295 |         flags & libc::HWCAP_LOONGARCH_LASX != 0\n296 |     }\n297 | }"
+  },
+  {
+    "id": 20,
+    "path": "rust/lance-table/src/transaction/validate.rs",
+    "start": 533,
+    "end": 555,
+    "read_at": "2026-10-03T18:52:03.330Z",
+    "evidence": "533 |     #[rstest::rstest]\n534 |     #[case::logical_type(DataType::Float32, true)]\n535 |     #[case::nullability(DataType::Int32, false)]\n536 |     #[test]\n537 |     fn test_merge_shared_id_change_requires_full_rewrite(\n538 |         #[case] data_type: DataType,\n539 |         #[case] nullable: bool,\n540 |     ) {\n541 |         let schema = one_field_schema();\n542 |         let prior_fragments = vec![\n543 |             fragment_with_file_fields(0, \"old-0.lance\", vec![0]),\n544 |             fragment_with_file_fields(1, \"old-1.lance\", vec![0]),\n545 |         ];\n546 |         let manifest = Manifest::new(\n547 |             schema.clone(),\n548 |             Arc::new(prior_fragments.clone()),\n549 |             DataStorageFormat::new(ConcreteFileVersion::V2_0),\n550 |             HashMap::new(),\n551 |         );\n552 |         let mut new_schema = schema;\n553 |         new_schema.fields[0].logical_type = LogicalType::try_from(&data_type).unwrap();\n554 |         new_schema.fields[0].nullable = nullable;\n555 | "
+  }
+]

@@ -1,0 +1,43 @@
+{
+  "iteration": 48,
+  "kind": "Two source-comment discrepancies clarified and two superseded coverage notes refreshed; sampled claims unchanged.",
+  "changes": [
+    {
+      "path": "protos/fragment_metadata.proto",
+      "range": [
+        251,
+        287
+      ],
+      "before": "DeletionFile path is {root}/_deletions/{fragment_id}-{read_version}-{id}.{extension}. Nested DeletionFileType is ARROW_ARRAY=0 (one Arrow IPC batch containing one Int32Array column, .arrow) or BITMAP=1 (Roaring bitmap, .bin). Comments motivate sparse versus dense selection but provide no threshold. Fields are file_type=1, read_version=2, concurrent-writer differentiating id=3, num_deleted_rows=4, and optional base_id=7 for Manifest.base_paths. Deletions operate on offsets, not stable logical IDs.",
+      "after": "DeletionFile path is {root}/_deletions/{fragment_id}-{read_version}-{id}.{extension}. Nested DeletionFileType is ARROW_ARRAY=0 or BITMAP=1. Schema comments describe one Arrow IPC batch with an Int32Array column and .arrow, or Roaring bitmap and .bin. The current Rust implementation instead requires row_id:UInt32; this source/comment discrepancy is explicit in rust/lance-table/src/io/deletion.rs:25-34 and rust/lance-table/src/io/deletion.rs:162-195. Comments motivate sparse versus dense selection but provide no threshold. Fields are file_type=1, read_version=2, concurrent-writer differentiating id=3, num_deleted_rows=4, and optional base_id=7 for Manifest.base_paths. Deletions operate on offsets, not stable logical IDs."
+    },
+    {
+      "path": "protos/table.proto",
+      "range": [
+        612,
+        635
+      ],
+      "before": "CompactedSsTable has shard_id UUID=1 and generation uint64=2 for latest compaction into base data. IndexCatchupProgress has base index_name=1 (must match maintained_indexes) and caught_up_generations repeated=2. An absent shard means unknown progress, so retain SSTables and schedule repair; it does not mean fully caught up or safe to delete.",
+      "after": "CompactedSsTable has shard_id UUID=1 and generation uint64=2 for latest compaction into base data. IndexCatchupProgress has base index_name=1 (must match maintained_indexes) and caught_up_generations repeated=2. The protobuf comment says an absent shard means unknown progress, requiring retained SSTables and repair. This conflicts with the Rust getter comment saying absence is assumed fully caught up; the getter itself simply returns None (rust/lance-table/src/system_index/mem_wal.rs:157-164). Complete consumers must resolve policy; neither comment proves safe deletion."
+    },
+    {
+      "path": "rust/lance-table/src/transaction/validate.rs",
+      "range": [
+        101,
+        119
+      ],
+      "before": "Private overwrite_fragments_valid scans in list order and rejects first Some deletion_file, even a file recording zero or unknown deletions. Error includes fragment ID plus formatted relative deletion path and recommends Delete/Merge. Docs explain new ID assignment would orphan an ID-named deletion file; this helper does not assign IDs, read data, remove files, check overlays/row lineage or mutate anything. Empty fragments pass. Relative path formatter is contextual only (rust/lance-table/src/io/deletion.rs:50-59).",
+      "after": "Private overwrite_fragments_valid scans in list order and rejects first Some deletion_file, even a file recording zero or unknown deletions. Error includes fragment ID plus formatted relative deletion path and recommends Delete/Merge. Docs explain new ID assignment would orphan an ID-named deletion file; this helper does not assign IDs, read data, remove files, check overlays/row lineage or mutate anything. Empty fragments pass. Relative path formatter is now fully analyzed (rust/lance-table/src/io/deletion.rs:50-59)."
+    },
+    {
+      "path": "rust/lance-table/src/transaction.rs",
+      "range": [
+        57,
+        69
+      ],
+      "before": "Imports metadata, bitmap, ordered map and UUID. Public LogicalIndexSegments aliases BTreeMap<String,Vec<CoverageIdentity>>. Docs require non-system logical names and UUID-ordered physical segments, retaining coverage bitmaps because same UUID can survive pruning. The alias itself enforces neither filtering nor vector sorting; builder population is contextual only.",
+      "after": "Imports metadata, bitmap, ordered map and UUID. Public LogicalIndexSegments aliases BTreeMap<String,Vec<CoverageIdentity>>. Docs require non-system logical names and UUID-ordered physical segments, retaining coverage bitmaps because same UUID can survive pruning. The alias itself enforces neither filtering nor vector sorting; producer behavior belongs to the separately analyzed manifest builder."
+    }
+  ],
+  "behavior_summary": "L3-symbols/behavior-contracts.md now explicitly flags the missing-progress comment discrepancy without selecting a consumer policy."
+}

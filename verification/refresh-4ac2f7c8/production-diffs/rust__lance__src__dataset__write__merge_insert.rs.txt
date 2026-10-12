@@ -1,0 +1,139 @@
+@@ -643,7 +643,7 @@ impl MergeInsertParams {
+  643  /// [`MergeInsertJob::update_fragments`] deposit their results.
+  644  #[derive(Debug, Default)]
+  645  struct PatchSink {
+  646 -    /// Fragments that gained a data file, one entry per task.
+  646 +    /// Patched fragments, including key-only matches that only update metadata.
+  647      fragments: Mutex<Vec<Fragment>>,
+  648      /// Physical offsets each fragment had patched. Only populated under stable
+  649      /// row ids, which is the only thing that reads the row-version metadata
+
+@@ -654,7 +654,7 @@ struct PatchSink {
+  654  /// What [`MergeInsertJob::update_fragments`] wrote.
+  655  #[derive(Debug)]
+  656  pub(super) struct PatchedFragments {
+  657 -    /// Existing fragments that gained a data file for the patched columns.
+  657 +    /// Existing fragments with column patches or updated row-version metadata.
+  658      pub updated_fragments: Vec<Fragment>,
+  659      /// Fragments written for rows that carried no target address.
+  660      pub new_fragments: Vec<Fragment>,
+
+@@ -1640,14 +1640,29 @@ impl MergeInsertJob {
+ 1640      /// fragments.
+ 1641      ///
+ 1642      /// `source` must carry `_rowaddr` plus the columns to write. A null
+ 1643 -    /// `_rowaddr` routes the row to a new fragment.
+ 1643 +    /// `_rowaddr` routes the row to a new fragment. Join columns in `on` are
+ 1644 +    /// written for new rows but preserved in existing fragments.
+ 1645      pub(super) async fn update_fragments(
+ 1646          dataset: Arc<Dataset>,
+ 1647          source: SendableRecordBatchStream,
+ 1648          current_version: u64,
+ 1649          target_bases_info: Option<Vec<TargetBaseInfo>>,
+ 1650          write_version: ConcreteFileVersion,
+ 1651 +        on: &[String],
+ 1652      ) -> Result<PatchedFragments> {
+ 1653 +        let source_schema = source.schema();
+ 1654 +        let update_projection: Vec<usize> = source_schema
+ 1655 +            .fields()
+ 1656 +            .iter()
+ 1657 +            .enumerate()
+ 1658 +            .filter_map(|(idx, field)| (!on.contains(field.name())).then_some(idx))
+ 1659 +            .collect();
+ 1660 +        // Every group has the same projected schema. Deletions and fragment
+ 1661 +        // coverage change its rows, not whether it carries columns to write.
+ 1662 +        let has_updated_columns = update_projection.iter().any(|&idx| {
+ 1663 +            let name = source_schema.field(idx).name();
+ 1664 +            name != ROW_ADDR && name != ROW_ID
+ 1665 +        });
+ 1666          // Shared across the per-group tasks spawned below; only new fragments
+ 1667          // are routed to target bases, column patches stay in primary storage.
+ 1668          let target_bases_info = Arc::new(target_bases_info);
+
+@@ -1799,6 +1814,36 @@ impl MergeInsertJob {
+ 1814                          .extend(offsets);
+ 1815                  }
+ 1816  
+ 1817 +                // A key-only match still updates row-version metadata, but
+ 1818 +                // has no column data to write or invalidate.
+ 1819 +                if write_schema.fields.is_empty() {
+ 1820 +                    if dataset.manifest.uses_stable_row_ids() {
+ 1821 +                        let updated_offsets: Vec<usize> = get_row_addr_iter(&batches)
+ 1822 +                            .map(|(row_addr, _)| RowAddress::from(row_addr).row_offset() as usize)
+ 1823 +                            .collect();
+ 1824 +                        let spilled_lineage =
+ 1825 +                            load_spilled_row_lineage(&dataset, [&metadata]).await?;
+ 1826 +                        lance_table::rowids::version::refresh_row_latest_update_meta_for_partial_frag_rewrite_cols(
+ 1827 +                            &mut metadata,
+ 1828 +                            &updated_offsets,
+ 1829 +                            current_version,
+ 1830 +                            dataset.manifest.version,
+ 1831 +                            &spilled_lineage,
+ 1832 +                        )?;
+ 1833 +                    }
+ 1834 +                    // Keep the matched fragments in the conflict read set even
+ 1835 +                    // without stable row ids: a concurrent rewrite of their
+ 1836 +                    // physical addresses must cause the merge to retry.
+ 1837 +                    patched
+ 1838 +                        .fragments
+ 1839 +                        .lock()
+ 1840 +                        .map_err(|err| {
+ 1841 +                            Error::internal(format!("Failed to lock patched fragments: {err}"))
+ 1842 +                        })?
+ 1843 +                        .push(metadata);
+ 1844 +                    return Ok(reservation_size);
+ 1845 +                }
+ 1846 +
+ 1847                  if has_full_fragment_coverage {
+ 1848                      // Exact, deletion-free coverage can be written directly because the
+ 1849                      // batches are sorted by row address.
+
+@@ -2062,6 +2107,13 @@ impl MergeInsertJob {
+ 2107                      };
+ 2108                      let metadata = fragment.metadata.clone();
+ 2109  
+ 2110 +                    // Matched join columns are equal by definition. Retain
+ 2111 +                    // them in the source only for the new-fragment branch.
+ 2112 +                    let batches = batches
+ 2113 +                        .into_iter()
+ 2114 +                        .map(|batch| batch.project(&update_projection))
+ 2115 +                        .collect::<std::result::Result<Vec<_>, _>>()?;
+ 2116 +
+ 2117                      let fut = handle_fragment(
+ 2118                          dataset.clone(),
+ 2119                          fragment,
+
+@@ -2121,6 +2173,9 @@ impl MergeInsertJob {
+ 2173          // Collect the updated fragments, and map the field ids. Tombstone old ones
+ 2174          // as needed.
+ 2175          for fragment in &mut updated_fragments {
+ 2176 +            if !has_updated_columns {
+ 2177 +                continue;
+ 2178 +            }
+ 2179              let updated_fields = fragment.files.last().unwrap().fields.clone();
+ 2180              all_fields_updated.extend(updated_fields.iter().map(|&f| f as u32));
+ 2181              for data_file in &mut fragment.files.iter_mut().rev().skip(1) {
+
+@@ -2370,11 +2425,8 @@ impl MergeInsertJob {
+ 2425          {
+ 2426              blockers.push("the source covers every dataset column, so there is nothing to skip");
+ 2427          }
+ 2373 -        // A source of nothing but the join key has no new values to write: the
+ 2374 -        // patch would reproduce the key column byte for byte, and still cost a
+ 2375 -        // full-fragment column file plus the invalidation of every index over
+ 2376 -        // the key. Row-rewrite writes more bytes for it, but it does not
+ 2377 -        // invalidate those indices.
+ 2428 +        // A source of nothing but the join key has no new column values to
+ 2429 +        // write, so there is no column patch for this sink to perform.
+ 2430          if !source_schema
+ 2431              .fields()
+ 2432              .iter()
+
+@@ -2946,6 +2998,7 @@ impl MergeInsertJob {
+ 2998                  self.dataset.manifest.version + 1,
+ 2999                  target_bases_info,
+ 3000                  self.params.write_version(&self.dataset),
+ 3001 +                &self.params.on,
+ 3002              )
+ 3003              .await?;
+ 3004  

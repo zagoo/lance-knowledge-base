@@ -1,0 +1,164 @@
+{
+  "iteration": 40,
+  "files": [
+    {
+      "path": "rust/lance-table/src/transaction/validate.rs",
+      "module": "L1-modules/rust-lance-table.md",
+      "reviewed": true,
+      "role": "Synchronous operation pre-validation, Merge schema/fragment binding guards and physical base-file rewrite detector. validate_operation is publicly reexported; schema validators are pub only inside a private module; rewrite detector is transaction-internal. Seven local tests and three fixtures.",
+      "ranges": [
+        [
+          1,
+          17,
+          "SPDX and module docs describe pre-commit coherent-manifest checks; imports Fragment/Manifest, deletion-path formatter, Operation/modes/offset map, Field/Schema, core errors, exact file versions and HashMap/HashSet. The introductory promise is broader than individual checks: modern schema validation does not inspect schema membership, and unhandled operation variants return Ok. No IO, async, unsafe, feature gate or mutable input occurs in this file."
+        ],
+        [
+          18,
+          41,
+          "Public validate_operation(manifest:Option<&Manifest>,operation:&Operation)->Result<()> first distinguishes absent dataset. None+Overwrite runs overwrite deletion guard then modern schema-fragment validation through None and returns early; None+Clone returns Ok without checking any payload. Any other None operation returns InvalidInput with Operation::name and non-existent dataset message. Some manifest proceeds to operation dispatch. Public facade reexports only this validator from the private validate module (rust/lance-table/src/transaction.rs:30-55)."
+        ],
+        [
+          42,
+          66,
+          "For existing dataset, Append validates supplied fragments against current schema using current manifest format; Project validates existing fragments against proposed schema. Merge runs fragment-preservation, field-binding/schema validation, then format-selected schema-fragment check, in that error precedence. Overwrite first rejects deletion metadata and deliberately passes None, ignoring old manifest format; new fragment exact versions are not consulted by this dispatch. The Append comment says all fields, but that is true only for the legacy helper. preserves_nullability flags and config/base payloads are not checked here."
+        ],
+        [
+          67,
+          100,
+          "Update first checks updated_fragments then new_fragments with current schema/format. Only Some(RewriteColumns) plus Some(updated_fragment_offsets) creates HashSet of updated IDs and rejects an offset-map key absent from that set. Error includes offending ID and requires only rewritten fragment keys. HashMap iteration can choose an unspecified first invalid key. Empty map succeeds, not every updated ID needs an entry, bitmap values/bounds are not checked, and mode None/RewriteRows skips key restriction. Removed IDs/fields/filter/SSTables are ignored locally. All remaining existing-dataset variants return Ok; a newly added variant could therefore bypass validation through wildcard."
+        ],
+        [
+          101,
+          119,
+          "Private overwrite_fragments_valid scans in list order and rejects first Some deletion_file, even a file recording zero or unknown deletions. Error includes fragment ID plus formatted relative deletion path and recommends Delete/Merge. Docs explain new ID assignment would orphan an ID-named deletion file; this helper does not assign IDs, read data, remove files, check overlays/row lineage or mutate anything. Empty fragments pass. Relative path formatter is now fully analyzed (rust/lance-table/src/io/deletion.rs:50-59)."
+        ],
+        [
+          120,
+          136,
+          "Private schema_fragments_valid chooses legacy only for manifest exactV1; V2_0,V2_1,V2_2,V2_3 choose modern. None always chooses modern. Selector reads manifest storage format, not per-file raw version, writer flags or row-ID capability. Result is forwarded unchanged; no version consistency or file/overlay validate call occurs."
+        ],
+        [
+          137,
+          151,
+          "pub schema_fragments_modern_valid is inside private non-reexported validate module, thus not an external API. It ignores _schema and scans only fragment.files, rejecting first DataFile with empty fields slice using path in InvalidInput. Empty fragment list or a fragment with no base files passes vacuously; overlays, field IDs, schema coverage, duplicate IDs, column alignment, row counts, tombstones, logical types and physical bytes are not checked. Work is linear in base-file count; successful path has no explicit owned allocation."
+        ],
+        [
+          152,
+          175,
+          "pub schema_fragments_legacy_valid likewise lacks external module route. For each fragment and every schema field in preorder, require any equal ID across base DataFile.fields; otherwise InvalidInput includes fragment ID and debug Field. Extra/masked file IDs and duplicates are allowed. Empty schema or fragment list passes; overlays do not provide coverage. Nested parents must be present. Repeated scanning costs roughly fragments times schema-fields times stored field IDs, plus schema traversal. TODO acknowledges incomplete consolidation with other validate methods. This documents a frozen legacy path, not a recommendation to extend it."
+        ],
+        [
+          176,
+          201,
+          "pub(super) inline merge_fragment_physically_rewritten borrows previous/merged fragment; debug_assert_eq IDs can panic in debug builds only. Differing base-file lengths immediately true; otherwise ordered zip compares path, fields, column_indices, raw major/minor and base_id. Cache size is intentionally excluded because scans can populate it concurrently. Reordering unequal base files counts as rewrite; deletion/overlay/physical-row/row-ID/version changes alone do not. It returns bool without IO or mutation, serving version stamping rather than full data-integrity proof. Contextual Merge builder uses it only when next_row_id is Some (rust/lance-table/src/transaction/manifest_build.rs:1183-1213)."
+        ],
+        [
+          202,
+          221,
+          "Private merge_fragments_valid docs say one-to-one preservation/only add columns or rows, but implementation first rejects only a smaller proposed vector length. It permits extra fragments. Then builds HashMap<u64,&Fragment>, retaining last proposed occurrence of each ID. No ID uniqueness/sort check; extra duplicates can satisfy count check while map hides earlier entries. O(proposed count) expected map construction and reference storage."
+        ],
+        [
+          222,
+          256,
+          "Scan every original fragment. Matching ID must preserve exact Option<usize> physical_rows, including None versus Some(0); mismatch returns immediately with ID and old/new values. Missing originals accumulate in Vec, then one InvalidInput reports missing IDs, original IDs and map keys (last list unordered). An encountered row-count mismatch takes precedence over accumulated missing IDs. The helper checks neither files/deletions/overlays/lineage nor actual rows. Empty original accepts any proposed list. It enforces inclusion and same stored count, not one-to-one identity."
+        ],
+        [
+          257,
+          279,
+          "Private merge_schema_valid documents stable field-ID/path bindings, guarded semantic changes, new IDs above prior maximum, materialized fresh-ID casts and legal drops/metadata changes. It borrows prior schema and collects proposed fragments into last-ID-wins HashMap. Docs say every proposed fragment must materialize shared changed IDs, but the helper called below visits only original manifest fragments; separately the fresh-ID path checks every proposed fragment. No full Schema::validate invocation here."
+        ],
+        [
+          280,
+          308,
+          "First pass follows proposed schema preorder for IDs that exist in prior schema. Compute both paths through field_path? and reject unequal paths with ID, old/new path and derive-from-current-schema guidance. Then shared_field_binding_changes tests type/nullability/encoding/dictionary; if changed and rewrite predicate false, return contextual InvalidInput listing changes. Shared paths cannot move even with rewritten bytes. Errors from path resolution propagate before later max-ID/fresh-path clauses. Metadata and other Field attributes are excluded from semantic comparison."
+        ],
+        [
+          309,
+          328,
+          "Second pass computes manifest.max_field_id and rejects any ID absent from prior schema but <=maximum, including previously dropped file IDs. Diagnostic contains proposed ID/path, prior maximum and checked next ID; i32 maximum yields explicit exhausted message rather than overflow. Existing prior IDs are exempt. There is no local positive-ID or duplicate-ID check. Manifest maximum includes schema, base and overlay IDs (rust/lance-table/src/format/manifest.rs:466-485)."
+        ],
+        [
+          329,
+          359,
+          "Build prior path->Field map, then visit each proposed field whose ID is absent from prior schema. If its path existed before, require every proposed fragment to contain new ID in some base file; missing materialization errors with path/old/new ID. Entirely new paths need no such materialization here; modern final validation also ignores schema completeness. Empty proposed fragments pass all(), subject to earlier merge fragment guard in validate_operation. New-ID remap does not require old paths/files removed or new base path physically different. Dropped fields and field metadata edits remain untested by these passes."
+        ],
+        [
+          360,
+          390,
+          "Private is_field_binding_fully_rewritten visits only original fragments, not additional proposed IDs. Each original needs a map match and a proposed base file carrying field_id even if original lacked it. For each prior base/overlay file carrying ID, no proposed base/overlay may carry same ID with identical base_id and path. Identity ignores sizes/raw versions/column mapping/content/overlay coverage/version; None base differs from Some. Retaining the path with that ID removed can pass. No file contents or object identity beyond these metadata strings checked. Empty prior manifest returns true. Nested per-field file scans can be quadratic in referenced files, with no extra collection inside helper. This differs from broader every-proposed-fragment prose above."
+        ],
+        [
+          391,
+          417,
+          "Private shared_field_binding_changes allocates Vec capacity4; compares exact logical_type,nullable,encoding,dictionary in fixed order. Changed first three produce old->new strings, dictionary just the word dictionary. Returns None if none changed, else joined comma-space String. Dictionary equality delegates its datatype implementation; schema field metadata/name/ID/parent/children outside recursive caller traversal/storage-related other flags are not compared here. No semantic type coercion or relaxed-nullability option."
+        ],
+        [
+          418,
+          447,
+          "cfg(test) module imports overlays/files/storage format, Arrow/Lance types, roaring and Arc/maps. First test constructs two-field Int32/Utf8 schema and three empty metadata fragments IDs1,2,3 in V2_0 manifest; no files/physical counts. Calls private merge-fragment helper directly, bypassing schema checks and store IO."
+        ],
+        [
+          448,
+          474,
+          "First preservation test rejects empty proposed list with reduced-count substring; same-length IDs1,2,4 reject missing-original substring. Assertions check result error and textual category, not exact full message or variant. No runtime execution performed."
+        ],
+        [
+          475,
+          506,
+          "Same test rejects shorter1,2 list, accepts all originals plus4,5 and accepts exact original ID list. All physical_rows remain None; does not test changed row counts, duplicate IDs or file preservation. Demonstrates extra fragments accepted despite one-to-one wording."
+        ],
+        [
+          507,
+          532,
+          "Three private fixtures: one_field_schema creates nullable Int32 a; fragment_with_file_fields creates Fragment then one legacy metadata DataFile with supplied path/IDs; manifest_with_file_fields wraps fragment0 f.lance in V2_0 manifest. Fixture per-file version and manifest version differ; tests reason about metadata guards, not actual encoded data."
+        ],
+        [
+          533,
+          555,
+          "rstest has two named cases: logical_type Float32/nullabletrue and nullability Int32/false; additional test attribute present. Two prior fragments0/1 each contain field0, with old paths and V2_0 manifest. Proposed schema changes logical_type and nullable from parameters; count/data bytes absent."
+        ],
+        [
+          556,
+          572,
+          "Shared-ID test accepts both new paths, rejects one rewritten plus one retained old path; asserts InvalidInput and rewrite-required substring. This is multi-fragment coverage for two semantic change categories, not encoding/dictionary variants or physical verification."
+        ],
+        [
+          573,
+          599,
+          "Dictionary regression constructs UInt32->Utf8 nullable schema and dictionary offset100,length5,valuesNone; prior metadata fragment0 old.lance. Comment describes former comparison behavior, but no historical source/release is inspected; only current test is authoritative."
+        ],
+        [
+          600,
+          627,
+          "Unchanged dictionary yields None changes and schema validation succeeds while retaining old file. Moving offset to200 yields exactly Some(dictionary), then InvalidInput and precise field0 d rewrite-required substring. Length/value variations are not tested. Uses metadata only; no dictionary buffer load."
+        ],
+        [
+          628,
+          656,
+          "Retained-overlay test changes field0 nullability, supplies new base path but keeps prior old-overlay.lance carrying0 with shared bitmap{0} and version1. Requires InvalidInput rewrite-required diagnostic. Overlay uses legacy DataFile metadata under V2_0 manifest and no actual values read. Demonstrates both old base and overlay identity matter for schema binding guard."
+        ],
+        [
+          657,
+          668,
+          "Fresh-ID test changes same path a from ID0 to1 and supplies replacement file fields[1], then private merge_schema_valid succeeds. Single fragment only, no missing-materialization failure, no removed old-file assertion or public validator call."
+        ],
+        [
+          669,
+          690,
+          "Max-ID test includes i32::MAX in base file fields though schema only has0, confirms manifest maximum, then adds new field b ID1 and requires InvalidInput containing assigns id1 and exhausted. This covers checked next-ID diagnostic without overflow and IDs retained outside current schema."
+        ],
+        [
+          691,
+          723,
+          "Regression comment links issue6417 and describes LEGACY-to-STABLE omission of struct parents. Builds root id/name/address struct with city/country; old manifest exactV1 and one empty fragment0. Link is source evidence only; no network/history queried."
+        ],
+        [
+          724,
+          755,
+          "Proposed fixture names itself stable_fragment and omits parentID2, using fields0,1,3,4 and columns0,1,2,3 with physical_rows10. However constructor explicitly receives ConcreteFileVersion::V1 at732, contrary to STABLE comments. Overwrite contains no config/bases, and validate_operation(Some(oldV1),...) unwrap succeeds because Overwrite always selects modern check. Test proves old-manifest bypass, not real stable-file compatibility or actual writer output. File ends;7 test functions (one2-case rstest),3 fixture helpers; no local direct tests of Clone/None, deletion overwrite rejection, generic modern/legacy checks, offset-key guard, physical-rewrite detector or several malformed schema cases. Contextual manifest-build test covers stray offset key (rust/lance-table/src/transaction/manifest_build.rs:3643-3693)."
+        ]
+      ],
+      "limits": "All755 physical lines fully read in three bounded outputs. No source modification or runtime tests. Narrow caller snippets identify CommitBuilder::execute validation and Merge version-stamping, without claiming complete commit ordering or storage safety. Local validation returns borrowed-input results and does no IO; caller may already have performed IO before entry (rust/lance/src/dataset/write/commit.rs:395-425). Full codec/manifest/index/commit implementation remains pending. Comment/code differences in all-proposed materialization and stable test fixture are explicitly retained."
+    }
+  ]
+}

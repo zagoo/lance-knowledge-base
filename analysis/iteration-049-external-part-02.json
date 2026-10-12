@@ -1,0 +1,252 @@
+[
+  [
+    1178,
+    1194,
+    "The cfg(test) module imports HashMap/Mutex, atomic flags/counters, Arrow schema types, Lance schema/storage versions, ObjectStore proxy failure policies, Tokio Notify, the canonical writer and VERSIONS_DIR. These are in-memory deterministic protocol fixtures. Their assertions were read for coverage; none of these tests was executed for this read-only knowledge-base task."
+  ],
+  [
+    1195,
+    1212,
+    "StoredManifest is a Debug/Clone path/size/optional-ETag row. TestExternalManifestStore holds rows keyed by (base URI, version) in a Mutex plus flags for losing a reservation response, failing an index update, or blocking its first final publish; an atomic call counter and two Notify values coordinate the latter race. This mock does not mint identities."
+  ],
+  [
+    1213,
+    1240,
+    "TestExternalManifestStore::new initializes an empty map, configurable first reservation-response failure, other failure flags false, zero publish count and fresh notifications. failing_final_publish_once changes only the final-publication error flag; blocking_first_final_publish enables a deterministic pause. These constructors exercise failure timing, not backend consistency or distributed transactions."
+  ],
+  [
+    1241,
+    1285,
+    "The mock ExternalManifestStore get locks the map and clones the selected path or returns contextual NotFound. get_manifest_location clones the complete row, builds a Path, classifies naming, returns Some(size)/stored ETag/identity None. get_latest_version scans only matching base URIs and selects the largest numeric version, with no detached-version filtering. It inherits the trait's default latest-location conversion, so latest metadata is initially unknown."
+  ],
+  [
+    1286,
+    1316,
+    "Mock put_if_not_exists locks the map, rejects an existing key with a commit conflict, otherwise inserts the full row and drops the lock. Only after insertion does fail_next_put_response.swap(false, SeqCst) simulate an IO response loss. Thus an error can coexist with a successfully selected staging path, which is the ambiguous outcome the retention tests need."
+  ],
+  [
+    1317,
+    1348,
+    "Mock put_if_exists can pause its first final update before taking the row lock, signal that pause and await release. A one-shot failure returns IO before mutating the record. Otherwise it requires the key to exist and overwrites path/size/ETag in place. All mock mutex locks unwrap poison; atomics use SeqCst. Its external record update is serialized locally, but the pause permits a second helper to copy/update/delete staging first."
+  ],
+  [
+    1349,
+    1358,
+    "test_manifest constructs a one-field non-nullable Int32 id schema, empty fragments, DataStorageFormat using resolved Stable LanceFileVersion, and empty config. It is a minimal real Manifest for the injected canonical writer, not a dataset-operation fixture."
+  ],
+  [
+    1359,
+    1398,
+    "test_finalized_manifest_ignores_legacy_external_store_etag writes a canonical V2 object, indexes its actual size with a deliberately wrong legacy ETag, resolves that version, and asserts canonical path, actual size and the object's HEAD ETag. It verifies generation refresh rather than manifest decoding; the stored bytes are only the literal manifest."
+  ],
+  [
+    1399,
+    1437,
+    "test_finalized_manifest_without_external_store_etag_uses_current_etag repeats the canonical-resolution check with an absent indexed ETag and asserts actual path/size/ETag. An absent index token does not prevent the returned location from carrying the current object generation."
+  ],
+  [
+    1438,
+    1468,
+    "test_default_store_returns_but_does_not_persist_etag performs a real ordinary commit through the default external workflow, HEADs the canonical object, compares the returned ETag, and asserts the external record has ETag None. Its next phase changes physical bytes at the same canonical path to test the intended generation-independent external index."
+  ],
+  [
+    1469,
+    1487,
+    "The default-store ETag test overwrites the canonical file with zero bytes of exactly the original length, observes a different ETag, resolves the indexed version and asserts the replacement ETag. This intentionally demonstrates that size/generation handling is not byte-content validation: resolution accepts equal-length replacement bytes without decoding them."
+  ],
+  [
+    1488,
+    1517,
+    "test_helping_finalizer_returns_but_does_not_persist_etag manually writes immutable staging bytes and reserves that path with its physical ETag. This creates a legacy-style indexed staging row so reader helping can be tested independently of ordinary commit."
+  ],
+  [
+    1518,
+    1531,
+    "The helping-finalizer test resolves the reserved version, asserts its returned ETag equals canonical HEAD, and asserts the repaired external record's ETag is None. It proves reader-side finalization clears a stored physical generation; it does not assert the staging deletion in this case."
+  ],
+  [
+    1532,
+    1565,
+    "test_onboarding_returns_but_does_not_persist_etag writes a canonical V2 object without an external row, resolves the version through fallback/onboarding, asserts the returned ETag is current and the newly inserted record has ETag None. This covers backfill of existing object-store history into a generic external store."
+  ],
+  [
+    1566,
+    1603,
+    "test_finalized_manifest_size_mismatch_remains_corruption stores canonical bytes and indexes actual size + 1. Exact-version resolution must return Error::CorruptFile and include Manifest size mismatch. Ignoring indexed ETags therefore does not disable the explicit known-size invariant on the generic finalized path."
+  ],
+  [
+    1604,
+    1638,
+    "test_canonical_manifest_commits_before_index_repair uses a one-shot final-index-update failure. Ordinary commit must still succeed at the canonical path with Some(ETag), and HEAD must find the object. This establishes canonical durability before successful index compaction in the generic workflow; it is an in-memory simulation despite assertion text referring to S3."
+  ],
+  [
+    1639,
+    1676,
+    "The index-repair test confirms the row still points to an existing staging object, then resolves the version to trigger helping. It asserts canonical returned path/ETag, repaired external path/size, indexed ETag None, and NotFound for the formerly retained staging object. Thus it covers success after repair failure and eventual cleanup, without treating repair failure as rollback."
+  ],
+  [
+    1677,
+    1715,
+    "test_concurrent_finalizers_return_but_do_not_persist_generations writes known staging bytes, starts default put in a Tokio task, and arranges to block the first external final update after that writer's COPY/HEAD. The task owns cloned store/base/path/ETag handles; the mock does not hold its row mutex across the pause."
+  ],
+  [
+    1716,
+    1744,
+    "The concurrent test bounds waiting for the writer's pause to five seconds, records its first canonical generation and confirms the reservation still names staging with ETag None. A reader resolves the same selected staging path, performs another equivalent copy and repairs the index; the test then releases and joins the first writer. Comments explain why physical generations may differ despite identical immutable bytes."
+  ],
+  [
+    1745,
+    1779,
+    "The concurrent test loads final bytes/metadata and external row, asserts bytes unchanged, final ETag different from the first generation, writer returned its earlier ETag, reader returned the later ETag, and final external tuple has canonical path/size but no ETag. A subsequent resolver returns the current generation. Thus a returned ETag is an observed physical generation, not a promise that no later equivalent copy will occur."
+  ],
+  [
+    1780,
+    1817,
+    "test_lost_external_store_response_retains_staging_manifest injects an error after reservation insertion. Ordinary commit must surface CommitConflict, the selected staging path remains readable, and a later exact-version resolver creates/finds the canonical V2 file. This codifies broad conflict classification for an ambiguous external response, not proof that the write lost arbitration."
+  ],
+  [
+    1818,
+    1859,
+    "test_finalization_returns_etag_without_persisting_it commits normally, asserts canonical path and returned ETag equal to HEAD, then verifies the external record advances to canonical path with ETag None. Its comments connect the transient ETag to cache separation; complete cache consumer behavior is outside this file."
+  ],
+  [
+    1860,
+    1885,
+    "test_missing_staging_verifies_existing_final_manifest supplies a missing staging path and an existing canonical object with the expected size. copy_or_verify_final_manifest must return that object's current ETag. The fixture tests the helper's NotFound recovery directly with immutable literal bytes."
+  ],
+  [
+    1886,
+    1905,
+    "test_missing_staging_rejects_missing_final_manifest leaves both paths absent and expects core NotFound mentioning the canonical path. A missing selected source without durable canonical evidence cannot establish success."
+  ],
+  [
+    1906,
+    1933,
+    "test_missing_staging_rejects_wrong_final_size leaves staging absent and creates a canonical object whose length differs from expected 42. It requires CorruptFile and the size-mismatch message. This complements the same-size recovery test but does not reject same-size different content."
+  ],
+  [
+    1934,
+    1967,
+    "test_copy_failure_after_external_store_commit_retains_staging_manifest wraps the in-memory raw store in a ProxyObjectStore. A named before-policy fails only the first copy, atomically consumes its flag and records the source path under Mutex. Base/version/canonical path are saved before attempting the real writer/commit workflow."
+  ],
+  [
+    1968,
+    2011,
+    "The injected-copy-failure test expects CommitConflict, confirms the one-shot failure was consumed, verifies the indexed record equals the failed copy's staging source and that staging still exists, then asserts canonical HEAD is NotFound. Reservation success therefore precedes copy success and the winning object must survive the copy error."
+  ],
+  [
+    2012,
+    2040,
+    "After clearing the named proxy policy, the test resolves the version and expects canonical path, updated external row, visible canonical object and deleted staging. This covers reader repair after a pre-copy failure; it does not exercise partial multipart upload, production provider errors or cancellation during copying."
+  ],
+  [
+    2041,
+    2051,
+    "Debug/Default IdentifiedStore is a second mock: Mutex<HashMap<u64, (String, u64, String)>> stores path/size/identity, AtomicUsize mints tokens, and a flag plus two Notify values can pause reservation. It intentionally ignores base URI, so it models one dataset and is not a production multi-tenant store. No ETags are persisted."
+  ],
+  [
+    2052,
+    2065,
+    "IdentifiedStore::mint formats identity-{counter} using fetch_add SeqCst, and handler(self: &Arc<Self>) clones the Arc into ExternalManifestCommitHandler. Counter uniqueness models the never-reuse contract within this fixture; it is not a distributed identity scheme."
+  ],
+  [
+    2066,
+    2085,
+    "recreate locks rows, collects existing version keys, clears records and repopulates the same versions at deterministic V2 paths, size 1 and freshly minted identities. It changes external records only, not object bytes. identity_of locks the map and clones the token for one version. These fixtures isolate dataset-incarnation checking from actual dataset replacement."
+  ],
+  [
+    2086,
+    2119,
+    "IdentifiedStore's get and get_manifest_location ignore base URI, return contextual NotFound for absent versions, and clone recorded values. The location parser unwraps its trusted fixture path, classifies scheme and supplies Some(size), ETag None and Some(identity). This identity-bearing metadata routes readers through recorded_as_final."
+  ],
+  [
+    2120,
+    2142,
+    "The identified store's get_latest_version selects maximum numeric key without detached filtering. Its get_latest_manifest_location override fetches that version's full identified location rather than using the trait default that drops identity. The two awaits do not hold one atomic snapshot; a concurrent deletion could make the second lookup fail."
+  ],
+  [
+    2143,
+    2176,
+    "put_if_not_exists mints a token before locking/checking the target key, so conflicts can consume counter values; a free key stores path/size/token. put_if_exists requires a row and changes only path/size, preserving identity. Both ignore supplied ETag/base URI. These choices make final index compaction preserve record incarnation in the fixture."
+  ],
+  [
+    2177,
+    2197,
+    "The identified store advertises predecessor support, returns identity_of from get_identity, and forget_version removes only a row whose current identity matches. Missing/mismatched rows are successful no-ops. Retirement changes external history only and does not delete its object."
+  ],
+  [
+    2198,
+    2212,
+    "IdentifiedStore::list_versions snapshots keys under the mutex, releases it, then sequentially fetches each requested version's identified location, filtering strictly greater than since when present. Returns Some(Vec), even empty; no sorting here. Concurrent row removal between key snapshot and fetch can fail the entire method; it is not one atomic history snapshot."
+  ],
+  [
+    2213,
+    2240,
+    "put_if_predecessor optionally signals/awaits a held reservation before mutation, mints a token, then holds one mutex while checking predecessor token and target absence and inserting. It returns PredecessorChanged before considering Taken, otherwise reserves with a cloned token. No adjacency/head requirement is imposed. Awaiting the pause before locking makes cancellation/recreation tests deterministic without holding a synchronous mutex across an await."
+  ],
+  [
+    2241,
+    2255,
+    "v2_path constructs a deterministic V2 manifest path under dataset. v2_names maps requested versions through that helper, extracts filenames with unwrap, collects and sorts. These fixture helpers compare physical directory names, not external history."
+  ],
+  [
+    2256,
+    2289,
+    "identified_fixture creates an identified handler plus in-memory store/base, commits version 1 using ordinary generic commit, resolves latest identity and asserts its version is 1. It returns the handler/store/base/predecessor tuple needed for conditioned version 2 tests. The returned ordinary-commit location is discarded; identity is obtained explicitly from the store afterward."
+  ],
+  [
+    2290,
+    2311,
+    "commit_after_v2 creates the minimal Manifest, sets version 2 and calls CommitHandler::commit_after with canonical writer, V2 naming, no indices/transaction and the supplied predecessor. It returns the raw Result so tests distinguish prerequisite failures from ordinary conflicts."
+  ],
+  [
+    2312,
+    2323,
+    "versions_dir_files lists every raw object under base/_versions, extracts filenames, collects and sorts. Unlike manifest listing, it includes unique staging-shaped final files and orphans. It unwraps all fixture IO and filename results."
+  ],
+  [
+    2324,
+    2359,
+    "test_a_conditioned_commit_lands_under_its_minted_identity asserts version 2's filename contains .manifest-, ordinary detect_scheme returns None, and its identity equals the store's token. Latest resolution preserves that path/token; external listing returns [2,1], listing since 1 returns [2], while raw directory count is two. Invisible to manifest discovery here does not mean the raw object store cannot list the physical object."
+  ],
+  [
+    2360,
+    2384,
+    "test_a_changed_predecessor_is_refused_without_publishing supplies a stale version-1 token and expects OtherError(PrerequisiteFailed), no version-2 identity, and only version-1 canonical physical filename after best-effort cleanup succeeds in memory. This is a failed prerequisite rather than a target-version conflict."
+  ],
+  [
+    2385,
+    2402,
+    "test_a_taken_version_is_a_conflict pre-inserts a version-2 record at its canonical path without creating that physical object, attempts a conditioned commit, expects CommitConflict, and verifies only version 1 remains physically. It exercises different-record-path loser cleanup, not validation of the winning record's object existence."
+  ],
+  [
+    2403,
+    2424,
+    "test_a_recreation_before_publication_is_refused replaces all mock records with fresh identities before a conditioned commit using the old predecessor. It expects PrerequisiteFailed and unchanged version-1-only physical filenames. Record recreation, not a real object-prefix deletion/rebuild, is the simulated competing action."
+  ],
+  [
+    2425,
+    2437,
+    "listed_versions requests descending handler manifest locations, maps to version numbers, collects and unwraps. This helper observes authoritative external history rather than all physical files and is reused for cancellation and retirement assertions."
+  ],
+  [
+    2438,
+    2474,
+    "The multithread Tokio cancellation test pauses the next reservation, spawns conditioned version 2, waits up to 30 seconds for the pause, aborts/joins the task and requires cancelled status. There is no version-2 token; external history and ordinary physical manifest discovery both remain [1], but raw directory count is two. The fully written unique orphan survives because cancellation before reservation has no cleanup guard; the test proves non-publication, not absence of orphan bytes."
+  ],
+  [
+    2475,
+    2505,
+    "test_forgetting_a_version_retires_only_that_record commits identified version 2, attempts retirement of version 1 with a stale token and sees [2,1]. It then retires version 1 with its current token twice and sees [2]. This establishes identity-conditional/idempotent record removal; it does not inspect or delete physical files."
+  ],
+  [
+    2506,
+    2543,
+    "Inside test_retirement_is_refused_where_the_store_cannot_forget, Debug NoForget wraps Arc<IdentifiedStore>, delegates only required get/latest/conditional-insert/update methods and returns true for support. It intentionally inherits default forget_version. It also inherits other optional defaults, so it is not a complete correct predecessor-capable implementation; the test isolates refusal of missing retirement support."
+  ],
+  [
+    2544,
+    2553,
+    "The retirement-refusal test wraps NoForget in the handler, calls forget_version with identity-0 and requires Error::NotSupported. The remaining braces close the test and module. No production external service, large-copy threshold, multipart failure/cancellation branch or complete dataset conflict-resolution loop is exercised by these local tests."
+  ]
+]

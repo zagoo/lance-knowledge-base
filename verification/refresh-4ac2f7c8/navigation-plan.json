@@ -1,0 +1,2389 @@
+{
+  "prepared_from": "Current KB only, before source confirmation",
+  "new_commit": "4ac2f7c88be1ea2ab2c0fbb61d02238883fc18b9",
+  "tasks": [
+    {
+      "id": "route-001",
+      "task": "Read and execute a query",
+      "ordered_read_sets": [
+        [
+          "rust/lance/src/dataset.rs:1688-1705",
+          "rust/lance/src/dataset/scanner.rs:2999-3042,3633-3801",
+          "rust/lance-datafusion/src/exec.rs:721-761",
+          "rust/lance-file/src/reader.rs:732-1020"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-file/src/reader.rs",
+        "rust/lance/src/dataset.rs",
+        "rust/lance/src/dataset/scanner.rs"
+      ],
+      "kb_section": "Read and execute a query\n\n[Contract and executable trace](../L0-orientation.md#read-path). Read in this order:\n\n1. `rust/lance/src/dataset.rs:1688-1705` \u2014 construct snapshot Scanner.\n2. `rust/lance/src/dataset/scanner.rs:2999-3042,3633-3801` \u2014 validate, choose source, build/execute plan.\n3. `rust/lance-datafusion/src/exec.rs:721-761` \u2014 partition/order handling.\n4. [Frozen reader](../L2-files/rust/lance-file/src/reader.rs.md) \u2192 `rust/lance-file/src/reader.rs:732-1020` \u2014 persisted metadata to prepared file reads.\n\n<a id=\"write\"></a>\n"
+    },
+    {
+      "id": "route-002",
+      "task": "Create or append a dataset",
+      "ordered_read_sets": [
+        [
+          "rust/lance/src/dataset.rs:951-980",
+          "rust/lance/src/dataset/write/insert.rs:98-315",
+          "rust/lance/src/dataset/write.rs:1734-1840",
+          "rust/lance/src/dataset/write/commit.rs:301-572",
+          "rust/lance/src/io/commit.rs:1682-2078"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance/src/dataset.rs",
+        "rust/lance/src/dataset/write.rs",
+        "rust/lance/src/dataset/write/commit.rs",
+        "rust/lance/src/io/commit.rs"
+      ],
+      "kb_section": "Create or append a dataset\n\n[Write contract](../L0-orientation.md#write-path) and [ambiguous outcomes](../L3-symbols/protocol-commit.md#errors-retries-and-ambiguous-success).\n\n1. `rust/lance/src/dataset.rs:951-980` \u2014 public entry.\n2. `rust/lance/src/dataset/write/insert.rs:98-315` \u2014 write/stage versus commit, operation intent.\n3. `rust/lance/src/dataset/write.rs:1734-1840` \u2014 fragment-writer handoff.\n4. `rust/lance/src/dataset/write/commit.rs:301-572` \u2014 new/existing/detached dispatch and returned snapshot.\n5. `rust/lance/src/io/commit.rs:1682-2078` \u2014 existing-table publication and recovery. For a low-level byte change choose the separate format/encoding route.\n\n<a id=\"compact\"></a>\n"
+    },
+    {
+      "id": "route-003",
+      "task": "Compact files after writing",
+      "ordered_read_sets": [
+        [
+          "rust/lance/src/dataset/optimize.rs:1028-1152,2494-2569,3227-3337,3662-3693",
+          "rust/lance/src/io/commit.rs:1682-1941",
+          "rust/lance/src/io/commit/conflict_resolver.rs:1546-1813,2973-3229",
+          "rust/lance-table/src/transaction/manifest_build.rs:1059-1144"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-table/src/transaction/manifest_build.rs",
+        "rust/lance/src/dataset/optimize.rs",
+        "rust/lance/src/io/commit.rs",
+        "rust/lance/src/io/commit/conflict_resolver.rs"
+      ],
+      "kb_section": "Compact files after writing\n\n[Compaction trace](../L0-orientation.md#compaction-path) and [lineage contract](../L3-symbols/protocol-commit.md#index-coverage-and-rewrite-lineage).\n\n1. `rust/lance/src/dataset/optimize.rs:1028-1152,2494-2569,3227-3337,3662-3693` \u2014 plan, select copy/re-encode, reserve/commit Rewrite.\n2. `rust/lance/src/io/commit.rs:1682-1941` \u2014 rebase and fresh candidate assembly.\n3. `rust/lance/src/io/commit/conflict_resolver.rs:1546-1813,2973-3229` \u2014 directional rewrite checks and original-versus-current lineage.\n4. [Frozen operation application](../L2-files/rust/lance-table/src/transaction/manifest_build.rs.md) \u2192 `rust/lance-table/src/transaction/manifest_build.rs:1059-1144` \u2014 fragment liveness/application contract.\n\n<a id=\"index\"></a>\n"
+    },
+    {
+      "id": "route-004",
+      "task": "Build or update an index",
+      "ordered_read_sets": [
+        [
+          "rust/lance/src/index/create.rs:176-251,667-743",
+          "rust/lance/src/index/scalar.rs:349-453",
+          "rust/lance/src/index/vector.rs:1199-1325",
+          "rust/lance/src/index/vector/builder.rs:553-594,729-830"
+        ],
+        [
+          "rust/lance/src/index.rs:3233-3404",
+          "rust/lance/src/index/append.rs:530-766,1052-1437",
+          "rust/lance-index-core/src/scalar.rs:531-564,628-762",
+          "rust/lance/src/io/commit/conflict_resolver.rs:1071-1813"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance/src/index.rs",
+        "rust/lance/src/index/create.rs",
+        "rust/lance/src/io/commit/conflict_resolver.rs"
+      ],
+      "kb_section": "Build or update an index\n\n[Index lifecycle contract](../L3-symbols/protocol-index.md). First choose one subtask:\n\n**Build:** `rust/lance/src/index/create.rs:176-251,667-743` \u2192 `rust/lance/src/index/scalar.rs:349-453` for scalar, **or** `rust/lance/src/index/vector.rs:1199-1325` \u2192 `rust/lance/src/index/vector/builder.rs:553-594,729-830` for IVF-PQ. Maximum three files after choosing the branch.\n\n**Update:** `rust/lance/src/index.rs:3233-3404` \u2192 `rust/lance/src/index/append.rs:530-766,1052-1437` \u2192 `rust/lance-index-core/src/scalar.rs:531-564,628-762` for scalar filtering \u2192 `rust/lance/src/io/commit/conflict_resolver.rs:1071-1813` for concurrent coverage changes.\n\n<a id=\"new-index\"></a>\n"
+    },
+    {
+      "id": "route-006",
+      "task": "Add an encoding or change structural selection",
+      "ordered_read_sets": [
+        [
+          "rust/lance-encoding/src/encoder/structural.rs:24-288",
+          "rust/lance-encoding/src/encodings/logical/primitive.rs:5410-5480,7690-7928",
+          "rust/lance-file/src/versions/v2_3/mod.rs:103-139",
+          "rust/lance-file/src/versions/v2_3/reader.rs:149-265"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-encoding/src/encodings/logical/primitive.rs",
+        "rust/lance-file/src/versions/v2_3/reader.rs"
+      ],
+      "kb_section": "Add an encoding or change structural selection\n\n[Encoding selection contract](../L3-symbols/protocol-encoding.md). Choose the structural task here or its separate compression-policy set in that contract.\n\n1. [Frozen structural builders](../L2-files/rust/lance-encoding/src/encoder/structural.rs.md) \u2192 `rust/lance-encoding/src/encoder/structural.rs:24-288`.\n2. `rust/lance-encoding/src/encodings/logical/primitive.rs:5410-5480,7690-7928` \u2014 ordered behaviors and explicit/automatic layout paths.\n3. [Frozen V2_3 composition](../L2-files/rust/lance-file/src/versions/v2_3/mod.rs.md) \u2192 `rust/lance-file/src/versions/v2_3/mod.rs:103-139`.\n4. [Frozen exact V2_3 reader](../L2-files/rust/lance-file/src/versions/v2_3/reader.rs.md) \u2192 `rust/lance-file/src/versions/v2_3/reader.rs:149-265` \u2014 matching grammar admission.\n5. [Frozen structural schema](../L2-files/protos/encodings_v2_1.proto.md) \u2014 descriptor tags and framing. Stable V2_1/V2_2 are not automatically opted into a new mechanism.\n\n<a id=\"new-operation\"></a>\n"
+    },
+    {
+      "id": "route-007",
+      "task": "Add a transaction operation",
+      "ordered_read_sets": [
+        [
+          "rust/lance-table/src/transaction/operation.rs:37-262",
+          "rust/lance-table/src/transaction/proto.rs:83-424,490-731",
+          "rust/lance-table/src/transaction/validate.rs:377-698",
+          "rust/lance-table/src/transaction/manifest_build.rs:598-779",
+          "protos/transaction.proto:410-434"
+        ],
+        [
+          "rust/lance/src/dataset/write/commit.rs:301-572",
+          "rust/lance/src/io/commit.rs:1539-2078",
+          "rust/lance/src/io/commit/conflict_resolver.rs:637-704,2538-2583"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-table/src/transaction/manifest_build.rs",
+        "rust/lance-table/src/transaction/validate.rs",
+        "rust/lance/src/dataset/write/commit.rs",
+        "rust/lance/src/io/commit.rs",
+        "rust/lance/src/io/commit/conflict_resolver.rs"
+      ],
+      "kb_section": "Add a transaction operation\n\n[Directional conflict and publication contract](../L3-symbols/protocol-commit.md). Two distinct subtasks:\n\n**Definition/application:** `rust/lance-table/src/transaction/operation.rs:37-262` \u2192 `rust/lance-table/src/transaction/proto.rs:83-424,490-731` \u2192 `rust/lance-table/src/transaction/validate.rs:377-698` \u2192 `rust/lance-table/src/transaction/manifest_build.rs:598-779` \u2192 `protos/transaction.proto:410-434`. Retained records: [operation](../L2-files/rust/lance-table/src/transaction/operation.rs.md) \u2192 [protobuf conversion](../L2-files/rust/lance-table/src/transaction/proto.rs.md) \u2192 [validation](../L2-files/rust/lance-table/src/transaction/validate.rs.md) \u2192 [manifest application](../L2-files/rust/lance-table/src/transaction/manifest_build.rs.md) \u2192 [transaction schema](../L2-files/protos/transaction.proto.md). Each record supplies exact ranges. Index-affecting payloads additionally select the separate retained \u201cModify index coverage during a transaction\u201d recipe below before implementation.\n\n**Orchestration:** `rust/lance/src/dataset/write/commit.rs:301-572` \u2192 `rust/lance/src/io/commit.rs:1539-2078` \u2192 `rust/lance/src/io/commit/conflict_resolver.rs:637-704,2538-2583` and the operation's directional row in the canonical contract. Also check the reverse direction in existing operations. These three files are a separate publication subtask.\n\n<a id=\"expression\"></a>\n"
+    },
+    {
+      "id": "route-008",
+      "task": "Extend expression parsing or filter pushdown",
+      "ordered_read_sets": [
+        [
+          "rust/lance-datafusion/src/planner.rs:280-350",
+          "rust/lance/src/datafusion/dataframe.rs:132-197",
+          "rust/lance/src/dataset/scanner.rs:3633-3801",
+          "rust/lance-datafusion/src/exec.rs:721-761"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance/src/dataset/scanner.rs"
+      ],
+      "kb_section": "Extend expression parsing or filter pushdown\n\n[Query integration contract](../L3-symbols/public-api.md#readquery-contracts).\n\n1. `rust/lance-datafusion/src/planner.rs:280-350` \u2014 identifier resolution and qualification.\n2. `rust/lance/src/datafusion/dataframe.rs:132-197` \u2014 Exact TableProvider pushdown claim and scanner translation.\n3. `rust/lance/src/dataset/scanner.rs:3633-3801` \u2014 eligibility, residual filter and plan stage order.\n4. `rust/lance-datafusion/src/exec.rs:721-761` \u2014 output partition/order contract.\n\n<a id=\"python\"></a>\n"
+    },
+    {
+      "id": "route-009",
+      "task": "Extend a Python API or trace its Rust implementation",
+      "ordered_read_sets": [
+        [
+          "python/python/lance/dataset.py:1225-1567,7403-7440",
+          "python/src/dataset.rs:1244-1449",
+          "rust/lance/src/dataset/scanner.rs:3633-3801",
+          "python/src/scanner.rs:34-49",
+          "python/src/reader.rs:48-123"
+        ]
+      ],
+      "affected_paths": [
+        "python/python/lance/dataset.py",
+        "python/src/dataset.rs",
+        "rust/lance/src/dataset/scanner.rs"
+      ],
+      "kb_section": "Extend a Python API or trace its Rust implementation\n\n[API families and all local declarations](../L3-symbols/public-api.md#python-to-rust-ordered-read-maps). Concrete scanner-option task:\n\n1. `python/python/lance/dataset.py:1225-1567,7403-7440` \u2014 public argument/default and forwarding path.\n2. `python/src/dataset.rs:1244-1449` \u2014 PyO3 signature, conversion and builder call.\n3. `rust/lance/src/dataset/scanner.rs:3633-3801` plus the selected setter from the [declaration directory](../L3-symbols/api-reference/lance.md) \u2014 validation/planning.\n4. `python/src/scanner.rs:34-49` \u2192 `python/src/reader.rs:48-123` only if result streaming/lifetime changes. That expands to five unique files.\n\n<a id=\"java\"></a>\n"
+    },
+    {
+      "id": "route-010",
+      "task": "Extend Java scanner options \u2014 mapped only",
+      "ordered_read_sets": [
+        [
+          "java/src/main/java/org/lance/Dataset.java:834-858",
+          "java/src/main/java/org/lance/ipc/ScanOptions.java:369-378,618-747",
+          "java/src/main/java/org/lance/ipc/LanceScanner.java:57-102",
+          "java/lance-jni/src/blocking_scanner.rs:352-414,633-774"
+        ]
+      ],
+      "affected_paths": [
+        "java/lance-jni/src/blocking_scanner.rs",
+        "java/src/main/java/org/lance/ipc/LanceScanner.java",
+        "java/src/main/java/org/lance/ipc/ScanOptions.java"
+      ],
+      "kb_section": "Extend Java scanner options \u2014 mapped only\n\n[Java Module Map and JNI route](../L1-modules/java.md). Navigation confirmation does not upgrade Java to deep verification.\n\n1. `java/src/main/java/org/lance/Dataset.java:834-858`.\n2. `java/src/main/java/org/lance/ipc/ScanOptions.java:369-378,618-747`.\n3. `java/src/main/java/org/lance/ipc/LanceScanner.java:57-102`.\n4. `java/lance-jni/src/blocking_scanner.rs:352-414,633-774`.\n\n<a id=\"io\"></a>\n"
+    },
+    {
+      "id": "route-014",
+      "task": "Change or interpret exact version gates",
+      "ordered_read_sets": [
+        [
+          "rust/lance-file/src/version.rs:25-262",
+          "rust/lance-file/src/versions/v2_1/reader.rs:99-171",
+          "rust/lance-file/src/versions/v2_2/reader.rs:99-169",
+          "rust/lance-file/src/versions/v2_3/reader.rs:149-265",
+          "rust/lance-table/src/feature_flags.rs:98-126,323-432"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-file/src/versions/v2_1/reader.rs",
+        "rust/lance-file/src/versions/v2_2/reader.rs",
+        "rust/lance-file/src/versions/v2_3/reader.rs",
+        "rust/lance-table/src/feature_flags.rs"
+      ],
+      "kb_section": "Change or interpret exact version gates\n\n[Authoritative format matrix](../L3-symbols/format-spec.md#exact-file-identity-and-acceptance).\n\n1. [Frozen version identity/parser](../L2-files/rust/lance-file/src/version.rs.md) \u2192 `rust/lance-file/src/version.rs:25-262`.\n2. [V2_1 reader](../L2-files/rust/lance-file/src/versions/v2_1/reader.rs.md) \u2192 `rust/lance-file/src/versions/v2_1/reader.rs:99-171`.\n3. [V2_2 reader](../L2-files/rust/lance-file/src/versions/v2_2/reader.rs.md) \u2192 `rust/lance-file/src/versions/v2_2/reader.rs:99-169`.\n4. [V2_3 reader](../L2-files/rust/lance-file/src/versions/v2_3/reader.rs.md) \u2192 `rust/lance-file/src/versions/v2_3/reader.rs:149-265` \u2014 unstable grammar.\n5. [Frozen table feature flags](../L2-files/rust/lance-table/src/feature_flags.rs.md) \u2192 `rust/lance-table/src/feature_flags.rs:98-126,323-432` \u2014 independent reader/writer capability words, including managed blobs.\n\n<a id=\"distributed-compaction\"></a>\n"
+    },
+    {
+      "id": "route-015",
+      "task": "Avoid resurrecting concurrently deleted rows during distributed compaction",
+      "ordered_read_sets": [
+        [
+          "rust/lance/src/dataset/optimize.rs:3227-3337,3662-3693",
+          "rust/lance/src/io/commit/conflict_resolver.rs:1546-1813,2973-3229",
+          "rust/lance/src/io/commit.rs:1539-1614,1682-1941"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance/src/dataset/optimize.rs",
+        "rust/lance/src/io/commit.rs",
+        "rust/lance/src/io/commit/conflict_resolver.rs"
+      ],
+      "kb_section": "Avoid resurrecting concurrently deleted rows during distributed compaction\n\n[Compaction intent and directional conflict contract](../L3-symbols/protocol-commit.md#index-coverage-and-rewrite-lineage).\n\n1. `rust/lance/src/dataset/optimize.rs:3227-3337,3662-3693` \u2014 minimum task read-version and commit intent.\n2. `rust/lance/src/io/commit/conflict_resolver.rs:1546-1813,2973-3229` \u2014 overlapping changes and original-read-version transition ownership.\n3. `rust/lance/src/io/commit.rs:1539-1614,1682-1941` \u2014 current-state preparation per attempt.\n4. [Frozen manifest application](../L2-files/rust/lance-table/src/transaction/manifest_build.rs.md) \u2014 liveness/fragment replacement validation.\n\n<a id=\"file-v20\"></a>\n"
+    },
+    {
+      "id": "route-017",
+      "task": "Open a named branch or tag",
+      "ordered_read_sets": [
+        [
+          "rust/lance/src/dataset/builder.rs:240-255,734-866",
+          "rust/lance/src/dataset.rs:521-589"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance/src/dataset.rs"
+      ],
+      "kb_section": "Open a named branch or tag\n\n[Reference-resolution contract](../L3-symbols/public-api.md#dataset-open-reference-resolution). Source order:\n\n1. `rust/lance/src/dataset/builder.rs:240-255,734-866` \u2014 reference selection, initial load and delayed checkout.\n2. `rust/lance/src/dataset.rs:521-589` \u2014 Dataset open/checkout facade and snapshot ownership.\n\n<a id=\"java-open\"></a>\n"
+    },
+    {
+      "id": "route-019",
+      "task": "Adding index metadata",
+      "ordered_read_sets": [
+        [
+          "protos/index.proto:17-383",
+          "protos/table.proto:319-434",
+          "rust/lance-table/src/format/index.rs:21-95",
+          "rust/lance-table/src/format/index.rs:161-377",
+          "rust/lance-index/src/scalar/registry.rs:29-367"
+        ]
+      ],
+      "affected_paths": [
+        "protos/table.proto",
+        "rust/lance-table/src/format/index.rs"
+      ],
+      "kb_section": "Adding index metadata\n\n[Recipe](cookbook.md#adding-index-metadata-established-first-steps) \u00b7 [Decision contract](../L3-symbols/behavior-contracts.md)\n\n1. [Frozen current details schema](../L2-files/protos/index.proto.md) \u2192 protos/index.proto:17-383 \u2014 choose an existing detail shape or introduce a compatible new message. Historical namespace identities remain frozen; do not move old messages.\n2. [Frozen manifest index envelope](../L2-files/protos/table.proto.md) \u2192 protos/table.proto:319-434 \u2014 locate index metadata in the complete numbered declaration record.\n3. [Frozen metadata conversion](../L2-files/rust/lance-table/src/format/index.rs.md) \u2192 rust/lance-table/src/format/index.rs:21-95, rust/lance-table/src/format/index.rs:161-377 \u2014 identity, coverage, optional details and wire conversion.\n4. `rust/lance-index/src/scalar/registry.rs:29-367` \u2014 type-specific metadata load/validation; use [index extension](../L3-symbols/protocol-index.md#adding-a-scalar-index-bounded-subtasks) for a new algorithm rather than treating the metadata change as sufficient.\n\n<a id=\"recipe-03\"></a>\n\n"
+    },
+    {
+      "id": "route-020",
+      "task": "Extend a logical type",
+      "ordered_read_sets": [
+        [
+          "rust/lance-core/src/datatypes.rs:51-194",
+          "rust/lance-core/src/datatypes.rs:302-565",
+          "rust/lance-core/src/datatypes/field.rs:170-195",
+          "rust/lance-core/src/datatypes/field.rs:1225-1369"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-core/src/datatypes/field.rs"
+      ],
+      "kb_section": "Extend a logical type\n\n[Recipe](cookbook.md#local-recipe-extend-a-logical-type-incomplete-whole-system-recipe) \u00b7 [Decision contract](../L3-symbols/behavior-contracts.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-core/src/datatypes.rs.md) \u2192 rust/lance-core/src/datatypes.rs:51-194, rust/lance-core/src/datatypes.rs:302-565.\n2. [frozen/Key File contract](../L2-files/rust/lance-core/src/datatypes/field.rs.md) \u2192 rust/lance-core/src/datatypes/field.rs:170-195, rust/lance-core/src/datatypes/field.rs:1225-1369.\n\n<a id=\"recipe-04\"></a>\n\n"
+    },
+    {
+      "id": "route-021",
+      "task": "Extend schema validation or selection",
+      "ordered_read_sets": [
+        [
+          "rust/lance-core/src/datatypes/schema.rs:351-406",
+          "rust/lance-core/src/datatypes/schema.rs:883-919",
+          "rust/lance-core/src/datatypes/schema.rs:937-956",
+          "rust/lance-core/src/datatypes/schema.rs:1324-1545",
+          "rust/lance-core/src/datatypes/schema.rs:1577-1612",
+          "rust/lance-core/src/datatypes/field.rs:274-310"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-core/src/datatypes/field.rs",
+        "rust/lance-core/src/datatypes/schema.rs"
+      ],
+      "kb_section": "Extend schema validation or selection\n\n[Recipe](cookbook.md#extend-schema-validation-or-selection) \u00b7 [Decision contract](../L3-symbols/behavior-contracts.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-core/src/datatypes/schema.rs.md) \u2192 rust/lance-core/src/datatypes/schema.rs:351-406, rust/lance-core/src/datatypes/schema.rs:883-919, rust/lance-core/src/datatypes/schema.rs:937-956, rust/lance-core/src/datatypes/schema.rs:1324-1545, rust/lance-core/src/datatypes/schema.rs:1577-1612.\n2. [frozen/Key File contract](../L2-files/rust/lance-core/src/datatypes/field.rs.md) \u2192 rust/lance-core/src/datatypes/field.rs:274-310.\n\n<a id=\"recipe-05\"></a>\n\n"
+    },
+    {
+      "id": "route-027",
+      "task": "Custom cache backend",
+      "ordered_read_sets": [
+        [
+          "rust/lance-core/src/cache/backend.rs:11-18",
+          "rust/lance-core/src/cache/backend.rs:62-173",
+          "rust/lance-core/src/cache/backend.rs:197-215",
+          "rust/lance-core/src/cache/registry.rs:80-84",
+          "rust/lance-core/src/cache/registry.rs:104-171",
+          "rust/lance-core/src/cache/backend_uri.rs:59-104"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-core/src/cache/backend.rs"
+      ],
+      "kb_section": "Custom cache backend\n\n[Recipe](cookbook.md#local-extension-seam-custom-cache-backend) \u00b7 [Decision contract](../L3-symbols/behavior-contracts.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-core/src/cache/backend.rs.md) \u2192 rust/lance-core/src/cache/backend.rs:11-18, rust/lance-core/src/cache/backend.rs:62-173, rust/lance-core/src/cache/backend.rs:197-215.\n2. [frozen/Key File contract](../L2-files/rust/lance-core/src/cache/registry.rs.md) \u2192 rust/lance-core/src/cache/registry.rs:80-84, rust/lance-core/src/cache/registry.rs:104-171.\n3. [frozen/Key File contract](../L2-files/rust/lance-core/src/cache/backend_uri.rs.md) \u2192 rust/lance-core/src/cache/backend_uri.rs:59-104.\n\n<a id=\"recipe-11\"></a>\n\n"
+    },
+    {
+      "id": "route-028",
+      "task": "A serializable cache value",
+      "ordered_read_sets": [
+        [
+          "rust/lance-core/src/cache/codec.rs:202-273",
+          "rust/lance-core/src/cache/codec.rs:343-383",
+          "rust/lance-core/src/cache/codec.rs:499-523",
+          "rust/lance-core/src/cache/entry_io.rs:100-114"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-core/src/cache/codec.rs"
+      ],
+      "kb_section": "A serializable cache value\n\n[Recipe](cookbook.md#local-extension-seam-a-serializable-cache-value) \u00b7 [Decision contract](../L3-symbols/behavior-contracts.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-core/src/cache/codec.rs.md) \u2192 rust/lance-core/src/cache/codec.rs:202-273, rust/lance-core/src/cache/codec.rs:343-383, rust/lance-core/src/cache/codec.rs:499-523.\n2. [frozen/Key File contract](../L2-files/rust/lance-core/src/cache/entry_io.rs.md) \u2192 rust/lance-core/src/cache/entry_io.rs:100-114.\n\n<a id=\"recipe-12\"></a>\n\n"
+    },
+    {
+      "id": "route-029",
+      "task": "Memory-backend selection and testing seam",
+      "ordered_read_sets": [
+        [
+          "rust/lance-core/src/cache/quick.rs:46-56",
+          "rust/lance-core/src/cache/quick.rs:67-194",
+          "rust/lance-core/src/cache/moka.rs:34-47",
+          "rust/lance-core/src/cache/moka.rs:134-165"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-core/src/cache/moka.rs",
+        "rust/lance-core/src/cache/quick.rs"
+      ],
+      "kb_section": "Memory-backend selection and testing seam\n\n[Recipe](cookbook.md#memory-backend-selection-and-testing-seam) \u00b7 [Decision contract](../L3-symbols/behavior-contracts.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-core/src/cache/quick.rs.md) \u2192 rust/lance-core/src/cache/quick.rs:46-56, rust/lance-core/src/cache/quick.rs:67-194.\n2. [frozen/Key File contract](../L2-files/rust/lance-core/src/cache/moka.rs.md) \u2192 rust/lance-core/src/cache/moka.rs:34-47, rust/lance-core/src/cache/moka.rs:134-165.\n\n<a id=\"recipe-13\"></a>\n\n"
+    },
+    {
+      "id": "route-030",
+      "task": "Typed cache key/value extension seam",
+      "ordered_read_sets": [
+        [
+          "rust/lance-core/src/cache/mod.rs:107-191",
+          "rust/lance-core/src/cache/mod.rs:197-256",
+          "rust/lance-core/src/cache/mod.rs:556-633",
+          "rust/lance-core/src/cache/mod.rs:635-665",
+          "rust/lance-core/src/cache/codec.rs:220-273"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-core/src/cache/codec.rs",
+        "rust/lance-core/src/cache/mod.rs"
+      ],
+      "kb_section": "Typed cache key/value extension seam\n\n[Recipe](cookbook.md#typed-cache-keyvalue-extension-seam) \u00b7 [Decision contract](../L3-symbols/behavior-contracts.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-core/src/cache/mod.rs.md) \u2192 rust/lance-core/src/cache/mod.rs:107-191, rust/lance-core/src/cache/mod.rs:197-256, rust/lance-core/src/cache/mod.rs:556-633, rust/lance-core/src/cache/mod.rs:635-665.\n2. [frozen/Key File contract](../L2-files/rust/lance-core/src/cache/codec.rs.md) \u2192 rust/lance-core/src/cache/codec.rs:220-273.\n\n<a id=\"recipe-15\"></a>\n\n"
+    },
+    {
+      "id": "route-031",
+      "task": "Interpreting an existing manifest feature word",
+      "ordered_read_sets": [
+        [
+          "rust/lance-table/src/feature_flags.rs:152-189",
+          "rust/lance-table/src/feature_flags.rs:323-432",
+          "rust/lance-table/src/format.rs:52-55"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-table/src/feature_flags.rs"
+      ],
+      "kb_section": "Interpreting an existing manifest feature word\n\n[Recipe](cookbook.md#interpreting-an-existing-manifest-feature-word) \u00b7 [Decision contract](../L3-symbols/behavior-contracts.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-table/src/feature_flags.rs.md) \u2192 rust/lance-table/src/feature_flags.rs:152-189, rust/lance-table/src/feature_flags.rs:323-432.\n2. [frozen/Key File contract](../L2-files/rust/lance-table/src/format.rs.md) \u2192 rust/lance-table/src/format.rs:52-55.\n\n<a id=\"recipe-16\"></a>\n\n"
+    },
+    {
+      "id": "route-033",
+      "task": "Extending metadata consumers conservatively",
+      "ordered_read_sets": [
+        [
+          "rust/lance-table/src/format/fragment.rs:253-279",
+          "rust/lance-table/src/format/fragment.rs:589-670",
+          "rust/lance-table/src/format/fragment.rs:700-725",
+          "rust/lance-table/src/format/manifest.rs:260-279",
+          "rust/lance-table/src/format/manifest.rs:478-502",
+          "rust/lance-table/src/format/manifest.rs:638-670",
+          "rust/lance-table/src/format/manifest.rs:875-966",
+          "rust/lance-table/src/format/manifest.rs:1030-1044",
+          "rust/lance-table/src/format/manifest.rs:1064-1079",
+          "rust/lance-table/src/format/manifest.rs:1219-1246",
+          "rust/lance-table/src/feature_flags.rs:333-429"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-table/src/feature_flags.rs",
+        "rust/lance-table/src/format/manifest.rs"
+      ],
+      "kb_section": "Extending metadata consumers conservatively\n\n[Recipe](cookbook.md#extending-metadata-consumers-conservatively) \u00b7 [Decision contract](../L3-symbols/behavior-contracts.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-table/src/format/fragment.rs.md) \u2192 rust/lance-table/src/format/fragment.rs:253-279, rust/lance-table/src/format/fragment.rs:589-670, rust/lance-table/src/format/fragment.rs:700-725.\n2. [frozen/Key File contract](../L2-files/rust/lance-table/src/format/manifest.rs.md) \u2192 rust/lance-table/src/format/manifest.rs:260-279, rust/lance-table/src/format/manifest.rs:478-502, rust/lance-table/src/format/manifest.rs:638-670, rust/lance-table/src/format/manifest.rs:875-966, rust/lance-table/src/format/manifest.rs:1030-1044, rust/lance-table/src/format/manifest.rs:1064-1079, rust/lance-table/src/format/manifest.rs:1219-1246.\n3. [frozen/Key File contract](../L2-files/rust/lance-table/src/feature_flags.rs.md) \u2192 rust/lance-table/src/feature_flags.rs:333-429.\n\n<a id=\"recipe-18\"></a>\n\n"
+    },
+    {
+      "id": "route-034",
+      "task": "Local metadata extension checklist",
+      "ordered_read_sets": [
+        [
+          "rust/lance-table/src/format/index.rs:160-247",
+          "rust/lance-table/src/format/overlay.rs:192-327",
+          "rust/lance-table/src/format/key_existence.rs:30-65",
+          "rust/lance-table/src/format/key_existence.rs:175-280",
+          "rust/lance-table/src/format/key_existence.rs:311-390"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-table/src/format/index.rs"
+      ],
+      "kb_section": "Local metadata extension checklist\n\n[Recipe](cookbook.md#local-metadata-extension-checklist-incomplete-end-to-end-recipe) \u00b7 [Decision contract](../L3-symbols/behavior-contracts.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-table/src/format/index.rs.md) \u2192 rust/lance-table/src/format/index.rs:160-247.\n2. [frozen/Key File contract](../L2-files/rust/lance-table/src/format/overlay.rs.md) \u2192 rust/lance-table/src/format/overlay.rs:192-327.\n3. [frozen/Key File contract](../L2-files/rust/lance-table/src/format/key_existence.rs.md) \u2192 rust/lance-table/src/format/key_existence.rs:30-65, rust/lance-table/src/format/key_existence.rs:175-280, rust/lance-table/src/format/key_existence.rs:311-390.\n\n<a id=\"recipe-19\"></a>\n\n"
+    },
+    {
+      "id": "route-035",
+      "task": "File-version and overlay-staleness extension seams",
+      "ordered_read_sets": [
+        [
+          "rust/lance-file/src/version.rs:13-272",
+          "rust/lance-table/src/format/overlay/staleness.rs:35-176"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-table/src/format/overlay/staleness.rs"
+      ],
+      "kb_section": "File-version and overlay-staleness extension seams\n\n[Recipe](cookbook.md#file-version-and-overlay-staleness-extension-seams) \u00b7 [Decision contract](../L3-symbols/behavior-contracts.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-file/src/version.rs.md) \u2192 rust/lance-file/src/version.rs:13-272.\n2. [frozen/Key File contract](../L2-files/rust/lance-table/src/format/overlay/staleness.rs.md) \u2192 rust/lance-table/src/format/overlay/staleness.rs:35-176.\n\n<a id=\"recipe-20\"></a>\n\n"
+    },
+    {
+      "id": "route-039",
+      "task": "Row-ID sequence operations",
+      "ordered_read_sets": [
+        [
+          "rust/lance-table/src/rowids.rs:67-170",
+          "rust/lance-table/src/rowids.rs:237-1127",
+          "rust/lance-table/src/rowids/segment.rs:40-954",
+          "rust/lance-table/src/rowids/serde.rs:98-426",
+          "rust/lance-table/src/utils/stream.rs:407-444",
+          "rust/lance-table/src/utils/stream.rs:648-680",
+          "rust/lance-table/src/transaction/manifest_build.rs:74-123"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-table/src/transaction/manifest_build.rs"
+      ],
+      "kb_section": "Row-ID sequence operations\n\n[Recipe](cookbook.md#local-extension-seam-row-id-sequence-operations) \u00b7 [Decision contract](../L3-symbols/protocol-commit.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-table/src/rowids.rs.md) \u2192 rust/lance-table/src/rowids.rs:67-170, rust/lance-table/src/rowids.rs:237-1127.\n2. [frozen/Key File contract](../L2-files/rust/lance-table/src/rowids/segment.rs.md) \u2192 rust/lance-table/src/rowids/segment.rs:40-954.\n3. [frozen/Key File contract](../L2-files/rust/lance-table/src/rowids/serde.rs.md) \u2192 rust/lance-table/src/rowids/serde.rs:98-426.\n4. [frozen/Key File contract](../L2-files/rust/lance-table/src/utils/stream.rs.md) \u2192 rust/lance-table/src/utils/stream.rs:407-444, rust/lance-table/src/utils/stream.rs:648-680.\n5. [frozen/Key File contract](../L2-files/rust/lance-table/src/transaction/manifest_build.rs.md) \u2192 rust/lance-table/src/transaction/manifest_build.rs:74-123.\n\n<a id=\"recipe-24\"></a>\n\n"
+    },
+    {
+      "id": "route-040",
+      "task": "Change transaction row lineage",
+      "ordered_read_sets": [
+        [
+          "rust/lance-table/src/transaction/row_version.rs:39-52",
+          "rust/lance-table/src/transaction/row_version.rs:73-295",
+          "rust/lance-table/src/transaction/row_version.rs:298-405",
+          "rust/lance-table/src/transaction.rs:51-51",
+          "rust/lance-table/src/transaction/manifest_build.rs:965-1022"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-table/src/transaction.rs",
+        "rust/lance-table/src/transaction/manifest_build.rs"
+      ],
+      "kb_section": "Change transaction row lineage\n\n[Recipe](cookbook.md#local-recipe-change-transaction-row-lineage) \u00b7 [Decision contract](../L3-symbols/protocol-commit.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-table/src/transaction/row_version.rs.md) \u2192 rust/lance-table/src/transaction/row_version.rs:39-52, rust/lance-table/src/transaction/row_version.rs:73-295, rust/lance-table/src/transaction/row_version.rs:298-405.\n2. [frozen/Key File contract](../L2-files/rust/lance-table/src/transaction.rs.md) \u2192 rust/lance-table/src/transaction.rs:51-51.\n3. [frozen/Key File contract](../L2-files/rust/lance-table/src/transaction/manifest_build.rs.md) \u2192 rust/lance-table/src/transaction/manifest_build.rs:965-1022.\n\n<a id=\"recipe-25\"></a>\n\n"
+    },
+    {
+      "id": "route-041",
+      "task": "New operation: definition and application",
+      "ordered_read_sets": [
+        [
+          "rust/lance-table/src/transaction/operation.rs:37-262",
+          "rust/lance-table/src/transaction/operation.rs:293-315",
+          "rust/lance-table/src/transaction/operation.rs:353-412",
+          "rust/lance-table/src/transaction/operation.rs:414-436",
+          "rust/lance-table/src/transaction/builder.rs:16-25",
+          "rust/lance-table/src/transaction/conflicts.rs:18-29",
+          "rust/lance-table/src/transaction.rs:15-27",
+          "rust/lance-table/src/transaction.rs:44-59",
+          "rust/lance-table/src/transaction.rs:90-106",
+          "rust/lance-table/src/transaction/update_map.rs:58-81"
+        ],
+        [
+          "rust/lance-table/src/transaction/prepare.rs:44-100"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-table/src/transaction.rs"
+      ],
+      "kb_section": "New operation: definition and application\n\n[Recipe](cookbook.md#new-operation-known-definition-side-touch-points) \u00b7 [Decision contract](../L3-symbols/protocol-commit.md)\n\n**Local subtask 1: operation, builder, conflicts, transaction, update_map.** Select this set only when changing those mechanisms; the other sets are separate subproblems.\n\n1. [frozen/Key File contract](../L2-files/rust/lance-table/src/transaction/operation.rs.md) \u2192 rust/lance-table/src/transaction/operation.rs:37-262, rust/lance-table/src/transaction/operation.rs:293-315, rust/lance-table/src/transaction/operation.rs:353-412, rust/lance-table/src/transaction/operation.rs:414-436.\n2. [frozen/Key File contract](../L2-files/rust/lance-table/src/transaction/builder.rs.md) \u2192 rust/lance-table/src/transaction/builder.rs:16-25.\n3. [frozen/Key File contract](../L2-files/rust/lance-table/src/transaction/conflicts.rs.md) \u2192 rust/lance-table/src/transaction/conflicts.rs:18-29.\n4. [frozen/Key File contract](../L2-files/rust/lance-table/src/transaction.rs.md) \u2192 rust/lance-table/src/transaction.rs:15-27, rust/lance-table/src/transaction.rs:44-59, rust/lance-table/src/transaction.rs:90-106.\n5. [frozen/Key File contract](../L2-files/rust/lance-table/src/transaction/update_map.rs.md) \u2192 rust/lance-table/src/transaction/update_map.rs:58-81.\n\n**Local subtask 2: prepare.** Select this set only when changing those mechanisms; the other sets are separate subproblems.\n\n1. [frozen/Key File contract](../L2-files/rust/lance-table/src/transaction/prepare.rs.md) \u2192 rust/lance-table/src/transaction/prepare.rs:44-100.\n\n<a id=\"recipe-26\"></a>\n\n"
+    },
+    {
+      "id": "route-042",
+      "task": "Extend transaction equality and metadata predicates",
+      "ordered_read_sets": [
+        [
+          "rust/lance-table/src/transaction/conflicts.rs:18-29",
+          "rust/lance-table/src/transaction/conflicts.rs:200-869",
+          "rust/lance-table/src/transaction/conflicts.rs:871-993",
+          "rust/lance-table/src/transaction/operation.rs:293-315",
+          "rust/lance-table/src/transaction/operation.rs:414-436",
+          "rust/lance/src/io/commit.rs:261-301",
+          "rust/lance/src/io/commit/conflict_resolver.rs:1814-1865",
+          "rust/lance/src/io/commit/conflict_resolver.rs:2320-2384"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance/src/io/commit.rs",
+        "rust/lance/src/io/commit/conflict_resolver.rs"
+      ],
+      "kb_section": "Extend transaction equality and metadata predicates\n\n[Recipe](cookbook.md#extend-transaction-equality-and-metadata-predicates) \u00b7 [Decision contract](../L3-symbols/protocol-commit.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-table/src/transaction/conflicts.rs.md) \u2192 rust/lance-table/src/transaction/conflicts.rs:18-29, rust/lance-table/src/transaction/conflicts.rs:200-869, rust/lance-table/src/transaction/conflicts.rs:871-993.\n2. [frozen/Key File contract](../L2-files/rust/lance-table/src/transaction/operation.rs.md) \u2192 rust/lance-table/src/transaction/operation.rs:293-315, rust/lance-table/src/transaction/operation.rs:414-436.\n3. [Module Map](../L1-modules/rust-lance.md#rust-lance-src-io) \u2192 rust/lance/src/io/commit.rs:261-301.\n4. [Module Map](../L1-modules/rust-lance.md#rust-lance-src-io-commit) \u2192 rust/lance/src/io/commit/conflict_resolver.rs:1814-1865, rust/lance/src/io/commit/conflict_resolver.rs:2320-2384.\n\n<a id=\"recipe-27\"></a>\n\n"
+    },
+    {
+      "id": "route-043",
+      "task": "Change validation or add an operation guard",
+      "ordered_read_sets": [
+        [
+          "rust/lance-table/src/transaction/validate.rs:377-623",
+          "rust/lance-table/src/transaction/validate.rs:676-698",
+          "rust/lance-table/src/transaction/validate.rs:726-1044"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-table/src/transaction/validate.rs"
+      ],
+      "kb_section": "Change validation or add an operation guard\n\n[Recipe](cookbook.md#change-validation-or-add-an-operation-guard) \u00b7 [Decision contract](../L3-symbols/protocol-commit.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-table/src/transaction/validate.rs.md) \u2192 rust/lance-table/src/transaction/validate.rs:377-623, rust/lance-table/src/transaction/validate.rs:676-698, rust/lance-table/src/transaction/validate.rs:726-1044.\n\n<a id=\"recipe-28\"></a>\n\n"
+    },
+    {
+      "id": "route-045",
+      "task": "Modify index coverage during a transaction",
+      "ordered_read_sets": [
+        [
+          "rust/lance-table/src/transaction/index_maintenance.rs:106-643",
+          "rust/lance-table/src/transaction/index_maintenance.rs:650-807"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-table/src/transaction/index_maintenance.rs"
+      ],
+      "kb_section": "Modify index coverage during a transaction\n\n[Recipe](cookbook.md#modify-index-coverage-during-a-transaction) \u00b7 [Decision contract](../L3-symbols/protocol-commit.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-table/src/transaction/index_maintenance.rs.md) \u2192 rust/lance-table/src/transaction/index_maintenance.rs:106-643, rust/lance-table/src/transaction/index_maintenance.rs:650-807.\n\n<a id=\"recipe-30\"></a>\n\n"
+    },
+    {
+      "id": "route-048",
+      "task": "Modify MemWAL metadata or progress rules",
+      "ordered_read_sets": [
+        [
+          "rust/lance-table/src/system_index/mem_wal.rs:31-193",
+          "rust/lance-table/src/system_index/mem_wal.rs:391-618",
+          "rust/lance-table/src/transaction/manifest_build.rs:1029-1037",
+          "rust/lance-table/src/transaction/manifest_build.rs:1610-1620"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-table/src/transaction/manifest_build.rs"
+      ],
+      "kb_section": "Modify MemWAL metadata or progress rules\n\n[Recipe](cookbook.md#modify-memwal-metadata-or-progress-rules) \u00b7 [Decision contract](../L3-symbols/protocol-commit.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-table/src/system_index/mem_wal.rs.md) \u2192 rust/lance-table/src/system_index/mem_wal.rs:31-193, rust/lance-table/src/system_index/mem_wal.rs:391-618.\n2. [frozen/Key File contract](../L2-files/rust/lance-table/src/transaction/manifest_build.rs.md) \u2192 rust/lance-table/src/transaction/manifest_build.rs:1029-1037, rust/lance-table/src/transaction/manifest_build.rs:1610-1620.\n\n<a id=\"recipe-33\"></a>\n\n"
+    },
+    {
+      "id": "route-049",
+      "task": "Change candidate assembly safely",
+      "ordered_read_sets": [
+        [
+          "rust/lance-table/src/transaction.rs:30-40",
+          "rust/lance-table/src/transaction.rs:43-62",
+          "rust/lance-table/src/transaction/operation.rs:37-262",
+          "rust/lance-table/src/transaction/manifest_build.rs:220-535",
+          "rust/lance-table/src/transaction/manifest_build.rs:593-2025",
+          "rust/lance/src/io/commit.rs:1886-1923"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-table/src/transaction.rs",
+        "rust/lance-table/src/transaction/manifest_build.rs",
+        "rust/lance/src/io/commit.rs"
+      ],
+      "kb_section": "Change candidate assembly safely\n\n[Recipe](cookbook.md#change-candidate-assembly-safely) \u00b7 [Decision contract](../L3-symbols/protocol-commit.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-table/src/transaction.rs.md) \u2192 rust/lance-table/src/transaction.rs:30-40, rust/lance-table/src/transaction.rs:43-62.\n2. [frozen/Key File contract](../L2-files/rust/lance-table/src/transaction/operation.rs.md) \u2192 rust/lance-table/src/transaction/operation.rs:37-262.\n3. [frozen/Key File contract](../L2-files/rust/lance-table/src/transaction/manifest_build.rs.md) \u2192 rust/lance-table/src/transaction/manifest_build.rs:220-535, rust/lance-table/src/transaction/manifest_build.rs:593-2025.\n4. [Module Map](../L1-modules/rust-lance.md#rust-lance-src-io) \u2192 rust/lance/src/io/commit.rs:1886-1923.\n\n<a id=\"recipe-34\"></a>\n\n"
+    },
+    {
+      "id": "route-050",
+      "task": "Modify manifest or deletion IO",
+      "ordered_read_sets": [
+        [
+          "rust/lance-table/src/io/manifest.rs:32-251",
+          "rust/lance-table/src/io/deletion.rs:25-216",
+          "rust/lance/src/io/deletion.rs:11-43",
+          "rust/lance/src/dataset/fragment.rs:3005-3036"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance/src/dataset/fragment.rs"
+      ],
+      "kb_section": "Modify manifest or deletion IO\n\n[Recipe](cookbook.md#modify-manifest-or-deletion-io) \u00b7 [Decision contract](../L3-symbols/behavior-contracts.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-table/src/io/manifest.rs.md) \u2192 rust/lance-table/src/io/manifest.rs:32-251.\n2. [frozen/Key File contract](../L2-files/rust/lance-table/src/io/deletion.rs.md) \u2192 rust/lance-table/src/io/deletion.rs:25-216.\n3. [Module Map](../L1-modules/rust-lance.md#rust-lance-src-io) \u2192 rust/lance/src/io/deletion.rs:11-43.\n4. [Module Map](../L1-modules/rust-lance.md#rust-lance-src-dataset) \u2192 rust/lance/src/dataset/fragment.rs:3005-3036.\n\n<a id=\"recipe-35\"></a>\n\n"
+    },
+    {
+      "id": "route-053",
+      "task": "Modify DynamoDB coordination or row-ID lookup",
+      "ordered_read_sets": [
+        [
+          "rust/lance-table/src/io/commit/dynamodb.rs:162-513",
+          "rust/lance-table/src/io/commit/external_manifest.rs:286-335",
+          "rust/lance-table/src/rowids/index.rs:62-183",
+          "rust/lance-table/src/rowids/index.rs:306-500",
+          "rust/lance-table/src/rowids/index.rs:502-752"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-table/src/rowids/index.rs"
+      ],
+      "kb_section": "Modify DynamoDB coordination or row-ID lookup\n\n[Recipe](cookbook.md#modify-dynamodb-coordination-or-row-id-lookup) \u00b7 [Decision contract](../L3-symbols/protocol-commit.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-table/src/io/commit/dynamodb.rs.md) \u2192 rust/lance-table/src/io/commit/dynamodb.rs:162-513.\n2. [frozen/Key File contract](../L2-files/rust/lance-table/src/io/commit/external_manifest.rs.md) \u2192 rust/lance-table/src/io/commit/external_manifest.rs:286-335.\n3. [frozen/Key File contract](../L2-files/rust/lance-table/src/rowids/index.rs.md) \u2192 rust/lance-table/src/rowids/index.rs:62-183, rust/lance-table/src/rowids/index.rs:306-500, rust/lance-table/src/rowids/index.rs:502-752.\n\n<a id=\"recipe-38\"></a>\n\n"
+    },
+    {
+      "id": "route-055",
+      "task": "File-level extension prerequisites",
+      "ordered_read_sets": [
+        [
+          "rust/lance-file/src/version.rs:128-262",
+          "rust/lance-file/src/versions/mod.rs:38-401",
+          "rust/lance-file/src/writer.rs:67-289",
+          "rust/lance-core/src/datatypes/field.rs:1348-1368",
+          "rust/lance-file/src/writer/field_types.rs:87-199"
+        ],
+        [
+          "rust/lance-core/src/datatypes/schema.rs:922-926",
+          "rust/lance-file/src/io.rs:19-148",
+          "rust/lance-encoding/src/lib.rs:40-104",
+          "rust/lance-io/src/scheduler.rs:1195-1313"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-core/src/datatypes/field.rs",
+        "rust/lance-core/src/datatypes/schema.rs",
+        "rust/lance-file/src/writer/field_types.rs"
+      ],
+      "kb_section": "File-level extension prerequisites\n\n[Recipe](cookbook.md#file-level-extension-prerequisites) \u00b7 [Decision contract](../L3-symbols/protocol-encoding.md)\n\n**Local subtask 1: version, mod, writer, field, field_types.** Select this set only when changing those mechanisms; the other sets are separate subproblems.\n\n1. [frozen/Key File contract](../L2-files/rust/lance-file/src/version.rs.md) \u2192 rust/lance-file/src/version.rs:128-262.\n2. [frozen/Key File contract](../L2-files/rust/lance-file/src/versions/mod.rs.md) \u2192 rust/lance-file/src/versions/mod.rs:38-401.\n3. [frozen/Key File contract](../L2-files/rust/lance-file/src/writer.rs.md) \u2192 rust/lance-file/src/writer.rs:67-289.\n4. [frozen/Key File contract](../L2-files/rust/lance-core/src/datatypes/field.rs.md) \u2192 rust/lance-core/src/datatypes/field.rs:1348-1368.\n5. [frozen/Key File contract](../L2-files/rust/lance-file/src/writer/field_types.rs.md) \u2192 rust/lance-file/src/writer/field_types.rs:87-199.\n\n**Local subtask 2: schema, io, lib, scheduler.** Select this set only when changing those mechanisms; the other sets are separate subproblems.\n\n1. [frozen/Key File contract](../L2-files/rust/lance-core/src/datatypes/schema.rs.md) \u2192 rust/lance-core/src/datatypes/schema.rs:922-926.\n2. [frozen/Key File contract](../L2-files/rust/lance-file/src/io.rs.md) \u2192 rust/lance-file/src/io.rs:19-148.\n3. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/lib.rs.md) \u2192 rust/lance-encoding/src/lib.rs:40-104.\n4. [frozen/Key File contract](../L2-files/rust/lance-io/src/scheduler.rs.md) \u2192 rust/lance-io/src/scheduler.rs:1195-1313.\n\n<a id=\"recipe-40\"></a>\n\n"
+    },
+    {
+      "id": "route-056",
+      "task": "Current-format mechanism change: resolved local seams",
+      "ordered_read_sets": [
+        [
+          "rust/lance-file/src/versions/v2_1/mod.rs:69-134",
+          "rust/lance-file/src/versions/v2_2/mod.rs:67-131",
+          "rust/lance-file/src/versions/v2_3/mod.rs:75-139",
+          "rust/lance-file/src/versions/v2_1/compression.rs:29-129",
+          "rust/lance-file/src/versions/v2_2/compression.rs:32-129"
+        ],
+        [
+          "rust/lance-file/src/versions/v2_3/compression.rs:32-130",
+          "rust/lance-file/src/reader/structural.rs:173-357",
+          "rust/lance-file/src/reader/structural.rs:409-433",
+          "rust/lance-file/src/reader.rs:512-569"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-file/src/reader.rs",
+        "rust/lance-file/src/versions/v2_3/compression.rs"
+      ],
+      "kb_section": "Current-format mechanism change: resolved local seams\n\n[Recipe](cookbook.md#current-format-mechanism-change-resolved-local-seams) \u00b7 [Decision contract](../L3-symbols/behavior-contracts.md)\n\n**Local subtask 1: mod, mod, mod, compression, compression.** Select this set only when changing those mechanisms; the other sets are separate subproblems.\n\n1. [frozen/Key File contract](../L2-files/rust/lance-file/src/versions/v2_1/mod.rs.md) \u2192 rust/lance-file/src/versions/v2_1/mod.rs:69-134.\n2. [frozen/Key File contract](../L2-files/rust/lance-file/src/versions/v2_2/mod.rs.md) \u2192 rust/lance-file/src/versions/v2_2/mod.rs:67-131.\n3. [frozen/Key File contract](../L2-files/rust/lance-file/src/versions/v2_3/mod.rs.md) \u2192 rust/lance-file/src/versions/v2_3/mod.rs:75-139.\n4. [frozen/Key File contract](../L2-files/rust/lance-file/src/versions/v2_1/compression.rs.md) \u2192 rust/lance-file/src/versions/v2_1/compression.rs:29-129.\n5. [frozen/Key File contract](../L2-files/rust/lance-file/src/versions/v2_2/compression.rs.md) \u2192 rust/lance-file/src/versions/v2_2/compression.rs:32-129.\n\n**Local subtask 2: compression, structural, reader.** Select this set only when changing those mechanisms; the other sets are separate subproblems.\n\n1. [frozen/Key File contract](../L2-files/rust/lance-file/src/versions/v2_3/compression.rs.md) \u2192 rust/lance-file/src/versions/v2_3/compression.rs:32-130.\n2. [frozen/Key File contract](../L2-files/rust/lance-file/src/reader/structural.rs.md) \u2192 rust/lance-file/src/reader/structural.rs:173-357, rust/lance-file/src/reader/structural.rs:409-433.\n3. [frozen/Key File contract](../L2-files/rust/lance-file/src/reader.rs.md) \u2192 rust/lance-file/src/reader.rs:512-569.\n\n<a id=\"recipe-41\"></a>\n\n"
+    },
+    {
+      "id": "route-057",
+      "task": "Extending exact reader grammar: local touch set",
+      "ordered_read_sets": [
+        [
+          "rust/lance-file/src/versions/v2_1/reader.rs:18-268",
+          "rust/lance-file/src/versions/v2_1/reader.rs:26-108",
+          "rust/lance-file/src/versions/v2_2/reader.rs:18-270",
+          "rust/lance-file/src/versions/v2_3/reader.rs:20-347"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-file/src/versions/v2_1/reader.rs",
+        "rust/lance-file/src/versions/v2_2/reader.rs",
+        "rust/lance-file/src/versions/v2_3/reader.rs"
+      ],
+      "kb_section": "Extending exact reader grammar: local touch set\n\n[Recipe](cookbook.md#extending-exact-reader-grammar-local-touch-set) \u00b7 [Decision contract](../L3-symbols/behavior-contracts.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-file/src/versions/v2_1/reader.rs.md) \u2192 rust/lance-file/src/versions/v2_1/reader.rs:18-268, rust/lance-file/src/versions/v2_1/reader.rs:26-108.\n2. [frozen/Key File contract](../L2-files/rust/lance-file/src/versions/v2_2/reader.rs.md) \u2192 rust/lance-file/src/versions/v2_2/reader.rs:18-270.\n3. [frozen/Key File contract](../L2-files/rust/lance-file/src/versions/v2_3/reader.rs.md) \u2192 rust/lance-file/src/versions/v2_3/reader.rs:20-347.\n\n<a id=\"recipe-42\"></a>\n\n"
+    },
+    {
+      "id": "route-060",
+      "task": "Reader projection, metadata and selector changes",
+      "ordered_read_sets": [
+        [
+          "rust/lance-file/src/reader.rs:1023-1107",
+          "rust/lance-file/src/reader.rs:1411-1474",
+          "rust/lance-file/src/reader.rs:1534-1669",
+          "rust/lance-file/src/reader.rs:1768-1877",
+          "rust/lance-file/src/reader.rs:1968-2249",
+          "rust/lance-file/src/reader.rs:2255-2275"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-file/src/reader.rs"
+      ],
+      "kb_section": "Reader projection, metadata and selector changes\n\n[Recipe](cookbook.md#reader-projection-metadata-and-selector-changes) \u00b7 [Decision contract](../L3-symbols/behavior-contracts.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-file/src/reader.rs.md) \u2192 rust/lance-file/src/reader.rs:1023-1107, rust/lance-file/src/reader.rs:1411-1474, rust/lance-file/src/reader.rs:1534-1669, rust/lance-file/src/reader.rs:1768-1877, rust/lance-file/src/reader.rs:1968-2249, rust/lance-file/src/reader.rs:2255-2275.\n\n<a id=\"recipe-46\"></a>\n\n"
+    },
+    {
+      "id": "route-061",
+      "task": "Changing encoded concatenation",
+      "ordered_read_sets": [
+        [
+          "rust/lance-file/src/concat.rs:569-685",
+          "rust/lance-file/src/concat.rs:697-806",
+          "rust/lance-file/src/concat.rs:808-1048",
+          "rust/lance/src/dataset/write.rs:308-334",
+          "rust/lance-file/src/versions/mod.rs:230-276"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance/src/dataset/write.rs"
+      ],
+      "kb_section": "Changing encoded concatenation\n\n[Recipe](cookbook.md#changing-encoded-concatenation) \u00b7 [Decision contract](../L3-symbols/behavior-contracts.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-file/src/concat.rs.md) \u2192 rust/lance-file/src/concat.rs:569-685, rust/lance-file/src/concat.rs:697-806, rust/lance-file/src/concat.rs:808-1048.\n2. [Module Map](../L1-modules/rust-lance.md#rust-lance-src-dataset) \u2192 rust/lance/src/dataset/write.rs:308-334.\n3. [frozen/Key File contract](../L2-files/rust/lance-file/src/versions/mod.rs.md) \u2192 rust/lance-file/src/versions/mod.rs:230-276.\n\n<a id=\"recipe-47\"></a>\n\n"
+    },
+    {
+      "id": "route-064",
+      "task": "Separately authorized V1 reader repair",
+      "ordered_read_sets": [
+        [
+          "rust/lance-file/src/versions/v1/reader.rs:68-294",
+          "rust/lance-file/src/versions/v1/reader.rs:324-445",
+          "rust/lance-table/src/format/manifest.rs:1220-1246"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-table/src/format/manifest.rs"
+      ],
+      "kb_section": "Separately authorized V1 reader repair\n\n[Recipe](cookbook.md#separately-authorized-v1-reader-repair) \u00b7 [Decision contract](../L3-symbols/behavior-contracts.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-file/src/versions/v1/reader.rs.md) \u2192 rust/lance-file/src/versions/v1/reader.rs:68-294, rust/lance-file/src/versions/v1/reader.rs:324-445.\n2. [frozen/Key File contract](../L2-files/rust/lance-table/src/format/manifest.rs.md) \u2192 rust/lance-table/src/format/manifest.rs:1220-1246.\n\n<a id=\"recipe-50\"></a>\n\n"
+    },
+    {
+      "id": "route-068",
+      "task": "Encoding change: constructor and IO seam portion only",
+      "ordered_read_sets": [
+        [
+          "rust/lance-encoding/src/format.rs:50-827",
+          "rust/lance-file/src/versions/v2_1/reader.rs:99-151",
+          "rust/lance-file/src/versions/v2_2/reader.rs:99-153",
+          "rust/lance-encoding/src/lib.rs:33-134",
+          "rust/lance-file/src/io.rs:17-148"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-encoding/src/format.rs",
+        "rust/lance-file/src/versions/v2_1/reader.rs",
+        "rust/lance-file/src/versions/v2_2/reader.rs"
+      ],
+      "kb_section": "Encoding change: constructor and IO seam portion only\n\n[Recipe](cookbook.md#encoding-change-constructor-and-io-seam-portion-only) \u00b7 [Decision contract](../L3-symbols/protocol-encoding.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/format.rs.md) \u2192 rust/lance-encoding/src/format.rs:50-827.\n2. [frozen/Key File contract](../L2-files/rust/lance-file/src/versions/v2_1/reader.rs.md) \u2192 rust/lance-file/src/versions/v2_1/reader.rs:99-151.\n3. [frozen/Key File contract](../L2-files/rust/lance-file/src/versions/v2_2/reader.rs.md) \u2192 rust/lance-file/src/versions/v2_2/reader.rs:99-153.\n4. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/lib.rs.md) \u2192 rust/lance-encoding/src/lib.rs:33-134.\n5. [frozen/Key File contract](../L2-files/rust/lance-file/src/io.rs.md) \u2192 rust/lance-file/src/io.rs:17-148.\n\n<a id=\"recipe-59\"></a>\n\n"
+    },
+    {
+      "id": "route-069",
+      "task": "Extending compression policy or a general codec: known touch points",
+      "ordered_read_sets": [
+        [
+          "rust/lance-encoding/src/constants.rs:9-65",
+          "rust/lance-encoding/src/compression_config.rs:55-169",
+          "rust/lance-encoding/src/compression.rs:560-591",
+          "rust/lance-file/src/versions/v2_2/compression.rs:27-38",
+          "rust/lance-encoding/src/encodings/physical/block.rs:42-162",
+          "rust/lance-encoding/src/encodings/physical/block.rs:256-496",
+          "rust/lance-encoding/src/encodings/physical/block.rs:538-653",
+          "rust/lance-encoding/src/encodings/physical/block.rs:656-819"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-encoding/src/compression.rs",
+        "rust/lance-encoding/src/encodings/physical/block.rs"
+      ],
+      "kb_section": "Extending compression policy or a general codec: known touch points\n\n[Recipe](cookbook.md#extending-compression-policy-or-a-general-codec-known-touch-points) \u00b7 [Decision contract](../L3-symbols/protocol-encoding.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/constants.rs.md) \u2192 rust/lance-encoding/src/constants.rs:9-65.\n2. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/compression_config.rs.md) \u2192 rust/lance-encoding/src/compression_config.rs:55-169.\n3. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/compression.rs.md) \u2192 rust/lance-encoding/src/compression.rs:560-591.\n4. [frozen/Key File contract](../L2-files/rust/lance-file/src/versions/v2_2/compression.rs.md) \u2192 rust/lance-file/src/versions/v2_2/compression.rs:27-38.\n5. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/encodings/physical/block.rs.md) \u2192 rust/lance-encoding/src/encodings/physical/block.rs:42-162, rust/lance-encoding/src/encodings/physical/block.rs:256-496, rust/lance-encoding/src/encodings/physical/block.rs:538-653, rust/lance-encoding/src/encodings/physical/block.rs:656-819.\n\n<a id=\"recipe-60\"></a>\n\n"
+    },
+    {
+      "id": "route-070",
+      "task": "Changing a buffer operation or mini-block codec",
+      "ordered_read_sets": [
+        [
+          "rust/lance-encoding/src/buffer.rs:78-260",
+          "rust/lance-encoding/src/array_encoding/physical/packed_struct.rs:172-249",
+          "rust/lance-encoding/src/encodings/logical/primitive/miniblock.rs:45-156",
+          "rust/lance-encoding/src/compression.rs:936-954",
+          "rust/lance-encoding/src/encodings/physical/general.rs:112-229"
+        ],
+        [
+          "rust/lance-encoding/src/encodings/logical/primitive/layout.rs:8-24",
+          "rust/lance-file/src/versions/v2_2/mod.rs:121-131",
+          "rust/lance-file/src/versions/v2_3/mod.rs:129-139"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-encoding/src/compression.rs",
+        "rust/lance-encoding/src/encodings/logical/primitive/miniblock.rs",
+        "rust/lance-encoding/src/encodings/physical/general.rs"
+      ],
+      "kb_section": "Changing a buffer operation or mini-block codec\n\n[Recipe](cookbook.md#changing-a-buffer-operation-or-mini-block-codec) \u00b7 [Decision contract](../L3-symbols/protocol-encoding.md)\n\n**Local subtask 1: buffer, packed_struct, miniblock, compression, general.** Select this set only when changing those mechanisms; the other sets are separate subproblems.\n\n1. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/buffer.rs.md) \u2192 rust/lance-encoding/src/buffer.rs:78-260.\n2. [Module Map](../L1-modules/peripheral-maps.md#rust-lance-encoding-src-array-encoding) \u2192 rust/lance-encoding/src/array_encoding/physical/packed_struct.rs:172-249.\n3. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/encodings/logical/primitive/miniblock.rs.md) \u2192 rust/lance-encoding/src/encodings/logical/primitive/miniblock.rs:45-156.\n4. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/compression.rs.md) \u2192 rust/lance-encoding/src/compression.rs:936-954.\n5. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/encodings/physical/general.rs.md) \u2192 rust/lance-encoding/src/encodings/physical/general.rs:112-229.\n\n**Local subtask 2: layout, mod, mod.** Select this set only when changing those mechanisms; the other sets are separate subproblems.\n\n1. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/encodings/logical/primitive/layout.rs.md) \u2192 rust/lance-encoding/src/encodings/logical/primitive/layout.rs:8-24.\n2. [frozen/Key File contract](../L2-files/rust/lance-file/src/versions/v2_2/mod.rs.md) \u2192 rust/lance-file/src/versions/v2_2/mod.rs:121-131.\n3. [frozen/Key File contract](../L2-files/rust/lance-file/src/versions/v2_3/mod.rs.md) \u2192 rust/lance-file/src/versions/v2_3/mod.rs:129-139.\n\n<a id=\"recipe-61\"></a>\n\n"
+    },
+    {
+      "id": "route-071",
+      "task": "Modifying current value or bitpacking codecs",
+      "ordered_read_sets": [
+        [
+          "rust/lance-encoding/src/encodings/physical/value.rs:323-455",
+          "rust/lance-encoding/src/encodings/physical/value.rs:516-869",
+          "rust/compression/bitpacking/src/lib.rs:1-278",
+          "rust/lance-encoding/src/encodings/physical/bitpacking.rs:106-692",
+          "rust/lance-encoding/src/compression.rs:339-457",
+          "rust/lance-encoding/src/compression.rs:1025-1109",
+          "rust/lance-encoding/src/compression.rs:1273-1337"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-encoding/src/compression.rs",
+        "rust/lance-encoding/src/encodings/physical/bitpacking.rs",
+        "rust/lance-encoding/src/encodings/physical/value.rs"
+      ],
+      "kb_section": "Modifying current value or bitpacking codecs\n\n[Recipe](cookbook.md#modifying-current-value-or-bitpacking-codecs) \u00b7 [Decision contract](../L3-symbols/protocol-encoding.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/encodings/physical/value.rs.md) \u2192 rust/lance-encoding/src/encodings/physical/value.rs:323-455, rust/lance-encoding/src/encodings/physical/value.rs:516-869.\n2. [Module Map](../L1-modules/peripheral-maps.md#rust-compression-bitpacking) \u2192 rust/compression/bitpacking/src/lib.rs:1-278.\n3. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/encodings/physical/bitpacking.rs.md) \u2192 rust/lance-encoding/src/encodings/physical/bitpacking.rs:106-692.\n4. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/compression.rs.md) \u2192 rust/lance-encoding/src/compression.rs:339-457, rust/lance-encoding/src/compression.rs:1025-1109, rust/lance-encoding/src/compression.rs:1273-1337.\n\n<a id=\"recipe-62\"></a>\n\n"
+    },
+    {
+      "id": "route-072",
+      "task": "Changing variable, FSST or BSS behavior",
+      "ordered_read_sets": [
+        [
+          "rust/lance-encoding/src/encodings/physical/binary.rs:89-1149",
+          "rust/lance-encoding/src/data.rs:742-969",
+          "rust/lance-encoding/src/compression.rs:154-191",
+          "rust/lance-encoding/src/compression.rs:661-736",
+          "rust/lance-encoding/src/compression.rs:837-881",
+          "rust/lance-encoding/src/compression.rs:1061-1134",
+          "rust/lance-encoding/src/compression.rs:1213-1242",
+          "rust/lance-encoding/src/encodings/physical/fsst.rs:36-392",
+          "rust/lance-encoding/src/encodings/physical/byte_stream_split.rs:83-325"
+        ],
+        [
+          "rust/lance-encoding/src/statistics.rs:500-551"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-encoding/src/compression.rs",
+        "rust/lance-encoding/src/data.rs",
+        "rust/lance-encoding/src/encodings/physical/binary.rs",
+        "rust/lance-encoding/src/encodings/physical/fsst.rs"
+      ],
+      "kb_section": "Changing variable, FSST or BSS behavior\n\n[Recipe](cookbook.md#changing-variable-fsst-or-bss-behavior) \u00b7 [Decision contract](../L3-symbols/protocol-encoding.md)\n\n**Local subtask 1: binary, data, compression, fsst, byte_stream_split.** Select this set only when changing those mechanisms; the other sets are separate subproblems.\n\n1. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/encodings/physical/binary.rs.md) \u2192 rust/lance-encoding/src/encodings/physical/binary.rs:89-1149.\n2. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/data.rs.md) \u2192 rust/lance-encoding/src/data.rs:742-969.\n3. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/compression.rs.md) \u2192 rust/lance-encoding/src/compression.rs:154-191, rust/lance-encoding/src/compression.rs:661-736, rust/lance-encoding/src/compression.rs:837-881, rust/lance-encoding/src/compression.rs:1061-1134, rust/lance-encoding/src/compression.rs:1213-1242.\n4. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/encodings/physical/fsst.rs.md) \u2192 rust/lance-encoding/src/encodings/physical/fsst.rs:36-392.\n5. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/encodings/physical/byte_stream_split.rs.md) \u2192 rust/lance-encoding/src/encodings/physical/byte_stream_split.rs:83-325.\n\n**Local subtask 2: statistics.** Select this set only when changing those mechanisms; the other sets are separate subproblems.\n\n1. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/statistics.rs.md) \u2192 rust/lance-encoding/src/statistics.rs:500-551.\n\n<a id=\"recipe-63\"></a>\n\n"
+    },
+    {
+      "id": "route-073",
+      "task": "Extending packed structures or statistics",
+      "ordered_read_sets": [
+        [
+          "rust/lance-encoding/src/encodings/physical/packed.rs:71-218",
+          "rust/lance-encoding/src/encodings/physical/packed.rs:329-525",
+          "rust/lance-encoding/src/encodings/physical/packed.rs:562-897",
+          "rust/lance-encoding/src/compression.rs:738-835",
+          "rust/lance-encoding/src/compression.rs:1241-1279",
+          "rust/lance-file/src/versions/v2_2/compression.rs:77-93",
+          "rust/lance-file/src/versions/v2_3/compression.rs:79-94",
+          "rust/lance-encoding/src/data.rs:63-85",
+          "rust/lance-encoding/src/data.rs:2078-2123"
+        ],
+        [
+          "rust/lance-encoding/src/statistics.rs:19-594",
+          "rust/lance-encoding/src/encodings/physical/byte_stream_split.rs:277-324"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-encoding/src/compression.rs",
+        "rust/lance-encoding/src/data.rs",
+        "rust/lance-encoding/src/encodings/physical/packed.rs",
+        "rust/lance-file/src/versions/v2_3/compression.rs"
+      ],
+      "kb_section": "Extending packed structures or statistics\n\n[Recipe](cookbook.md#extending-packed-structures-or-statistics) \u00b7 [Decision contract](../L3-symbols/protocol-encoding.md)\n\n**Local subtask 1: packed, compression, compression, compression, data.** Select this set only when changing those mechanisms; the other sets are separate subproblems.\n\n1. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/encodings/physical/packed.rs.md) \u2192 rust/lance-encoding/src/encodings/physical/packed.rs:71-218, rust/lance-encoding/src/encodings/physical/packed.rs:329-525, rust/lance-encoding/src/encodings/physical/packed.rs:562-897.\n2. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/compression.rs.md) \u2192 rust/lance-encoding/src/compression.rs:738-835, rust/lance-encoding/src/compression.rs:1241-1279.\n3. [frozen/Key File contract](../L2-files/rust/lance-file/src/versions/v2_2/compression.rs.md) \u2192 rust/lance-file/src/versions/v2_2/compression.rs:77-93.\n4. [frozen/Key File contract](../L2-files/rust/lance-file/src/versions/v2_3/compression.rs.md) \u2192 rust/lance-file/src/versions/v2_3/compression.rs:79-94.\n5. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/data.rs.md) \u2192 rust/lance-encoding/src/data.rs:63-85, rust/lance-encoding/src/data.rs:2078-2123.\n\n**Local subtask 2: statistics, byte_stream_split.** Select this set only when changing those mechanisms; the other sets are separate subproblems.\n\n1. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/statistics.rs.md) \u2192 rust/lance-encoding/src/statistics.rs:19-594.\n2. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/encodings/physical/byte_stream_split.rs.md) \u2192 rust/lance-encoding/src/encodings/physical/byte_stream_split.rs:277-324.\n\n<a id=\"recipe-64\"></a>\n\n"
+    },
+    {
+      "id": "route-074",
+      "task": "Changing a structural compression policy",
+      "ordered_read_sets": [
+        [
+          "rust/lance-encoding/src/compression.rs:92-145",
+          "rust/lance-encoding/src/compression.rs:180-516",
+          "rust/lance-encoding/src/compression.rs:936-1928",
+          "rust/lance-file/src/versions/v2_1/compression.rs:51-104",
+          "rust/lance-file/src/versions/v2_2/compression.rs:41-99",
+          "rust/lance-file/src/versions/v2_3/compression.rs:41-101",
+          "rust/lance-encoding/src/encodings/physical/rle.rs:1013-1039"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-encoding/src/compression.rs",
+        "rust/lance-encoding/src/encodings/physical/rle.rs",
+        "rust/lance-file/src/versions/v2_3/compression.rs"
+      ],
+      "kb_section": "Changing a structural compression policy\n\n[Recipe](cookbook.md#changing-a-structural-compression-policy) \u00b7 [Decision contract](../L3-symbols/protocol-encoding.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/compression.rs.md) \u2192 rust/lance-encoding/src/compression.rs:92-145, rust/lance-encoding/src/compression.rs:180-516, rust/lance-encoding/src/compression.rs:936-1928.\n2. [frozen/Key File contract](../L2-files/rust/lance-file/src/versions/v2_1/compression.rs.md) \u2192 rust/lance-file/src/versions/v2_1/compression.rs:51-104.\n3. [frozen/Key File contract](../L2-files/rust/lance-file/src/versions/v2_2/compression.rs.md) \u2192 rust/lance-file/src/versions/v2_2/compression.rs:41-99.\n4. [frozen/Key File contract](../L2-files/rust/lance-file/src/versions/v2_3/compression.rs.md) \u2192 rust/lance-file/src/versions/v2_3/compression.rs:41-101.\n5. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/encodings/physical/rle.rs.md) \u2192 rust/lance-encoding/src/encodings/physical/rle.rs:1013-1039.\n\n<a id=\"recipe-65\"></a>\n\n"
+    },
+    {
+      "id": "route-075",
+      "task": "Modifying modern RLE behavior",
+      "ordered_read_sets": [
+        [
+          "rust/lance-encoding/src/compression.rs:180-273",
+          "rust/lance-encoding/src/compression.rs:1757-1928",
+          "rust/lance-encoding/src/encodings/physical/rle.rs:142-328",
+          "rust/lance-encoding/src/encodings/physical/rle.rs:385-725",
+          "rust/lance-encoding/src/encodings/physical/rle.rs:727-1151",
+          "rust/lance-encoding/src/encodings/physical/rle.rs:1471-1948",
+          "rust/lance-file/src/versions/v2_3/compression.rs:41-101"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-encoding/src/compression.rs",
+        "rust/lance-encoding/src/encodings/physical/rle.rs",
+        "rust/lance-file/src/versions/v2_3/compression.rs"
+      ],
+      "kb_section": "Modifying modern RLE behavior\n\n[Recipe](cookbook.md#modifying-modern-rle-behavior) \u00b7 [Decision contract](../L3-symbols/protocol-encoding.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/compression.rs.md) \u2192 rust/lance-encoding/src/compression.rs:180-273, rust/lance-encoding/src/compression.rs:1757-1928.\n2. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/encodings/physical/rle.rs.md) \u2192 rust/lance-encoding/src/encodings/physical/rle.rs:142-328, rust/lance-encoding/src/encodings/physical/rle.rs:385-725, rust/lance-encoding/src/encodings/physical/rle.rs:727-1151, rust/lance-encoding/src/encodings/physical/rle.rs:1471-1948.\n3. [frozen/Key File contract](../L2-files/rust/lance-file/src/versions/v2_3/compression.rs.md) \u2192 rust/lance-file/src/versions/v2_3/compression.rs:41-101.\n\n<a id=\"recipe-66\"></a>\n\n"
+    },
+    {
+      "id": "route-076",
+      "task": "Extending DataBlock or its conversion boundary",
+      "ordered_read_sets": [
+        [
+          "rust/lance-encoding/src/data.rs:61-86",
+          "rust/lance-encoding/src/data.rs:226-450",
+          "rust/lance-encoding/src/data.rs:576-619",
+          "rust/lance-encoding/src/data.rs:663-982",
+          "rust/lance-encoding/src/data.rs:1025-1055",
+          "rust/lance-encoding/src/data.rs:1179-1498",
+          "rust/lance-encoding/src/data.rs:1832-2057",
+          "rust/lance-encoding/src/data.rs:2059-2124",
+          "rust/lance-encoding/src/statistics.rs:51-71",
+          "rust/lance-encoding/src/statistics.rs:579-596",
+          "rust/lance-encoding/src/encodings/logical/primitive.rs:7575-7600",
+          "rust/lance-encoding/src/array_encoding/logical/primitive.rs:511-514"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-encoding/src/data.rs",
+        "rust/lance-encoding/src/encodings/logical/primitive.rs"
+      ],
+      "kb_section": "Extending DataBlock or its conversion boundary\n\n[Recipe](cookbook.md#extending-datablock-or-its-conversion-boundary) \u00b7 [Decision contract](../L3-symbols/protocol-encoding.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/data.rs.md) \u2192 rust/lance-encoding/src/data.rs:61-86, rust/lance-encoding/src/data.rs:226-450, rust/lance-encoding/src/data.rs:576-619, rust/lance-encoding/src/data.rs:663-982, rust/lance-encoding/src/data.rs:1025-1055, rust/lance-encoding/src/data.rs:1179-1498, rust/lance-encoding/src/data.rs:1832-2057, rust/lance-encoding/src/data.rs:2059-2124.\n2. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/statistics.rs.md) \u2192 rust/lance-encoding/src/statistics.rs:51-71, rust/lance-encoding/src/statistics.rs:579-596.\n3. [Module Map](../L1-modules/peripheral-maps.md#rust-lance-encoding) \u2192 rust/lance-encoding/src/encodings/logical/primitive.rs:7575-7600.\n4. [Module Map](../L1-modules/peripheral-maps.md#rust-lance-encoding-src-array-encoding) \u2192 rust/lance-encoding/src/array_encoding/logical/primitive.rs:511-514.\n\n<a id=\"recipe-67\"></a>\n\n"
+    },
+    {
+      "id": "route-077",
+      "task": "Changing rep/def or control words",
+      "ordered_read_sets": [
+        [
+          "rust/lance-encoding/src/repdef.rs:127-152",
+          "rust/lance-encoding/src/repdef.rs:342-451",
+          "rust/lance-encoding/src/repdef.rs:561-645",
+          "rust/lance-encoding/src/repdef.rs:707-948",
+          "rust/lance-encoding/src/repdef.rs:958-1230",
+          "rust/lance-encoding/src/repdef.rs:1617-1967",
+          "rust/lance-encoding/src/repdef.rs:2016-2140",
+          "rust/lance-encoding/src/repdef.rs:2143-2840",
+          "rust/lance-encoding/src/encodings/logical/primitive.rs:7118-7162",
+          "rust/lance-encoding/src/encodings/logical/primitive.rs:7709-7729"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-encoding/src/encodings/logical/primitive.rs",
+        "rust/lance-encoding/src/repdef.rs"
+      ],
+      "kb_section": "Changing rep/def or control words\n\n[Recipe](cookbook.md#changing-repdef-or-control-words) \u00b7 [Decision contract](../L3-symbols/protocol-encoding.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/repdef.rs.md) \u2192 rust/lance-encoding/src/repdef.rs:127-152, rust/lance-encoding/src/repdef.rs:342-451, rust/lance-encoding/src/repdef.rs:561-645, rust/lance-encoding/src/repdef.rs:707-948, rust/lance-encoding/src/repdef.rs:958-1230, rust/lance-encoding/src/repdef.rs:1617-1967, rust/lance-encoding/src/repdef.rs:2016-2140, rust/lance-encoding/src/repdef.rs:2143-2840.\n2. [Module Map](../L1-modules/peripheral-maps.md#rust-lance-encoding) \u2192 rust/lance-encoding/src/encodings/logical/primitive.rs:7118-7162, rust/lance-encoding/src/encodings/logical/primitive.rs:7709-7729.\n\n<a id=\"recipe-68\"></a>\n\n"
+    },
+    {
+      "id": "route-080",
+      "task": "Changing primitive helper behavior",
+      "ordered_read_sets": [
+        [
+          "rust/lance-encoding/src/encodings/logical/primitive/chunk_index.rs:32-343",
+          "rust/lance-encoding/src/encodings/logical/primitive/chunk_index.rs:387-432",
+          "rust/lance-encoding/src/encodings/logical/primitive/constant.rs:30-492",
+          "rust/lance-arrow/src/scalar.rs:1-190",
+          "rust/lance-encoding/src/encodings/logical/primitive.rs:4543-4572",
+          "rust/lance-encoding/src/encodings/logical/primitive.rs:7410-7457",
+          "rust/lance-encoding/src/encodings/logical/primitive.rs:7650-7688",
+          "rust/lance-encoding/src/encodings/logical/primitive.rs:7927-7972",
+          "rust/lance-encoding/src/encodings/logical/primitive/dict.rs:30-427"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-encoding/src/encodings/logical/primitive.rs"
+      ],
+      "kb_section": "Changing primitive helper behavior\n\n[Recipe](cookbook.md#changing-primitive-helper-behavior) \u00b7 [Decision contract](../L3-symbols/protocol-encoding.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/encodings/logical/primitive/chunk_index.rs.md) \u2192 rust/lance-encoding/src/encodings/logical/primitive/chunk_index.rs:32-343, rust/lance-encoding/src/encodings/logical/primitive/chunk_index.rs:387-432.\n2. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/encodings/logical/primitive/constant.rs.md) \u2192 rust/lance-encoding/src/encodings/logical/primitive/constant.rs:30-492.\n3. [Module Map](../L1-modules/peripheral-maps.md#rust-lance-arrow) \u2192 rust/lance-arrow/src/scalar.rs:1-190.\n4. [Module Map](../L1-modules/peripheral-maps.md#rust-lance-encoding) \u2192 rust/lance-encoding/src/encodings/logical/primitive.rs:4543-4572, rust/lance-encoding/src/encodings/logical/primitive.rs:7410-7457, rust/lance-encoding/src/encodings/logical/primitive.rs:7650-7688, rust/lance-encoding/src/encodings/logical/primitive.rs:7927-7972.\n5. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/encodings/logical/primitive/dict.rs.md) \u2192 rust/lance-encoding/src/encodings/logical/primitive/dict.rs:30-427.\n\n<a id=\"recipe-71\"></a>\n\n"
+    },
+    {
+      "id": "route-081",
+      "task": "Changing Blob encoding or loading",
+      "ordered_read_sets": [
+        [
+          "rust/lance-encoding/src/encoder/structural.rs:136-168",
+          "rust/lance-encoding/src/encodings/logical/blob.rs:43-125",
+          "rust/lance-encoding/src/encodings/logical/blob.rs:127-214",
+          "rust/lance-encoding/src/encodings/logical/blob.rs:234-465",
+          "rust/lance-encoding/src/encodings/logical/primitive/blob.rs:70-552",
+          "rust/lance-encoding/src/encodings/logical/primitive.rs:4583-4616"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-encoding/src/encodings/logical/primitive.rs"
+      ],
+      "kb_section": "Changing Blob encoding or loading\n\n[Recipe](cookbook.md#changing-blob-encoding-or-loading) \u00b7 [Decision contract](../L3-symbols/protocol-encoding.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/encoder/structural.rs.md) \u2192 rust/lance-encoding/src/encoder/structural.rs:136-168.\n2. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/encodings/logical/blob.rs.md) \u2192 rust/lance-encoding/src/encodings/logical/blob.rs:43-125, rust/lance-encoding/src/encodings/logical/blob.rs:127-214, rust/lance-encoding/src/encodings/logical/blob.rs:234-465.\n3. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/encodings/logical/primitive/blob.rs.md) \u2192 rust/lance-encoding/src/encodings/logical/primitive/blob.rs:70-552.\n4. [Module Map](../L1-modules/peripheral-maps.md#rust-lance-encoding) \u2192 rust/lance-encoding/src/encodings/logical/primitive.rs:4583-4616.\n\n<a id=\"recipe-72\"></a>\n\n"
+    },
+    {
+      "id": "route-082",
+      "task": "Extending nested structural shapes",
+      "ordered_read_sets": [
+        [
+          "rust/lance-core/src/datatypes.rs:302-311",
+          "rust/lance-core/src/datatypes/field.rs:1243-1278",
+          "rust/lance-core/src/datatypes/schema.rs:128-138",
+          "rust/lance-encoding/src/encoder/structural.rs:192-261",
+          "rust/lance-encoding/src/decoder.rs:878-884",
+          "rust/lance-encoding/src/decoder.rs:959-981"
+        ],
+        [
+          "rust/lance-encoding/src/encodings/logical/struct.rs:291-319",
+          "rust/lance-file/src/versions/v2_1/mod.rs:95-122",
+          "rust/lance-file/src/versions/v2_2/mod.rs:95-118",
+          "rust/lance-file/src/versions/v2_3/mod.rs:103-126",
+          "rust/lance-encoding/src/encodings/logical/fixed_size_list.rs:307-545"
+        ],
+        [
+          "rust/lance-encoding/src/repdef.rs:1299-1396",
+          "rust/lance-encoding/src/repdef.rs:2078-2140",
+          "rust/lance-encoding/src/encodings/logical/map.rs:192-238"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-core/src/datatypes/field.rs",
+        "rust/lance-core/src/datatypes/schema.rs",
+        "rust/lance-encoding/src/encodings/logical/fixed_size_list.rs",
+        "rust/lance-encoding/src/encodings/logical/map.rs",
+        "rust/lance-encoding/src/encodings/logical/struct.rs",
+        "rust/lance-encoding/src/repdef.rs"
+      ],
+      "kb_section": "Extending nested structural shapes\n\n[Recipe](cookbook.md#extending-nested-structural-shapes) \u00b7 [Decision contract](../L3-symbols/protocol-encoding.md)\n\n**Local subtask 1: datatypes, field, schema, structural, decoder.** Select this set only when changing those mechanisms; the other sets are separate subproblems.\n\n1. [frozen/Key File contract](../L2-files/rust/lance-core/src/datatypes.rs.md) \u2192 rust/lance-core/src/datatypes.rs:302-311.\n2. [frozen/Key File contract](../L2-files/rust/lance-core/src/datatypes/field.rs.md) \u2192 rust/lance-core/src/datatypes/field.rs:1243-1278.\n3. [frozen/Key File contract](../L2-files/rust/lance-core/src/datatypes/schema.rs.md) \u2192 rust/lance-core/src/datatypes/schema.rs:128-138.\n4. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/encoder/structural.rs.md) \u2192 rust/lance-encoding/src/encoder/structural.rs:192-261.\n5. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/decoder.rs.md) \u2192 rust/lance-encoding/src/decoder.rs:878-884, rust/lance-encoding/src/decoder.rs:959-981.\n\n**Local subtask 2: struct, mod, mod, mod, fixed_size_list.** Select this set only when changing those mechanisms; the other sets are separate subproblems.\n\n1. [Module Map](../L1-modules/peripheral-maps.md#rust-lance-encoding) \u2192 rust/lance-encoding/src/encodings/logical/struct.rs:291-319.\n2. [frozen/Key File contract](../L2-files/rust/lance-file/src/versions/v2_1/mod.rs.md) \u2192 rust/lance-file/src/versions/v2_1/mod.rs:95-122.\n3. [frozen/Key File contract](../L2-files/rust/lance-file/src/versions/v2_2/mod.rs.md) \u2192 rust/lance-file/src/versions/v2_2/mod.rs:95-118.\n4. [frozen/Key File contract](../L2-files/rust/lance-file/src/versions/v2_3/mod.rs.md) \u2192 rust/lance-file/src/versions/v2_3/mod.rs:103-126.\n5. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/encodings/logical/fixed_size_list.rs.md) \u2192 rust/lance-encoding/src/encodings/logical/fixed_size_list.rs:307-545.\n\n**Local subtask 3: repdef, map.** Select this set only when changing those mechanisms; the other sets are separate subproblems.\n\n1. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/repdef.rs.md) \u2192 rust/lance-encoding/src/repdef.rs:1299-1396, rust/lance-encoding/src/repdef.rs:2078-2140.\n2. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/encodings/logical/map.rs.md) \u2192 rust/lance-encoding/src/encodings/logical/map.rs:192-238.\n\n<a id=\"scenario-01\"></a>\n\n"
+    },
+    {
+      "id": "route-083",
+      "task": "Distributed filtered-read serialization",
+      "ordered_read_sets": [
+        [
+          "protos/table_identifier.proto:8-20",
+          "protos/filtered_read.proto:15-76",
+          "protos/filtered_read.proto:89-125"
+        ]
+      ],
+      "affected_paths": [
+        "protos/filtered_read.proto"
+      ],
+      "kb_section": "Distributed filtered-read serialization\n\n[Scenario](scenarios.md#partial-scenario-distributed-filtered-read-serialization) \u00b7 [Decision contract](../L3-symbols/behavior-contracts.md)\n\n1. [frozen/Key File contract](../L2-files/protos/table_identifier.proto.md) \u2192 protos/table_identifier.proto:8-20.\n2. [frozen/Key File contract](../L2-files/protos/filtered_read.proto.md) \u2192 protos/filtered_read.proto:15-76, protos/filtered_read.proto:89-125.\n\n<a id=\"scenario-03\"></a>\n\n"
+    },
+    {
+      "id": "route-084",
+      "task": "State machines from schema contracts",
+      "ordered_read_sets": [
+        [
+          "protos/transaction.proto:370-393",
+          "protos/fragment_metadata.proto:185-237",
+          "protos/table.proto:147-158",
+          "protos/table.proto:391-415",
+          "protos/table.proto:523-591"
+        ]
+      ],
+      "affected_paths": [
+        "protos/fragment_metadata.proto",
+        "protos/table.proto"
+      ],
+      "kb_section": "State machines from schema contracts\n\n[Scenario](scenarios.md#partial-state-machines-from-schema-contracts) \u00b7 [Decision contract](../L3-symbols/protocol-commit.md)\n\n1. [frozen/Key File contract](../L2-files/protos/transaction.proto.md) \u2192 protos/transaction.proto:370-393.\n2. [frozen/Key File contract](../L2-files/protos/fragment_metadata.proto.md) \u2192 protos/fragment_metadata.proto:185-237.\n3. [frozen/Key File contract](../L2-files/protos/table.proto.md) \u2192 protos/table.proto:147-158, protos/table.proto:391-415, protos/table.proto:523-591.\n\n<a id=\"scenario-04\"></a>\n\n"
+    },
+    {
+      "id": "route-085",
+      "task": "In-memory blob projection trace",
+      "ordered_read_sets": [
+        [
+          "rust/lance-core/src/datatypes/field.rs:274-310",
+          "rust/lance-core/src/datatypes/field.rs:623-658",
+          "rust/lance-core/src/datatypes/field.rs:1095-1105",
+          "rust/lance-core/src/datatypes/field.rs:1225-1313",
+          "rust/lance-core/src/datatypes/schema.rs:351-406",
+          "rust/lance-core/src/datatypes/schema.rs:481-491",
+          "rust/lance-core/src/datatypes/schema.rs:711-728",
+          "rust/lance-core/src/datatypes/schema.rs:883-919",
+          "rust/lance-core/src/datatypes/schema.rs:937-955",
+          "rust/lance-core/src/datatypes/schema.rs:959-967",
+          "rust/lance-core/src/datatypes/schema.rs:1221-1236",
+          "rust/lance-core/src/datatypes/schema.rs:1324-1357",
+          "rust/lance-core/src/datatypes/schema.rs:1572-1575",
+          "rust/lance-core/src/datatypes/schema.rs:1577-1612"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-core/src/datatypes/field.rs",
+        "rust/lance-core/src/datatypes/schema.rs"
+      ],
+      "kb_section": "In-memory blob projection trace\n\n[Scenario](scenarios.md#partial-in-memory-blob-projection-trace) \u00b7 [Decision contract](../L3-symbols/behavior-contracts.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-core/src/datatypes/field.rs.md) \u2192 rust/lance-core/src/datatypes/field.rs:274-310, rust/lance-core/src/datatypes/field.rs:623-658, rust/lance-core/src/datatypes/field.rs:1095-1105, rust/lance-core/src/datatypes/field.rs:1225-1313.\n2. [frozen/Key File contract](../L2-files/rust/lance-core/src/datatypes/schema.rs.md) \u2192 rust/lance-core/src/datatypes/schema.rs:351-406, rust/lance-core/src/datatypes/schema.rs:481-491, rust/lance-core/src/datatypes/schema.rs:711-728, rust/lance-core/src/datatypes/schema.rs:883-919, rust/lance-core/src/datatypes/schema.rs:937-955, rust/lance-core/src/datatypes/schema.rs:959-967, rust/lance-core/src/datatypes/schema.rs:1221-1236, rust/lance-core/src/datatypes/schema.rs:1324-1357, rust/lance-core/src/datatypes/schema.rs:1572-1575, rust/lance-core/src/datatypes/schema.rs:1577-1612.\n\n<a id=\"scenario-05\"></a>\n\n"
+    },
+    {
+      "id": "route-090",
+      "task": "Configuring a cache backend",
+      "ordered_read_sets": [
+        [
+          "rust/lance-core/src/cache/backend_uri.rs:51-104",
+          "rust/lance-core/src/cache/registry.rs:91-95",
+          "rust/lance-core/src/cache/registry.rs:153-193",
+          "rust/lance-core/src/cache/backend.rs:20-31",
+          "rust/lance-core/src/cache/backend.rs:45-163"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-core/src/cache/backend.rs"
+      ],
+      "kb_section": "Configuring a cache backend\n\n[Scenario](scenarios.md#local-trace-configuring-a-cache-backend) \u00b7 [Decision contract](../L3-symbols/behavior-contracts.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-core/src/cache/backend_uri.rs.md) \u2192 rust/lance-core/src/cache/backend_uri.rs:51-104.\n2. [frozen/Key File contract](../L2-files/rust/lance-core/src/cache/registry.rs.md) \u2192 rust/lance-core/src/cache/registry.rs:91-95, rust/lance-core/src/cache/registry.rs:153-193.\n3. [frozen/Key File contract](../L2-files/rust/lance-core/src/cache/backend.rs.md) \u2192 rust/lance-core/src/cache/backend.rs:20-31, rust/lance-core/src/cache/backend.rs:45-163.\n\n<a id=\"scenario-10\"></a>\n\n"
+    },
+    {
+      "id": "route-091",
+      "task": "Serializing and decoding one cache entry",
+      "ordered_read_sets": [
+        [
+          "rust/lance-core/src/cache/codec.rs:319-383",
+          "rust/lance-core/src/cache/codec.rs:415-524"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-core/src/cache/codec.rs"
+      ],
+      "kb_section": "Serializing and decoding one cache entry\n\n[Scenario](scenarios.md#local-trace-serializing-and-decoding-one-cache-entry) \u00b7 [Decision contract](../L3-symbols/behavior-contracts.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-core/src/cache/codec.rs.md) \u2192 rust/lance-core/src/cache/codec.rs:319-383, rust/lance-core/src/cache/codec.rs:415-524.\n\n<a id=\"scenario-11\"></a>\n\n"
+    },
+    {
+      "id": "route-092",
+      "task": "Memory backend miss and retry",
+      "ordered_read_sets": [
+        [
+          "rust/lance-core/src/cache/moka.rs:67-81",
+          "rust/lance-core/src/cache/moka.rs:134-165",
+          "rust/lance-core/src/cache/moka.rs:327-376",
+          "rust/lance-core/src/cache/quick.rs:263-296"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-core/src/cache/moka.rs",
+        "rust/lance-core/src/cache/quick.rs"
+      ],
+      "kb_section": "Memory backend miss and retry\n\n[Scenario](scenarios.md#local-trace-memory-backend-miss-and-retry) \u00b7 [Decision contract](../L3-symbols/behavior-contracts.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-core/src/cache/moka.rs.md) \u2192 rust/lance-core/src/cache/moka.rs:67-81, rust/lance-core/src/cache/moka.rs:134-165, rust/lance-core/src/cache/moka.rs:327-376.\n2. [frozen/Key File contract](../L2-files/rust/lance-core/src/cache/quick.rs.md) \u2192 rust/lance-core/src/cache/quick.rs:263-296.\n\n<a id=\"scenario-12\"></a>\n\n"
+    },
+    {
+      "id": "route-093",
+      "task": "One typed cached load",
+      "ordered_read_sets": [
+        [
+          "rust/lance-core/src/cache/mod.rs:238-256",
+          "rust/lance-core/src/cache/mod.rs:327-331",
+          "rust/lance-core/src/cache/mod.rs:528-553",
+          "rust/lance-core/src/cache/mod.rs:635-645",
+          "rust/lance-core/src/cache/mod.rs:784-799",
+          "rust/lance-core/src/cache/mod.rs:822-827",
+          "rust/lance-core/src/cache/moka.rs:134-165",
+          "rust/lance-core/src/cache/quick.rs:263-296"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-core/src/cache/mod.rs",
+        "rust/lance-core/src/cache/moka.rs",
+        "rust/lance-core/src/cache/quick.rs"
+      ],
+      "kb_section": "One typed cached load\n\n[Scenario](scenarios.md#local-trace-one-typed-cached-load) \u00b7 [Decision contract](../L3-symbols/behavior-contracts.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-core/src/cache/mod.rs.md) \u2192 rust/lance-core/src/cache/mod.rs:238-256, rust/lance-core/src/cache/mod.rs:327-331, rust/lance-core/src/cache/mod.rs:528-553, rust/lance-core/src/cache/mod.rs:635-645, rust/lance-core/src/cache/mod.rs:784-799, rust/lance-core/src/cache/mod.rs:822-827.\n2. [frozen/Key File contract](../L2-files/rust/lance-core/src/cache/moka.rs.md) \u2192 rust/lance-core/src/cache/moka.rs:134-165.\n3. [frozen/Key File contract](../L2-files/rust/lance-core/src/cache/quick.rs.md) \u2192 rust/lance-core/src/cache/quick.rs:263-296.\n\n<a id=\"scenario-13\"></a>\n\n"
+    },
+    {
+      "id": "route-094",
+      "task": "Local manifest capability walkthrough",
+      "ordered_read_sets": [
+        [
+          "rust/lance-table/src/feature_flags.rs:140-237",
+          "rust/lance-table/src/feature_flags.rs:256-260",
+          "rust/lance-table/src/feature_flags.rs:285-329",
+          "rust/lance-table/src/feature_flags.rs:331-432"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-table/src/feature_flags.rs"
+      ],
+      "kb_section": "Local manifest capability walkthrough\n\n[Scenario](scenarios.md#local-manifest-capability-walkthrough) \u00b7 [Decision contract](../L3-symbols/behavior-contracts.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-table/src/feature_flags.rs.md) \u2192 rust/lance-table/src/feature_flags.rs:140-237, rust/lance-table/src/feature_flags.rs:256-260, rust/lance-table/src/feature_flags.rs:285-329, rust/lance-table/src/feature_flags.rs:331-432.\n\n<a id=\"scenario-14\"></a>\n\n"
+    },
+    {
+      "id": "route-096",
+      "task": "Decode, share, detach and clone a manifest",
+      "ordered_read_sets": [
+        [
+          "rust/lance-table/src/format/fragment.rs:378-461",
+          "rust/lance-table/src/format/fragment.rs:635-725",
+          "rust/lance-table/src/format/manifest.rs:248-320",
+          "rust/lance-table/src/format/manifest.rs:403-431",
+          "rust/lance-table/src/format/manifest.rs:1021-1118",
+          "rust/lance-table/src/format/row_ids.rs:75-84",
+          "rust/lance-table/src/feature_flags.rs:141-237"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-table/src/feature_flags.rs",
+        "rust/lance-table/src/format/manifest.rs"
+      ],
+      "kb_section": "Decode, share, detach and clone a manifest\n\n[Scenario](scenarios.md#decode-share-detach-and-clone-a-manifest) \u00b7 [Decision contract](../L3-symbols/behavior-contracts.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-table/src/format/fragment.rs.md) \u2192 rust/lance-table/src/format/fragment.rs:378-461, rust/lance-table/src/format/fragment.rs:635-725.\n2. [frozen/Key File contract](../L2-files/rust/lance-table/src/format/manifest.rs.md) \u2192 rust/lance-table/src/format/manifest.rs:248-320, rust/lance-table/src/format/manifest.rs:403-431, rust/lance-table/src/format/manifest.rs:1021-1118.\n3. [frozen/Key File contract](../L2-files/rust/lance-table/src/format/row_ids.rs.md) \u2192 rust/lance-table/src/format/row_ids.rs:75-84.\n4. [frozen/Key File contract](../L2-files/rust/lance-table/src/feature_flags.rs.md) \u2192 rust/lance-table/src/feature_flags.rs:141-237.\n\n<a id=\"scenario-16\"></a>\n\n"
+    },
+    {
+      "id": "route-097",
+      "task": "Local index-list cache and overlay reload traces",
+      "ordered_read_sets": [
+        [
+          "rust/lance-table/src/format/index.rs:278-334",
+          "rust/lance-table/src/format/index.rs:388-432",
+          "rust/lance-core/src/cache/codec.rs:415-420",
+          "rust/lance-table/src/format/overlay.rs:215-221",
+          "rust/lance-table/src/format/overlay.rs:242-275",
+          "rust/lance-table/src/format/overlay.rs:297-327",
+          "rust/lance-table/src/format/fragment.rs:831-869"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-core/src/cache/codec.rs",
+        "rust/lance-table/src/format/index.rs"
+      ],
+      "kb_section": "Local index-list cache and overlay reload traces\n\n[Scenario](scenarios.md#local-index-list-cache-and-overlay-reload-traces) \u00b7 [Decision contract](../L3-symbols/behavior-contracts.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-table/src/format/index.rs.md) \u2192 rust/lance-table/src/format/index.rs:278-334, rust/lance-table/src/format/index.rs:388-432.\n2. [frozen/Key File contract](../L2-files/rust/lance-core/src/cache/codec.rs.md) \u2192 rust/lance-core/src/cache/codec.rs:415-420.\n3. [frozen/Key File contract](../L2-files/rust/lance-table/src/format/overlay.rs.md) \u2192 rust/lance-table/src/format/overlay.rs:215-221, rust/lance-table/src/format/overlay.rs:242-275, rust/lance-table/src/format/overlay.rs:297-327.\n4. [frozen/Key File contract](../L2-files/rust/lance-table/src/format/fragment.rs.md) \u2192 rust/lance-table/src/format/fragment.rs:831-869.\n\n<a id=\"scenario-17\"></a>\n\n"
+    },
+    {
+      "id": "route-099",
+      "task": "Exact version and stale-index metadata traces",
+      "ordered_read_sets": [
+        [
+          "rust/lance-file/src/version.rs:19-75",
+          "rust/lance-file/src/version.rs:187-261",
+          "rust/lance-file/src/lib.rs:45-59",
+          "rust/lance-table/src/format/fragment.rs:109-144",
+          "rust/lance-table/src/format/manifest.rs:1153-1188",
+          "rust/lance-table/src/format/overlay/staleness.rs:131-176"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-table/src/format/manifest.rs",
+        "rust/lance-table/src/format/overlay/staleness.rs"
+      ],
+      "kb_section": "Exact version and stale-index metadata traces\n\n[Scenario](scenarios.md#exact-version-and-stale-index-metadata-traces) \u00b7 [Decision contract](../L3-symbols/behavior-contracts.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-file/src/version.rs.md) \u2192 rust/lance-file/src/version.rs:19-75, rust/lance-file/src/version.rs:187-261.\n2. [frozen/Key File contract](../L2-files/rust/lance-file/src/lib.rs.md) \u2192 rust/lance-file/src/lib.rs:45-59.\n3. [frozen/Key File contract](../L2-files/rust/lance-table/src/format/fragment.rs.md) \u2192 rust/lance-table/src/format/fragment.rs:109-144.\n4. [frozen/Key File contract](../L2-files/rust/lance-table/src/format/manifest.rs.md) \u2192 rust/lance-table/src/format/manifest.rs:1153-1188.\n5. [frozen/Key File contract](../L2-files/rust/lance-table/src/format/overlay/staleness.rs.md) \u2192 rust/lance-table/src/format/overlay/staleness.rs:131-176.\n\n<a id=\"scenario-19\"></a>\n\n"
+    },
+    {
+      "id": "route-104",
+      "task": "Selection, deletion and rechunking",
+      "ordered_read_sets": [
+        [
+          "rust/lance-table/src/rowids.rs:67-170",
+          "rust/lance-table/src/rowids.rs:221-265",
+          "rust/lance-table/src/rowids.rs:340-454",
+          "rust/lance-table/src/rowids.rs:516-591",
+          "rust/lance-table/src/rowids.rs:609-798",
+          "rust/lance-table/src/rowids.rs:946-1052",
+          "rust/lance-table/src/utils/stream.rs:407-444",
+          "rust/lance-table/src/utils/stream.rs:648-680",
+          "rust/lance-table/src/transaction/manifest_build.rs:74-123"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-table/src/transaction/manifest_build.rs"
+      ],
+      "kb_section": "Selection, deletion and rechunking\n\n[Scenario](scenarios.md#local-trace-selection-deletion-and-rechunking) \u00b7 [Decision contract](../L3-symbols/protocol-commit.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-table/src/rowids.rs.md) \u2192 rust/lance-table/src/rowids.rs:67-170, rust/lance-table/src/rowids.rs:221-265, rust/lance-table/src/rowids.rs:340-454, rust/lance-table/src/rowids.rs:516-591, rust/lance-table/src/rowids.rs:609-798, rust/lance-table/src/rowids.rs:946-1052.\n2. [frozen/Key File contract](../L2-files/rust/lance-table/src/utils/stream.rs.md) \u2192 rust/lance-table/src/utils/stream.rs:407-444, rust/lance-table/src/utils/stream.rs:648-680.\n3. [frozen/Key File contract](../L2-files/rust/lance-table/src/transaction/manifest_build.rs.md) \u2192 rust/lance-table/src/transaction/manifest_build.rs:74-123.\n\n<a id=\"scenario-24\"></a>\n\n"
+    },
+    {
+      "id": "route-105",
+      "task": "Local transaction trace: allocate IDs, preserve creation, stamp update",
+      "ordered_read_sets": [
+        [
+          "rust/lance-table/src/transaction/row_version.rs:97-171",
+          "rust/lance-table/src/transaction/row_version.rs:173-295",
+          "rust/lance-table/src/transaction/row_version.rs:332-405",
+          "rust/lance-table/src/transaction/manifest_build.rs:765-765",
+          "rust/lance-table/src/transaction/manifest_build.rs:965-1022"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-table/src/transaction/manifest_build.rs"
+      ],
+      "kb_section": "Local transaction trace: allocate IDs, preserve creation, stamp update\n\n[Scenario](scenarios.md#local-transaction-trace-allocate-ids-preserve-creation-stamp-update) \u00b7 [Decision contract](../L3-symbols/protocol-commit.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-table/src/transaction/row_version.rs.md) \u2192 rust/lance-table/src/transaction/row_version.rs:97-171, rust/lance-table/src/transaction/row_version.rs:173-295, rust/lance-table/src/transaction/row_version.rs:332-405.\n2. [frozen/Key File contract](../L2-files/rust/lance-table/src/transaction/manifest_build.rs.md) \u2192 rust/lance-table/src/transaction/manifest_build.rs:765-765, rust/lance-table/src/transaction/manifest_build.rs:965-1022.\n\n<a id=\"scenario-25\"></a>\n\n"
+    },
+    {
+      "id": "route-106",
+      "task": "Transaction-attempt trace",
+      "ordered_read_sets": [
+        [
+          "rust/lance-table/src/transaction/builder.rs:37-90",
+          "rust/lance-table/src/transaction/manifest_build.rs:487-535",
+          "rust/lance-table/src/transaction/manifest_build.rs:606-624"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-table/src/transaction/manifest_build.rs"
+      ],
+      "kb_section": "Transaction-attempt trace\n\n[Scenario](scenarios.md#partial-transaction-attempt-trace) \u00b7 [Decision contract](../L3-symbols/protocol-commit.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-table/src/transaction/builder.rs.md) \u2192 rust/lance-table/src/transaction/builder.rs:37-90.\n2. [frozen/Key File contract](../L2-files/rust/lance-table/src/transaction/manifest_build.rs.md) \u2192 rust/lance-table/src/transaction/manifest_build.rs:487-535, rust/lance-table/src/transaction/manifest_build.rs:606-624.\n\n<a id=\"scenario-26\"></a>\n\n"
+    },
+    {
+      "id": "route-108",
+      "task": "Local pre-commit validation trace",
+      "ordered_read_sets": [
+        [
+          "rust/lance/src/dataset/write/commit.rs:301-341",
+          "rust/lance/src/dataset/write/commit.rs:402-425",
+          "rust/lance-table/src/transaction/validate.rs:377-698",
+          "rust/lance-table/src/transaction/validate.rs:726-1044"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-table/src/transaction/validate.rs",
+        "rust/lance/src/dataset/write/commit.rs"
+      ],
+      "kb_section": "Local pre-commit validation trace\n\n[Scenario](scenarios.md#local-pre-commit-validation-trace) \u00b7 [Decision contract](../L3-symbols/protocol-commit.md)\n\n1. [Module Map](../L1-modules/rust-lance.md#rust-lance-src-dataset-write) \u2192 rust/lance/src/dataset/write/commit.rs:301-341, rust/lance/src/dataset/write/commit.rs:402-425.\n2. [frozen/Key File contract](../L2-files/rust/lance-table/src/transaction/validate.rs.md) \u2192 rust/lance-table/src/transaction/validate.rs:377-698, rust/lance-table/src/transaction/validate.rs:726-1044.\n\n<a id=\"scenario-28\"></a>\n\n"
+    },
+    {
+      "id": "route-110",
+      "task": "Local index invalidation and rewrite trace",
+      "ordered_read_sets": [
+        [
+          "rust/lance-table/src/transaction/index_maintenance.rs:106-217",
+          "rust/lance-table/src/transaction/index_maintenance.rs:259-393",
+          "rust/lance-table/src/transaction/index_maintenance.rs:535-643",
+          "rust/lance-table/src/transaction/index_maintenance.rs:650-807",
+          "rust/lance-table/src/transaction/manifest_build.rs:1059-1144",
+          "rust/lance/src/io/commit/conflict_resolver.rs:1186-1254",
+          "rust/lance/src/io/commit/conflict_resolver.rs:1286-1342",
+          "rust/lance/src/io/commit/conflict_resolver.rs:1472-1508"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-table/src/transaction/index_maintenance.rs",
+        "rust/lance-table/src/transaction/manifest_build.rs",
+        "rust/lance/src/io/commit/conflict_resolver.rs"
+      ],
+      "kb_section": "Local index invalidation and rewrite trace\n\n[Scenario](scenarios.md#local-index-invalidation-and-rewrite-trace) \u00b7 [Decision contract](../L3-symbols/protocol-commit.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-table/src/transaction/index_maintenance.rs.md) \u2192 rust/lance-table/src/transaction/index_maintenance.rs:106-217, rust/lance-table/src/transaction/index_maintenance.rs:259-393, rust/lance-table/src/transaction/index_maintenance.rs:535-643, rust/lance-table/src/transaction/index_maintenance.rs:650-807.\n2. [frozen/Key File contract](../L2-files/rust/lance-table/src/transaction/manifest_build.rs.md) \u2192 rust/lance-table/src/transaction/manifest_build.rs:1059-1144.\n3. [Module Map](../L1-modules/rust-lance.md#rust-lance-src-io-commit) \u2192 rust/lance/src/io/commit/conflict_resolver.rs:1186-1254, rust/lance/src/io/commit/conflict_resolver.rs:1286-1342, rust/lance/src/io/commit/conflict_resolver.rs:1472-1508.\n\n<a id=\"scenario-30\"></a>\n\n"
+    },
+    {
+      "id": "route-111",
+      "task": "Gate and clone-guard boundaries",
+      "ordered_read_sets": [
+        [
+          "rust/lance-table/src/transaction/manifest_build.rs:487-535",
+          "rust/lance-table/src/transaction/manifest_build.rs:606-624",
+          "rust/lance-table/src/system_index/frag_reuse/metadata.rs:70-85",
+          "rust/lance/src/dataset.rs:3345-3395,3449-3473",
+          "rust/lance/src/io/commit.rs:462-538"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-table/src/transaction/manifest_build.rs",
+        "rust/lance/src/dataset.rs",
+        "rust/lance/src/io/commit.rs"
+      ],
+      "kb_section": "Gate and clone-guard boundaries\n\nThe standalone guard is deprecated. Dataset clone now relocates tagged references through commit orchestration; it does not call this old guard. Read the [current clone contract](../L3-symbols/refresh-2026-10-07.md#clone-and-garbage-collection).\n\n[Scenario](scenarios.md#gate-and-clone-guard-boundaries) \u00b7 [Decision contract](../L3-symbols/protocol-commit.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-table/src/transaction/manifest_build.rs.md) \u2192 rust/lance-table/src/transaction/manifest_build.rs:487-535, rust/lance-table/src/transaction/manifest_build.rs:606-624.\n2. [frozen/Key File contract](../L2-files/rust/lance-table/src/system_index/frag_reuse/metadata.rs.md) \u2192 rust/lance-table/src/system_index/frag_reuse/metadata.rs:70-85.\n3. [frozen/Key File contract](../L2-files/rust/lance/src/dataset.rs.md) \u2192 rust/lance/src/dataset.rs:3345-3395,3449-3473.\n4. [Module Map](../L1-modules/rust-lance.md#rust-lance-src-io) \u2192 rust/lance/src/io/commit.rs:462-538.\n\n<a id=\"scenario-31\"></a>\n\n"
+    },
+    {
+      "id": "route-113",
+      "task": "Local MemWAL generation publication preparation",
+      "ordered_read_sets": [
+        [
+          "rust/lance-table/src/transaction/manifest_build.rs:466-590",
+          "rust/lance-table/src/transaction/manifest_build.rs:593-2025",
+          "rust/lance-table/src/system_index/mem_wal.rs:531-538",
+          "rust/lance-table/src/system_index/mem_wal.rs:540-585",
+          "rust/lance-table/src/system_index/mem_wal.rs:587-618",
+          "rust/lance/src/index.rs:4713-4743",
+          "rust/lance/src/io/commit.rs:1333-1411",
+          "rust/lance/src/io/commit.rs:1570-1614",
+          "rust/lance/src/io/commit.rs:1832-1923"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-table/src/transaction/manifest_build.rs",
+        "rust/lance/src/index.rs",
+        "rust/lance/src/io/commit.rs"
+      ],
+      "kb_section": "Local MemWAL generation publication preparation\n\n[Scenario](scenarios.md#local-memwal-generation-publication-preparation) \u00b7 [Decision contract](../L3-symbols/protocol-commit.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-table/src/transaction/manifest_build.rs.md) \u2192 rust/lance-table/src/transaction/manifest_build.rs:466-590, rust/lance-table/src/transaction/manifest_build.rs:593-2025.\n2. [frozen/Key File contract](../L2-files/rust/lance-table/src/system_index/mem_wal.rs.md) \u2192 rust/lance-table/src/system_index/mem_wal.rs:531-538, rust/lance-table/src/system_index/mem_wal.rs:540-585, rust/lance-table/src/system_index/mem_wal.rs:587-618.\n3. [Module Map](../L1-modules/rust-lance.md#rust-lance-src) \u2192 rust/lance/src/index.rs:4713-4743.\n4. [Module Map](../L1-modules/rust-lance.md#rust-lance-src-io) \u2192 rust/lance/src/io/commit.rs:1333-1411, rust/lance/src/io/commit.rs:1570-1614, rust/lance/src/io/commit.rs:1832-1923.\n\n<a id=\"scenario-33\"></a>\n\n"
+    },
+    {
+      "id": "route-114",
+      "task": "Manifest body write/read and deletion-object trace",
+      "ordered_read_sets": [
+        [
+          "rust/lance-table/src/transaction/manifest_build.rs:2008-2025",
+          "rust/lance-table/src/io/manifest.rs:32-175",
+          "rust/lance-table/src/io/manifest.rs:177-230",
+          "rust/lance-table/src/io/commit.rs:213-230",
+          "rust/lance-table/src/format/manifest.rs:403-431",
+          "rust/lance-table/src/io/deletion.rs:61-216"
+        ],
+        [
+          "rust/lance/src/dataset/fragment.rs:3005-3036",
+          "rust/lance/src/io/deletion.rs:11-43"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-table/src/format/manifest.rs",
+        "rust/lance-table/src/transaction/manifest_build.rs",
+        "rust/lance/src/dataset/fragment.rs"
+      ],
+      "kb_section": "Manifest body write/read and deletion-object trace\n\n[Scenario](scenarios.md#manifest-body-writeread-and-deletion-object-trace) \u00b7 [Decision contract](../L3-symbols/protocol-commit.md)\n\n**Local subtask 1: manifest_build, manifest, commit, manifest, deletion.** Select this set only when changing those mechanisms; the other sets are separate subproblems.\n\n1. [frozen/Key File contract](../L2-files/rust/lance-table/src/transaction/manifest_build.rs.md) \u2192 rust/lance-table/src/transaction/manifest_build.rs:2008-2025.\n2. [frozen/Key File contract](../L2-files/rust/lance-table/src/io/manifest.rs.md) \u2192 rust/lance-table/src/io/manifest.rs:32-175, rust/lance-table/src/io/manifest.rs:177-230.\n3. [frozen/Key File contract](../L2-files/rust/lance-table/src/io/commit.rs.md) \u2192 rust/lance-table/src/io/commit.rs:213-230.\n4. [frozen/Key File contract](../L2-files/rust/lance-table/src/format/manifest.rs.md) \u2192 rust/lance-table/src/format/manifest.rs:403-431.\n5. [frozen/Key File contract](../L2-files/rust/lance-table/src/io/deletion.rs.md) \u2192 rust/lance-table/src/io/deletion.rs:61-216.\n\n**Local subtask 2: fragment, deletion.** Select this set only when changing those mechanisms; the other sets are separate subproblems.\n\n1. [Module Map](../L1-modules/rust-lance.md#rust-lance-src-dataset) \u2192 rust/lance/src/dataset/fragment.rs:3005-3036.\n2. [Module Map](../L1-modules/rust-lance.md#rust-lance-src-io) \u2192 rust/lance/src/io/deletion.rs:11-43.\n\n<a id=\"scenario-34\"></a>\n\n"
+    },
+    {
+      "id": "route-117",
+      "task": "DynamoDB generic commit and stable-ID lookup traces",
+      "ordered_read_sets": [
+        [
+          "rust/lance-table/src/io/commit.rs:1139-1169",
+          "rust/lance-table/src/io/commit/dynamodb.rs:162-265",
+          "rust/lance-table/src/io/commit/dynamodb.rs:423-484",
+          "rust/lance-table/src/io/commit/external_manifest.rs:35-102",
+          "rust/lance-table/src/io/commit/external_manifest.rs:963-1011",
+          "rust/lance-table/src/rowids/index.rs:62-183",
+          "rust/lance-table/src/rowids/index.rs:276-435",
+          "rust/lance-table/src/rowids/index.rs:502-752"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-table/src/rowids/index.rs"
+      ],
+      "kb_section": "DynamoDB generic commit and stable-ID lookup traces\n\n[Scenario](scenarios.md#dynamodb-generic-commit-and-stable-id-lookup-traces) \u00b7 [Decision contract](../L3-symbols/protocol-commit.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-table/src/io/commit.rs.md) \u2192 rust/lance-table/src/io/commit.rs:1139-1169.\n2. [frozen/Key File contract](../L2-files/rust/lance-table/src/io/commit/dynamodb.rs.md) \u2192 rust/lance-table/src/io/commit/dynamodb.rs:162-265, rust/lance-table/src/io/commit/dynamodb.rs:423-484.\n3. [frozen/Key File contract](../L2-files/rust/lance-table/src/io/commit/external_manifest.rs.md) \u2192 rust/lance-table/src/io/commit/external_manifest.rs:35-102, rust/lance-table/src/io/commit/external_manifest.rs:963-1011.\n4. [frozen/Key File contract](../L2-files/rust/lance-table/src/rowids/index.rs.md) \u2192 rust/lance-table/src/rowids/index.rs:62-183, rust/lance-table/src/rowids/index.rs:276-435, rust/lance-table/src/rowids/index.rs:502-752.\n\n<a id=\"scenario-37\"></a>\n\n"
+    },
+    {
+      "id": "route-118",
+      "task": "Scheduled batches to visible rows",
+      "ordered_read_sets": [
+        [
+          "rust/lance/src/dataset/fragment.rs:3681-3720",
+          "rust/lance/src/dataset/fragment.rs:3873-3917",
+          "rust/lance-table/src/utils/stream.rs:489-641",
+          "rust/lance-table/src/utils/stream.rs:692-848"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance/src/dataset/fragment.rs"
+      ],
+      "kb_section": "Scheduled batches to visible rows\n\n[Scenario](scenarios.md#scheduled-batches-to-visible-rows) \u00b7 [Decision contract](../L3-symbols/behavior-contracts.md)\n\n1. [Module Map](../L1-modules/rust-lance.md#rust-lance-src-dataset) \u2192 rust/lance/src/dataset/fragment.rs:3681-3720, rust/lance/src/dataset/fragment.rs:3873-3917.\n2. [frozen/Key File contract](../L2-files/rust/lance-table/src/utils/stream.rs.md) \u2192 rust/lance-table/src/utils/stream.rs:489-641, rust/lance-table/src/utils/stream.rs:692-848.\n\n<a id=\"scenario-38\"></a>\n\n"
+    },
+    {
+      "id": "route-119",
+      "task": "File runtime entry paths",
+      "ordered_read_sets": [
+        [
+          "rust/lance-file/src/version.rs:59-75",
+          "rust/lance-file/src/versions/mod.rs:151-198",
+          "rust/lance-file/src/versions/mod.rs:279-326",
+          "rust/lance-file/src/versions/mod.rs:328-372",
+          "rust/lance-file/src/writer.rs:160-189",
+          "rust/lance-file/src/writer/field_types.rs:87-128",
+          "rust/lance-file/src/writer/structural.rs:610-630"
+        ],
+        [
+          "rust/lance-file/src/versions/v2_0/writer.rs:458-477",
+          "rust/lance-file/src/reader.rs:934-944",
+          "rust/lance-file/src/io.rs:51-148"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-file/src/reader.rs",
+        "rust/lance-file/src/writer/field_types.rs"
+      ],
+      "kb_section": "File runtime entry paths\n\n[Scenario](scenarios.md#file-runtime-entry-paths-local-not-complete-dataset-write) \u00b7 [Decision contract](../L3-symbols/behavior-contracts.md)\n\n**Local subtask 1: version, mod, writer, field_types, structural.** Select this set only when changing those mechanisms; the other sets are separate subproblems.\n\n1. [frozen/Key File contract](../L2-files/rust/lance-file/src/version.rs.md) \u2192 rust/lance-file/src/version.rs:59-75.\n2. [frozen/Key File contract](../L2-files/rust/lance-file/src/versions/mod.rs.md) \u2192 rust/lance-file/src/versions/mod.rs:151-198, rust/lance-file/src/versions/mod.rs:279-326, rust/lance-file/src/versions/mod.rs:328-372.\n3. [frozen/Key File contract](../L2-files/rust/lance-file/src/writer.rs.md) \u2192 rust/lance-file/src/writer.rs:160-189.\n4. [frozen/Key File contract](../L2-files/rust/lance-file/src/writer/field_types.rs.md) \u2192 rust/lance-file/src/writer/field_types.rs:87-128.\n5. [frozen/Key File contract](../L2-files/rust/lance-file/src/writer/structural.rs.md) \u2192 rust/lance-file/src/writer/structural.rs:610-630.\n\n**Local subtask 2: writer, reader, io.** Select this set only when changing those mechanisms; the other sets are separate subproblems.\n\n1. [frozen/Key File contract](../L2-files/rust/lance-file/src/versions/v2_0/writer.rs.md) \u2192 rust/lance-file/src/versions/v2_0/writer.rs:458-477.\n2. [frozen/Key File contract](../L2-files/rust/lance-file/src/reader.rs.md) \u2192 rust/lance-file/src/reader.rs:934-944.\n3. [frozen/Key File contract](../L2-files/rust/lance-file/src/io.rs.md) \u2192 rust/lance-file/src/io.rs:51-148.\n\n<a id=\"scenario-39\"></a>\n\n"
+    },
+    {
+      "id": "route-120",
+      "task": "Structural projection subtrace",
+      "ordered_read_sets": [
+        [
+          "rust/lance-file/src/reader/structural.rs:319-431",
+          "rust/lance-file/src/reader.rs:539-569"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-file/src/reader.rs"
+      ],
+      "kb_section": "Structural projection subtrace\n\n[Scenario](scenarios.md#structural-projection-subtrace) \u00b7 [Decision contract](../L3-symbols/behavior-contracts.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-file/src/reader/structural.rs.md) \u2192 rust/lance-file/src/reader/structural.rs:319-431.\n2. [frozen/Key File contract](../L2-files/rust/lance-file/src/reader.rs.md) \u2192 rust/lance-file/src/reader.rs:539-569.\n\n<a id=\"scenario-40\"></a>\n\n"
+    },
+    {
+      "id": "route-121",
+      "task": "Metadata finishing subtrace",
+      "ordered_read_sets": [
+        [
+          "rust/lance-file/src/versions/v2_0/reader.rs:150-175",
+          "rust/lance-file/src/versions/v2_0/reader.rs:350-395",
+          "rust/lance-file/src/versions/v2_1/reader.rs:170-267",
+          "rust/lance-file/src/versions/v2_2/reader.rs:172-269",
+          "rust/lance-file/src/versions/v2_3/reader.rs:249-346"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-file/src/versions/v2_1/reader.rs",
+        "rust/lance-file/src/versions/v2_2/reader.rs",
+        "rust/lance-file/src/versions/v2_3/reader.rs"
+      ],
+      "kb_section": "Metadata finishing subtrace\n\n[Scenario](scenarios.md#metadata-finishing-subtrace) \u00b7 [Decision contract](../L3-symbols/behavior-contracts.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-file/src/versions/v2_0/reader.rs.md) \u2192 rust/lance-file/src/versions/v2_0/reader.rs:150-175, rust/lance-file/src/versions/v2_0/reader.rs:350-395.\n2. [frozen/Key File contract](../L2-files/rust/lance-file/src/versions/v2_1/reader.rs.md) \u2192 rust/lance-file/src/versions/v2_1/reader.rs:170-267.\n3. [frozen/Key File contract](../L2-files/rust/lance-file/src/versions/v2_2/reader.rs.md) \u2192 rust/lance-file/src/versions/v2_2/reader.rs:172-269.\n4. [frozen/Key File contract](../L2-files/rust/lance-file/src/versions/v2_3/reader.rs.md) \u2192 rust/lance-file/src/versions/v2_3/reader.rs:249-346.\n\n<a id=\"scenario-41\"></a>\n\n"
+    },
+    {
+      "id": "route-123",
+      "task": "Shared reader open, prepare and consume",
+      "ordered_read_sets": [
+        [
+          "rust/lance-file/src/reader.rs:457-468",
+          "rust/lance-file/src/reader.rs:946-1107",
+          "rust/lance-file/src/reader.rs:1158-1474",
+          "rust/lance-file/src/reader.rs:1612-1669",
+          "rust/lance-file/src/reader.rs:1713-1743",
+          "rust/lance-file/src/reader.rs:1745-1877",
+          "rust/lance-file/src/reader.rs:1968-2072",
+          "rust/lance-file/src/reader.rs:2178-2211",
+          "rust/lance-file/src/reader/structural.rs:393-431"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-file/src/reader.rs"
+      ],
+      "kb_section": "Shared reader open, prepare and consume\n\n[Scenario](scenarios.md#shared-reader-open-prepare-and-consume) \u00b7 [Decision contract](../L3-symbols/behavior-contracts.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-file/src/reader.rs.md) \u2192 rust/lance-file/src/reader.rs:457-468, rust/lance-file/src/reader.rs:946-1107, rust/lance-file/src/reader.rs:1158-1474, rust/lance-file/src/reader.rs:1612-1669, rust/lance-file/src/reader.rs:1713-1743, rust/lance-file/src/reader.rs:1745-1877, rust/lance-file/src/reader.rs:1968-2072, rust/lance-file/src/reader.rs:2178-2211.\n2. [frozen/Key File contract](../L2-files/rust/lance-file/src/reader/structural.rs.md) \u2192 rust/lance-file/src/reader/structural.rs:393-431.\n\n<a id=\"scenario-45\"></a>\n\n"
+    },
+    {
+      "id": "route-126",
+      "task": "Frozen V1 full local read trace",
+      "ordered_read_sets": [
+        [
+          "rust/lance-table/src/format/manifest.rs:1220-1246",
+          "rust/lance-file/src/versions/v1/reader.rs:139-288",
+          "rust/lance-file/src/versions/v1/reader.rs:324-507",
+          "rust/lance-file/src/versions/v1/reader.rs:509-808",
+          "rust/lance-file/src/versions/v1/format/metadata.rs:128-163"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-table/src/format/manifest.rs"
+      ],
+      "kb_section": "Frozen V1 full local read trace\n\n[Scenario](scenarios.md#frozen-v1-full-local-read-trace) \u00b7 [Decision contract](../L3-symbols/behavior-contracts.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-table/src/format/manifest.rs.md) \u2192 rust/lance-table/src/format/manifest.rs:1220-1246.\n2. [frozen/Key File contract](../L2-files/rust/lance-file/src/versions/v1/reader.rs.md) \u2192 rust/lance-file/src/versions/v1/reader.rs:139-288, rust/lance-file/src/versions/v1/reader.rs:324-507, rust/lance-file/src/versions/v1/reader.rs:509-808.\n3. [frozen/Key File contract](../L2-files/rust/lance-file/src/versions/v1/format/metadata.rs.md) \u2192 rust/lance-file/src/versions/v1/format/metadata.rs:128-163.\n\n<a id=\"scenario-48\"></a>\n\n"
+    },
+    {
+      "id": "route-127",
+      "task": "Complete local V1 write-to-read trace",
+      "ordered_read_sets": [
+        [
+          "rust/lance/src/dataset/write.rs:2102-2113",
+          "rust/lance/src/dataset/write.rs:2335-2363",
+          "rust/lance-file/src/versions/v1/writer/mod.rs:166-236",
+          "rust/lance-file/src/versions/v1/writer/mod.rs:255-270",
+          "rust/lance-file/src/versions/v1/writer/mod.rs:462-586",
+          "rust/lance-file/src/versions/v1/writer/mod.rs:588-651",
+          "rust/lance-table/src/io/manifest.rs:232-250"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance/src/dataset/write.rs"
+      ],
+      "kb_section": "Complete local V1 write-to-read trace\n\n[Scenario](scenarios.md#complete-local-v1-write-to-read-trace) \u00b7 [Decision contract](../L3-symbols/behavior-contracts.md)\n\n1. [Module Map](../L1-modules/rust-lance.md#rust-lance-src-dataset) \u2192 rust/lance/src/dataset/write.rs:2102-2113, rust/lance/src/dataset/write.rs:2335-2363.\n2. [frozen/Key File contract](../L2-files/rust/lance-file/src/versions/v1/writer/mod.rs.md) \u2192 rust/lance-file/src/versions/v1/writer/mod.rs:166-236, rust/lance-file/src/versions/v1/writer/mod.rs:255-270, rust/lance-file/src/versions/v1/writer/mod.rs:462-586, rust/lance-file/src/versions/v1/writer/mod.rs:588-651.\n3. [frozen/Key File contract](../L2-files/rust/lance-table/src/io/manifest.rs.md) \u2192 rust/lance-table/src/io/manifest.rs:232-250.\n\n<a id=\"scenario-49\"></a>\n\n"
+    },
+    {
+      "id": "route-129",
+      "task": "Read stable V2_0 through production code",
+      "ordered_read_sets": [
+        [
+          "rust/lance-file/src/version.rs:200-262",
+          "rust/lance-encoding/src/array_encoding/logical/list.rs:1116-1243",
+          "rust/lance-encoding/src/data.rs:1710-1785",
+          "rust/lance-encoding/src/array_encoding/logical/blob.rs:308-399"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-encoding/src/data.rs"
+      ],
+      "kb_section": "Read stable V2_0 through production code\n\n[Scenario](scenarios.md#decode-the-pinned-standard-v2_0-file) \u00b7 [Decision contract](../L3-symbols/protocol-encoding.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-file/src/version.rs.md) \u2192 rust/lance-file/src/version.rs:200-262.\n2. [Module Map](../L1-modules/peripheral-maps.md#rust-lance-encoding-src-array-encoding) \u2192 rust/lance-encoding/src/array_encoding/logical/list.rs:1116-1243.\n3. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/data.rs.md) \u2192 rust/lance-encoding/src/data.rs:1710-1785.\n4. [Module Map](../L1-modules/peripheral-maps.md#rust-lance-encoding-src-array-encoding) \u2192 rust/lance-encoding/src/array_encoding/logical/blob.rs:308-399.\n\n<a id=\"scenario-55\"></a>\n\n"
+    },
+    {
+      "id": "route-130",
+      "task": "Read stable V2_2 through production code",
+      "ordered_read_sets": [
+        [
+          "protos/file2.proto:40-93",
+          "rust/lance-encoding/src/encodings/logical/primitive.rs:5751-6062",
+          "rust/lance-arrow/src/scalar.rs:61-191",
+          "rust/lance-encoding/src/encodings/logical/primitive/constant.rs:219-259"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-encoding/src/encodings/logical/primitive.rs"
+      ],
+      "kb_section": "Read stable V2_2 through production code\n\n[Scenario](scenarios.md#decode-the-pinned-standard-v2_2-file) \u00b7 [Decision contract](../L3-symbols/protocol-encoding.md)\n\n1. [frozen/Key File contract](../L2-files/protos/file2.proto.md) \u2192 protos/file2.proto:40-93.\n2. [Module Map](../L1-modules/peripheral-maps.md#rust-lance-encoding) \u2192 rust/lance-encoding/src/encodings/logical/primitive.rs:5751-6062.\n3. [Module Map](../L1-modules/peripheral-maps.md#rust-lance-arrow) \u2192 rust/lance-arrow/src/scalar.rs:61-191.\n4. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/encodings/logical/primitive/constant.rs.md) \u2192 rust/lance-encoding/src/encodings/logical/primitive/constant.rs:219-259.\n\n<a id=\"scenario-56\"></a>\n\n"
+    },
+    {
+      "id": "route-131",
+      "task": "Local metadata and IO handoff",
+      "ordered_read_sets": [
+        [
+          "rust/lance-encoding/build.rs:15-20",
+          "rust/lance-encoding/src/format.rs:4-33",
+          "rust/lance-encoding/src/format.rs:312-827",
+          "rust/lance-file/src/versions/v2_1/reader.rs:99-151",
+          "rust/lance-file/src/versions/v2_2/reader.rs:99-153",
+          "rust/lance-encoding/src/lib.rs:33-134"
+        ],
+        [
+          "rust/lance-file/src/io.rs:17-148",
+          "rust/lance-encoding/src/decoder.rs:3412-3440"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-encoding/src/format.rs",
+        "rust/lance-file/src/versions/v2_1/reader.rs",
+        "rust/lance-file/src/versions/v2_2/reader.rs"
+      ],
+      "kb_section": "Local metadata and IO handoff\n\n[Scenario](scenarios.md#local-metadata-and-io-handoff) \u00b7 [Decision contract](../L3-symbols/protocol-encoding.md)\n\n**Local subtask 1: build, format, reader, reader, lib.** Select this set only when changing those mechanisms; the other sets are separate subproblems.\n\n1. [Module Map](../L1-modules/peripheral-maps.md#rust-lance-encoding) \u2192 rust/lance-encoding/build.rs:15-20.\n2. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/format.rs.md) \u2192 rust/lance-encoding/src/format.rs:4-33, rust/lance-encoding/src/format.rs:312-827.\n3. [frozen/Key File contract](../L2-files/rust/lance-file/src/versions/v2_1/reader.rs.md) \u2192 rust/lance-file/src/versions/v2_1/reader.rs:99-151.\n4. [frozen/Key File contract](../L2-files/rust/lance-file/src/versions/v2_2/reader.rs.md) \u2192 rust/lance-file/src/versions/v2_2/reader.rs:99-153.\n5. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/lib.rs.md) \u2192 rust/lance-encoding/src/lib.rs:33-134.\n\n**Local subtask 2: io, decoder.** Select this set only when changing those mechanisms; the other sets are separate subproblems.\n\n1. [frozen/Key File contract](../L2-files/rust/lance-file/src/io.rs.md) \u2192 rust/lance-file/src/io.rs:17-148.\n2. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/decoder.rs.md) \u2192 rust/lance-encoding/src/decoder.rs:3412-3440.\n\n<a id=\"scenario-57\"></a>\n\n"
+    },
+    {
+      "id": "route-132",
+      "task": "Local configuration-to-buffer trace",
+      "ordered_read_sets": [
+        [
+          "rust/lance-encoding/src/compression_config.rs:84-141",
+          "rust/lance-file/src/versions/v2_2/compression.rs:27-38",
+          "rust/lance-encoding/src/compression.rs:560-591",
+          "rust/lance-encoding/src/compression.rs:1335-1353",
+          "rust/lance-encoding/src/utils/accumulation.rs:37-105",
+          "rust/lance-encoding/src/encodings/logical/primitive.rs:7974-8005"
+        ],
+        [
+          "rust/lance-encoding/src/encodings/physical/block.rs:577-604",
+          "rust/lance-encoding/src/encodings/physical/block.rs:772-808"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-encoding/src/compression.rs",
+        "rust/lance-encoding/src/encodings/logical/primitive.rs",
+        "rust/lance-encoding/src/encodings/physical/block.rs"
+      ],
+      "kb_section": "Local configuration-to-buffer trace\n\n[Scenario](scenarios.md#local-configuration-to-buffer-trace) \u00b7 [Decision contract](../L3-symbols/protocol-encoding.md)\n\n**Local subtask 1: compression_config, compression, compression, accumulation, primitive.** Select this set only when changing those mechanisms; the other sets are separate subproblems.\n\n1. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/compression_config.rs.md) \u2192 rust/lance-encoding/src/compression_config.rs:84-141.\n2. [frozen/Key File contract](../L2-files/rust/lance-file/src/versions/v2_2/compression.rs.md) \u2192 rust/lance-file/src/versions/v2_2/compression.rs:27-38.\n3. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/compression.rs.md) \u2192 rust/lance-encoding/src/compression.rs:560-591, rust/lance-encoding/src/compression.rs:1335-1353.\n4. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/utils/accumulation.rs.md) \u2192 rust/lance-encoding/src/utils/accumulation.rs:37-105.\n5. [Module Map](../L1-modules/peripheral-maps.md#rust-lance-encoding) \u2192 rust/lance-encoding/src/encodings/logical/primitive.rs:7974-8005.\n\n**Local subtask 2: block.** Select this set only when changing those mechanisms; the other sets are separate subproblems.\n\n1. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/encodings/physical/block.rs.md) \u2192 rust/lance-encoding/src/encodings/physical/block.rs:577-604, rust/lance-encoding/src/encodings/physical/block.rs:772-808.\n\n<a id=\"scenario-58\"></a>\n\n"
+    },
+    {
+      "id": "route-133",
+      "task": "General mini-block subtrace",
+      "ordered_read_sets": [
+        [
+          "rust/lance-encoding/src/compression.rs:517-531",
+          "rust/lance-encoding/src/compression.rs:699-737",
+          "rust/lance-encoding/src/compression.rs:1133-1154",
+          "rust/lance-encoding/src/encodings/physical/general.rs:112-188",
+          "rust/lance-encoding/src/encodings/physical/general.rs:204-229"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-encoding/src/compression.rs",
+        "rust/lance-encoding/src/encodings/physical/general.rs"
+      ],
+      "kb_section": "General mini-block subtrace\n\n[Scenario](scenarios.md#general-mini-block-subtrace) \u00b7 [Decision contract](../L3-symbols/protocol-encoding.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/compression.rs.md) \u2192 rust/lance-encoding/src/compression.rs:517-531, rust/lance-encoding/src/compression.rs:699-737, rust/lance-encoding/src/compression.rs:1133-1154.\n2. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/encodings/physical/general.rs.md) \u2192 rust/lance-encoding/src/encodings/physical/general.rs:112-188, rust/lance-encoding/src/encodings/physical/general.rs:204-229.\n\n<a id=\"scenario-59\"></a>\n\n"
+    },
+    {
+      "id": "route-134",
+      "task": "Raw FSL and bitpacking codec subtraces",
+      "ordered_read_sets": [
+        [
+          "rust/lance-encoding/src/compression.rs:339-457",
+          "rust/lance-encoding/src/compression.rs:745-775",
+          "rust/lance-encoding/src/compression.rs:1025-1109",
+          "rust/lance-encoding/src/compression.rs:1273-1337",
+          "rust/lance-encoding/src/encodings/physical/value.rs:323-455",
+          "rust/lance-encoding/src/encodings/physical/value.rs:516-852",
+          "rust/lance-encoding/src/statistics.rs:353-406",
+          "rust/lance-encoding/src/encodings/physical/bitpacking.rs:220-314",
+          "rust/lance-encoding/src/encodings/physical/bitpacking.rs:500-564"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-encoding/src/compression.rs",
+        "rust/lance-encoding/src/encodings/physical/bitpacking.rs",
+        "rust/lance-encoding/src/encodings/physical/value.rs"
+      ],
+      "kb_section": "Raw FSL and bitpacking codec subtraces\n\n[Scenario](scenarios.md#raw-fsl-and-bitpacking-codec-subtraces) \u00b7 [Decision contract](../L3-symbols/protocol-encoding.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/compression.rs.md) \u2192 rust/lance-encoding/src/compression.rs:339-457, rust/lance-encoding/src/compression.rs:745-775, rust/lance-encoding/src/compression.rs:1025-1109, rust/lance-encoding/src/compression.rs:1273-1337.\n2. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/encodings/physical/value.rs.md) \u2192 rust/lance-encoding/src/encodings/physical/value.rs:323-455, rust/lance-encoding/src/encodings/physical/value.rs:516-852.\n3. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/statistics.rs.md) \u2192 rust/lance-encoding/src/statistics.rs:353-406.\n4. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/encodings/physical/bitpacking.rs.md) \u2192 rust/lance-encoding/src/encodings/physical/bitpacking.rs:220-314, rust/lance-encoding/src/encodings/physical/bitpacking.rs:500-564.\n\n<a id=\"scenario-60\"></a>\n\n"
+    },
+    {
+      "id": "route-135",
+      "task": "Variable and BSS codec subtraces",
+      "ordered_read_sets": [
+        [
+          "rust/lance-encoding/src/compression.rs:154-191",
+          "rust/lance-encoding/src/compression.rs:661-736",
+          "rust/lance-encoding/src/compression.rs:1061-1134",
+          "rust/lance-encoding/src/compression.rs:1213-1242",
+          "rust/lance-encoding/src/encodings/physical/fsst.rs:147-168",
+          "rust/lance-encoding/src/encodings/physical/fsst.rs:317-390",
+          "rust/lance-encoding/src/data.rs:742-969",
+          "rust/lance-encoding/src/statistics.rs:500-551",
+          "rust/lance-encoding/src/encodings/physical/byte_stream_split.rs:109-324"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-encoding/src/compression.rs",
+        "rust/lance-encoding/src/data.rs",
+        "rust/lance-encoding/src/encodings/physical/fsst.rs"
+      ],
+      "kb_section": "Variable and BSS codec subtraces\n\n[Scenario](scenarios.md#variable-and-bss-codec-subtraces) \u00b7 [Decision contract](../L3-symbols/protocol-encoding.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/compression.rs.md) \u2192 rust/lance-encoding/src/compression.rs:154-191, rust/lance-encoding/src/compression.rs:661-736, rust/lance-encoding/src/compression.rs:1061-1134, rust/lance-encoding/src/compression.rs:1213-1242.\n2. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/encodings/physical/fsst.rs.md) \u2192 rust/lance-encoding/src/encodings/physical/fsst.rs:147-168, rust/lance-encoding/src/encodings/physical/fsst.rs:317-390.\n3. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/data.rs.md) \u2192 rust/lance-encoding/src/data.rs:742-969.\n4. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/statistics.rs.md) \u2192 rust/lance-encoding/src/statistics.rs:500-551.\n5. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/encodings/physical/byte_stream_split.rs.md) \u2192 rust/lance-encoding/src/encodings/physical/byte_stream_split.rs:109-324.\n\n<a id=\"scenario-61\"></a>\n\n"
+    },
+    {
+      "id": "route-136",
+      "task": "Packed and statistics subtraces",
+      "ordered_read_sets": [
+        [
+          "rust/lance-encoding/src/data.rs:2027-2037",
+          "rust/lance-encoding/src/statistics.rs:73-137",
+          "rust/lance-encoding/src/statistics.rs:187-214",
+          "rust/lance-encoding/src/statistics.rs:579-594",
+          "rust/lance-encoding/src/encodings/physical/packed.rs:40-103",
+          "rust/lance-encoding/src/encodings/physical/packed.rs:329-448",
+          "rust/lance-encoding/src/encodings/physical/packed.rs:637-897"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-encoding/src/data.rs",
+        "rust/lance-encoding/src/encodings/physical/packed.rs"
+      ],
+      "kb_section": "Packed and statistics subtraces\n\n[Scenario](scenarios.md#packed-and-statistics-subtraces) \u00b7 [Decision contract](../L3-symbols/protocol-encoding.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/data.rs.md) \u2192 rust/lance-encoding/src/data.rs:2027-2037.\n2. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/statistics.rs.md) \u2192 rust/lance-encoding/src/statistics.rs:73-137, rust/lance-encoding/src/statistics.rs:187-214, rust/lance-encoding/src/statistics.rs:579-594.\n3. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/encodings/physical/packed.rs.md) \u2192 rust/lance-encoding/src/encodings/physical/packed.rs:40-103, rust/lance-encoding/src/encodings/physical/packed.rs:329-448, rust/lance-encoding/src/encodings/physical/packed.rs:637-897.\n\n<a id=\"scenario-62\"></a>\n\n"
+    },
+    {
+      "id": "route-137",
+      "task": "Compression policy subtrace",
+      "ordered_read_sets": [
+        [
+          "rust/lance-file/src/versions/v2_3/compression.rs:31-101",
+          "rust/lance-encoding/src/compression.rs:594-764",
+          "rust/lance-encoding/src/compression.rs:839-880",
+          "rust/lance-encoding/src/compression.rs:1034-1908"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-encoding/src/compression.rs",
+        "rust/lance-file/src/versions/v2_3/compression.rs"
+      ],
+      "kb_section": "Compression policy subtrace\n\n[Scenario](scenarios.md#compression-policy-subtrace) \u00b7 [Decision contract](../L3-symbols/protocol-encoding.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-file/src/versions/v2_3/compression.rs.md) \u2192 rust/lance-file/src/versions/v2_3/compression.rs:31-101.\n2. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/compression.rs.md) \u2192 rust/lance-encoding/src/compression.rs:594-764, rust/lance-encoding/src/compression.rs:839-880, rust/lance-encoding/src/compression.rs:1034-1908.\n\n<a id=\"scenario-63\"></a>\n\n"
+    },
+    {
+      "id": "route-138",
+      "task": "RLE local write/read trace",
+      "ordered_read_sets": [
+        [
+          "rust/lance-encoding/src/encodings/physical/rle.rs:142-328",
+          "rust/lance-encoding/src/encodings/physical/rle.rs:385-634",
+          "rust/lance-encoding/src/encodings/physical/rle.rs:727-1151",
+          "rust/lance-encoding/src/encodings/physical/rle.rs:1471-1632",
+          "rust/lance-encoding/src/encodings/physical/rle.rs:1925-1948",
+          "rust/lance-encoding/src/encodings/logical/primitive.rs:1302-1380"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-encoding/src/encodings/logical/primitive.rs",
+        "rust/lance-encoding/src/encodings/physical/rle.rs"
+      ],
+      "kb_section": "RLE local write/read trace\n\n[Scenario](scenarios.md#rle-local-writeread-trace) \u00b7 [Decision contract](../L3-symbols/protocol-encoding.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/encodings/physical/rle.rs.md) \u2192 rust/lance-encoding/src/encodings/physical/rle.rs:142-328, rust/lance-encoding/src/encodings/physical/rle.rs:385-634, rust/lance-encoding/src/encodings/physical/rle.rs:727-1151, rust/lance-encoding/src/encodings/physical/rle.rs:1471-1632, rust/lance-encoding/src/encodings/physical/rle.rs:1925-1948.\n2. [Module Map](../L1-modules/peripheral-maps.md#rust-lance-encoding) \u2192 rust/lance-encoding/src/encodings/logical/primitive.rs:1302-1380.\n\n<a id=\"scenario-64\"></a>\n\n"
+    },
+    {
+      "id": "route-139",
+      "task": "Arrow array to physical block and back",
+      "ordered_read_sets": [
+        [
+          "rust/lance-encoding/src/encodings/logical/primitive.rs:7575-7600",
+          "rust/lance-encoding/src/data.rs:735-963",
+          "rust/lance-encoding/src/data.rs:1192-1216",
+          "rust/lance-encoding/src/data.rs:1802-2044"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-encoding/src/data.rs",
+        "rust/lance-encoding/src/encodings/logical/primitive.rs"
+      ],
+      "kb_section": "Arrow array to physical block and back\n\n[Scenario](scenarios.md#arrow-array-to-physical-block-and-back) \u00b7 [Decision contract](../L3-symbols/protocol-encoding.md)\n\n1. [Module Map](../L1-modules/peripheral-maps.md#rust-lance-encoding) \u2192 rust/lance-encoding/src/encodings/logical/primitive.rs:7575-7600.\n2. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/data.rs.md) \u2192 rust/lance-encoding/src/data.rs:735-963, rust/lance-encoding/src/data.rs:1192-1216, rust/lance-encoding/src/data.rs:1802-2044.\n\n<a id=\"scenario-65\"></a>\n\n"
+    },
+    {
+      "id": "route-140",
+      "task": "Structural utility trace",
+      "ordered_read_sets": [
+        [
+          "rust/lance-encoding/src/repdef.rs:510-590",
+          "rust/lance-encoding/src/repdef.rs:958-1230",
+          "rust/lance-encoding/src/repdef.rs:1251-1396",
+          "rust/lance-encoding/src/repdef.rs:1409-1589",
+          "rust/lance-encoding/src/repdef.rs:1615-2140",
+          "rust/lance-encoding/src/repdef.rs:2143-2548",
+          "rust/lance-encoding/src/repdef.rs:2550-2840",
+          "rust/lance-encoding/src/encodings/logical/primitive.rs:7118-7162",
+          "rust/lance-encoding/src/encodings/logical/primitive.rs:7709-7729",
+          "rust/lance-encoding/src/encodings/logical/struct.rs:438-460"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-encoding/src/encodings/logical/primitive.rs",
+        "rust/lance-encoding/src/encodings/logical/struct.rs",
+        "rust/lance-encoding/src/repdef.rs"
+      ],
+      "kb_section": "Structural utility trace\n\n[Scenario](scenarios.md#structural-utility-trace) \u00b7 [Decision contract](../L3-symbols/protocol-encoding.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/repdef.rs.md) \u2192 rust/lance-encoding/src/repdef.rs:510-590, rust/lance-encoding/src/repdef.rs:958-1230, rust/lance-encoding/src/repdef.rs:1251-1396, rust/lance-encoding/src/repdef.rs:1409-1589, rust/lance-encoding/src/repdef.rs:1615-2140, rust/lance-encoding/src/repdef.rs:2143-2548, rust/lance-encoding/src/repdef.rs:2550-2840.\n2. [Module Map](../L1-modules/peripheral-maps.md#rust-lance-encoding) \u2192 rust/lance-encoding/src/encodings/logical/primitive.rs:7118-7162, rust/lance-encoding/src/encodings/logical/primitive.rs:7709-7729.\n3. [Module Map](../L1-modules/peripheral-maps.md#rust-lance-encoding) \u2192 rust/lance-encoding/src/encodings/logical/struct.rs:438-460.\n\n<a id=\"scenario-66\"></a>\n\n"
+    },
+    {
+      "id": "route-143",
+      "task": "Constant page selection and dictionary validity trace",
+      "ordered_read_sets": [
+        [
+          "rust/lance-encoding/src/encodings/logical/primitive.rs:131-195",
+          "rust/lance-encoding/src/encodings/logical/primitive.rs:4543-4572",
+          "rust/lance-encoding/src/encodings/logical/primitive.rs:7410-7457",
+          "rust/lance-encoding/src/encodings/logical/primitive.rs:7650-7688",
+          "rust/lance-encoding/src/encodings/logical/primitive.rs:7927-7972",
+          "rust/lance-encoding/src/encodings/logical/primitive/constant.rs:30-77",
+          "rust/lance-encoding/src/encodings/logical/primitive/constant.rs:129-280",
+          "rust/lance-encoding/src/encodings/logical/primitive/constant.rs:282-492",
+          "rust/lance-encoding/src/encodings/logical/primitive/dict.rs:30-170"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-encoding/src/encodings/logical/primitive.rs"
+      ],
+      "kb_section": "Constant page selection and dictionary validity trace\n\n[Scenario](scenarios.md#constant-page-selection-and-dictionary-validity-trace) \u00b7 [Decision contract](../L3-symbols/protocol-encoding.md)\n\n1. [Module Map](../L1-modules/peripheral-maps.md#rust-lance-encoding) \u2192 rust/lance-encoding/src/encodings/logical/primitive.rs:131-195, rust/lance-encoding/src/encodings/logical/primitive.rs:4543-4572, rust/lance-encoding/src/encodings/logical/primitive.rs:7410-7457, rust/lance-encoding/src/encodings/logical/primitive.rs:7650-7688, rust/lance-encoding/src/encodings/logical/primitive.rs:7927-7972.\n2. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/encodings/logical/primitive/constant.rs.md) \u2192 rust/lance-encoding/src/encodings/logical/primitive/constant.rs:30-77, rust/lance-encoding/src/encodings/logical/primitive/constant.rs:129-280, rust/lance-encoding/src/encodings/logical/primitive/constant.rs:282-492.\n3. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/encodings/logical/primitive/dict.rs.md) \u2192 rust/lance-encoding/src/encodings/logical/primitive/dict.rs:30-170.\n\n<a id=\"scenario-69\"></a>\n\n"
+    },
+    {
+      "id": "route-144",
+      "task": "Original Blob encode/read subtrace",
+      "ordered_read_sets": [
+        [
+          "rust/lance-encoding/src/encoder/structural.rs:136-150",
+          "rust/lance-encoding/src/encodings/logical/blob.rs:43-227",
+          "rust/lance-encoding/src/encodings/logical/blob.rs:255-465",
+          "rust/lance-encoding/src/encodings/logical/primitive.rs:4583-4611",
+          "rust/lance-encoding/src/encodings/logical/primitive/blob.rs:70-109",
+          "rust/lance-encoding/src/encodings/logical/primitive/blob.rs:151-214",
+          "rust/lance-encoding/src/encodings/logical/primitive/blob.rs:262-290",
+          "rust/lance-encoding/src/encodings/logical/primitive/blob.rs:293-361",
+          "rust/lance-encoding/src/encodings/logical/primitive/blob.rs:363-552"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-encoding/src/encodings/logical/primitive.rs"
+      ],
+      "kb_section": "Original Blob encode/read subtrace\n\n[Scenario](scenarios.md#original-blob-encoderead-subtrace) \u00b7 [Decision contract](../L3-symbols/protocol-encoding.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/encoder/structural.rs.md) \u2192 rust/lance-encoding/src/encoder/structural.rs:136-150.\n2. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/encodings/logical/blob.rs.md) \u2192 rust/lance-encoding/src/encodings/logical/blob.rs:43-227, rust/lance-encoding/src/encodings/logical/blob.rs:255-465.\n3. [Module Map](../L1-modules/peripheral-maps.md#rust-lance-encoding) \u2192 rust/lance-encoding/src/encodings/logical/primitive.rs:4583-4611.\n4. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/encodings/logical/primitive/blob.rs.md) \u2192 rust/lance-encoding/src/encodings/logical/primitive/blob.rs:70-109, rust/lance-encoding/src/encodings/logical/primitive/blob.rs:151-214, rust/lance-encoding/src/encodings/logical/primitive/blob.rs:262-290, rust/lance-encoding/src/encodings/logical/primitive/blob.rs:293-361, rust/lance-encoding/src/encodings/logical/primitive/blob.rs:363-552.\n\n<a id=\"scenario-70\"></a>\n\n"
+    },
+    {
+      "id": "route-145",
+      "task": "Nested FSL/Map encode-decode subtrace",
+      "ordered_read_sets": [
+        [
+          "rust/lance-core/src/datatypes.rs:302-311",
+          "rust/lance-core/src/datatypes/field.rs:1243-1278",
+          "rust/lance-encoding/src/encoder/structural.rs:192-261",
+          "rust/lance-encoding/src/encodings/logical/fixed_size_list.rs:48-91",
+          "rust/lance-encoding/src/encodings/logical/fixed_size_list.rs:127-253",
+          "rust/lance-encoding/src/encodings/logical/fixed_size_list.rs:278-304",
+          "rust/lance-encoding/src/encodings/logical/map.rs:43-73",
+          "rust/lance-encoding/src/encodings/logical/map.rs:102-173",
+          "rust/lance-encoding/src/encodings/logical/map.rs:192-237"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-core/src/datatypes/field.rs",
+        "rust/lance-encoding/src/encodings/logical/fixed_size_list.rs",
+        "rust/lance-encoding/src/encodings/logical/map.rs"
+      ],
+      "kb_section": "Nested FSL/Map encode-decode subtrace\n\n[Scenario](scenarios.md#nested-fslmap-encode-decode-subtrace) \u00b7 [Decision contract](../L3-symbols/protocol-encoding.md)\n\n1. [frozen/Key File contract](../L2-files/rust/lance-core/src/datatypes.rs.md) \u2192 rust/lance-core/src/datatypes.rs:302-311.\n2. [frozen/Key File contract](../L2-files/rust/lance-core/src/datatypes/field.rs.md) \u2192 rust/lance-core/src/datatypes/field.rs:1243-1278.\n3. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/encoder/structural.rs.md) \u2192 rust/lance-encoding/src/encoder/structural.rs:192-261.\n4. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/encodings/logical/fixed_size_list.rs.md) \u2192 rust/lance-encoding/src/encodings/logical/fixed_size_list.rs:48-91, rust/lance-encoding/src/encodings/logical/fixed_size_list.rs:127-253, rust/lance-encoding/src/encodings/logical/fixed_size_list.rs:278-304.\n5. [frozen/Key File contract](../L2-files/rust/lance-encoding/src/encodings/logical/map.rs.md) \u2192 rust/lance-encoding/src/encodings/logical/map.rs:43-73, rust/lance-encoding/src/encodings/logical/map.rs:102-173, rust/lance-encoding/src/encodings/logical/map.rs:192-237.\n\n## Refresh-specific routes\n\n"
+    },
+    {
+      "id": "route-146",
+      "task": "Deep clone managed blob objects",
+      "ordered_read_sets": [
+        [
+          "rust/lance/src/dataset.rs:3345-3395,3464-3473",
+          "rust/lance/src/io/commit.rs:427-622",
+          "rust/lance/src/dataset/blob/clone.rs:1-259",
+          "rust/lance/src/dataset/blob.rs:5281-5437"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance/src/dataset.rs",
+        "rust/lance/src/io/commit.rs"
+      ],
+      "kb_section": "Deep clone managed blob objects\n\n[Contract](../L3-symbols/refresh-2026-10-07.md#clone-and-garbage-collection). Read in order: `rust/lance/src/dataset.rs:3345-3395,3464-3473` \u2192 `rust/lance/src/io/commit.rs:427-622` \u2192 [selected helper](../L2-files/rust/lance/src/dataset/blob/clone.rs.md) \u2192 `rust/lance/src/dataset/blob/clone.rs:1-259` \u2192 `rust/lance/src/dataset/blob.rs:5281-5437`. For tagged metadata relocation, use the next separate route.\n\n"
+    },
+    {
+      "id": "route-147",
+      "task": "Relocate tagged FRI during clone",
+      "ordered_read_sets": [
+        [
+          "rust/lance/src/io/commit.rs:427-622",
+          "rust/lance/src/index/frag_reuse.rs:2185-2415",
+          "rust/lance-table/src/system_index/frag_reuse/ledger.rs:108-255"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance/src/io/commit.rs"
+      ],
+      "kb_section": "Relocate tagged FRI during clone\n\n[Contract](../L3-symbols/refresh-2026-10-07.md#clone-and-garbage-collection). Read `rust/lance/src/io/commit.rs:427-622` \u2192 `rust/lance/src/index/frag_reuse.rs:2185-2415` \u2192 `rust/lance-table/src/system_index/frag_reuse/ledger.rs:108-255`.\n\n"
+    },
+    {
+      "id": "route-148",
+      "task": "Trim or prune tagged fragment-reuse history",
+      "ordered_read_sets": [
+        [
+          "rust/lance/src/dataset/index/frag_reuse.rs:355-450,650-895",
+          "rust/lance/src/io/commit/conflict_resolver.rs:2840-2910",
+          "rust/lance-table/src/system_index/frag_reuse/gate.rs:85-140",
+          "rust/lance-table/src/system_index/frag_reuse/ledger.rs:108-255"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance/src/io/commit/conflict_resolver.rs"
+      ],
+      "kb_section": "Trim or prune tagged fragment-reuse history\n\n[Contract](../L3-symbols/refresh-2026-10-07.md#fragment-reuse-remapping-and-concurrency). Read `rust/lance/src/dataset/index/frag_reuse.rs:355-450,650-895` \u2192 `rust/lance/src/io/commit/conflict_resolver.rs:2840-2910` \u2192 `rust/lance-table/src/system_index/frag_reuse/gate.rs:85-140` \u2192 `rust/lance-table/src/system_index/frag_reuse/ledger.rs:108-255`.\n\n"
+    },
+    {
+      "id": "route-150",
+      "task": "Evolve transaction history without blocking dataset opens",
+      "ordered_read_sets": [
+        [
+          "protos/table.proto:194-211",
+          "rust/lance-table/src/format/manifest.rs:1102-1105,1184-1185",
+          "rust/lance-table/src/transaction/proto.rs:404-406,709-715",
+          "rust/lance/src/io/commit/conflict_resolver.rs:458-463,638-704,2466-2512"
+        ]
+      ],
+      "affected_paths": [
+        "protos/table.proto",
+        "rust/lance-table/src/format/manifest.rs",
+        "rust/lance/src/io/commit/conflict_resolver.rs"
+      ],
+      "kb_section": "Evolve transaction history without blocking dataset opens\n\n[Contract](../L3-symbols/refresh-2026-10-07.md#manifest-transaction-compatibility). Read `protos/table.proto:194-211` \u2192 `rust/lance-table/src/format/manifest.rs:1102-1105,1184-1185` \u2192 `rust/lance-table/src/transaction/proto.rs:404-406,709-715` \u2192 `rust/lance/src/io/commit/conflict_resolver.rs:458-463,638-704,2466-2512`. New write operations must still follow the separate operation-registration route.\n\n"
+    },
+    {
+      "id": "route-151",
+      "task": "Extend public schema projection or count pushdown",
+      "ordered_read_sets": [
+        [
+          "rust/lance/src/dataset/scanner.rs:1864-1867,3144-3174",
+          "rust/lance-datafusion/src/projection.rs:311-315,351-355",
+          "rust/lance/src/io/exec/count_pushdown.rs:394-423",
+          "rust/lance/src/io/exec/filtered_read.rs:3535-3552"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance/src/dataset/scanner.rs",
+        "rust/lance/src/io/exec/count_pushdown.rs",
+        "rust/lance/src/io/exec/filtered_read.rs"
+      ],
+      "kb_section": "Extend public schema projection or count pushdown\n\n[Contract](../L3-symbols/refresh-2026-10-07.md#query-and-public-api-changes). Read `rust/lance/src/dataset/scanner.rs:1864-1867,3144-3174` \u2192 `rust/lance-datafusion/src/projection.rs:311-315,351-355` \u2192 `rust/lance/src/io/exec/count_pushdown.rs:394-423` \u2192 `rust/lance/src/io/exec/filtered_read.rs:3535-3552`.\n\n## October 9 implementation routes\n\n"
+    },
+    {
+      "id": "route-152",
+      "task": "Count with selected scalar index segments",
+      "ordered_read_sets": [
+        [
+          "rust/lance/src/dataset/scanner.rs:1447-1656,3444-3496",
+          "rust/lance/src/io/exec/scalar_index.rs:1-300",
+          "rust/lance/src/index/scalar_logical.rs:270-425",
+          "java/src/main/java/org/lance/Dataset.java:1485-1559",
+          "java/lance-jni/src/blocking_dataset.rs:4016-4142"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance/src/dataset/scanner.rs"
+      ],
+      "kb_section": "Count with selected scalar index segments\n\n[Contract](../L3-symbols/refresh-2026-10-09.md#indexed-counting-and-public-apis). Read `rust/lance/src/dataset/scanner.rs:1447-1656,3444-3496` \u2192 `rust/lance/src/io/exec/scalar_index.rs:1-300` \u2192 `rust/lance/src/index/scalar_logical.rs:270-425`. For Java forwarding, add `java/src/main/java/org/lance/Dataset.java:1485-1559` and `java/lance-jni/src/blocking_dataset.rs:4016-4142`; the native count methods parse UUIDs and delegate to Rust. Java remains mapped only.\n\n"
+    },
+    {
+      "id": "route-153",
+      "task": "Add or customize top-k late materialization",
+      "ordered_read_sets": [
+        [
+          "rust/lance/src/io/exec/topk_late_materialization.rs:69-446",
+          "rust/lance/src/io/exec/filtered_read.rs:2847-2892",
+          "rust/lance/src/io/exec/take.rs:574-623,697-701"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance/src/io/exec/filtered_read.rs",
+        "rust/lance/src/io/exec/take.rs",
+        "rust/lance/src/io/exec/topk_late_materialization.rs"
+      ],
+      "kb_section": "Add or customize top-k late materialization\n\n[Selected Key File](../L2-files/rust/lance/src/io/exec/topk_late_materialization.rs.md). Read `rust/lance/src/io/exec/topk_late_materialization.rs:69-446` \u2192 `rust/lance/src/io/exec/filtered_read.rs:2847-2892` \u2192 `rust/lance/src/io/exec/take.rs:574-623,697-701`. The filter-read projection helper is included in this route; do not infer that this rule is automatically registered.\n\n"
+    },
+    {
+      "id": "route-154",
+      "task": "Evolve a MemWAL writer schema",
+      "ordered_read_sets": [
+        [
+          "rust/lance/src/dataset/mem_wal/api.rs:857-926",
+          "rust/lance/src/dataset/mem_wal/write.rs:1867-1903,1991-2013,3895-3999",
+          "rust/lance/src/dataset/mem_wal/scanner/generation_read.rs:84-158,410-448",
+          "rust/lance/src/dataset/schema_evolution.rs:491-531,851-874",
+          "rust/lance/src/dataset/mem_wal/wal.rs:44-62,1117-1125",
+          "rust/lance/src/dataset/mem_wal/write.rs:1522-1550"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance/src/dataset/mem_wal/api.rs",
+        "rust/lance/src/dataset/mem_wal/scanner/generation_read.rs",
+        "rust/lance/src/dataset/mem_wal/wal.rs",
+        "rust/lance/src/dataset/mem_wal/write.rs",
+        "rust/lance/src/dataset/schema_evolution.rs"
+      ],
+      "kb_section": "Evolve a MemWAL writer schema\n\n[Contract](../L3-symbols/refresh-2026-10-09.md#memwal-schema-ownership-and-reads). Read `rust/lance/src/dataset/mem_wal/api.rs:857-926` \u2192 `rust/lance/src/dataset/mem_wal/write.rs:1867-1903,1991-2013,3895-3999` \u2192 `rust/lance/src/dataset/mem_wal/scanner/generation_read.rs:84-158,410-448` \u2192 `rust/lance/src/dataset/schema_evolution.rs:491-531,851-874`. WAL replay is a separate subtask: `rust/lance/src/dataset/mem_wal/wal.rs:44-62,1117-1125` \u2192 `rust/lance/src/dataset/mem_wal/write.rs:1522-1550`.\n\n"
+    },
+    {
+      "id": "route-155",
+      "task": "Preserve deleted physical rows during column updates",
+      "ordered_read_sets": [
+        [
+          "rust/lance/src/dataset/updater.rs:116-210,272-460,572-600,759-796",
+          "rust/lance/src/dataset/updater/blanks.rs:24-65,293-354,458-499,875-1059"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance/src/dataset/updater.rs"
+      ],
+      "kb_section": "Preserve deleted physical rows during column updates\n\n[Contract](../L3-symbols/refresh-2026-10-09.md#updater-and-cleanup). Read `rust/lance/src/dataset/updater.rs:116-210,272-460,572-600,759-796` \u2192 `rust/lance/src/dataset/updater/blanks.rs:24-65,293-354,458-499,875-1059`.\n\n"
+    },
+    {
+      "id": "route-156",
+      "task": "Change managed cleanup scanning or cascade throttling",
+      "ordered_read_sets": [
+        [
+          "rust/lance/src/dataset/cleanup.rs:313-339,594-681,1073-1085,1584-1595,1920-1928",
+          "rust/lance/src/dataset/blob.rs:5281-5346",
+          "rust/lance/src/dataset/blob/clone.rs:227-244"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance/src/dataset/cleanup.rs"
+      ],
+      "kb_section": "Change managed cleanup scanning or cascade throttling\n\n[Contract](../L3-symbols/refresh-2026-10-09.md#updater-and-cleanup). Read `rust/lance/src/dataset/cleanup.rs:313-339,594-681,1073-1085,1584-1595,1920-1928` \u2192 `rust/lance/src/dataset/blob.rs:5281-5346` \u2192 `rust/lance/src/dataset/blob/clone.rs:227-244`.\n\n"
+    },
+    {
+      "id": "route-157",
+      "task": "Extend streaming coreset training",
+      "ordered_read_sets": [
+        [
+          "rust/lance/src/index/vector/ivf.rs:3837-3877,5033-5058",
+          "rust/lance/src/index/vector/ivf/coreset_algo/mod.rs:1-92",
+          "rust/lance/src/index/vector/ivf/coreset_algo/float_coreset.rs:1-174"
+        ],
+        [
+          "rust/lance/src/index/vector/ivf.rs:3837-3877,5033-5058",
+          "rust/lance/src/index/vector/ivf/coreset_algo/mod.rs:1-92",
+          "rust/lance/src/index/vector/ivf/coreset_algo/hamming_coreset.rs:1-140",
+          "rust/lance/src/index/vector/ivf/streaming_hamming.rs:1-180,423-492,714-854",
+          "rust/lance/src/index/vector/ivf/streaming_hamming/counter.rs:1-120"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance/src/index/vector/ivf.rs"
+      ],
+      "kb_section": "Extend streaming coreset training\n\n[Contract and mapped-only boundary](../L3-symbols/refresh-2026-10-09.md#vector-training-maps). Read `rust/lance/src/index/vector/ivf.rs:3837-3877,5033-5058` \u2192 `rust/lance/src/index/vector/ivf/coreset_algo/mod.rs:1-92` \u2192 choose `rust/lance/src/index/vector/ivf/coreset_algo/float_coreset.rs:1-174` or `rust/lance/src/index/vector/ivf/coreset_algo/hamming_coreset.rs:1-140`. For Hamming details, read `rust/lance/src/index/vector/ivf/streaming_hamming.rs:1-180,423-492,714-854` \u2192 `rust/lance/src/index/vector/ivf/streaming_hamming/counter.rs:1-120`. Float and Hamming are separate branches, each at most five files.\n\n"
+    },
+    {
+      "id": "route-158",
+      "task": "Retrieve current Python version summary",
+      "ordered_read_sets": [
+        [
+          "python/python/lance/dataset.py:3165-3194,6135-6143",
+          "python/src/dataset.rs:924-934,2141-2153"
+        ]
+      ],
+      "affected_paths": [
+        "python/python/lance/dataset.py",
+        "python/src/dataset.rs"
+      ],
+      "kb_section": "Retrieve current Python version summary\n\n[Contract](../L3-symbols/refresh-2026-10-09.md#indexed-counting-and-public-apis). Read `python/python/lance/dataset.py:3165-3194,6135-6143` \u2192 `python/src/dataset.rs:924-934,2141-2153` \u2192 the retained Dataset version contract in [Dataset map](../L1-modules/rust-lance.md).\n\n## October 11 implementation routes\n\n"
+    },
+    {
+      "id": "route-159",
+      "task": "Activate non-reusable field IDs",
+      "ordered_read_sets": [
+        [
+          "rust/lance/src/dataset.rs:3300-3343",
+          "rust/lance-table/src/transaction/manifest_build.rs:190-204",
+          "protos/table.proto:167-174,281-292",
+          "rust/lance-table/src/feature_flags.rs:102-114,405-427",
+          "rust/lance-table/src/format/manifest.rs:478-522"
+        ]
+      ],
+      "affected_paths": [
+        "protos/table.proto",
+        "rust/lance-table/src/feature_flags.rs",
+        "rust/lance-table/src/format/manifest.rs",
+        "rust/lance-table/src/transaction/manifest_build.rs",
+        "rust/lance/src/dataset.rs"
+      ],
+      "kb_section": "Activate non-reusable field IDs\n\n[Current contract](../L3-symbols/refresh-2026-10-11.md). Read `rust/lance/src/dataset.rs:3300-3343` \u2192 `rust/lance-table/src/transaction/manifest_build.rs:190-204` \u2192 `protos/table.proto:167-174,281-292` \u2192 `rust/lance-table/src/feature_flags.rs:102-114,405-427` \u2192 `rust/lance-table/src/format/manifest.rs:478-522`.\n\n"
+    },
+    {
+      "id": "route-160",
+      "task": "Canonicalize transaction identities",
+      "ordered_read_sets": [
+        [
+          "rust/lance-table/src/transaction/validate.rs:20-139,196-243,303-375",
+          "rust/lance/src/io/commit.rs:1803-1819",
+          "rust/lance-table/src/transaction/validate.rs:477-623,826-986"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-table/src/transaction/validate.rs",
+        "rust/lance/src/io/commit.rs"
+      ],
+      "kb_section": "Canonicalize transaction identities\n\n[Current contract](../L3-symbols/refresh-2026-10-11.md). Read `rust/lance-table/src/transaction/validate.rs:20-139,196-243,303-375` \u2192 `rust/lance/src/io/commit.rs:1803-1819` \u2192 `rust/lance-table/src/transaction/validate.rs:477-623,826-986`.\n\n"
+    },
+    {
+      "id": "route-161",
+      "task": "Resolve deferred compaction index conflicts",
+      "ordered_read_sets": [
+        [
+          "rust/lance/src/io/commit/conflict_resolver.rs:564-635,1226-1243,1355-1402,3300-3384",
+          "rust/lance/src/io/commit.rs:1758-1788"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance/src/io/commit.rs",
+        "rust/lance/src/io/commit/conflict_resolver.rs"
+      ],
+      "kb_section": "Resolve deferred compaction index conflicts\n\n[Current contract](../L3-symbols/refresh-2026-10-11.md). Read `rust/lance/src/io/commit/conflict_resolver.rs:564-635,1226-1243,1355-1402,3300-3384` \u2192 `rust/lance/src/io/commit.rs:1758-1788`.\n\n"
+    },
+    {
+      "id": "route-162",
+      "task": "Extend unstable sequence encoding",
+      "ordered_read_sets": [
+        [
+          "rust/lance-encoding/src/compression.rs:1375-1754",
+          "rust/lance-encoding/src/encodings/physical/sequence/decoder.rs:33-117",
+          "rust/lance-encoding/src/encodings/physical/sequence.rs:78-277",
+          "rust/lance-encoding/src/encodings/physical/binary.rs:446-508,594-698"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-encoding/src/compression.rs",
+        "rust/lance-encoding/src/encodings/physical/binary.rs",
+        "rust/lance-encoding/src/encodings/physical/sequence.rs",
+        "rust/lance-encoding/src/encodings/physical/sequence/decoder.rs"
+      ],
+      "kb_section": "Extend unstable sequence encoding\n\n[Current contract](../L3-symbols/refresh-2026-10-11.md). Read `rust/lance-encoding/src/compression.rs:1375-1754` \u2192 `rust/lance-encoding/src/encodings/physical/sequence/decoder.rs:33-117` \u2192 `rust/lance-encoding/src/encodings/physical/sequence.rs:78-277` \u2192 `rust/lance-encoding/src/encodings/physical/binary.rs:446-508,594-698`.\n\n"
+    },
+    {
+      "id": "route-163",
+      "task": "Keep stable encoding readers isolated",
+      "ordered_read_sets": [
+        [
+          "rust/lance-file/src/versions/v2_1/reader.rs:25-108",
+          "rust/lance-file/src/versions/v2_2/reader.rs:25-114",
+          "rust/lance-file/src/versions/v2_3/compression.rs:51-65",
+          "rust/lance-file/src/versions/v2_3/reader.rs:28-186"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-file/src/versions/v2_1/reader.rs",
+        "rust/lance-file/src/versions/v2_2/reader.rs",
+        "rust/lance-file/src/versions/v2_3/compression.rs",
+        "rust/lance-file/src/versions/v2_3/reader.rs"
+      ],
+      "kb_section": "Keep stable encoding readers isolated\n\n[Current contract](../L3-symbols/refresh-2026-10-11.md). Read `rust/lance-file/src/versions/v2_1/reader.rs:25-108` \u2192 `rust/lance-file/src/versions/v2_2/reader.rs:25-114` \u2192 `rust/lance-file/src/versions/v2_3/compression.rs:51-65` \u2192 `rust/lance-file/src/versions/v2_3/reader.rs:28-186`.\n\n"
+    },
+    {
+      "id": "route-164",
+      "task": "Implement physical fragment slices",
+      "ordered_read_sets": [
+        [
+          "rust/lance/src/dataset/fragment_slice.rs:11-92",
+          "rust/lance/src/dataset/scanner.rs:1929-1993",
+          "rust/lance/src/dataset/scanner.rs:1934-1942,3412-3429",
+          "protos/filtered_read.proto:77-86",
+          "rust/lance/src/io/exec/topk_late_materialization.rs:163-178"
+        ]
+      ],
+      "affected_paths": [
+        "protos/filtered_read.proto",
+        "rust/lance/src/dataset/fragment_slice.rs",
+        "rust/lance/src/dataset/scanner.rs",
+        "rust/lance/src/io/exec/topk_late_materialization.rs"
+      ],
+      "kb_section": "Implement physical fragment slices\n\n[Current contract](../L3-symbols/refresh-2026-10-11.md). Read `rust/lance/src/dataset/fragment_slice.rs:11-92` \u2192 `rust/lance/src/dataset/scanner.rs:1929-1993` \u2192 `rust/lance/src/dataset/scanner.rs:1934-1942,3412-3429` \u2192 `protos/filtered_read.proto:77-86` \u2192 `rust/lance/src/io/exec/topk_late_materialization.rs:163-178`.\n\n"
+    },
+    {
+      "id": "route-165",
+      "task": "Tune adaptive vector search effort",
+      "ordered_read_sets": [
+        [
+          "rust/lance-index/src/vector.rs:107-144,176-185,224-235",
+          "rust/lance/src/dataset/scanner.rs:2457-2555",
+          "rust/lance/src/io/exec/knn/adaptive_probe.rs:44-103,189-224",
+          "protos/ann.proto:71-75"
+        ]
+      ],
+      "affected_paths": [
+        "protos/ann.proto",
+        "rust/lance-index/src/vector.rs",
+        "rust/lance/src/dataset/scanner.rs",
+        "rust/lance/src/io/exec/knn/adaptive_probe.rs"
+      ],
+      "kb_section": "Tune adaptive vector search effort\n\n[Current contract](../L3-symbols/refresh-2026-10-11.md). Read `rust/lance-index/src/vector.rs:107-144,176-185,224-235` \u2192 `rust/lance/src/dataset/scanner.rs:2457-2555` \u2192 `rust/lance/src/io/exec/knn/adaptive_probe.rs:44-103,189-224` \u2192 `protos/ann.proto:71-75`.\n\n"
+    },
+    {
+      "id": "route-166",
+      "task": "Preserve Python schema provenance",
+      "ordered_read_sets": [
+        [
+          "python/src/dataset.rs:3163-3285",
+          "python/src/schema.rs:130-143",
+          "python/src/blob.rs:240-272"
+        ]
+      ],
+      "affected_paths": [
+        "python/src/blob.rs",
+        "python/src/dataset.rs",
+        "python/src/schema.rs"
+      ],
+      "kb_section": "Preserve Python schema provenance\n\n[Current contract](../L3-symbols/refresh-2026-10-11.md). Read `python/src/dataset.rs:3163-3285` \u2192 `python/src/schema.rs:130-143` \u2192 `python/src/blob.rs:240-272`.\n\n"
+    },
+    {
+      "id": "route-167",
+      "task": "Forward Python search effort and delta bounds",
+      "ordered_read_sets": [
+        [
+          "python/python/lance/dataset.py:5521-5530,7205-7265,8790-8833",
+          "python/src/dataset.rs:5803-5831,5962-5966"
+        ]
+      ],
+      "affected_paths": [
+        "python/python/lance/dataset.py",
+        "python/src/dataset.rs"
+      ],
+      "kb_section": "Forward Python search effort and delta bounds\n\n[Current contract](../L3-symbols/refresh-2026-10-11.md). Read `python/python/lance/dataset.py:5521-5530,7205-7265,8790-8833` \u2192 `python/src/dataset.rs:5803-5831,5962-5966`.\n\n"
+    },
+    {
+      "id": "route-168",
+      "task": "Implement a MemWAL index plugin",
+      "ordered_read_sets": [
+        [
+          "rust/lance/src/dataset/mem_wal/index/plugin.rs:437-575,578-706",
+          "rust/lance/src/dataset/mem_wal/index/plugin.rs:296-436",
+          "rust/lance/src/dataset/mem_wal/index/query.rs:128-180"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance/src/dataset/mem_wal/index/plugin.rs",
+        "rust/lance/src/dataset/mem_wal/index/query.rs"
+      ],
+      "kb_section": "Implement a MemWAL index plugin\n\n[Current contract](../L3-symbols/refresh-2026-10-11.md). Read `rust/lance/src/dataset/mem_wal/index/plugin.rs:437-575,578-706` \u2192 `rust/lance/src/dataset/mem_wal/index/plugin.rs:296-436` \u2192 `rust/lance/src/dataset/mem_wal/index/query.rs:128-180`.\n\n"
+    },
+    {
+      "id": "route-169",
+      "task": "Configure MemWAL plugin overrides",
+      "ordered_read_sets": [
+        [
+          "rust/lance/src/dataset/mem_wal/write.rs:217-240,418-446",
+          "rust/lance/src/dataset/mem_wal/api.rs:955-975,1032-1149"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance/src/dataset/mem_wal/api.rs",
+        "rust/lance/src/dataset/mem_wal/write.rs"
+      ],
+      "kb_section": "Configure MemWAL plugin overrides\n\n[Current contract](../L3-symbols/refresh-2026-10-11.md). Read `rust/lance/src/dataset/mem_wal/write.rs:217-240,418-446` \u2192 `rust/lance/src/dataset/mem_wal/api.rs:955-975,1032-1149`.\n\n"
+    },
+    {
+      "id": "route-170",
+      "task": "Preserve index coverage evidence",
+      "ordered_read_sets": [
+        [
+          "rust/lance/src/index.rs:157-165,333-404,428-517,519-750"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance/src/index.rs"
+      ],
+      "kb_section": "Preserve index coverage evidence\n\n[Current contract](../L3-symbols/refresh-2026-10-11.md). Read `rust/lance/src/index.rs:157-165,333-404,428-517,519-750`.\n\n"
+    },
+    {
+      "id": "route-171",
+      "task": "Extend cache priority and visibility",
+      "ordered_read_sets": [
+        [
+          "rust/lance-core/src/cache/backend.rs:48-124",
+          "rust/lance-core/src/cache/moka.rs:108-116",
+          "rust/lance-core/src/cache/quick.rs:209-238",
+          "rust/lance-core/src/cache/mod.rs:143-146,376-463",
+          "rust/lance-core/src/cache/quick.rs:157-194,244-307",
+          "rust/lance-core/src/cache/priority.rs:27-98"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-core/src/cache/backend.rs",
+        "rust/lance-core/src/cache/mod.rs",
+        "rust/lance-core/src/cache/moka.rs",
+        "rust/lance-core/src/cache/priority.rs",
+        "rust/lance-core/src/cache/quick.rs"
+      ],
+      "kb_section": "Extend cache priority and visibility\n\n[Current contract](../L3-symbols/refresh-2026-10-11.md). Read `rust/lance-core/src/cache/backend.rs:48-124` \u2192 `rust/lance-core/src/cache/moka.rs:108-116` \u2192 `rust/lance-core/src/cache/quick.rs:209-238` \u2192 `rust/lance-core/src/cache/mod.rs:143-146,376-463` \u2192 `rust/lance-core/src/cache/quick.rs:157-194,244-307` \u2192 `rust/lance-core/src/cache/priority.rs:27-98`.\n\n"
+    },
+    {
+      "id": "route-172",
+      "task": "Decode cached row selections",
+      "ordered_read_sets": [
+        [
+          "rust/lance-core/src/cache/codec.rs:191-253,385-475"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-core/src/cache/codec.rs"
+      ],
+      "kb_section": "Decode cached row selections\n\n[Current contract](../L3-symbols/refresh-2026-10-11.md). Read `rust/lance-core/src/cache/codec.rs:191-253,385-475`.\n\n"
+    },
+    {
+      "id": "route-173",
+      "task": "Resolve cloud credential option precedence",
+      "ordered_read_sets": [
+        [
+          "rust/lance-io/src/object_store.rs:1692-1749",
+          "rust/lance-io/src/object_store/providers/aws.rs:614-646"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-io/src/object_store.rs",
+        "rust/lance-io/src/object_store/providers/aws.rs"
+      ],
+      "kb_section": "Resolve cloud credential option precedence\n\n[Current contract](../L3-symbols/refresh-2026-10-11.md). Read `rust/lance-io/src/object_store.rs:1692-1749` \u2192 `rust/lance-io/src/object_store/providers/aws.rs:614-646`.\n\n"
+    },
+    {
+      "id": "route-174",
+      "task": "Change scan byte estimates",
+      "ordered_read_sets": [
+        [
+          "rust/lance/src/io/exec/utils.rs:1074-1122,1185-1257"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance/src/io/exec/utils.rs"
+      ],
+      "kb_section": "Change scan byte estimates\n\n[Current contract](../L3-symbols/refresh-2026-10-11.md). Read `rust/lance/src/io/exec/utils.rs:1074-1122,1185-1257`.\n\n"
+    },
+    {
+      "id": "route-175",
+      "task": "Enter the local JSONB implementation",
+      "ordered_read_sets": [
+        [
+          "rust/lance-jsonb/src/lib.rs:6-103"
+        ]
+      ],
+      "affected_paths": [
+        "rust/lance-jsonb/src/lib.rs"
+      ],
+      "kb_section": "Enter the local JSONB implementation\n\n[Current contract](../L3-symbols/refresh-2026-10-11.md). Read `rust/lance-jsonb/src/lib.rs:6-103`.\n\n"
+    }
+  ],
+  "unaffected_routes_skipped": [
+    "Add a scalar index plugin",
+    "Tune I/O scheduling without stalling dependent reads",
+    "Add an object-store provider \u2014 interface route",
+    "Add a namespace implementation \u2014 mapped only",
+    "Preserve the stable V2_0 writer/reader contract",
+    "Open a Java dataset at a reference \u2014 mapped only",
+    "Core containers, memory and small utilities",
+    "Deletion vectors and single-rewrite mapping",
+    "Ordered and stable-partition row mapping",
+    "AIMD control",
+    "Generic split-block Bloom filters",
+    "Reading row-ID and transaction metadata without conflating layers",
+    "Row-version metadata and selections",
+    "Row-ID wire payloads",
+    "Segment representation or cursor behavior",
+    "Extend a transaction payload through its codec",
+    "Extend tagged-history operation policy",
+    "Extend supported fragment-reuse mappings",
+    "Add or change a commit handler",
+    "Implement an external manifest store",
+    "Change task alignment or system-column materialization",
+    "Extend a current structural writer mechanism",
+    "V2_0 persistence persistence contract",
+    "Preserve frozen V1 boundaries during current-format work",
+    "Separately authorized V1 codec repair",
+    "Investigating a frozen V1 write regression",
+    "Investigating historical statistics regressions",
+    "Embedded V2_0 compatibility reader behavior",
+    "Extending a current field-encoding mechanism",
+    "Extending current decode planning",
+    "Deletion vectors and single-rewrite mapping",
+    "Ordered and stable-partition row mapping",
+    "AIMD control",
+    "Generic split-block Bloom filters",
+    "Local row-ID metadata and transaction disposition traces",
+    "Local merge-insert key representation trace",
+    "Refresh last-updated lineage during column rewrite",
+    "Read version batches and present row-ID offsets",
+    "Inline row-ID encode/decode",
+    "Construct, select and mutate a segment",
+    "Local config and metadata overlap examples",
+    "Local transaction protobuf trace",
+    "Decode one fragment-reuse history",
+    "Single-attempt conditional and locked commit traces",
+    "External publication, repair and conditioned history",
+    "Current structural file write subtrace",
+    "Local encoded-concatenation trace",
+    "Frozen V1 value roundtrip subtrace",
+    "Local V1 statistics trace",
+    "In-memory batch encoding trace",
+    "Schedule and decode trace",
+    "Stream index remapping across tagged transitions"
+  ]
+}

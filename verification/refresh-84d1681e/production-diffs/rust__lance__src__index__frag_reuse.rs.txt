@@ -1,0 +1,1270 @@
+@@ -4,6 +4,7 @@
+    4  use crate::Dataset;
+    5  use crate::index::frag_reuse_reader::SegmentPlanParts;
+    6  use crate::index::{DatasetIndexExt, DatasetIndexInternalExt};
+    7 +use crate::session::index_caches::FragReuseDetailsKey;
+    8  use lance_core::Error;
+    9  use lance_core::cache::{CacheKey, CacheKeySchema, KeyBuilder};
+   10  use lance_core::deepsize::DeepSizeOf;
+
+@@ -12,12 +13,15 @@ use lance_index::frag_reuse::{
+   13      FRAG_REUSE_INDEX_NAME, FragReuseGroup, FragReuseIndexDetails, FragReuseVersion,
+   14  };
+   15  use lance_index::scalar::{BatchRowIdRemapper, MetricsCollector, RowIdRemapper};
+   16 +use lance_io::object_store::{ObjectStore, ObjectStoreRegistry};
+   17  use lance_table::format::pb::fragment_reuse_index_details::{
+   18      self as pb_fri, Content, InlineContent,
+   19  };
+   20  use lance_table::format::pb::{ExternalFile, FragmentReuseIndexDetails};
+   19 -use lance_table::format::{Fragment, IndexMetadata};
+   21 +use lance_table::format::{Fragment, IndexMetadata, Manifest};
+   22 +use lance_table::system_index::frag_reuse::gate::{BareRewriteRefusal, covered_bare_rewrite};
+   23  use lance_table::transaction::RewriteGroup;
+   24 +use object_store::path::Path;
+   25  use prost::Message;
+   26  use roaring::RoaringBitmap;
+   27  use std::collections::{HashMap, HashSet};
+
+@@ -122,6 +126,17 @@ fn translated_namespace(fingerprint: &[u8; 32]) -> String {
+  126      prefix
+  127  }
+  128  
+  129 +/// Why a segment is being opened. A query takes its segments from the
+  130 +/// listing and must never see one the tagged reader excluded (it derives no
+  131 +/// coverage for it, so nothing scheduled a scan of its rows); maintenance
+  132 +/// opens by uuid to rebuild or replace a segment and reads such a segment as
+  133 +/// contributing nothing.
+  134 +#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+  135 +pub(crate) enum OpenPurpose {
+  136 +    Query,
+  137 +    Maintenance,
+  138 +}
+  139 +
+  140  /// The translation inputs one segment needs under a tagged history.
+  141  #[derive(Clone, Debug)]
+  142  pub(crate) enum SegmentRemappingPlan {
+
+@@ -135,11 +150,51 @@ pub(crate) enum SegmentRemappingPlan {
+  150          excluded_fragments: RoaringBitmap,
+  151          fingerprint: [u8; 32],
+  152      },
+  138 -    /// Committed metadata exists but the filtered listing carries no query
+  139 -    /// coverage for this segment (it was skipped or lost its bitmap).
+  140 -    MissingCoverage,
+  153 +    /// Committed metadata exists but the reader derives no query coverage
+  154 +    /// for this segment; the reason decides what maintenance may do with it.
+  155 +    MissingCoverage(MissingCoverageReason),
+  156 +}
+  157 +
+  158 +/// Why the reader derives no coverage for a registered segment. Queries
+  159 +/// refuse every kind by uuid (the listing excludes the segment, so no scan
+  160 +/// was scheduled for its rows); maintenance consumes the reason.
+  161 +#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+  162 +pub(crate) enum MissingCoverageReason {
+  163 +    /// The stored bitmap is empty: every fragment the segment covered was
+  164 +    /// withdrawn (an in-place rewrite), or it is a deferred definition.
+  165 +    /// Maintenance reads it as an empty translation and replaces it.
+  166 +    Withdrawn,
+  167 +    /// The backtrack derives nothing from a non-empty bitmap: newer siblings
+  168 +    /// own its direct coverage (superseded), or a destination lacks
+  169 +    /// contributing sources. Maintenance reads it as an empty translation.
+  170 +    NoDerivedCoverage,
+  171 +    /// This build cannot translate the segment: its type has no batch
+  172 +    /// remapper, its coverage is unknown (no stored bitmap), or the history
+  173 +    /// carries transitions this build cannot interpret. Maintenance skips it.
+  174 +    Unsupported,
+  175 +    /// The stored metadata cannot be interpreted (no or undecodable index
+  176 +    /// details). Maintenance fails.
+  177 +    Corrupt,
+  178 +}
+  179 +
+  180 +impl std::fmt::Display for MissingCoverageReason {
+  181 +    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+  182 +        f.write_str(match self {
+  183 +            Self::Withdrawn => "its coverage was withdrawn",
+  184 +            Self::NoDerivedCoverage => {
+  185 +                "the reader derives no coverage for it (superseded, or missing contributors)"
+  186 +            }
+  187 +            Self::Unsupported => "this build cannot translate it",
+  188 +            Self::Corrupt => "its metadata cannot be interpreted",
+  189 +        })
+  190 +    }
+  191  }
+  192  
+  193 +/// The plan of a registered segment the snapshot plan does not know (a
+  194 +/// stale cached plan): nothing is derived for it.
+  195 +const PLAN_MISS: SegmentRemappingPlan =
+  196 +    SegmentRemappingPlan::MissingCoverage(MissingCoverageReason::NoDerivedCoverage);
+  197 +
+  198  /// Snapshot-level plan of every committed segment's translation inputs.
+  199  ///
+  200  /// Which rows a segment owns is decided once per manifest snapshot, from one
+
+@@ -256,7 +311,15 @@ async fn fri_query_plan(
+  311                  }
+  312                  let mut segments = HashMap::with_capacity(stored.len());
+  313                  for source in stored.iter() {
+  259 -                    let plan = if !mapping.may_need_translation(source.fragment_bitmap.as_ref()) {
+  314 +                    let plan = if source
+  315 +                        .fragment_bitmap
+  316 +                        .as_ref()
+  317 +                        .is_some_and(|bitmap| bitmap.is_empty())
+  318 +                    {
+  319 +                        // An empty bitmap needs no translation, but its pages
+  320 +                        // may still hold the withdrawn rows: never identity.
+  321 +                        SegmentRemappingPlan::MissingCoverage(MissingCoverageReason::Withdrawn)
+  322 +                    } else if !mapping.may_need_translation(source.fragment_bitmap.as_ref()) {
+  323                          SegmentRemappingPlan::Identity
+  324                      } else if let Some(entry) = filtered_by_uuid.get(&source.uuid)
+  325                          && let Some(bitmap) = &entry.fragment_bitmap
+
+@@ -278,7 +341,9 @@ async fn fri_query_plan(
+  341                              fingerprint,
+  342                          }
+  343                      } else {
+  281 -                        SegmentRemappingPlan::MissingCoverage
+  344 +                        SegmentRemappingPlan::MissingCoverage(
+  345 +                            missing_coverage_reason(dataset, mapping, source).await?,
+  346 +                        )
+  347                      };
+  348                      segments.insert(source.uuid, plan);
+  349                  }
+
+@@ -288,13 +353,133 @@ async fn fri_query_plan(
+  353          .await
+  354  }
+  355  
+  356 +/// Why the reader derives no coverage for the registered segment `index` on
+  357 +/// this snapshot, or `None` when it derives coverage (or identity) for it.
+  358 +/// Maintenance that rewrites a segment (remap) decides its eligibility from
+  359 +/// this before touching any file.
+  360 +pub(crate) async fn segment_coverage_reason(
+  361 +    dataset: &Dataset,
+  362 +    index: &IndexMetadata,
+  363 +) -> lance_core::Result<Option<MissingCoverageReason>> {
+  364 +    let stored = super::load_all_indices(dataset).await?;
+  365 +    let Some(fri) = stored
+  366 +        .iter()
+  367 +        .find(|entry| entry.name == FRAG_REUSE_INDEX_NAME)
+  368 +    else {
+  369 +        return Ok(None);
+  370 +    };
+  371 +    if fri.index_version != 1 {
+  372 +        return Ok(None);
+  373 +    }
+  374 +    let mapping = super::frag_reuse_reader::FragmentReuseIndex::open(dataset, fri).await?;
+  375 +    let plan = fri_query_plan(dataset, fri, &stored, &mapping).await?;
+  376 +    Ok(match plan.segments.get(&index.uuid) {
+  377 +        Some(SegmentRemappingPlan::MissingCoverage(reason)) => Some(*reason),
+  378 +        Some(_) => None,
+  379 +        None => Some(MissingCoverageReason::NoDerivedCoverage),
+  380 +    })
+  381 +}
+  382 +
+  383 +/// Why the reader derives no coverage for `source`, from what it can see of
+  384 +/// the segment without opening its files.
+  385 +async fn missing_coverage_reason(
+  386 +    dataset: &Dataset,
+  387 +    mapping: &super::frag_reuse_reader::FragmentReuseIndex,
+  388 +    source: &IndexMetadata,
+  389 +) -> lance_core::Result<MissingCoverageReason> {
+  390 +    if mapping.has_unsupported_transitions() {
+  391 +        return Ok(MissingCoverageReason::Unsupported);
+  392 +    }
+  393 +    match &source.fragment_bitmap {
+  394 +        Some(bitmap) if bitmap.is_empty() => return Ok(MissingCoverageReason::Withdrawn),
+  395 +        None => return Ok(MissingCoverageReason::Unsupported),
+  396 +        Some(_) => {}
+  397 +    }
+  398 +    if source.index_details.is_none() {
+  399 +        return Ok(MissingCoverageReason::Corrupt);
+  400 +    }
+  401 +    Ok(
+  402 +        match super::frag_reuse_reader::segment_supports_batch_remapping(dataset, source).await? {
+  403 +            Some(true) => MissingCoverageReason::NoDerivedCoverage,
+  404 +            Some(false) => MissingCoverageReason::Unsupported,
+  405 +            None => MissingCoverageReason::Corrupt,
+  406 +        },
+  407 +    )
+  408 +}
+  409 +
+  410 +/// Translation plans for segments the manifest does not list: a staged
+  411 +/// (uncommitted) build about to be merged, planned as one group by
+  412 +/// [`plan_staged_segments`]. Keyed by segment uuid.
+  413 +pub(crate) type StagedRemappingPlans = HashMap<Uuid, SegmentRemappingPlan>;
+  414 +
+  415 +/// Plan `segments` as ONE group with the reader's own algorithm, for segments
+  416 +/// the snapshot plan cannot know about (a staged build being merged).
+  417 +///
+  418 +/// Every step is the one `fri_query_plan` runs per committed group
+  419 +/// (`may_need_translation`, `segment_plans`, `translation_fingerprint`), so a
+  420 +/// staged segment translates exactly as it would once committed: its
+  421 +/// provenance is its stored bitmap, its siblings for direct coverage and
+  422 +/// exclusions are the other staged segments, and a destination the group only
+  423 +/// partly covers is simply absent from its coverage (the caller shrinks what it
+  424 +/// claims; nothing is claimed that the group cannot serve). `None` on a table
+  425 +/// without a tagged history, where the snapshot lookup applies.
+  426 +pub(crate) async fn plan_staged_segments(
+  427 +    dataset: &Dataset,
+  428 +    segments: &[IndexMetadata],
+  429 +) -> lance_core::Result<Option<StagedRemappingPlans>> {
+  430 +    let stored = super::load_all_indices(dataset).await?;
+  431 +    let Some(fri) = stored
+  432 +        .iter()
+  433 +        .find(|entry| entry.name == FRAG_REUSE_INDEX_NAME)
+  434 +        .filter(|entry| entry.index_version != 0)
+  435 +    else {
+  436 +        return Ok(None);
+  437 +    };
+  438 +    if fri.index_version != 1 {
+  439 +        return Err(Error::not_supported(format!(
+  440 +            "FRI index_version {} is unsupported. Please upgrade to a newer version",
+  441 +            fri.index_version
+  442 +        )));
+  443 +    }
+  444 +    lance_index::scalar::check_batch_remapping_entry()?;
+  445 +    let mapping = super::frag_reuse_reader::FragmentReuseIndex::open(dataset, fri).await?;
+  446 +    let provenance: Vec<RoaringBitmap> = segments
+  447 +        .iter()
+  448 +        .map(|segment| {
+  449 +            segment.fragment_bitmap.clone().ok_or_else(|| {
+  450 +                Error::invalid_input(format!(
+  451 +                    "CreateIndex: segment {} is missing fragment coverage",
+  452 +                    segment.uuid
+  453 +                ))
+  454 +            })
+  455 +        })
+  456 +        .collect::<lance_core::Result<_>>()?;
+  457 +    let parts = mapping.segment_plans(&provenance);
+  458 +    let mut plans = HashMap::with_capacity(segments.len());
+  459 +    for (segment, parts) in segments.iter().zip(parts) {
+  460 +        let plan = if !mapping.may_need_translation(segment.fragment_bitmap.as_ref()) {
+  461 +            SegmentRemappingPlan::Identity
+  462 +        } else {
+  463 +            let fingerprint =
+  464 +                mapping.translation_fingerprint(&parts.coverage, &parts.excluded, &parts.path);
+  465 +            SegmentRemappingPlan::Translate {
+  466 +                coverage: parts.coverage,
+  467 +                excluded_fragments: parts.excluded,
+  468 +                fingerprint,
+  469 +            }
+  470 +        };
+  471 +        plans.insert(segment.uuid, plan);
+  472 +    }
+  473 +    Ok(Some(plans))
+  474 +}
+  475 +
+  476  /// Resolve the FRI remapper shared by scalar and vector index loading.
+  477  pub(super) async fn open_row_id_remapping(
+  478      dataset: &Dataset,
+  479      index: &IndexMetadata,
+  480      metrics: &dyn MetricsCollector,
+  481  ) -> lance_core::Result<Option<(Uuid, ResolvedRemapping)>> {
+  297 -    open_row_id_remapping_with_plan(dataset, index, None, metrics).await
+  482 +    open_row_id_remapping_with_plan(dataset, index, None, OpenPurpose::Query, metrics).await
+  483  }
+  484  
+  485  /// [`open_row_id_remapping`] for a segment whose plan the caller supplies
+
+@@ -304,6 +489,7 @@ pub(super) async fn open_row_id_remapping_with_plan(
+  489      dataset: &Dataset,
+  490      index: &IndexMetadata,
+  491      staged: Option<&SegmentRemappingPlan>,
+  492 +    purpose: OpenPurpose,
+  493      metrics: &dyn MetricsCollector,
+  494  ) -> lance_core::Result<Option<(Uuid, ResolvedRemapping)>> {
+  495      // The cheap cached stored listing decides the generation; the filtered
+
+@@ -345,6 +531,10 @@ pub(super) async fn open_row_id_remapping_with_plan(
+  531              snapshot_plan = fri_query_plan(dataset, fri, &stored, &mapping).await?;
+  532              match snapshot_plan.segments.get(&index.uuid) {
+  533                  Some(plan) => plan,
+  534 +                // A registered segment the reader left out of the plan: it
+  535 +                // derives no coverage, so it is out of the listing too. What
+  536 +                // that means depends on who asks (below).
+  537 +                None if stored.iter().any(|entry| entry.uuid == index.uuid) => &PLAN_MISS,
+  538                  None => {
+  539                      return Err(Error::not_supported(format!(
+  540                          "FRI remapping requires committed segment metadata for {}; a staged \
+
+@@ -357,10 +547,50 @@ pub(super) async fn open_row_id_remapping_with_plan(
+  547      };
+  548      match plan {
+  549          SegmentRemappingPlan::Identity => Ok(Some((fri.uuid, ResolvedRemapping::V1Identity))),
+  360 -        SegmentRemappingPlan::MissingCoverage => Err(Error::not_supported(format!(
+  361 -            "FRI query coverage is unavailable for segment {}",
+  362 -            index.uuid
+  363 -        ))),
+  550 +        // No derivable coverage (withdrawn or unresolvable). A query must not
+  551 +        // open such a segment: the listing excludes it, so no scan was
+  552 +        // scheduled for its rows, and an empty answer would silently drop
+  553 +        // them. Maintenance reads it as an empty segment (every stored row
+  554 +        // translates to nothing) and replaces it.
+  555 +        SegmentRemappingPlan::MissingCoverage(reason) if purpose == OpenPurpose::Query => {
+  556 +            Err(Error::not_supported(format!(
+  557 +                "FRI query coverage is unavailable for segment {} ({reason}): the reader \
+  558 +                 excludes it from the index listing on this snapshot; open it through the \
+  559 +                 listing, not by uuid",
+  560 +                index.uuid
+  561 +            )))
+  562 +        }
+  563 +        SegmentRemappingPlan::MissingCoverage(MissingCoverageReason::Unsupported) => {
+  564 +            Err(Error::not_supported(format!(
+  565 +                "segment {} cannot be translated by this build under the tagged fragment reuse \
+  566 +                 history; leave it for a rebuild or a newer version of Lance",
+  567 +                index.uuid
+  568 +            )))
+  569 +        }
+  570 +        SegmentRemappingPlan::MissingCoverage(MissingCoverageReason::Corrupt) => {
+  571 +            Err(Error::index(format!(
+  572 +                "segment {} has metadata this build cannot interpret; the index must be \
+  573 +                 rebuilt",
+  574 +                index.uuid
+  575 +            )))
+  576 +        }
+  577 +        SegmentRemappingPlan::MissingCoverage(
+  578 +            MissingCoverageReason::Withdrawn | MissingCoverageReason::NoDerivedCoverage,
+  579 +        ) => {
+  580 +            let empty = RoaringBitmap::new();
+  581 +            let fingerprint = mapping.translation_fingerprint(&empty, &empty, &[]);
+  582 +            Ok(Some((
+  583 +                fri.uuid,
+  584 +                ResolvedRemapping::V1Translate {
+  585 +                    remapper: Arc::new(super::frag_reuse_remapping::QueryRowIdRemapper::new(
+  586 +                        mapping,
+  587 +                        RoaringBitmap::new(),
+  588 +                        RoaringBitmap::new(),
+  589 +                    )),
+  590 +                    fingerprint,
+  591 +                },
+  592 +            )))
+  593 +        }
+  594          SegmentRemappingPlan::Translate {
+  595              coverage,
+  596              excluded_fragments,
+
+@@ -410,44 +640,70 @@ pub async fn load_frag_reuse_index_details(
+  640              Ok(Arc::new(FragReuseIndexDetails::try_from(content.clone())?))
+  641          }
+  642          Some(Content::External(external_file)) => {
+  413 -            // the file content will be cached in the index cache later
+  414 -            // so we do not put it to the file cache
+  415 -            let data = read_fri_external_file(dataset, index, external_file).await?;
+  416 -
+  417 -            let pb_sequence = InlineContent::decode(data)?;
+  418 -            Ok(Arc::new(FragReuseIndexDetails::try_from(pb_sequence)?))
+  643 +            let (store, path) = fri_external_location(dataset, index, external_file).await?;
+  644 +            dataset
+  645 +                .index_cache
+  646 +                .get_or_insert_with_key(
+  647 +                    FragReuseDetailsKey {
+  648 +                        store_identity: &store.store_prefix,
+  649 +                        path: &path,
+  650 +                        offset: external_file.offset,
+  651 +                        size: external_file.size,
+  652 +                    },
+  653 +                    || async {
+  654 +                        let data = read_fri_external_range(&store, &path, external_file).await?;
+  655 +                        FragReuseIndexDetails::try_from(InlineContent::decode(data)?)
+  656 +                    },
+  657 +                )
+  658 +                .await
+  659          }
+  660      }
+  661  }
+  662  
+  423 -/// Resolve an FRI entry's external details bytes, honoring the entry's base:
+  663 +/// Where an FRI entry's external details live, honoring the entry's base:
+  664  /// a shallow-cloned entry's `details.binpb` lives in the SOURCE dataset, so
+  665  /// the path and store come from the entry's `base_id` (like every other
+  666  /// base-aware index file) instead of the current dataset root.
+  427 -async fn read_fri_external_file(
+  667 +async fn fri_external_location(
+  668      dataset: &Dataset,
+  669      index: &IndexMetadata,
+  670      file: &ExternalFile,
+  671 +) -> lance_core::Result<(Arc<ObjectStore>, Path)> {
+  672 +    let path = dataset
+  673 +        .indice_files_dir(index)?
+  674 +        .join(index.uuid.to_string())
+  675 +        .join(file.path.as_str());
+  676 +    Ok((dataset.object_store_for_index(index).await?, path))
+  677 +}
+  678 +
+  679 +async fn read_fri_external_range(
+  680 +    store: &ObjectStore,
+  681 +    path: &Path,
+  682 +    file: &ExternalFile,
+  683  ) -> lance_core::Result<bytes::Bytes> {
+  684      let end = file
+  685          .offset
+  686          .checked_add(file.size)
+  687          .and_then(|n| usize::try_from(n).ok())
+  688          .ok_or_else(|| Error::corrupt_file_named("FRI details", "external FRI range overflow"))?;
+  437 -    let path = dataset
+  438 -        .indice_files_dir(index)?
+  439 -        .join(index.uuid.to_string())
+  440 -        .join(file.path.as_str());
+  441 -    dataset
+  442 -        .object_store_for_index(index)
+  443 -        .await?
+  444 -        .open(&path)
+  689 +    store
+  690 +        .open(path)
+  691          .await?
+  692          .get_range(file.offset as usize..end)
+  693          .await
+  694          .map_err(Error::from)
+  695  }
+  696  
+  697 +/// An FRI entry's raw external details bytes, read from storage.
+  698 +async fn read_fri_external_file(
+  699 +    dataset: &Dataset,
+  700 +    index: &IndexMetadata,
+  701 +    file: &ExternalFile,
+  702 +) -> lance_core::Result<bytes::Bytes> {
+  703 +    let (store, path) = fri_external_location(dataset, index, file).await?;
+  704 +    read_fri_external_range(&store, &path, file).await
+  705 +}
+  706 +
+  707  /// open fragment reuse index based on its metadata details
+  708  pub(crate) async fn open_frag_reuse_index(
+  709      uuid: Uuid,
+
+@@ -456,13 +712,16 @@ pub(crate) async fn open_frag_reuse_index(
+  712      CompactFragReuseIndex::try_new(uuid, details.clone())
+  713  }
+  714  
+  715 +/// `dataset_version` stamps both the new reuse version and the entry, which must agree.
+  716  pub(crate) async fn build_new_frag_reuse_index(
+  717      dataset: &mut Dataset,
+  718      frag_reuse_groups: Vec<FragReuseGroup>,
+  719      new_fragment_bitmap: RoaringBitmap,
+  720 +    dataset_version: u64,
+  721  ) -> lance_core::Result<IndexMetadata> {
+  722      let new_version = FragReuseVersion {
+  465 -        dataset_version: dataset.manifest.version,
+  723 +        // `finish_rewrite` restamps it if the rewrite publishes on a later version.
+  724 +        dataset_version,
+  725          groups: frag_reuse_groups,
+  726      };
+  727  
+
+@@ -473,36 +732,48 @@ pub(crate) async fn build_new_frag_reuse_index(
+  732              .cloned()
+  733      })?;
+  734  
+  476 -    let new_index_details = match &index_meta {
+  477 -        None => FragReuseIndexDetails {
+  478 -            versions: Vec::from([new_version]),
+  479 -        },
+  735 +    let (new_index_details, fragment_bitmap) = match &index_meta {
+  736 +        None => (
+  737 +            FragReuseIndexDetails {
+  738 +                versions: Vec::from([new_version]),
+  739 +            },
+  740 +            new_fragment_bitmap,
+  741 +        ),
+  742          Some(index_meta) => {
+  743              let current_details = load_frag_reuse_index_details(dataset, index_meta).await?;
+  744 +            // Every version's new fragments, as a rebuild in `finish_rewrite` or a cleanup
+  745 +            // publishes, so the entry is the same whether or not its commit is restamped.
+  746 +            let fragment_bitmap = current_details.new_frag_bitmap() | new_fragment_bitmap;
+  747              let mut versions = current_details.versions.clone();
+  748              versions.push(new_version);
+  484 -            FragReuseIndexDetails { versions }
+  749 +            (FragReuseIndexDetails { versions }, fragment_bitmap)
+  750          }
+  751      };
+  752  
+  488 -    build_frag_reuse_index_metadata(
+  753 +    let mut entry = build_frag_reuse_index_metadata(
+  754          dataset,
+  755          index_meta.as_ref(),
+  756          new_index_details,
+  492 -        new_fragment_bitmap,
+  757 +        fragment_bitmap,
+  758      )
+  494 -    .await
+  759 +    .await?;
+  760 +    entry.dataset_version = dataset_version;
+  761 +    Ok(entry)
+  762  }
+  763  
+  764  pub(crate) async fn build_frag_reuse_index_metadata(
+  765      dataset: &Dataset,
+  766      index_meta: Option<&IndexMetadata>,
+  500 -    new_index_details: FragReuseIndexDetails,
+  767 +    mut new_index_details: FragReuseIndexDetails,
+  768      new_fragment_bitmap: RoaringBitmap,
+  769  ) -> lance_core::Result<IndexMetadata> {
+  770 +    // The encoding orders versions by stamp; the cached copy must match a read of the file.
+  771 +    new_index_details
+  772 +        .versions
+  773 +        .sort_by_key(|version| version.dataset_version);
+  774      let index_id = uuid::Uuid::new_v4();
+  775      let new_index_details_proto = InlineContent::from(&new_index_details);
+  505 -    let proto = if new_index_details_proto.encoded_len() > 204800 {
+  776 +    let proto = if new_index_details_proto.encoded_len() > FRAG_REUSE_INLINE_DETAILS_LIMIT {
+  777          let file_path = dataset
+  778              .indices_dir()
+  779              .join(index_id.to_string())
+
+@@ -526,7 +797,7 @@ pub(crate) async fn build_frag_reuse_index_metadata(
+  797          }
+  798      };
+  799  
+  529 -    Ok(IndexMetadata {
+  800 +    let entry = IndexMetadata {
+  801          uuid: index_id,
+  802          name: FRAG_REUSE_INDEX_NAME.to_string(),
+  803          fields: vec![],
+
+@@ -539,7 +810,24 @@ pub(crate) async fn build_frag_reuse_index_metadata(
+  810          base_id: None,
+  811          // Fragment reuse index is inline (no files)
+  812          files: None,
+  542 -    })
+  813 +    };
+  814 +    // Spares the commit's history check from reading the file back.
+  815 +    if let Some(Content::External(file)) = &proto.content {
+  816 +        let (store, path) = fri_external_location(dataset, &entry, file).await?;
+  817 +        dataset
+  818 +            .index_cache
+  819 +            .insert_with_key(
+  820 +                &FragReuseDetailsKey {
+  821 +                    store_identity: &store.store_prefix,
+  822 +                    path: &path,
+  823 +                    offset: file.offset,
+  824 +                    size: file.size,
+  825 +                },
+  826 +                Arc::new(new_index_details),
+  827 +            )
+  828 +            .await;
+  829 +    }
+  830 +    Ok(entry)
+  831  }
+  832  
+  833  /// One length-delimited protobuf field, the unit both the inline details
+
+@@ -557,10 +845,9 @@ fn encode_length_delimited_field(tag: u32, bytes: &[u8]) -> Vec<u8> {
+  845  /// `Any` is decoded directly, so the envelope is parsed exactly once, by the
+  846  /// ledger. Works for v0 entries too: legacy versions decode as lifted
+  847  /// transitions.
+  560 -// The production caller went away when the sp-x-sp manifest diff was
+  561 -// replaced by merge-through-reassembly; the commit-path tests still verify
+  562 -// committed entries with it.
+  563 -#[cfg_attr(not(test), allow(dead_code))]
+  848 +// The sp-x-sp manifest diff caller went away when it was replaced by
+  849 +// merge-through-reassembly; the maintenance stack (trim derivation, tagged
+  850 +// remap planning) and the commit-path tests call it now.
+  851  pub(crate) async fn decode_frag_reuse_ledger(
+  852      dataset: &Dataset,
+  853      entry: &IndexMetadata,
+
+@@ -577,6 +864,29 @@ pub(crate) async fn decode_frag_reuse_ledger(
+  864      .await
+  865  }
+  866  
+  867 +/// Decode already-loaded FRI content bytes into a transition ledger. Used by
+  868 +/// maintenance paths that hold the entry's verbatim content (the trim's
+  869 +/// splice inputs and outputs, cleanup's reference resolution) and by tests.
+  870 +pub(crate) async fn decode_frag_reuse_ledger_from_content(
+  871 +    index_version: i32,
+  872 +    content: &[u8],
+  873 +) -> lance_core::Result<lance_table::system_index::frag_reuse::ledger::FragReuseLedger> {
+  874 +    let inline = prost_types::Any {
+  875 +        type_url: "/lance.table.FragmentReuseIndexDetails".into(),
+  876 +        value: encode_length_delimited_field(1, content),
+  877 +    };
+  878 +    lance_table::system_index::frag_reuse::ledger::FragReuseLedger::decode(
+  879 +        index_version,
+  880 +        &inline,
+  881 +        |_| async {
+  882 +            Err(Error::invalid_input(
+  883 +                "re-wrapped FRI content is inline; no external read is possible",
+  884 +            ))
+  885 +        },
+  886 +    )
+  887 +    .await
+  888 +}
+  889 +
+  890  /// Extract a committed FRI entry's `FragmentReuseIndexDetails` content bytes
+  891  /// verbatim, resolving an external reference but never reinterpreting the
+  892  /// content: existing legacy versions and transitions keep their exact wire
+
+@@ -587,15 +897,33 @@ pub(crate) async fn load_raw_frag_reuse_content(
+  897      dataset: &Dataset,
+  898      index: &IndexMetadata,
+  899  ) -> lance_core::Result<Vec<u8>> {
+  590 -    use bytes::Buf;
+  591 -    use prost::encoding::{DecodeContext, WireType, decode_key, decode_varint, skip_field};
+  592 -
+  593 -    let corrupt = |message: &str| Error::corrupt_file_named("FRI details", message);
+  900      let details = index
+  901          .index_details
+  902          .as_ref()
+  903          .filter(|details| details.type_url.ends_with("FragmentReuseIndexDetails"))
+  904          .ok_or_else(|| Error::index("Index details is not for the fragment reuse index"))?;
+  905 +    extract_raw_frag_reuse_content(details, |file| async move {
+  906 +        read_fri_external_file(dataset, index, &file).await
+  907 +    })
+  908 +    .await
+  909 +}
+  910 +
+  911 +/// [`load_raw_frag_reuse_content`] with the external read abstracted: callers
+  912 +/// outside a live `Dataset` (the shallow-clone relocation reads the SOURCE
+  913 +/// dataset's entry before the clone exists; the parent's cleanup reads a
+  914 +/// BRANCH manifest's entry) supply their own resolution.
+  915 +pub(crate) async fn extract_raw_frag_reuse_content<F, Fut>(
+  916 +    details: &prost_types::Any,
+  917 +    read_external: F,
+  918 +) -> lance_core::Result<Vec<u8>>
+  919 +where
+  920 +    F: FnOnce(ExternalFile) -> Fut,
+  921 +    Fut: std::future::Future<Output = lance_core::Result<bytes::Bytes>>,
+  922 +{
+  923 +    use bytes::Buf;
+  924 +    use prost::encoding::{DecodeContext, WireType, decode_key, decode_varint, skip_field};
+  925 +
+  926 +    let corrupt = |message: &str| Error::corrupt_file_named("FRI details", message);
+  927      let mut wire = bytes::Bytes::copy_from_slice(&details.value);
+  928      let mut content: Option<(u32, bytes::Bytes)> = None;
+  929      while wire.has_remaining() {
+
+@@ -621,7 +949,7 @@ pub(crate) async fn load_raw_frag_reuse_content(
+  949              let external_file =
+  950                  ExternalFile::decode(external).map_err(|e| corrupt(&e.to_string()))?;
+  951              let expected = external_file.size;
+  624 -            let data = read_fri_external_file(dataset, index, &external_file).await?;
+  952 +            let data = read_external(external_file).await?;
+  953              if data.len() as u64 != expected {
+  954                  return Err(corrupt(&format!(
+  955                      "external FRI size mismatch: expected {expected}, received {}",
+
+@@ -1143,6 +1471,42 @@ pub(crate) fn legacy_version_transitions(version: &pb_fri::Version) -> Vec<pb_fr
+ 1471          .collect()
+ 1472  }
+ 1473  
+ 1474 +/// Refuse a bare group of a transition-carrying rewrite by the bare-rewrite
+ 1475 +/// rule (`gate::covered_bare_rewrite`).
+ 1476 +fn refuse_covered_bare_group(
+ 1477 +    group: &RewriteGroup,
+ 1478 +    indices: &[IndexMetadata],
+ 1479 +) -> lance_core::Result<()> {
+ 1480 +    let rewritten: RoaringBitmap = group
+ 1481 +        .old_fragments
+ 1482 +        .iter()
+ 1483 +        .filter_map(|fragment| u32::try_from(fragment.id).ok())
+ 1484 +        .collect();
+ 1485 +    let fragments = || {
+ 1486 +        group
+ 1487 +            .old_fragments
+ 1488 +            .iter()
+ 1489 +            .map(|fragment| fragment.id)
+ 1490 +            .collect::<Vec<_>>()
+ 1491 +    };
+ 1492 +    match covered_bare_rewrite(&rewritten, indices) {
+ 1493 +        None => Ok(()),
+ 1494 +        Some(BareRewriteRefusal::Covered { index, overlap }) => Err(Error::invalid_input(format!(
+ 1495 +            "rewrite group of fragments {:?} carries no fragment reuse transition but index \
+ 1496 +             {index} covers fragments {:?} of it; record a transition for the group or rebuild \
+ 1497 +             the index before the rewrite",
+ 1498 +            fragments(),
+ 1499 +            overlap.iter().collect::<Vec<_>>(),
+ 1500 +        ))),
+ 1501 +        Some(BareRewriteRefusal::UnknownCoverage { index }) => Err(Error::invalid_input(format!(
+ 1502 +            "rewrite group of fragments {:?} carries no fragment reuse transition and index \
+ 1503 +             {index} has no fragment bitmap, so its coverage is unknown; record a transition \
+ 1504 +             for the group or rebuild the index before the rewrite",
+ 1505 +            fragments(),
+ 1506 +        ))),
+ 1507 +    }
+ 1508 +}
+ 1509 +
+ 1510  /// Assemble the tagged FRI entry a rewrite commits, and return it with the
+ 1511  /// `dataset_version` of the entry it appended onto.
+ 1512  ///
+
+@@ -1180,10 +1544,13 @@ pub(crate) async fn build_frag_reuse_rewrite_entry(
+ 1544          ));
+ 1545      }
+ 1546  
+ 1547 +    let stored = super::load_all_indices(dataset).await?;
+ 1548 +
+ 1549      // Bind the covered rewrite groups to the transitions, one to one and in
+ 1550      // order. A group is covered when its old fragments appear among the
+ 1551      // transitions' sources; a group straddling covered and uncovered sources
+ 1186 -    // is rejected (see `ordered_rewrite_groups`).
+ 1552 +    // is rejected (see `ordered_rewrite_groups`). A bare group follows the
+ 1553 +    // bare-rewrite rule against the index list of this attempt.
+ 1554      let source_ids: HashSet<u64> = transitions
+ 1555          .iter()
+ 1556          .flat_map(|transition| transition.sources.iter().map(|source| source.id))
+
+@@ -1196,6 +1563,7 @@ pub(crate) async fn build_frag_reuse_rewrite_entry(
+ 1563              .filter(|frag| source_ids.contains(&frag.id))
+ 1564              .count();
+ 1565          if covered == 0 {
+ 1566 +            refuse_covered_bare_group(group, &stored)?;
+ 1567              continue;
+ 1568          }
+ 1569          if covered != group.old_fragments.len() {
+
+@@ -1428,7 +1796,6 @@ pub(crate) async fn build_frag_reuse_rewrite_entry(
+ 1796      }
+ 1797  
+ 1798      // Carry the current entry's content bytes over verbatim.
+ 1431 -    let stored = super::load_all_indices(dataset).await?;
+ 1799      let existing = stored.iter().find(|idx| idx.name == FRAG_REUSE_INDEX_NAME);
+ 1800      let (mut content, base_bitmap, base_entry_version) = match existing {
+ 1801          None => (Vec::new(), RoaringBitmap::new(), None),
+
+@@ -1536,26 +1903,28 @@ pub(crate) async fn build_frag_reuse_rewrite_entry(
+ 1903          }
+ 1904      }
+ 1905  
+ 1906 +    let entry = build_tagged_frag_reuse_entry(dataset, content, fragment_bitmap).await?;
+ 1907 +    Ok((entry, base_entry_version))
+ 1908 +}
+ 1909 +
+ 1910 +/// Package assembled tagged FRI content bytes into a fresh manifest entry,
+ 1911 +/// spilling to an external details file above the inline threshold. The
+ 1912 +/// content must already be validated (a decodable ledger); this only encodes.
+ 1913 +pub(crate) async fn build_tagged_frag_reuse_entry(
+ 1914 +    dataset: &Dataset,
+ 1915 +    content: Vec<u8>,
+ 1916 +    fragment_bitmap: RoaringBitmap,
+ 1917 +) -> lance_core::Result<IndexMetadata> {
+ 1918      let index_id = Uuid::new_v4();
+ 1540 -    let details_value = if content.len() > 204800 {
+ 1541 -        let file_path = dataset
+ 1542 -            .indices_dir()
+ 1543 -            .join(index_id.to_string())
+ 1544 -            .join(FRAG_REUSE_DETAILS_FILE_NAME);
+ 1545 -        let mut writer = dataset.object_store.create(&file_path).await?;
+ 1546 -        writer.write_all(&content).await?;
+ 1547 -        writer.shutdown().await?;
+ 1548 -        let external_file = ExternalFile {
+ 1549 -            path: FRAG_REUSE_DETAILS_FILE_NAME.to_owned(),
+ 1550 -            offset: 0,
+ 1551 -            size: content.len() as u64,
+ 1552 -        };
+ 1553 -        encode_length_delimited_field(2, &external_file.encode_to_vec())
+ 1554 -    } else {
+ 1555 -        assembled.value
+ 1556 -    };
+ 1919 +    let details_value = encode_tagged_frag_reuse_details(
+ 1920 +        &dataset.object_store,
+ 1921 +        dataset.indices_dir(),
+ 1922 +        index_id,
+ 1923 +        content,
+ 1924 +    )
+ 1925 +    .await?;
+ 1926  
+ 1558 -    let entry = IndexMetadata {
+ 1927 +    Ok(IndexMetadata {
+ 1928          uuid: index_id,
+ 1929          name: FRAG_REUSE_INDEX_NAME.to_string(),
+ 1930          fields: vec![],
+
+@@ -1572,58 +1941,548 @@ pub(crate) async fn build_frag_reuse_rewrite_entry(
+ 1941          // The row-map files live in their own directories referenced from the
+ 1942          // transitions, not under this entry's uuid.
+ 1943          files: None,
+ 1575 -    };
+ 1576 -    Ok((entry, base_entry_version))
+ 1944 +    })
+ 1945  }
+ 1946  
+ 1947 +/// Encode validated tagged FRI content bytes as an `index_details` value,
+ 1948 +/// spilling to `<indices_dir>/<index_id>/details.binpb` above the inline
+ 1949 +/// threshold.
+ 1950 +async fn encode_tagged_frag_reuse_details(
+ 1951 +    object_store: &ObjectStore,
+ 1952 +    indices_dir: Path,
+ 1953 +    index_id: Uuid,
+ 1954 +    content: Vec<u8>,
+ 1955 +) -> lance_core::Result<Vec<u8>> {
+ 1956 +    if content.len() > FRAG_REUSE_INLINE_DETAILS_LIMIT {
+ 1957 +        let file_path = indices_dir
+ 1958 +            .join(index_id.to_string())
+ 1959 +            .join(FRAG_REUSE_DETAILS_FILE_NAME);
+ 1960 +        let mut writer = object_store.create(&file_path).await?;
+ 1961 +        writer.write_all(&content).await?;
+ 1962 +        writer.shutdown().await?;
+ 1963 +        let external_file = ExternalFile {
+ 1964 +            path: FRAG_REUSE_DETAILS_FILE_NAME.to_owned(),
+ 1965 +            offset: 0,
+ 1966 +            size: content.len() as u64,
+ 1967 +        };
+ 1968 +        Ok(encode_length_delimited_field(
+ 1969 +            2,
+ 1970 +            &external_file.encode_to_vec(),
+ 1971 +        ))
+ 1972 +    } else {
+ 1973 +        Ok(encode_length_delimited_field(1, &content))
+ 1974 +    }
+ 1975 +}
+ 1976  
+ 1977 +/// Details above this size spill to an external `details.binpb` file.
+ 1978 +pub(crate) const FRAG_REUSE_INLINE_DETAILS_LIMIT: usize = 204800;
+ 1979 +
+ 1980 +/// `InlineContent.Transition.stable_partition` (proto field 4).
+ 1981 +const STABLE_PARTITION_FIELD: u32 = 4;
+ 1982 +/// `StablePartition.base_id` (proto field 3, varint).
+ 1983 +const STABLE_PARTITION_BASE_ID_FIELD: u32 = 3;
+ 1984 +
+ 1985 +/// Rewrite each stable-partition mapping's `base_id` through `remap`, leaving
+ 1986 +/// every other byte in its exact wire form. The rewrite is a surgical
+ 1987 +/// wire-level patch (no protobuf decode/re-encode), so unknown NESTED fields
+ 1988 +/// -- extensions of `StablePartition` or `FragmentDigest` this writer does
+ 1989 +/// not know, exactly the shape `base_id` itself was added in -- survive
+ 1990 +/// byte-identically instead of being silently stripped. An unknown envelope
+ 1991 +/// record is still refused: it may participate in base resolution in ways
+ 1992 +/// this writer cannot see, so a history it cannot fully parse must not be
+ 1993 +/// relocated (mirrors the trim's obligation). Unknown fields INSIDE a
+ 1994 +/// transition are refused earlier, by the ledger gate the caller runs.
+ 1995 +fn relocate_stable_partition_bases(
+ 1996 +    content: &[u8],
+ 1997 +    remap: impl Fn(Option<u32>) -> lance_core::Result<Option<u32>>,
+ 1998 +) -> lance_core::Result<Vec<u8>> {
+ 1999 +    use bytes::Buf;
+ 2000 +    use prost::encoding::{WireType, decode_key, decode_varint};
+ 2001 +
+ 2002 +    let corrupt = |message: String| Error::corrupt_file_named("FRI details", message);
+ 2003 +    let total = content.len();
+ 2004 +    let mut buf = bytes::Bytes::copy_from_slice(content);
+ 2005 +    let mut output = Vec::with_capacity(content.len());
+ 2006 +    while buf.has_remaining() {
+ 2007 +        let start = total - buf.remaining();
+ 2008 +        let (tag, wire_type) = decode_key(&mut buf).map_err(|e| corrupt(e.to_string()))?;
+ 2009 +        if wire_type != WireType::LengthDelimited || !matches!(tag, 1 | 2) {
+ 2010 +            return Err(Error::not_supported(format!(
+ 2011 +                "the tagged FRI history carries an unknown record (field {tag}); \
+ 2012 +                 upgrade to a newer version of Lance before cloning this table"
+ 2013 +            )));
+ 2014 +        }
+ 2015 +        let length = decode_varint(&mut buf).map_err(|e| corrupt(e.to_string()))?;
+ 2016 +        if length > buf.remaining() as u64 {
+ 2017 +            return Err(corrupt(format!(
+ 2018 +                "field {tag} length {length} exceeds remaining {} bytes",
+ 2019 +                buf.remaining()
+ 2020 +            )));
+ 2021 +        }
+ 2022 +        let payload = buf.split_to(length as usize);
+ 2023 +        let end = total - buf.remaining();
+ 2024 +        if tag == 2
+ 2025 +            && let Some(patched) = patch_transition_stable_partition(&payload, &remap)?
+ 2026 +        {
+ 2027 +            output.extend_from_slice(&encode_length_delimited_field(2, &patched));
+ 2028 +        } else {
+ 2029 +            // Legacy versions and transitions without a stable-partition
+ 2030 +            // mapping (ordered compaction) reference no bases; verbatim.
+ 2031 +            output.extend_from_slice(&content[start..end]);
+ 2032 +        }
+ 2033      }
+ 2034 +    Ok(output)
+ 2035 +}
+ 2036  
+ 2037 +/// Patch a transition's stable-partition submessage in place, copying every
+ 2038 +/// other field's bytes verbatim (whatever their field number or wire type).
+ 2039 +/// Returns `None` when the transition carries no stable-partition mapping.
+ 2040 +fn patch_transition_stable_partition(
+ 2041 +    raw: &[u8],
+ 2042 +    remap: &impl Fn(Option<u32>) -> lance_core::Result<Option<u32>>,
+ 2043 +) -> lance_core::Result<Option<Vec<u8>>> {
+ 2044 +    use bytes::Buf;
+ 2045 +    use prost::encoding::{DecodeContext, WireType, decode_key, decode_varint, skip_field};
+ 2046 +
+ 2047 +    let corrupt = |message: String| Error::corrupt_file_named("FRI details", message);
+ 2048 +    let total = raw.len();
+ 2049 +    let mut buf = bytes::Bytes::copy_from_slice(raw);
+ 2050 +    let mut output = Vec::with_capacity(raw.len() + 8);
+ 2051 +    let mut found = false;
+ 2052 +    while buf.has_remaining() {
+ 2053 +        let start = total - buf.remaining();
+ 2054 +        let (tag, wire_type) = decode_key(&mut buf).map_err(|e| corrupt(e.to_string()))?;
+ 2055 +        if tag == STABLE_PARTITION_FIELD {
+ 2056 +            if wire_type != WireType::LengthDelimited {
+ 2057 +                return Err(corrupt("stable partition mapping must be a message".into()));
+ 2058 +            }
+ 2059 +            let length = decode_varint(&mut buf).map_err(|e| corrupt(e.to_string()))?;
+ 2060 +            if length > buf.remaining() as u64 {
+ 2061 +                return Err(corrupt(format!(
+ 2062 +                    "stable partition length {length} exceeds remaining {} bytes",
+ 2063 +                    buf.remaining()
+ 2064 +                )));
+ 2065 +            }
+ 2066 +            let payload = buf.split_to(length as usize);
+ 2067 +            if found {
+ 2068 +                // The ledger gate rejects this before relocation runs.
+ 2069 +                return Err(corrupt(
+ 2070 +                    "transition contains multiple stable-partition mappings".into(),
+ 2071 +                ));
+ 2072 +            }
+ 2073 +            found = true;
+ 2074 +            let patched = patch_stable_partition_base(&payload, remap)?;
+ 2075 +            output.extend_from_slice(&encode_length_delimited_field(
+ 2076 +                STABLE_PARTITION_FIELD,
+ 2077 +                &patched,
+ 2078              ));
+ 2079 +        } else {
+ 2080 +            if wire_type == WireType::LengthDelimited {
+ 2081 +                let length = decode_varint(&mut buf).map_err(|e| corrupt(e.to_string()))?;
+ 2082 +                if length > buf.remaining() as u64 {
+ 2083 +                    return Err(corrupt(format!(
+ 2084 +                        "field {tag} length {length} exceeds remaining {} bytes",
+ 2085 +                        buf.remaining()
+ 2086 +                    )));
+ 2087 +                }
+ 2088 +                buf.advance(length as usize);
+ 2089 +            } else {
+ 2090 +                skip_field(wire_type, tag, &mut buf, DecodeContext::default())
+ 2091 +                    .map_err(|e| corrupt(e.to_string()))?;
+ 2092 +            }
+ 2093 +            let end = total - buf.remaining();
+ 2094 +            output.extend_from_slice(&raw[start..end]);
+ 2095 +        }
+ 2096 +    }
+ 2097 +    Ok(found.then_some(output))
+ 2098 +}
+ 2099 +
+ 2100 +/// Drop the submessage's `base_id` field wherever it occurs (proto3
+ 2101 +/// last-one-wins yields the effective current value) and re-emit the
+ 2102 +/// remapped value at the end; every other byte is preserved verbatim.
+ 2103 +fn patch_stable_partition_base(
+ 2104 +    raw: &[u8],
+ 2105 +    remap: &impl Fn(Option<u32>) -> lance_core::Result<Option<u32>>,
+ 2106 +) -> lance_core::Result<Vec<u8>> {
+ 2107 +    use bytes::Buf;
+ 2108 +    use prost::encoding::{DecodeContext, WireType, decode_key, decode_varint, skip_field};
+ 2109 +
+ 2110 +    let corrupt = |message: String| Error::corrupt_file_named("FRI details", message);
+ 2111 +    let total = raw.len();
+ 2112 +    let mut buf = bytes::Bytes::copy_from_slice(raw);
+ 2113 +    let mut output = Vec::with_capacity(raw.len() + 8);
+ 2114 +    let mut existing = None;
+ 2115 +    while buf.has_remaining() {
+ 2116 +        let start = total - buf.remaining();
+ 2117 +        let (tag, wire_type) = decode_key(&mut buf).map_err(|e| corrupt(e.to_string()))?;
+ 2118 +        if tag == STABLE_PARTITION_BASE_ID_FIELD {
+ 2119 +            if wire_type != WireType::Varint {
+ 2120 +                return Err(corrupt("stable partition base_id must be a varint".into()));
+ 2121 +            }
+ 2122 +            let value = decode_varint(&mut buf).map_err(|e| corrupt(e.to_string()))?;
+ 2123 +            existing =
+ 2124 +                Some(u32::try_from(value).map_err(|_| {
+ 2125 +                    corrupt(format!("stable partition base_id {value} overflows u32"))
+ 2126 +                })?);
+ 2127 +        } else {
+ 2128 +            if wire_type == WireType::LengthDelimited {
+ 2129 +                let length = decode_varint(&mut buf).map_err(|e| corrupt(e.to_string()))?;
+ 2130 +                if length > buf.remaining() as u64 {
+ 2131 +                    return Err(corrupt(format!(
+ 2132 +                        "field {tag} length {length} exceeds remaining {} bytes",
+ 2133 +                        buf.remaining()
+ 2134 +                    )));
+ 2135 +                }
+ 2136 +                buf.advance(length as usize);
+ 2137 +            } else {
+ 2138 +                skip_field(wire_type, tag, &mut buf, DecodeContext::default())
+ 2139 +                    .map_err(|e| corrupt(e.to_string()))?;
+ 2140 +            }
+ 2141 +            let end = total - buf.remaining();
+ 2142 +            output.extend_from_slice(&raw[start..end]);
+ 2143 +        }
+ 2144 +    }
+ 2145 +    if let Some(base_id) = remap(existing)? {
+ 2146 +        prost::encoding::encode_key(
+ 2147 +            STABLE_PARTITION_BASE_ID_FIELD,
+ 2148 +            WireType::Varint,
+ 2149 +            &mut output,
+ 2150 +        );
+ 2151 +        prost::encoding::encode_varint(u64::from(base_id), &mut output);
+ 2152 +    }
+ 2153 +    Ok(output)
+ 2154 +}
+ 2155 +
+ 2156 +/// How a clone restamps the stable-partition `base_id`s it relocates.
+ 2157 +pub(crate) enum CloneBaseRemap {
+ 2158 +    /// Shallow clone: row-map files stay where they are.
+ 2159 +    /// `Manifest::shallow_clone` carries the source's `base_paths` ids over
+ 2160 +    /// verbatim and adds `new_base_id` for the source's own base, so `None`
+ 2161 +    /// becomes `Some(new_base_id)` and `Some(id)` stays `id`.
+ 2162 +    Shallow { new_base_id: u32 },
+ 2163 +    /// Deep clone: every referenced row map is copied into the clone's own
+ 2164 +    /// `_fri/` (see [`collect_tagged_row_map_paths`]), so every reference
+ 2165 +    /// becomes local: any stamp clears to unset.
+ 2166 +    Deep,
+ 2167 +}
+ 2168 +
+ 2169 +/// Relocate a tagged FRI entry for a clone.
+ 2170 +///
+ 2171 +/// The source entry's content is resolved base-aware (a chained clone's entry
+ 2172 +/// or details file may live in one of the source's own bases), its
+ 2173 +/// stable-partition references are restamped through the clone's base mapping
+ 2174 +/// (per [`CloneBaseRemap`]), and the relocated content is written into the
+ 2175 +/// CLONE under a fresh uuid with `base_id: None`.
+ 2176 +///
+ 2177 +/// A history this writer cannot fully interpret (unsupported transitions or
+ 2178 +/// unknown records) is refused with `NotSupported` before anything is
+ 2179 +/// written, per the spec's writer obligation.
+ 2180 +///
+ 2181 +/// Returns the relocated entry and, when the details spilled to an external
+ 2182 +/// file in the target, that file's path so a failed clone commit can delete
+ 2183 +/// it again.
+ 2184 +#[allow(clippy::too_many_arguments)]
+ 2185 +pub(crate) async fn relocate_tagged_entry_for_clone(
+ 2186 +    source_store: &ObjectStore,
+ 2187 +    source_base: &Path,
+ 2188 +    source_manifest: &Manifest,
+ 2189 +    store_registry: Arc<ObjectStoreRegistry>,
+ 2190 +    entry: &IndexMetadata,
+ 2191 +    base_remap: CloneBaseRemap,
+ 2192 +    target_store: &ObjectStore,
+ 2193 +    target_base: &Path,
+ 2194 +) -> lance_core::Result<(IndexMetadata, Option<Path>)> {
+ 2195 +    let details = entry
+ 2196 +        .index_details
+ 2197 +        .as_ref()
+ 2198 +        .filter(|details| details.type_url.ends_with("FragmentReuseIndexDetails"))
+ 2199 +        .ok_or_else(|| Error::index("Index details is not for the fragment reuse index"))?;
+ 2200 +    // Base-aware resolution of the entry's external details without a live
+ 2201 +    // `Dataset`: the same rule as `read_fri_external_file`, against the
+ 2202 +    // source manifest's `base_paths`.
+ 2203 +    let registry = store_registry.clone();
+ 2204 +    let content = extract_raw_frag_reuse_content(details, |file| async move {
+ 2205 +        let end = file
+ 2206 +            .offset
+ 2207 +            .checked_add(file.size)
+ 2208 +            .and_then(|n| usize::try_from(n).ok())
+ 2209 +            .ok_or_else(|| {
+ 2210 +                Error::corrupt_file_named("FRI details", "external FRI range overflow")
+ 2211 +            })?;
+ 2212 +        let (store, indices_dir) = match entry.base_id {
+ 2213 +            None => (None, source_base.clone().join(crate::dataset::INDICES_DIR)),
+ 2214 +            Some(id) => {
+ 2215 +                let base_path = source_manifest.base_paths.get(&id).ok_or_else(|| {
+ 2216 +                    Error::invalid_input(format!(
+ 2217 +                        "base_path id {} not found for index {}",
+ 2218 +                        id, entry.uuid
+ 2219 +                    ))
+ 2220 +                })?;
+ 2221 +                let path = base_path.extract_path(registry.clone())?;
+ 2222 +                let dir = if base_path.is_dataset_root {
+ 2223 +                    path.join(crate::dataset::INDICES_DIR)
+ 2224 +                } else {
+ 2225 +                    path
+ 2226 +                };
+ 2227 +                // Foreign bases are opened with default store params:
+ 2228 +                // per-base source credentials are not plumbed through the
+ 2229 +                // clone commit path. Documented limitation shared with deep
+ 2230 +                // clone's base reads (see
+ 2231 +                // <https://github.com/lance-format/lance/issues/6093>).
+ 2232 +                let (store, _) = ObjectStore::from_uri_and_params(
+ 2233 +                    registry,
+ 2234 +                    &base_path.path,
+ 2235 +                    &Default::default(),
+ 2236 +                )
+ 2237 +                .await?;
+ 2238 +                (Some(store), dir)
+ 2239 +            }
+ 2240 +        };
+ 2241 +        let path = indices_dir
+ 2242 +            .join(entry.uuid.to_string())
+ 2243 +            .join(file.path.as_str());
+ 2244 +        let store = store.as_deref().unwrap_or(source_store);
+ 2245 +        store
+ 2246 +            .open(&path)
+ 2247 +            .await?
+ 2248 +            .get_range(file.offset as usize..end)
+ 2249 +            .await
+ 2250 +            .map_err(Error::from)
+ 2251 +    })
+ 2252 +    .await?;
+ 2253 +
+ 2254 +    // Full ledger validation before interpreting anything; reader semantics
+ 2255 +    // skip unknown mappings, and a writer must not relocate a history it
+ 2256 +    // cannot fully interpret.
+ 2257 +    let ledger = decode_frag_reuse_ledger_from_content(entry.index_version, &content).await?;
+ 2258 +    if ledger.has_unsupported_transitions() {
+ 2259 +        return Err(Error::not_supported(
+ 2260 +            "the fragment reuse history contains mappings this writer cannot relocate; \
+ 2261 +             upgrade to a newer version of Lance before cloning this table",
+ 2262 +        ));
+ 2263 +    }
+ 2264 +
+ 2265 +    let relocated =
+ 2266 +        relocate_stable_partition_bases(&content, |base_id| match (&base_remap, base_id) {
+ 2267 +            // Deep clone materializes every referenced map into the clone's
+ 2268 +            // own `_fri/`, so every stamp clears to unset.
+ 2269 +            (CloneBaseRemap::Deep, _) => Ok(None),
+ 2270 +            // The source's own base gets the id the clone assigned to it.
+ 2271 +            (CloneBaseRemap::Shallow { new_base_id }, None) => Ok(Some(*new_base_id)),
+ 2272 +            // The clone carries the source's `base_paths` entries over under
+ 2273 +            // the same ids, so a foreign-base reference keeps its id; it
+ 2274 +            // must exist.
+ 2275 +            (CloneBaseRemap::Shallow { .. }, Some(id)) => {
+ 2276 +                if source_manifest.base_paths.contains_key(&id) {
+ 2277 +                    Ok(Some(id))
+ 2278 +                } else {
+ 2279 +                    Err(Error::corrupt_file_named(
+ 2280 +                        "FRI details",
+ 2281 +                        format!("stable partition mapping references missing base {id}"),
+ 2282 +                    ))
+ 2283 +                }
+ 2284 +            }
+ 2285 +        })?;
+ 2286 +    // The relocated history must still decode as a well-formed ledger.
+ 2287 +    decode_frag_reuse_ledger_from_content(entry.index_version, &relocated).await?;
+ 2288 +
+ 2289 +    let index_id = Uuid::new_v4();
+ 2290 +    let target_indices_dir = target_base.clone().join(crate::dataset::INDICES_DIR);
+ 2291 +    let spilled = (relocated.len() > FRAG_REUSE_INLINE_DETAILS_LIMIT).then(|| {
+ 2292 +        target_indices_dir
+ 2293 +            .clone()
+ 2294 +            .join(index_id.to_string())
+ 2295 +            .join(FRAG_REUSE_DETAILS_FILE_NAME)
+ 2296 +    });
+ 2297 +    let details_value =
+ 2298 +        encode_tagged_frag_reuse_details(target_store, target_indices_dir, index_id, relocated)
+ 2299 +            .await?;
+ 2300 +    Ok((
+ 2301 +        IndexMetadata {
+ 2302 +            uuid: index_id,
+ 2303 +            name: entry.name.clone(),
+ 2304 +            fields: entry.fields.clone(),
+ 2305 +            covering_fields: entry.covering_fields.clone(),
+ 2306 +            dataset_version: entry.dataset_version,
+ 2307 +            fragment_bitmap: entry.fragment_bitmap.clone(),
+ 2308 +            index_details: Some(Arc::new(prost_types::Any {
+ 2309 +                type_url: "/lance.table.FragmentReuseIndexDetails".into(),
+ 2310 +                value: details_value,
+ 2311 +            })),
+ 2312 +            index_version: entry.index_version,
+ 2313 +            created_at: entry.created_at,
+ 2314 +            // The relocated entry lives in the clone.
+ 2315 +            base_id: None,
+ 2316 +            files: entry.files.clone(),
+ 2317 +        },
+ 2318 +        spilled,
+ 2319 +    ))
+ 2320 +}
+ 2321 +
+ 2322 +/// The copy work a deep clone owes a tagged FRI entry: every file of every
+ 2323 +/// `_fri/<map_id>/` row map the history references, resolved through the
+ 2324 +/// manifest's `base_paths` (a chained shallow-then-deep clone finds maps
+ 2325 +/// living in ancestor bases), as `(relative_path, base_root)` pairs for
+ 2326 +/// `deep_clone`'s copy loop. Map ids are UUIDs minted at rewrite time, so
+ 2327 +/// the copies land in the target's fresh `_fri/` namespace collision-free.
+ 2328 +///
+ 2329 +/// A history this writer cannot fully interpret (an unknown mapping kind or
+ 2330 +/// an unknown envelope record) is refused with `NotSupported` before
+ 2331 +/// anything is copied: an unknown record may reference row maps this writer
+ 2332 +/// cannot enumerate, and copying an incomplete set would fabricate a
+ 2333 +/// silently broken "independent" table. This is the same obligation the
+ 2334 +/// shallow-clone relocation honors, with the same error.
+ 2335 +pub(crate) async fn collect_tagged_row_map_paths(
+ 2336 +    dataset: &Dataset,
+ 2337 +    entry: &IndexMetadata,
+ 2338 +) -> lance_core::Result<Vec<(String, Path)>> {
+ 2339 +    use futures::TryStreamExt;
+ 2340 +    use lance_index::frag_reuse::stable_partition::MAPPING_FILE;
+ 2341 +    use lance_table::system_index::frag_reuse::ledger::Mapping;
+ 2342 +
+ 2343 +    let ledger = decode_frag_reuse_ledger(dataset, entry).await?;
+ 2344 +    if ledger.has_unsupported_transitions() {
+ 2345 +        return Err(Error::not_supported(
+ 2346 +            "the fragment reuse history contains mappings this writer cannot relocate; \
+ 2347 +             upgrade to a newer version of Lance before cloning this table",
+ 2348 +        ));
+ 2349 +    }
+ 2350 +
+ 2351 +    let mut seen: HashSet<(Option<u32>, &str)> = HashSet::new();
+ 2352 +    let mut paths = Vec::new();
+ 2353 +    for transition in ledger.transitions() {
+ 2354 +        let Mapping::StablePartition(reference) = transition.mapping() else {
+ 2355 +            continue;
+ 2356 +        };
+ 2357 +        if !seen.insert((reference.base_id, reference.map_id.as_str())) {
+ 2358 +            continue;
+ 2359 +        }
+ 2360 +        // The same base-aware resolution the reader opens the map with.
+ 2361 +        let base_root = match reference.base_id {
+ 2362 +            None => dataset.base.clone(),
+ 2363 +            Some(id) => dataset
+ 2364 +                .manifest
+ 2365 +                .base_paths
+ 2366 +                .get(&id)
+ 2367 +                .ok_or_else(|| {
+ 2368 +                    Error::invalid_input(format!(
+ 2369 +                        "mapping {} references missing base {id}",
+ 2370 +                        reference.map_id
+ 2371 +                    ))
+ 2372 +                })?
+ 2373 +                .extract_path(dataset.session.store_registry())?,
+ 2374 +        };
+ 2375 +        let map_dir = base_root
+ 2376 +            .clone()
+ 2377 +            .join("_fri")
+ 2378 +            .join(reference.map_id.as_str());
+ 2379 +        let mut mapping_size = None;
+ 2380 +        let mut stream = dataset.object_store.read_dir_all(&map_dir, None);
+ 2381 +        loop {
+ 2382 +            match stream.try_next().await {
+ 2383 +                Ok(Some(meta)) => {
+ 2384 +                    let relative = meta
+ 2385 +                        .location
+ 2386 +                        .as_ref()
+ 2387 +                        .strip_prefix(map_dir.as_ref())
+ 2388 +                        .ok_or_else(|| {
+ 2389 +                            Error::internal(format!(
+ 2390 +                                "listing {} returned {} outside it",
+ 2391 +                                map_dir, meta.location
+ 2392 +                            ))
+ 2393 +                        })?
+ 2394 +                        .trim_start_matches('/');
+ 2395 +                    if relative == MAPPING_FILE {
+ 2396 +                        mapping_size = Some(meta.size);
+ 2397 +                    }
+ 2398 +                    paths.push((
+ 2399 +                        format!("_fri/{}/{relative}", reference.map_id),
+ 2400 +                        base_root.clone(),
+ 2401 +                    ));
+ 2402 +                }
+ 2403 +                Ok(None) => break,
+ 2404 +                Err(Error::NotFound { .. }) => break,
+ 2405 +                Err(error) => return Err(error),
+ 2406 +            }
+ 2407 +        }
+ 2408 +        // The copy must produce a working clone: the map's mapping file has
+ 2409 +        // to be there with the size the history records for it (the reader
+ 2410 +        // opens the file by that size). Refuse the clone now rather than
+ 2411 +        // hand the target a history whose first translating query fails.
+ 2412 +        match mapping_size {
+ 2413 +            Some(size) if size == reference.map_size_bytes => {}
+ 2414 +            Some(size) => {
+ 2415 +                return Err(Error::corrupt_file_named(
+ 2416 +                    "FRI details",
+ 2417 +                    format!(
+ 2418 +                        "row map {} has a {MAPPING_FILE} of {size} bytes under its base, \
+ 2419 +                         the history records {} bytes",
+ 2420 +                        reference.map_id, reference.map_size_bytes
+ 2421 +                    ),
+ 2422 +                ));
+ 2423 +            }
+ 2424 +            None => {
+ 2425 +                return Err(Error::corrupt_file_named(
+ 2426 +                    "FRI details",
+ 2427 +                    format!(
+ 2428 +                        "row map {} has no {MAPPING_FILE} under its base",
+ 2429 +                        reference.map_id
+ 2430 +                    ),
+ 2431 +                ));
+ 2432 +            }
+ 2433 +        }
+ 2434 +    }
+ 2435 +    Ok(paths)
+ 2436 +}
+ 2437 +

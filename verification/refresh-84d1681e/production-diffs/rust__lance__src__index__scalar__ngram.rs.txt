@@ -1,0 +1,70 @@
+@@ -37,6 +37,7 @@ async fn collect_ngram_segment_stores(
+   37  pub(in crate::index) async fn merge_segments(
+   38      dataset: &Dataset,
+   39      segments: Vec<IndexMetadata>,
+   40 +    staged: Option<&crate::index::frag_reuse::StagedRemappingPlans>,
+   41  ) -> Result<IndexMetadata> {
+   42      if segments.is_empty() {
+   43          return Err(Error::index("No segment metadata was provided".to_string()));
+
+@@ -124,11 +125,18 @@ pub(in crate::index) async fn merge_segments(
+  125          )
+  126      } else {
+  127          let (fragment_bitmap, old_data_filters) =
+  127 -            crate::index::append::build_per_segment_filters(dataset, &segment_refs).await?;
+  128 +            crate::index::append::build_per_segment_filters(dataset, &segment_refs, staged).await?;
+  129          let new_store = LanceIndexStore::from_dataset_for_new(dataset, &new_uuid)?;
+  130          (
+  130 -            open_and_merge_segments(dataset, &segment_refs, None, &new_store, &old_data_filters)
+  131 -                .await?,
+  131 +            open_and_merge_segments(
+  132 +                dataset,
+  133 +                &segment_refs,
+  134 +                None,
+  135 +                &new_store,
+  136 +                &old_data_filters,
+  137 +                staged,
+  138 +            )
+  139 +            .await?,
+  140              source_dataset_version,
+  141              fragment_bitmap,
+  142          )
+
+@@ -157,7 +165,37 @@ pub(in crate::index) async fn open_and_merge_segments(
+  165      new_data: Option<SendableRecordBatchStream>,
+  166      new_store: &LanceIndexStore,
+  167      old_data_filters: &[Option<OldIndexDataFilter>],
+  168 +    staged: Option<&crate::index::frag_reuse::StagedRemappingPlans>,
+  169  ) -> Result<CreatedIndex> {
+  170 +    // The NGram merge reads its sources' spill files directly and translates
+  171 +    // them through the synchronous v0 remapper only; a tagged history has no
+  172 +    // such remapper, so a segment whose rows need translation would be merged
+  173 +    // with stale addresses against filters expressed in the translated
+  174 +    // domain. Refuse instead of silently emptying the merge; the segment
+  175 +    // keeps translating at query time and a rebuild catches it up.
+  176 +    if crate::index::append::tagged_segment_coverage(dataset, segments, staged)
+  177 +        .await?
+  178 +        .is_some()
+  179 +        && let Some(segment) = segments.iter().find(|segment| {
+  180 +            use crate::index::frag_reuse::SegmentRemappingPlan;
+  181 +            match staged.and_then(|plans| plans.get(&segment.uuid)) {
+  182 +                // A staged segment's bitmap already holds its planned live
+  183 +                // coverage; the plan says whether its rows translate.
+  184 +                Some(SegmentRemappingPlan::Translate { .. }) => true,
+  185 +                Some(_) => false,
+  186 +                None => segment
+  187 +                    .fragment_bitmap
+  188 +                    .as_ref()
+  189 +                    .is_none_or(|bitmap| !bitmap.is_subset(dataset.fragment_bitmap.as_ref())),
+  190 +            }
+  191 +        })
+  192 +    {
+  193 +        return Err(Error::not_supported(format!(
+  194 +            "NGram segment {} needs address translation under the tagged fragment reuse \
+  195 +             history and cannot be merged; rebuild the index instead",
+  196 +            segment.uuid
+  197 +        )));
+  198 +    }
+  199      let segments = segments.iter().map(|&s| s.clone()).collect::<Vec<_>>();
+  200      let segment_stores = collect_ngram_segment_stores(dataset, &segments).await?;
+  201      let frag_reuse_index = dataset.open_frag_reuse_index(&NoOpMetricsCollector).await?;

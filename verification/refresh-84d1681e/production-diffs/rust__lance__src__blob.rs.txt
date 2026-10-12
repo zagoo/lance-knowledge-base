@@ -1,0 +1,112 @@
+@@ -557,6 +557,23 @@ fn validate_prepared_blob_value_array(field: &Field, array: &ArrayRef) -> Result
+  557                  }
+  558                  validate_blob_id(blob_id_col.value(row))?;
+  559              }
+  560 +            BlobKind::Managed | BlobKind::ManagedWithBase => {
+  561 +                if uri_col.is_null(row)
+  562 +                    || ((kind_col.value(row) == BlobKind::ManagedWithBase as u8)
+  563 +                        != blob_id_col.is_valid(row))
+  564 +                    || blob_size_col.is_null(row)
+  565 +                    || position_col.is_null(row)
+  566 +                {
+  567 +                    return Err(Error::invalid_input(format!(
+  568 +                        "Prepared Managed blob row {row} requires `uri`, `blob_size`, and `position`, plus `blob_id` for an explicit base"
+  569 +                    )));
+  570 +                }
+  571 +                lance_core::utils::blob::validate_managed_reference(
+  572 +                    uri_col.value(row),
+  573 +                    position_col.value(row),
+  574 +                    blob_size_col.value(row),
+  575 +                )?;
+  576 +            }
+  577              BlobKind::External => {
+  578                  if uri_col.is_null(row) || uri_col.value(row).is_empty() {
+  579                      return Err(Error::invalid_input(format!(
+
+@@ -629,6 +646,14 @@ pub enum BlobDescriptor {
+  646      },
+  647      /// Payload bytes stored as the full contents of a dedicated sidecar blob.
+  648      Dedicated { blob_id: u32, size: u64 },
+  649 +    /// A known range in an immutable Lance-owned object. `None` uses the
+  650 +    /// writer's table base; `Some(id)` requires an already registered base.
+  651 +    Managed {
+  652 +        base_id: Option<u32>,
+  653 +        uri: String,
+  654 +        offset: u64,
+  655 +        size: u64,
+  656 +    },
+  657      /// Payload bytes referenced from an external object or registered base.
+  658      External {
+  659          base_id: u32,
+
+@@ -816,6 +841,24 @@ impl BlobDescriptorArrayBuilder {
+  841                      blob_size_builder.append_value(size);
+  842                      position_builder.append_null();
+  843                  }
+  844 +                BlobDescriptor::Managed {
+  845 +                    base_id,
+  846 +                    uri,
+  847 +                    offset,
+  848 +                    size,
+  849 +                } => {
+  850 +                    validity.append_non_null();
+  851 +                    kind_builder.append_value(if base_id.is_some() {
+  852 +                        BlobKind::ManagedWithBase as u8
+  853 +                    } else {
+  854 +                        BlobKind::Managed as u8
+  855 +                    });
+  856 +                    data_builder.append_null();
+  857 +                    uri_builder.append_value(uri);
+  858 +                    blob_id_builder.append_option(base_id);
+  859 +                    blob_size_builder.append_value(size);
+  860 +                    position_builder.append_value(offset);
+  861 +                }
+  862                  BlobDescriptor::External {
+  863                      base_id,
+  864                      uri,
+
+@@ -872,6 +915,12 @@ fn validate_blob_descriptor(value: &BlobDescriptor) -> Result<()> {
+  915              Ok(())
+  916          }
+  917          BlobDescriptor::Dedicated { blob_id, .. } => validate_blob_id(*blob_id),
+  918 +        BlobDescriptor::Managed {
+  919 +            uri, offset, size, ..
+  920 +        } => {
+  921 +            lance_core::utils::blob::validate_managed_reference(uri, *offset, *size)?;
+  922 +            Ok(())
+  923 +        }
+  924          BlobDescriptor::External {
+  925              uri, offset, size, ..
+  926          } => {
+
+@@ -922,6 +971,14 @@ impl PackedBlobWriter {
+  971          blob_id: u32,
+  972      ) -> Result<Self> {
+  973          let path = sidecar_path_for_data_file(&data_file_path, blob_id)?;
+  974 +        Self::try_new_at(object_store, path, blob_id).await
+  975 +    }
+  976 +
+  977 +    pub(crate) async fn try_new_at(
+  978 +        object_store: ObjectStore,
+  979 +        path: Path,
+  980 +        blob_id: u32,
+  981 +    ) -> Result<Self> {
+  982          let writer = object_store.create(&path).await?;
+  983          Ok(Self {
+  984              object_store,
+
+@@ -1063,6 +1120,14 @@ impl DedicatedBlobWriter {
+ 1120          blob_id: u32,
+ 1121      ) -> Result<Self> {
+ 1122          let path = sidecar_path_for_data_file(&data_file_path, blob_id)?;
+ 1123 +        Self::try_new_at(object_store, path, blob_id).await
+ 1124 +    }
+ 1125 +
+ 1126 +    pub(crate) async fn try_new_at(
+ 1127 +        object_store: ObjectStore,
+ 1128 +        path: Path,
+ 1129 +        blob_id: u32,
+ 1130 +    ) -> Result<Self> {
+ 1131          let writer = object_store.create(&path).await?;
+ 1132          Ok(Self {
+ 1133              object_store,

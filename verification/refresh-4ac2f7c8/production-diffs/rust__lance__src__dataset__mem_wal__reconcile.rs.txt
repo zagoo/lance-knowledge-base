@@ -1,0 +1,42 @@
+@@ -11,8 +11,8 @@
+   11  //! the same name under a different id is a different column. Names are used only
+   12  //! where no id exists, as in a batch a caller just handed in.
+   13  //!
+   14 -//! A table with a MemWAL refuses type changes, so an id that disappears always
+   15 -//! means the column was dropped.
+   14 +//! A table with a MemWAL refuses type changes, so an id that disappears
+   15 +//! normally means the column was dropped.
+   16  
+   17  use std::collections::HashMap;
+   18  use std::sync::Arc;
+
+@@ -302,21 +302,14 @@ fn resolve_field(
+  302      if source.data_type() == field.data_type() {
+  303          return Ok(Source::Take(index));
+  304      }
+  305 -    // The same column under a different scalar type. A table with a MemWAL
+  306 -    // refuses a cast, so this is a disagreement to surface rather than paper
+  307 -    // over; a struct differing only in its children is handled below.
+  308 -    if !matches!(
+  309 -        (source.data_type(), field.data_type()),
+  310 -        (DataType::Struct(_), DataType::Struct(_))
+  311 -    ) {
+  312 -        return Err(Error::invalid_input(format!(
+  313 -            "column `{name}` is stored as {} and the schema declares {}; a column's type \
+  314 -             cannot change on a table with a MemWAL",
+  315 -            source.data_type(),
+  316 -            field.data_type()
+  317 -        )));
+  318 -    }
+  319 -    unreachable!("a struct is resolved above and any other mismatch is rejected")
+  305 +    // Same column, different type. A MemWAL table refuses type changes, so
+  306 +    // report it rather than convert.
+  307 +    Err(Error::invalid_input(format!(
+  308 +        "column `{name}` is stored as {} and the schema declares {}; a column's type \
+  309 +         cannot change on a table with a MemWAL",
+  310 +        source.data_type(),
+  311 +        field.data_type()
+  312 +    )))
+  313  }
+  314  
+  315  /// Whether this type carries its children inside its own type, so an array of

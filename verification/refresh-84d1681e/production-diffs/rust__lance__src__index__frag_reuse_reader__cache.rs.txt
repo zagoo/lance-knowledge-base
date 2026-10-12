@@ -1,0 +1,76 @@
+@@ -12,6 +12,7 @@ use lance_core::Result;
+   12  use lance_core::cache::{CacheKey, CacheKeySchema, KeyBuilder, WeakLanceCache};
+   13  use lance_core::deepsize::{Context, DeepSizeOf};
+   14  use lance_core::utils::fragment_reuse::{MappingReader, OrderedCompactionMapping};
+   15 +use lance_index::frag_reuse::row_map::{ROW_MAP_CACHE_CHUNK_BYTES, RowMapBlockCache};
+   16  use lance_index::frag_reuse::stable_partition::{MAPPING_FILE, StablePartitionMapping};
+   17  use lance_index::scalar::lance_format::LanceIndexStore;
+   18  use lance_table::format::IndexMetadata;
+
+@@ -98,7 +99,7 @@ impl CacheKey for MappingKey {
+   99      }
+  100  }
+  101  
+  101 -pub(super) struct CachedMapping {
+  102 +pub struct CachedMapping {
+  103      reader: Arc<dyn MappingReader>,
+  104      cache: Option<(WeakLanceCache, MappingKey)>,
+  105      grows_on_open: bool,
+
+@@ -116,10 +117,7 @@ impl DeepSizeOf for CachedMapping {
+  117  }
+  118  
+  119  impl CachedMapping {
+  119 -    pub(super) async fn remap_row_ids(
+  120 -        self: &Arc<Self>,
+  121 -        row_ids: &[u64],
+  122 -    ) -> Result<Vec<Option<u64>>> {
+  120 +    pub async fn remap_row_ids(self: &Arc<Self>, row_ids: &[u64]) -> Result<Vec<Option<u64>>> {
+  121          let result = self.reader.remap_row_ids(row_ids).await;
+  122          // TODO: Evaluate cache size accuracy versus latency impact.
+  123          if self.grows_on_open {
+
+@@ -146,7 +144,7 @@ impl CachedMapping {
+  145  }
+  146  
+  149 -pub(super) async fn open_mapping(
+  147 +pub async fn open_mapping(
+  148      dataset: &Dataset,
+  149      transition: &Transition,
+  150  ) -> Result<Arc<CachedMapping>> {
+
+@@ -204,10 +202,33 @@ pub(super) async fn open_mapping(
+  202                              MAPPING_FILE.to_string(),
+  203                              reference.map_size_bytes,
+  204                          )]));
+  207 -                    Arc::new(StablePartitionMapping::try_new(
+  205 +                    // Row-map label chunks live in the index cache (following the
+  206 +                    // v0 placement choice: FRI file content is index-cached, not
+  207 +                    // file-cached). Keyed by the transition fingerprint so the
+  208 +                    // chunk entries are stable across queries and snapshots.
+  209 +                    //
+  210 +                    // A cache known to be smaller than one chunk can never
+  211 +                    // retain a chunk entry: every request would read a whole
+  212 +                    // chunk and discard it. Open the reader without a block
+  213 +                    // cache then, so a request reads exactly the blocks it
+  214 +                    // touches (a point lookup reads one block). When the
+  215 +                    // capacity is unknown the chunk cache is used, and a
+  216 +                    // request still pays at most one read per chunk because
+  217 +                    // the reader holds the chunk it loaded across the blocks
+  218 +                    // of one request.
+  219 +                    let capacity = dataset.index_cache.capacity_bytes();
+  220 +                    let block_cache = match capacity {
+  221 +                        Some(capacity) if capacity < ROW_MAP_CACHE_CHUNK_BYTES => None,
+  222 +                        _ => Some(RowMapBlockCache::new(
+  223 +                            WeakLanceCache::from(&dataset.index_cache),
+  224 +                            *transition.fingerprint(),
+  225 +                        )),
+  226 +                    };
+  227 +                    Arc::new(StablePartitionMapping::try_new_with_cache(
+  228                          Arc::new(store),
+  229                          transition.sources().to_vec(),
+  230                          transition.destinations().to_vec(),
+  231 +                        block_cache,
+  232                      )?)
+  233                  }
+  234              };

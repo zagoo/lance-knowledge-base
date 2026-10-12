@@ -1,0 +1,260 @@
+@@ -0,0 +1,259 @@
+    1 +// SPDX-License-Identifier: Apache-2.0
+    2 +// SPDX-FileCopyrightText: Copyright The Lance Authors
+    3 +
+    4 +//! Copy Managed payloads and rebind descriptors for an independent deep clone.
+    5 +
+    6 +use std::collections::HashMap;
+    7 +use std::sync::Arc;
+    8 +
+    9 +use arrow_array::cast::AsArray;
+   10 +use arrow_array::{
+   11 +    Array, ArrayRef, GenericListArray, RecordBatch, StringArray, StructArray, UInt8Array,
+   12 +    UInt32Array,
+   13 +};
+   14 +use arrow_schema::DataType;
+   15 +use lance_core::datatypes::{BlobHandling, BlobKind, Field};
+   16 +use lance_core::{Error, ROW_ADDR, Result};
+   17 +use lance_io::object_store::ObjectStore;
+   18 +use lance_table::format::{Fragment, Manifest};
+   19 +use object_store::path::Path;
+   20 +use uuid::Uuid;
+   21 +
+   22 +use super::{
+   23 +    BlobV2DescriptorColumns, field_contains_blob, join_base_and_relative_path, managed_references,
+   24 +};
+   25 +use crate::dataset::Dataset;
+   26 +use crate::dataset::optimize::BlobV2BatchRewritePlan;
+   27 +
+   28 +type BlobCopies = HashMap<(Option<u32>, String), String>;
+   29 +
+   30 +fn replace_array(copies: &BlobCopies, field: &Field, array: ArrayRef) -> Result<ArrayRef> {
+   31 +    if !field_contains_blob(field) {
+   32 +        return Ok(array);
+   33 +    }
+   34 +    if field.is_blob_v2() {
+   35 +        let values = array.as_struct();
+   36 +        let column = |name: &str| {
+   37 +            values.column_by_name(name).ok_or_else(|| {
+   38 +                Error::internal(format!("Prepared Managed rewrite is missing {name}"))
+   39 +            })
+   40 +        };
+   41 +        let columns = BlobV2DescriptorColumns {
+   42 +            descriptions: values,
+   43 +            kinds: column("kind")?.as_primitive(),
+   44 +            positions: column("position")?.as_primitive(),
+   45 +            sizes: column("blob_size")?.as_primitive(),
+   46 +            blob_ids: column("blob_id")?.as_primitive(),
+   47 +            blob_uris: column("uri")?.as_string(),
+   48 +        };
+   49 +        let mut ids = columns.blob_ids.iter().collect::<Vec<_>>();
+   50 +        let mut kinds = columns.kinds.values().to_vec();
+   51 +        let mut uris = Vec::with_capacity(values.len());
+   52 +        for (row, id) in ids.iter_mut().enumerate() {
+   53 +            let uri = columns.blob_uris.value(row);
+   54 +            if !columns.is_null_blob(row)
+   55 +                && matches!(
+   56 +                    BlobKind::try_from(columns.kinds.value(row))?,
+   57 +                    BlobKind::Managed | BlobKind::ManagedWithBase
+   58 +                )
+   59 +                && let Some(replacement) =
+   60 +                    copies.get(&(columns.managed_base_id(row), uri.to_string()))
+   61 +            {
+   62 +                *id = None;
+   63 +                kinds[row] = BlobKind::Managed as u8;
+   64 +                uris.push(Some(replacement.as_str()));
+   65 +            } else {
+   66 +                uris.push(columns.blob_uris.is_valid(row).then_some(uri));
+   67 +            }
+   68 +        }
+   69 +        let arrays = values
+   70 +            .fields()
+   71 +            .iter()
+   72 +            .zip(values.columns())
+   73 +            .map(|(field, array)| -> ArrayRef {
+   74 +                match field.name().as_str() {
+   75 +                    "kind" => Arc::new(UInt8Array::new(
+   76 +                        kinds.clone().into(),
+   77 +                        columns.kinds.nulls().cloned(),
+   78 +                    )),
+   79 +                    "blob_id" => Arc::new(UInt32Array::from(ids.clone())),
+   80 +                    "uri" => Arc::new(StringArray::from(uris.clone())),
+   81 +                    _ => array.clone(),
+   82 +                }
+   83 +            })
+   84 +            .collect();
+   85 +        return Ok(Arc::new(StructArray::try_new(
+   86 +            values.fields().clone(),
+   87 +            arrays,
+   88 +            values.nulls().cloned(),
+   89 +        )?));
+   90 +    }
+   91 +    match array.data_type() {
+   92 +        DataType::Struct(_) => {
+   93 +            let values = array.as_struct();
+   94 +            let arrays = field
+   95 +                .children
+   96 +                .iter()
+   97 +                .zip(values.columns())
+   98 +                .map(|(child, array)| replace_array(copies, child, array.clone()))
+   99 +                .collect::<Result<Vec<_>>>()?;
+  100 +            Ok(Arc::new(StructArray::try_new(
+  101 +                values.fields().clone(),
+  102 +                arrays,
+  103 +                values.nulls().cloned(),
+  104 +            )?))
+  105 +        }
+  106 +        DataType::List(child) => {
+  107 +            let values = array.as_list::<i32>();
+  108 +            Ok(Arc::new(GenericListArray::<i32>::try_new(
+  109 +                child.clone(),
+  110 +                values.offsets().clone(),
+  111 +                replace_array(copies, &field.children[0], values.values().clone())?,
+  112 +                values.nulls().cloned(),
+  113 +            )?))
+  114 +        }
+  115 +        DataType::LargeList(child) => {
+  116 +            let values = array.as_list::<i64>();
+  117 +            Ok(Arc::new(GenericListArray::<i64>::try_new(
+  118 +                child.clone(),
+  119 +                values.offsets().clone(),
+  120 +                replace_array(copies, &field.children[0], values.values().clone())?,
+  121 +                values.nulls().cloned(),
+  122 +            )?))
+  123 +        }
+  124 +        datatype => Err(Error::not_supported(format!(
+  125 +            "Managed replacement does not support {datatype}"
+  126 +        ))),
+  127 +    }
+  128 +}
+  129 +
+  130 +/// Rewrite only top-level columns that contain selected references. Fragment
+  131 +/// identity, row IDs, deletion vectors, and unrelated column files survive.
+  132 +async fn rewrite_blob_columns(
+  133 +    copies: &BlobCopies,
+  134 +    source: Arc<Dataset>,
+  135 +    target: Arc<Dataset>,
+  136 +) -> Result<Vec<Fragment>> {
+  137 +    let fields = source
+  138 +        .schema()
+  139 +        .fields
+  140 +        .iter()
+  141 +        .filter(|field| field_contains_blob(field))
+  142 +        .collect::<Vec<_>>();
+  143 +    let mut updated = Vec::new();
+  144 +    if copies.is_empty() || fields.is_empty() {
+  145 +        return Ok(updated);
+  146 +    }
+  147 +    for fragment in source.get_fragments() {
+  148 +        let columns = fields
+  149 +            .iter()
+  150 +            .map(|field| field.name.as_str())
+  151 +            .collect::<Vec<_>>();
+  152 +        let write_schema = source.schema().project(&columns)?;
+  153 +        let mut projection = columns.clone();
+  154 +        projection.push(ROW_ADDR);
+  155 +        let destination_fragment = target
+  156 +            .get_fragment(fragment.id())
+  157 +            .ok_or_else(|| Error::internal("Managed rewrite target fragment is missing"))?;
+  158 +        let mut updater = destination_fragment
+  159 +            .updater(
+  160 +                Some(&projection),
+  161 +                Some((write_schema, target.schema().clone())),
+  162 +                Some(64),
+  163 +                Some(BlobHandling::BlobsDescriptions),
+  164 +            )
+  165 +            .await?;
+  166 +        updater.allow_external_blob_outside_bases();
+  167 +        while let Some(batch) = updater.next().await? {
+  168 +            let plan = BlobV2BatchRewritePlan::try_new(
+  169 +                source.schema(),
+  170 +                batch.schema().as_ref(),
+  171 +                false,
+  172 +                true,
+  173 +            )?;
+  174 +            let prepared = plan.transform_batch(&source, batch.clone()).await?;
+  175 +            let arrays = prepared
+  176 +                .schema()
+  177 +                .fields()
+  178 +                .iter()
+  179 +                .zip(prepared.columns())
+  180 +                .map(|(field, array)| {
+  181 +                    let field = source
+  182 +                        .schema()
+  183 +                        .field(field.name())
+  184 +                        .ok_or_else(|| Error::internal("Managed rewrite field is missing"))?;
+  185 +                    replace_array(copies, field, array.clone())
+  186 +                })
+  187 +                .collect::<Result<Vec<_>>>()?;
+  188 +            updater
+  189 +                .update(RecordBatch::try_new(prepared.schema(), arrays)?)
+  190 +                .await?;
+  191 +        }
+  192 +        let mut fragment = updater.finish().await?;
+  193 +        let replaced = fragment
+  194 +            .files
+  195 +            .last()
+  196 +            .ok_or_else(|| Error::internal("Managed rewrite produced no data file"))?
+  197 +            .fields
+  198 +            .clone();
+  199 +        for file in fragment.files.iter_mut().rev().skip(1) {
+  200 +            file.fields = file
+  201 +                .fields
+  202 +                .iter()
+  203 +                .map(|id| if replaced.contains(id) { -2 } else { *id })
+  204 +                .collect::<Vec<_>>()
+  205 +                .into();
+  206 +        }
+  207 +        fragment
+  208 +            .files
+  209 +            .retain(|file| file.fields.iter().any(|id| *id != -2));
+  210 +        updated.push(fragment);
+  211 +    }
+  212 +    Ok(updated)
+  213 +}
+  214 +
+  215 +pub async fn copy_blob_columns(
+  216 +    source: Arc<Dataset>,
+  217 +    store: Arc<ObjectStore>,
+  218 +    base: Path,
+  219 +    uri: &str,
+  220 +    manifest: &mut Manifest,
+  221 +) -> Result<()> {
+  222 +    let mut target = source.as_ref().clone();
+  223 +    target.object_store = store;
+  224 +    target.base = base;
+  225 +    target.uri = uri.to_string();
+  226 +    target.base_object_stores = Default::default();
+  227 +    target.manifest = Arc::new(manifest.clone());
+  228 +    let target = Arc::new(target);
+  229 +    let mut copies = HashMap::new();
+  230 +    for (id, uri) in managed_references(&source).await? {
+  231 +        let path = join_base_and_relative_path(&source.blob_base_path(id)?, &uri)?;
+  232 +        // Local objects keep their relative address, so their data files can be
+  233 +        // copied verbatim. Registered bases may contain colliding object names.
+  234 +        let target_uri = if id.is_none() {
+  235 +            uri.clone()
+  236 +        } else {
+  237 +            format!("_blobs/{}.blob", Uuid::new_v4())
+  238 +        };
+  239 +        let target_path = join_base_and_relative_path(&target.base, &target_uri)?;
+  240 +        source
+  241 +            .object_store(id)
+  242 +            .await?
+  243 +            .copy_bulk(&path, &target.object_store, &target_path)
+  244 +            .await?;
+  245 +        if id.is_some() {
+  246 +            copies.insert((id, uri), target_uri);
+  247 +        }
+  248 +    }
+  249 +    let rewritten = rewrite_blob_columns(&copies, source, target).await?;
+  250 +    let fragments = Arc::make_mut(&mut manifest.fragments);
+  251 +    for fragment in rewritten {
+  252 +        let existing = fragments
+  253 +            .iter_mut()
+  254 +            .find(|entry| entry.id == fragment.id)
+  255 +            .ok_or_else(|| Error::internal("Cloned fragment is missing"))?;
+  256 +        *existing = fragment;
+  257 +    }
+  258 +    Ok(())
+  259 +}

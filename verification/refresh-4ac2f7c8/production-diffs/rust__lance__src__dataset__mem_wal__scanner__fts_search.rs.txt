@@ -1,0 +1,85 @@
+@@ -63,7 +63,8 @@ use super::projection::{
+   63      project_to_canonical, resolve_data_fields, top_level_of, validate_projection_names,
+   64  };
+   65  use super::sstable_cache::{DatasetCache, SsTableWarmer, open_sstable};
+   66 -use crate::dataset::mem_wal::memtable::scanner::MemTableScanner;
+   66 +use crate::dataset::mem_wal::index::FtsMemQuery;
+   67 +use crate::dataset::mem_wal::memtable::scanner::{MemTableScanner, local_fts_query};
+   68  use crate::dataset::mem_wal::write::{BatchStore, IndexStore};
+   69  use crate::index::scalar::inverted::{
+   70      indexed_fts_document_granularities, indexed_fts_index_params, resolve_fts_field,
+
+@@ -300,6 +301,25 @@ fn bind_to_stored_columns(
+  301      }
+  302  }
+  303  
+  304 +/// Whether the active memtable's own indexes answer this search, asked the
+  305 +/// question each index will receive.
+  306 +fn active_source_answers_fts(source: &LsmDataSource, query: &FullTextSearchQuery) -> bool {
+  307 +    let LsmDataSource::ActiveMemTable {
+  308 +        batch_store,
+  309 +        index_store,
+  310 +        ..
+  311 +    } = source
+  312 +    else {
+  313 +        return false;
+  314 +    };
+  315 +    // A row is visible only once every index holds it.
+  316 +    batch_store
+  317 +        .max_visible_row(index_store.visible_count())
+  318 +        .is_some()
+  319 +        && local_fts_query(query.clone(), Some(index_store))
+  320 +            .is_ok_and(|local| local.is_answered_by(index_store))
+  321 +}
+  322 +
+  323  fn active_source_can_execute_fts(
+  324      source: &LsmDataSource,
+  325      column: &str,
+
+@@ -312,8 +332,9 @@ fn active_source_can_execute_fts(
+  332              ..
+  333          } => {
+  334              index_store
+  315 -                .get_fts_by_column_and_granularity(column, document_granularity)
+  316 -                .is_some_and(|index| !index.is_empty())
+  335 +                .index_answering(column, &FtsMemQuery::probe(document_granularity))
+  336 +                .is_some()
+  337 +                // A row is visible only once every index holds it.
+  338                  && batch_store
+  339                      .max_visible_row(index_store.visible_count())
+  340                      .is_some()
+
+@@ -1044,7 +1065,7 @@ impl LsmFtsSearchPlanner {
+ 1065                      // A memtable created before a schema change indexes the
+ 1066                      // column under its old name, or not at all if it is newer.
+ 1067                      if memtable_matches_table(schema, &self.identity_schema) {
+ 1047 -                        index_store.fts_document_granularities_by_column(column)
+ 1068 +                        index_store.fts_granularities_on(column)
+ 1069                      } else {
+ 1070                          let generation = GenerationRead::for_memtable(
+ 1071                              schema,
+
+@@ -1054,9 +1075,7 @@ impl LsmFtsSearchPlanner {
+ 1075                          );
+ 1076                          match generation.stored_fts_name(column) {
+ 1077                              None => Vec::new(),
+ 1057 -                            Some(stored_column) => {
+ 1058 -                                index_store.fts_document_granularities_by_column(stored_column)
+ 1059 -                            }
+ 1078 +                            Some(stored_column) => index_store.fts_granularities_on(stored_column),
+ 1079                          }
+ 1080                      }
+ 1081                  }
+
+@@ -1290,9 +1309,8 @@ impl LsmFtsSearchPlanner {
+ 1309                  // single store, and re-indexing a maintained column costs one
+ 1310                  // tokenize pass over a memtable that is already paying for the
+ 1311                  // missing one.
+ 1293 -                let index_store = if stored_names.iter().all(|column| {
+ 1294 -                    active_source_can_execute_fts(source, column, document_granularity)
+ 1295 -                }) {
+ 1312 +                let asked = bind_to_stored_columns(query, columns, &stored_columns)?;
+ 1313 +                let index_store = if active_source_answers_fts(source, &asked) {
+ 1314                      index_store.clone()
+ 1315                  } else {
+ 1316                      match transient_fts_index_store(

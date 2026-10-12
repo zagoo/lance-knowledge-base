@@ -1,0 +1,918 @@
+@@ -0,0 +1,917 @@
+    1 +// SPDX-License-Identifier: Apache-2.0
+    2 +// SPDX-FileCopyrightText: Copyright The Lance Authors
+    3 +// SPDX-FileCopyrightText: Copyright 2023 Datafuse Labs
+    4 +// Adapted from databendlabs/jsonb at commit fba895c5ebe77ce2539e187f9c652f51cbf195c3.
+    5 +
+    6 +// This file contains functions that specifically operate on JSONB scalar values.
+    7 +
+    8 +use std::borrow::Cow;
+    9 +
+   10 +use crate::RawJsonb;
+   11 +use crate::core::JsonbItem;
+   12 +use crate::core::JsonbItemType;
+   13 +use crate::error::*;
+   14 +use crate::extension::ExtensionValue;
+   15 +use crate::number::Number;
+   16 +
+   17 +impl RawJsonb<'_> {
+   18 +    /// Checks if the JSONB value is null.
+   19 +    ///
+   20 +    /// This function determines whether the JSONB value represents a JSON `null`.
+   21 +    ///
+   22 +    /// # Arguments
+   23 +    ///
+   24 +    /// * `self` - The JSONB value.
+   25 +    ///
+   26 +    /// # Returns
+   27 +    ///
+   28 +    /// * `Ok(true)` if the value is null.
+   29 +    /// * `Ok(false)` if the value is not null.
+   30 +    /// * `Err(Error)` - If the input JSONB data is invalid.
+   31 +    ///
+   32 +    /// # Examples
+   33 +    ///
+   34 +    /// ```rust
+   35 +    /// use lance_jsonb::OwnedJsonb;
+   36 +    ///
+   37 +    /// let null_jsonb = "null".parse::<OwnedJsonb>().unwrap();
+   38 +    /// let raw_jsonb = null_jsonb.as_raw();
+   39 +    /// assert!(raw_jsonb.is_null().unwrap());
+   40 +    ///
+   41 +    /// let obj_jsonb = r#"{"a": 1}"#.parse::<OwnedJsonb>().unwrap();
+   42 +    /// let raw_jsonb = obj_jsonb.as_raw();
+   43 +    /// assert!(!raw_jsonb.is_null().unwrap());
+   44 +    /// ```
+   45 +    pub fn is_null(&self) -> Result<bool> {
+   46 +        let jsonb_item_type = self.jsonb_item_type()?;
+   47 +        Ok(matches!(jsonb_item_type, JsonbItemType::Null))
+   48 +    }
+   49 +
+   50 +    /// Checks if the JSONB value is a boolean.
+   51 +    ///
+   52 +    /// This function checks if the JSONB value represents a JSON boolean (`true` or `false`).
+   53 +    ///
+   54 +    /// # Arguments
+   55 +    ///
+   56 +    /// * `self` - The JSONB value.
+   57 +    ///
+   58 +    /// # Returns
+   59 +    ///
+   60 +    /// * `Ok(true)` - If the value is a boolean (`true` or `false`).
+   61 +    /// * `Ok(false)` - If the value is not a boolean.
+   62 +    /// * `Err(Error)` - If the JSONB data is invalid.
+   63 +    ///
+   64 +    /// # Examples
+   65 +    ///
+   66 +    /// ```rust
+   67 +    /// use lance_jsonb::OwnedJsonb;
+   68 +    ///
+   69 +    /// // Boolean values
+   70 +    /// let true_jsonb = "true".parse::<OwnedJsonb>().unwrap();
+   71 +    /// let raw_true = true_jsonb.as_raw();
+   72 +    /// assert!(raw_true.is_boolean().unwrap());
+   73 +    ///
+   74 +    /// let false_jsonb = "false".parse::<OwnedJsonb>().unwrap();
+   75 +    /// let raw_false = false_jsonb.as_raw();
+   76 +    /// assert!(raw_false.is_boolean().unwrap());
+   77 +    ///
+   78 +    /// // Non-boolean values
+   79 +    /// let num_jsonb = "1".parse::<OwnedJsonb>().unwrap();
+   80 +    /// let raw_num = num_jsonb.as_raw();
+   81 +    /// assert!(!raw_num.is_boolean().unwrap());
+   82 +    ///
+   83 +    /// let arr_jsonb = "[1, 2, 3]".parse::<OwnedJsonb>().unwrap();
+   84 +    /// let raw_arr = arr_jsonb.as_raw();
+   85 +    /// assert!(!raw_arr.is_boolean().unwrap());
+   86 +    ///
+   87 +    /// let obj_jsonb = r#"{"a": 1}"#.parse::<OwnedJsonb>().unwrap();
+   88 +    /// let raw_obj = obj_jsonb.as_raw();
+   89 +    /// assert!(!raw_obj.is_boolean().unwrap());
+   90 +    ///
+   91 +    /// let null_jsonb = "null".parse::<OwnedJsonb>().unwrap();
+   92 +    /// let raw_null = null_jsonb.as_raw();
+   93 +    /// assert!(!raw_null.is_boolean().unwrap());
+   94 +    ///
+   95 +    /// // Invalid JSONB
+   96 +    /// let invalid_jsonb = OwnedJsonb::from(vec![1, 2, 3, 4]);
+   97 +    /// let invalid_raw_jsonb = invalid_jsonb.as_raw();
+   98 +    /// let result = invalid_raw_jsonb.is_boolean();
+   99 +    /// assert!(result.is_err());
+  100 +    /// ```
+  101 +    pub fn is_boolean(&self) -> Result<bool> {
+  102 +        let jsonb_item_type = self.jsonb_item_type()?;
+  103 +        Ok(matches!(jsonb_item_type, JsonbItemType::Boolean))
+  104 +    }
+  105 +
+  106 +    /// Extracts a boolean value from a JSONB value.
+  107 +    ///
+  108 +    /// This function attempts to extract a boolean value (`true` or `false`) from the JSONB value.
+  109 +    /// If the JSONB value is a boolean, the corresponding boolean value is returned, and return `None` otherwise.
+  110 +    ///
+  111 +    /// # Arguments
+  112 +    ///
+  113 +    /// * `self` - The JSONB value.
+  114 +    ///
+  115 +    /// # Returns
+  116 +    ///
+  117 +    /// * `Ok(Some(true))` - If the value is JSON `true`.
+  118 +    /// * `Ok(Some(false))` - If the value is JSON `false`.
+  119 +    /// * `Ok(None)` - If the value is not a boolean.
+  120 +    /// * `Err(Error)` - If the JSONB data is invalid.
+  121 +    pub(crate) fn as_bool(&self) -> Result<Option<bool>> {
+  122 +        let jsonb_item = JsonbItem::from_raw_jsonb(*self)?;
+  123 +        match jsonb_item {
+  124 +            JsonbItem::Boolean(v) => Ok(Some(v)),
+  125 +            _ => Ok(None),
+  126 +        }
+  127 +    }
+  128 +
+  129 +    /// Converts a JSONB value to a boolean.
+  130 +    ///
+  131 +    /// This function attempts to convert a JSONB value to a boolean. It prioritizes extracting a boolean value directly if possible.
+  132 +    /// If the value is a string, it converts the string to lowercase and checks if it's "true" or "false". Otherwise, it returns an error.
+  133 +    ///
+  134 +    /// # Arguments
+  135 +    ///
+  136 +    /// * `self` - The JSONB value.
+  137 +    ///
+  138 +    /// # Returns
+  139 +    ///
+  140 +    /// * `Ok(true)` - If the value is JSON `true` or a string that is "true" (case-insensitive).
+  141 +    /// * `Ok(false)` - If the value is JSON `false` or a string that is "false" (case-insensitive).
+  142 +    /// * `Err(Error::InvalidCast)` - If the value cannot be converted to a boolean.
+  143 +    /// * `Err(Error)` - If the JSONB data is invalid.
+  144 +    ///
+  145 +    /// # Examples
+  146 +    ///
+  147 +    /// ```rust
+  148 +    /// use lance_jsonb::OwnedJsonb;
+  149 +    ///
+  150 +    /// // Boolean values
+  151 +    /// let true_jsonb = "true".parse::<OwnedJsonb>().unwrap();
+  152 +    /// assert!(true_jsonb.as_raw().to_bool().unwrap());
+  153 +    ///
+  154 +    /// let false_jsonb = "false".parse::<OwnedJsonb>().unwrap();
+  155 +    /// assert!(!false_jsonb.as_raw().to_bool().unwrap());
+  156 +    ///
+  157 +    /// // String representations of booleans
+  158 +    /// let true_str = r#""true""#.parse::<OwnedJsonb>().unwrap();
+  159 +    /// assert!(true_str.as_raw().to_bool().unwrap());
+  160 +    ///
+  161 +    /// let false_str = r#""false""#.parse::<OwnedJsonb>().unwrap();
+  162 +    /// assert!(!false_str.as_raw().to_bool().unwrap());
+  163 +    ///
+  164 +    /// let true_str_lowercase = r#""TRUE""#.parse::<OwnedJsonb>().unwrap();
+  165 +    /// assert!(true_str_lowercase.as_raw().to_bool().unwrap());
+  166 +    ///
+  167 +    /// // Invalid conversions
+  168 +    /// let num_jsonb = "1".parse::<OwnedJsonb>().unwrap();
+  169 +    /// let result = num_jsonb.as_raw().to_bool();
+  170 +    /// assert!(result.is_err());
+  171 +    ///
+  172 +    /// let arr_jsonb = "[1, 2, 3]".parse::<OwnedJsonb>().unwrap();
+  173 +    /// let result = arr_jsonb.as_raw().to_bool();
+  174 +    /// assert!(result.is_err());
+  175 +    ///
+  176 +    /// let obj_jsonb = r#"{"a": 1}"#.parse::<OwnedJsonb>().unwrap();
+  177 +    /// let result = obj_jsonb.as_raw().to_bool();
+  178 +    /// assert!(result.is_err());
+  179 +    ///
+  180 +    /// let null_jsonb = "null".parse::<OwnedJsonb>().unwrap();
+  181 +    /// let result = null_jsonb.as_raw().to_bool();
+  182 +    /// assert!(result.is_err());
+  183 +    ///
+  184 +    /// let invalid_str = r#""maybe""#.parse::<OwnedJsonb>().unwrap();
+  185 +    /// let result = invalid_str.as_raw().to_bool();
+  186 +    /// assert!(result.is_err());
+  187 +    ///
+  188 +    /// // Invalid JSONB
+  189 +    /// let invalid_jsonb = OwnedJsonb::from(vec![1, 2, 3, 4]);
+  190 +    /// let invalid_raw_jsonb = invalid_jsonb.as_raw();
+  191 +    /// let result = invalid_raw_jsonb.to_bool();
+  192 +    /// assert!(result.is_err());
+  193 +    /// ```
+  194 +    pub fn to_bool(&self) -> Result<bool> {
+  195 +        let jsonb_item = JsonbItem::from_raw_jsonb(*self)?;
+  196 +        match jsonb_item {
+  197 +            JsonbItem::Boolean(v) => {
+  198 +                return Ok(v);
+  199 +            }
+  200 +            JsonbItem::String(s) => {
+  201 +                if s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("yes") {
+  202 +                    return Ok(true);
+  203 +                } else if s.eq_ignore_ascii_case("false") || s.eq_ignore_ascii_case("no") {
+  204 +                    return Ok(false);
+  205 +                }
+  206 +            }
+  207 +            _ => {}
+  208 +        }
+  209 +        Err(Error::InvalidCast)
+  210 +    }
+  211 +
+  212 +    /// Checks if the JSONB value is a number.
+  213 +    ///
+  214 +    /// This function checks if the JSONB value represents a JSON number.
+  215 +    ///
+  216 +    /// # Arguments
+  217 +    ///
+  218 +    /// * `self` - The JSONB value.
+  219 +    ///
+  220 +    /// # Returns
+  221 +    ///
+  222 +    /// * `Ok(true)` - If the value is a number.
+  223 +    /// * `Ok(false)` - If the value is not a number.
+  224 +    /// * `Err(Error)` - If the JSONB data is invalid.
+  225 +    ///
+  226 +    /// # Examples
+  227 +    ///
+  228 +    /// ```rust
+  229 +    /// use lance_jsonb::OwnedJsonb;
+  230 +    ///
+  231 +    /// // Number values
+  232 +    /// let num_jsonb = "123.45".parse::<OwnedJsonb>().unwrap();
+  233 +    /// let raw_num = num_jsonb.as_raw();
+  234 +    /// assert!(raw_num.is_number().unwrap());
+  235 +    ///
+  236 +    /// let num_jsonb = "123".parse::<OwnedJsonb>().unwrap();
+  237 +    /// let raw_num = num_jsonb.as_raw();
+  238 +    /// assert!(raw_num.is_number().unwrap());
+  239 +    ///
+  240 +    /// let num_jsonb = "-123.45".parse::<OwnedJsonb>().unwrap();
+  241 +    /// let raw_num = num_jsonb.as_raw();
+  242 +    /// assert!(raw_num.is_number().unwrap());
+  243 +    ///
+  244 +    /// // Non-number values
+  245 +    /// let bool_jsonb = "true".parse::<OwnedJsonb>().unwrap();
+  246 +    /// let raw_bool = bool_jsonb.as_raw();
+  247 +    /// assert!(!raw_bool.is_number().unwrap());
+  248 +    ///
+  249 +    /// let str_jsonb = r#""hello""#.parse::<OwnedJsonb>().unwrap();
+  250 +    /// let raw_str = str_jsonb.as_raw();
+  251 +    /// assert!(!raw_str.is_number().unwrap());
+  252 +    ///
+  253 +    /// let arr_jsonb = "[1, 2, 3]".parse::<OwnedJsonb>().unwrap();
+  254 +    /// let raw_arr = arr_jsonb.as_raw();
+  255 +    /// assert!(!raw_arr.is_number().unwrap());
+  256 +    ///
+  257 +    /// let obj_jsonb = r#"{"a": 1}"#.parse::<OwnedJsonb>().unwrap();
+  258 +    /// let raw_obj = obj_jsonb.as_raw();
+  259 +    /// assert!(!raw_obj.is_number().unwrap());
+  260 +    ///
+  261 +    /// let null_jsonb = "null".parse::<OwnedJsonb>().unwrap();
+  262 +    /// let raw_null = null_jsonb.as_raw();
+  263 +    /// assert!(!raw_null.is_number().unwrap());
+  264 +    ///
+  265 +    /// // Invalid JSONB
+  266 +    /// let invalid_jsonb = OwnedJsonb::from(vec![1, 2, 3, 4]);
+  267 +    /// let invalid_raw_jsonb = invalid_jsonb.as_raw();
+  268 +    /// let result = invalid_raw_jsonb.is_number();
+  269 +    /// assert!(result.is_err());
+  270 +    /// ```
+  271 +    pub fn is_number(&self) -> Result<bool> {
+  272 +        let jsonb_item_type = self.jsonb_item_type()?;
+  273 +        Ok(matches!(jsonb_item_type, JsonbItemType::Number))
+  274 +    }
+  275 +
+  276 +    /// Extracts a number from a JSONB value.
+  277 +    ///
+  278 +    /// This function attempts to extract a number from the JSONB value.
+  279 +    /// If the JSONB value is a number, it returns the number; otherwise, it returns `None`.
+  280 +    ///
+  281 +    /// # Arguments
+  282 +    ///
+  283 +    /// * `self` - The JSONB value.
+  284 +    ///
+  285 +    /// # Returns
+  286 +    ///
+  287 +    /// * `Ok(Some(Number))` - If the value is a number, the extracted number.
+  288 +    /// * `Ok(None)` - If the value is not a number.
+  289 +    /// * `Err(Error)` - If the JSONB data is invalid or if the number cannot be decoded.
+  290 +    ///
+  291 +    /// # Examples
+  292 +    ///
+  293 +    /// ```rust
+  294 +    /// use lance_jsonb::Number;
+  295 +    /// use lance_jsonb::OwnedJsonb;
+  296 +    /// use lance_jsonb::RawJsonb;
+  297 +    ///
+  298 +    /// // Number value
+  299 +    /// let num_jsonb = "123.45".parse::<OwnedJsonb>().unwrap();
+  300 +    /// let raw_num = num_jsonb.as_raw();
+  301 +    /// assert_eq!(raw_num.as_number().unwrap(), Some(Number::Float64(123.45)));
+  302 +    ///
+  303 +    /// let num_jsonb = "-123".parse::<OwnedJsonb>().unwrap();
+  304 +    /// let raw_num = num_jsonb.as_raw();
+  305 +    /// assert_eq!(raw_num.as_number().unwrap(), Some(Number::Int64(-123)));
+  306 +    ///
+  307 +    /// // Non-number values
+  308 +    /// let bool_jsonb = "true".parse::<OwnedJsonb>().unwrap();
+  309 +    /// let raw_bool = bool_jsonb.as_raw();
+  310 +    /// assert_eq!(raw_bool.as_number().unwrap(), None);
+  311 +    ///
+  312 +    /// let str_jsonb = r#""hello""#.parse::<OwnedJsonb>().unwrap();
+  313 +    /// let raw_str = str_jsonb.as_raw();
+  314 +    /// assert_eq!(raw_str.as_number().unwrap(), None);
+  315 +    ///
+  316 +    /// let arr_jsonb = "[1, 2, 3]".parse::<OwnedJsonb>().unwrap();
+  317 +    /// let raw_arr = arr_jsonb.as_raw();
+  318 +    /// assert_eq!(raw_arr.as_number().unwrap(), None);
+  319 +    ///
+  320 +    /// let obj_jsonb = r#"{"a": 1}"#.parse::<OwnedJsonb>().unwrap();
+  321 +    /// let raw_obj = obj_jsonb.as_raw();
+  322 +    /// assert_eq!(raw_obj.as_number().unwrap(), None);
+  323 +    ///
+  324 +    /// let null_jsonb = "null".parse::<OwnedJsonb>().unwrap();
+  325 +    /// let raw_null = null_jsonb.as_raw();
+  326 +    /// assert_eq!(raw_null.as_number().unwrap(), None);
+  327 +    ///
+  328 +    /// // Invalid JSONB
+  329 +    /// let invalid_jsonb = OwnedJsonb::from(vec![1, 2, 3, 4]);
+  330 +    /// let invalid_raw_jsonb = invalid_jsonb.as_raw();
+  331 +    /// let result = invalid_raw_jsonb.as_number();
+  332 +    /// assert!(result.is_err());
+  333 +    ///
+  334 +    /// // Invalid Number (corrupted data)
+  335 +    /// let corrupted_num_jsonb = OwnedJsonb::from(vec![10, 0, 0, 0, 16, 0, 0, 0, 0, 1]);
+  336 +    /// let corrupted_raw_num_jsonb = corrupted_num_jsonb.as_raw();
+  337 +    /// let result = corrupted_raw_num_jsonb.as_number();
+  338 +    /// assert!(result.is_err()); // Decodes should return Err
+  339 +    /// ```
+  340 +    pub fn as_number(&self) -> Result<Option<Number>> {
+  341 +        let jsonb_item = JsonbItem::from_raw_jsonb(*self)?;
+  342 +        match jsonb_item {
+  343 +            JsonbItem::Number(num) => {
+  344 +                let value = num.as_number()?;
+  345 +                Ok(Some(value))
+  346 +            }
+  347 +            _ => Ok(None),
+  348 +        }
+  349 +    }
+  350 +
+  351 +    /// Checks whether the JSONB value is an exact `i64`.
+  352 +    ///
+  353 +    /// Decimal and floating-point numbers must already be integral.
+  354 +    ///
+  355 +    /// # Arguments
+  356 +    ///
+  357 +    /// * `self` - The JSONB value.
+  358 +    ///
+  359 +    /// # Returns
+  360 +    ///
+  361 +    /// * `Ok(true)` - If the value is an exact `i64`.
+  362 +    /// * `Ok(false)` - Otherwise.
+  363 +    /// * `Err(Error)` - If the JSONB data is invalid.
+  364 +    ///
+  365 +    /// # Examples
+  366 +    ///
+  367 +    /// ```rust
+  368 +    /// use lance_jsonb::OwnedJsonb;
+  369 +    ///
+  370 +    /// // i64 values
+  371 +    /// let i64_jsonb = "123456789012345678".parse::<OwnedJsonb>().unwrap();
+  372 +    /// let raw_i64 = i64_jsonb.as_raw();
+  373 +    /// assert!(raw_i64.is_i64().unwrap());
+  374 +    ///
+  375 +    /// let i64_jsonb = "-123456789012345678.0".parse::<OwnedJsonb>().unwrap();
+  376 +    /// let raw_i64 = i64_jsonb.as_raw();
+  377 +    /// assert!(raw_i64.is_i64().unwrap());
+  378 +    ///
+  379 +    /// let float_jsonb = "1.5e0".parse::<OwnedJsonb>().unwrap();
+  380 +    /// let raw_float = float_jsonb.as_raw();
+  381 +    /// assert!(!raw_float.is_i64().unwrap());
+  382 +    ///
+  383 +    /// // Out-of-range values
+  384 +    /// let float_jsonb = "1e100".parse::<OwnedJsonb>().unwrap();
+  385 +    /// let raw_float = float_jsonb.as_raw();
+  386 +    /// assert!(!raw_float.is_i64().unwrap());
+  387 +    ///
+  388 +    /// let str_jsonb = r#""hello""#.parse::<OwnedJsonb>().unwrap();
+  389 +    /// let raw_str = str_jsonb.as_raw();
+  390 +    /// assert!(!raw_str.is_i64().unwrap());
+  391 +    ///
+  392 +    /// // Invalid JSONB
+  393 +    /// let invalid_jsonb = OwnedJsonb::from(vec![1, 2, 3, 4]);
+  394 +    /// let invalid_raw_jsonb = invalid_jsonb.as_raw();
+  395 +    /// let result = invalid_raw_jsonb.is_i64();
+  396 +    /// assert!(result.is_err());
+  397 +    /// ```
+  398 +    pub fn is_i64(&self) -> Result<bool> {
+  399 +        self.as_i64().map(|v| v.is_some())
+  400 +    }
+  401 +
+  402 +    /// Extracts an exact `i64` from a JSONB value.
+  403 +    ///
+  404 +    /// Decimal and floating-point numbers are accepted only when they already
+  405 +    /// represent an integer.
+  406 +    ///
+  407 +    /// # Arguments
+  408 +    ///
+  409 +    /// * `self` - The JSONB value.
+  410 +    ///
+  411 +    /// # Returns
+  412 +    ///
+  413 +    /// * `Ok(Some(i64))` - If the value is an exact `i64`.
+  414 +    /// * `Ok(None)` - Otherwise.
+  415 +    /// * `Err(Error)` - If the JSONB data is invalid.
+  416 +    pub(crate) fn as_i64(&self) -> Result<Option<i64>> {
+  417 +        let jsonb_item = JsonbItem::from_raw_jsonb(*self)?;
+  418 +        match jsonb_item {
+  419 +            JsonbItem::Number(num) => {
+  420 +                let value = num.as_number()?;
+  421 +                Ok(value.as_i64())
+  422 +            }
+  423 +            _ => Ok(None),
+  424 +        }
+  425 +    }
+  426 +
+  427 +    /// Converts a JSONB value to `i64`.
+  428 +    ///
+  429 +    /// Numbers are rounded to the nearest integer. Booleans map to `1` and
+  430 +    /// `0`. Strings are parsed as `i64`, or as `f64` and then rounded.
+  431 +    ///
+  432 +    /// # Arguments
+  433 +    ///
+  434 +    /// * `self` - The JSONB value.
+  435 +    ///
+  436 +    /// # Returns
+  437 +    ///
+  438 +    /// * `Ok(i64)` - The converted value.
+  439 +    /// * `Err(Error::InvalidCast)` - If the value cannot be converted to an `i64`.
+  440 +    /// * `Err(Error)` - If the JSONB data is invalid.
+  441 +    ///
+  442 +    /// # Examples
+  443 +    ///
+  444 +    /// ```rust
+  445 +    /// use lance_jsonb::OwnedJsonb;
+  446 +    ///
+  447 +    /// // Integer values
+  448 +    /// let i64_jsonb = "123".parse::<OwnedJsonb>().unwrap();
+  449 +    /// assert_eq!(i64_jsonb.as_raw().to_i64().unwrap(), 123);
+  450 +    ///
+  451 +    /// let i64_jsonb = "-42".parse::<OwnedJsonb>().unwrap();
+  452 +    /// assert_eq!(i64_jsonb.as_raw().to_i64().unwrap(), -42);
+  453 +    ///
+  454 +    /// // Boolean values
+  455 +    /// let true_jsonb = "true".parse::<OwnedJsonb>().unwrap();
+  456 +    /// assert_eq!(true_jsonb.as_raw().to_i64().unwrap(), 1);
+  457 +    ///
+  458 +    /// let false_jsonb = "false".parse::<OwnedJsonb>().unwrap();
+  459 +    /// assert_eq!(false_jsonb.as_raw().to_i64().unwrap(), 0);
+  460 +    ///
+  461 +    /// // String representation of an integer
+  462 +    /// let str_jsonb = r#""123""#.parse::<OwnedJsonb>().unwrap();
+  463 +    /// assert_eq!(str_jsonb.as_raw().to_i64().unwrap(), 123);
+  464 +    ///
+  465 +    /// // Decimal and float numbers are rounded before conversion
+  466 +    /// let decimal_jsonb = "123.5".parse::<OwnedJsonb>().unwrap();
+  467 +    /// assert_eq!(decimal_jsonb.as_raw().to_i64().unwrap(), 124);
+  468 +    ///
+  469 +    /// let float_jsonb = "1.5e0".parse::<OwnedJsonb>().unwrap();
+  470 +    /// assert_eq!(float_jsonb.as_raw().to_i64().unwrap(), 2);
+  471 +    ///
+  472 +    /// let str_jsonb = r#""1.5""#.parse::<OwnedJsonb>().unwrap();
+  473 +    /// assert_eq!(str_jsonb.as_raw().to_i64().unwrap(), 2);
+  474 +    ///
+  475 +    /// // Invalid conversions
+  476 +    /// let float_jsonb = "1e100".parse::<OwnedJsonb>().unwrap();
+  477 +    /// let result = float_jsonb.as_raw().to_i64();
+  478 +    /// assert!(result.is_err());
+  479 +    ///
+  480 +    /// let arr_jsonb = "[1, 2, 3]".parse::<OwnedJsonb>().unwrap();
+  481 +    /// let result = arr_jsonb.as_raw().to_i64();
+  482 +    /// assert!(result.is_err());
+  483 +    ///
+  484 +    /// let obj_jsonb = r#"{"a": 1}"#.parse::<OwnedJsonb>().unwrap();
+  485 +    /// let result = obj_jsonb.as_raw().to_i64();
+  486 +    /// assert!(result.is_err());
+  487 +    ///
+  488 +    /// let null_jsonb = "null".parse::<OwnedJsonb>().unwrap();
+  489 +    /// let result = null_jsonb.as_raw().to_i64();
+  490 +    /// assert!(result.is_err());
+  491 +    ///
+  492 +    /// let invalid_str_jsonb = r#""abc""#.parse::<OwnedJsonb>().unwrap();
+  493 +    /// let result = invalid_str_jsonb.as_raw().to_i64();
+  494 +    /// assert!(result.is_err());
+  495 +    ///
+  496 +    /// // Invalid JSONB
+  497 +    /// let invalid_jsonb = OwnedJsonb::from(vec![1, 2, 3, 4]);
+  498 +    /// let invalid_raw_jsonb = invalid_jsonb.as_raw();
+  499 +    /// let result = invalid_raw_jsonb.to_i64();
+  500 +    /// assert!(result.is_err());
+  501 +    /// ```
+  502 +    pub fn to_i64(&self) -> Result<i64> {
+  503 +        let jsonb_item = JsonbItem::from_raw_jsonb(*self)?;
+  504 +        match jsonb_item {
+  505 +            JsonbItem::Boolean(v) => {
+  506 +                if v {
+  507 +                    return Ok(1_i64);
+  508 +                } else {
+  509 +                    return Ok(0_i64);
+  510 +                }
+  511 +            }
+  512 +            JsonbItem::Number(num) => {
+  513 +                let value = num.as_number()?;
+  514 +                if let Some(v) = value.to_i64() {
+  515 +                    return Ok(v);
+  516 +                }
+  517 +            }
+  518 +            JsonbItem::String(s) => {
+  519 +                if let Some(v) = parse_string_to_i64(&s) {
+  520 +                    return Ok(v);
+  521 +                }
+  522 +            }
+  523 +            _ => {}
+  524 +        }
+  525 +        Err(Error::InvalidCast)
+  526 +    }
+  527 +
+  528 +    /// Converts a JSONB value to an f64 floating-point number.
+  529 +    ///
+  530 +    /// This function attempts to convert a JSONB value to an `f64` floating-point number.
+  531 +    /// It prioritizes direct conversion from a number if possible.
+  532 +    /// If the value is a boolean, it's converted to 1.0 (for `true`) or 0.0 (for `false`).
+  533 +    /// If the value is a string that can be parsed as an `f64`, that parsed value is returned.
+  534 +    /// Otherwise, an error is returned.
+  535 +    ///
+  536 +    /// # Arguments
+  537 +    ///
+  538 +    /// * `self` - The JSONB value.
+  539 +    ///
+  540 +    /// # Returns
+  541 +    ///
+  542 +    /// * `Ok(f64)` - The `f64` representation of the JSONB value.
+  543 +    /// * `Err(Error::InvalidCast)` - If the value cannot be converted to an `f64`
+  544 +    ///   (e.g., it's an array, an object, a string that is not a valid number, or a null value).
+  545 +    /// * `Err(Error)` - If the JSONB data is invalid.
+  546 +    ///
+  547 +    /// # Examples
+  548 +    ///
+  549 +    /// ```rust
+  550 +    /// use lance_jsonb::OwnedJsonb;
+  551 +    ///
+  552 +    /// // f64 values
+  553 +    /// let f64_jsonb = "123.45".parse::<OwnedJsonb>().unwrap();
+  554 +    /// assert_eq!(f64_jsonb.as_raw().to_f64().unwrap(), 123.45);
+  555 +    ///
+  556 +    /// let int_jsonb = "123".parse::<OwnedJsonb>().unwrap();
+  557 +    /// assert_eq!(int_jsonb.as_raw().to_f64().unwrap(), 123.0);
+  558 +    ///
+  559 +    /// // Boolean values
+  560 +    /// let true_jsonb = "true".parse::<OwnedJsonb>().unwrap();
+  561 +    /// assert_eq!(true_jsonb.as_raw().to_f64().unwrap(), 1.0);
+  562 +    ///
+  563 +    /// let false_jsonb = "false".parse::<OwnedJsonb>().unwrap();
+  564 +    /// assert_eq!(false_jsonb.as_raw().to_f64().unwrap(), 0.0);
+  565 +    ///
+  566 +    /// // String representation of a number
+  567 +    /// let str_jsonb = r#""123.45""#.parse::<OwnedJsonb>().unwrap();
+  568 +    /// assert_eq!(str_jsonb.as_raw().to_f64().unwrap(), 123.45);
+  569 +    ///
+  570 +    /// // Invalid conversions
+  571 +    /// let arr_jsonb = "[1, 2, 3]".parse::<OwnedJsonb>().unwrap();
+  572 +    /// let result = arr_jsonb.as_raw().to_f64();
+  573 +    /// assert!(result.is_err());
+  574 +    ///
+  575 +    /// let obj_jsonb = r#"{"a": 1}"#.parse::<OwnedJsonb>().unwrap();
+  576 +    /// let result = obj_jsonb.as_raw().to_f64();
+  577 +    /// assert!(result.is_err());
+  578 +    ///
+  579 +    /// let null_jsonb = "null".parse::<OwnedJsonb>().unwrap();
+  580 +    /// let result = null_jsonb.as_raw().to_f64();
+  581 +    /// assert!(result.is_err());
+  582 +    ///
+  583 +    /// let invalid_str_jsonb = r#""abc""#.parse::<OwnedJsonb>().unwrap();
+  584 +    /// let result = invalid_str_jsonb.as_raw().to_f64();
+  585 +    /// assert!(result.is_err());
+  586 +    ///
+  587 +    /// // Invalid JSONB
+  588 +    /// let invalid_jsonb = OwnedJsonb::from(vec![1, 2, 3, 4]);
+  589 +    /// let invalid_raw_jsonb = invalid_jsonb.as_raw();
+  590 +    /// let result = invalid_raw_jsonb.to_f64();
+  591 +    /// assert!(result.is_err());
+  592 +    /// ```
+  593 +    pub fn to_f64(&self) -> Result<f64> {
+  594 +        let jsonb_item = JsonbItem::from_raw_jsonb(*self)?;
+  595 +        match jsonb_item {
+  596 +            JsonbItem::Boolean(v) => {
+  597 +                if v {
+  598 +                    return Ok(1_f64);
+  599 +                } else {
+  600 +                    return Ok(0_f64);
+  601 +                }
+  602 +            }
+  603 +            JsonbItem::Number(num) => {
+  604 +                let value = num.as_number()?;
+  605 +                let v = value.as_f64();
+  606 +                return Ok(v);
+  607 +            }
+  608 +            JsonbItem::String(s) => {
+  609 +                if let Ok(v) = s.parse::<f64>() {
+  610 +                    return Ok(v);
+  611 +                }
+  612 +            }
+  613 +            _ => {}
+  614 +        }
+  615 +        Err(Error::InvalidCast)
+  616 +    }
+  617 +
+  618 +    /// Checks if the JSONB value is a string.
+  619 +    ///
+  620 +    /// This function checks if the JSONB value represents a JSON string.
+  621 +    ///
+  622 +    /// # Arguments
+  623 +    ///
+  624 +    /// * `self` - The JSONB value.
+  625 +    ///
+  626 +    /// # Returns
+  627 +    ///
+  628 +    /// * `Ok(true)` - If the value is a string.
+  629 +    /// * `Ok(false)` - If the value is not a string.
+  630 +    /// * `Err(Error)` - If the JSONB data is invalid.
+  631 +    ///
+  632 +    /// # Examples
+  633 +    ///
+  634 +    /// ```rust
+  635 +    /// use lance_jsonb::OwnedJsonb;
+  636 +    ///
+  637 +    /// // String value
+  638 +    /// let str_jsonb = r#""hello""#.parse::<OwnedJsonb>().unwrap();
+  639 +    /// let raw_str = str_jsonb.as_raw();
+  640 +    /// assert!(raw_str.is_string().unwrap());
+  641 +    ///
+  642 +    /// // Non-string values
+  643 +    /// let num_jsonb = "123".parse::<OwnedJsonb>().unwrap();
+  644 +    /// let raw_num = num_jsonb.as_raw();
+  645 +    /// assert!(!raw_num.is_string().unwrap());
+  646 +    ///
+  647 +    /// let bool_jsonb = "true".parse::<OwnedJsonb>().unwrap();
+  648 +    /// let raw_bool = bool_jsonb.as_raw();
+  649 +    /// assert!(!raw_bool.is_string().unwrap());
+  650 +    ///
+  651 +    /// let arr_jsonb = "[1, 2, 3]".parse::<OwnedJsonb>().unwrap();
+  652 +    /// let raw_arr = arr_jsonb.as_raw();
+  653 +    /// assert!(!raw_arr.is_string().unwrap());
+  654 +    ///
+  655 +    /// let obj_jsonb = r#"{"a": 1}"#.parse::<OwnedJsonb>().unwrap();
+  656 +    /// let raw_obj = obj_jsonb.as_raw();
+  657 +    /// assert!(!raw_obj.is_string().unwrap());
+  658 +    ///
+  659 +    /// let null_jsonb = "null".parse::<OwnedJsonb>().unwrap();
+  660 +    /// let raw_null = null_jsonb.as_raw();
+  661 +    /// assert!(!raw_null.is_string().unwrap());
+  662 +    ///
+  663 +    /// // Invalid JSONB
+  664 +    /// let invalid_jsonb = OwnedJsonb::from(vec![1, 2, 3, 4]);
+  665 +    /// let invalid_raw_jsonb = invalid_jsonb.as_raw();
+  666 +    /// let result = invalid_raw_jsonb.is_string();
+  667 +    /// assert!(result.is_err());
+  668 +    /// ```
+  669 +    pub fn is_string(&self) -> Result<bool> {
+  670 +        let jsonb_item_type = self.jsonb_item_type()?;
+  671 +        Ok(matches!(jsonb_item_type, JsonbItemType::String))
+  672 +    }
+  673 +
+  674 +    /// Extracts a string from a JSONB value.
+  675 +    ///
+  676 +    /// This function attempts to extract a string from the JSONB value.
+  677 +    /// If the JSONB value is a string, it returns the string as a `Cow<'_, str>`.
+  678 +    /// Otherwise, it returns `None`.
+  679 +    ///
+  680 +    /// # Arguments
+  681 +    ///
+  682 +    /// * `self` - The JSONB value.
+  683 +    ///
+  684 +    /// # Returns
+  685 +    ///
+  686 +    /// * `Ok(Some(Cow<'_, str>))` - If the value is a string, the extracted string.
+  687 +    /// * `Ok(None)` - If the value is not a string (number, boolean, null, array, object).
+  688 +    /// * `Err(Error)` - If the JSONB data is invalid or if the string is not valid UTF-8.
+  689 +    pub(crate) fn as_str(&self) -> Result<Option<Cow<'_, str>>> {
+  690 +        let jsonb_item = JsonbItem::from_raw_jsonb(*self)?;
+  691 +        match jsonb_item {
+  692 +            JsonbItem::String(s) => Ok(Some(s)),
+  693 +            _ => Ok(None),
+  694 +        }
+  695 +    }
+  696 +
+  697 +    /// Converts a JSONB value to a String.
+  698 +    ///
+  699 +    /// This function attempts to convert a JSONB value to a string representation.
+  700 +    /// It prioritizes direct conversion from strings.
+  701 +    /// Booleans are converted to "true" or "false", and numbers are converted to their string representations.
+  702 +    /// Other types (arrays, objects, null) will result in an error.
+  703 +    ///
+  704 +    /// # Arguments
+  705 +    ///
+  706 +    /// * `self` - The JSONB value.
+  707 +    ///
+  708 +    /// # Returns
+  709 +    ///
+  710 +    /// * `Ok(String)` - The string representation of the JSONB value.
+  711 +    /// * `Err(Error::InvalidCast)` - If the JSONB value cannot be converted to a string (e.g., it's an array, an object, or a null value).
+  712 +    /// * `Err(Error)` - If the JSONB data is invalid.
+  713 +    ///
+  714 +    /// # Examples
+  715 +    ///
+  716 +    /// ```rust
+  717 +    /// use lance_jsonb::OwnedJsonb;
+  718 +    ///
+  719 +    /// // String value
+  720 +    /// let str_jsonb = r#""hello""#.parse::<OwnedJsonb>().unwrap();
+  721 +    /// assert_eq!(str_jsonb.as_raw().to_str().unwrap(), "hello");
+  722 +    ///
+  723 +    /// // Number value
+  724 +    /// let num_jsonb = "123.45".parse::<OwnedJsonb>().unwrap();
+  725 +    /// assert_eq!(num_jsonb.as_raw().to_str().unwrap(), "123.45");
+  726 +    ///
+  727 +    /// // Boolean values
+  728 +    /// let true_jsonb = "true".parse::<OwnedJsonb>().unwrap();
+  729 +    /// assert_eq!(true_jsonb.as_raw().to_str().unwrap(), "true");
+  730 +    ///
+  731 +    /// let false_jsonb = "false".parse::<OwnedJsonb>().unwrap();
+  732 +    /// assert_eq!(false_jsonb.as_raw().to_str().unwrap(), "false");
+  733 +    ///
+  734 +    /// // Invalid conversions
+  735 +    /// let arr_jsonb = "[1, 2, 3]".parse::<OwnedJsonb>().unwrap();
+  736 +    /// let result = arr_jsonb.as_raw().to_str();
+  737 +    /// assert!(result.is_err());
+  738 +    ///
+  739 +    /// let obj_jsonb = r#"{"a": 1}"#.parse::<OwnedJsonb>().unwrap();
+  740 +    /// let result = obj_jsonb.as_raw().to_str();
+  741 +    /// assert!(result.is_err());
+  742 +    ///
+  743 +    /// let null_jsonb = "null".parse::<OwnedJsonb>().unwrap();
+  744 +    /// let result = null_jsonb.as_raw().to_str();
+  745 +    /// assert!(result.is_err());
+  746 +    ///
+  747 +    /// // Invalid JSONB
+  748 +    /// let invalid_jsonb = OwnedJsonb::from(vec![1, 2, 3, 4]);
+  749 +    /// let invalid_raw_jsonb = invalid_jsonb.as_raw();
+  750 +    /// let result = invalid_raw_jsonb.to_str();
+  751 +    /// assert!(result.is_err());
+  752 +    /// ```
+  753 +    pub fn to_str(&self) -> Result<String> {
+  754 +        let jsonb_item = JsonbItem::from_raw_jsonb(*self)?;
+  755 +        match jsonb_item {
+  756 +            JsonbItem::Boolean(v) => {
+  757 +                if v {
+  758 +                    Ok("true".to_string())
+  759 +                } else {
+  760 +                    Ok("false".to_string())
+  761 +                }
+  762 +            }
+  763 +            JsonbItem::Number(num) => {
+  764 +                let value = num.as_number()?;
+  765 +                Ok(format!("{}", value))
+  766 +            }
+  767 +            JsonbItem::String(s) => Ok(s.to_string()),
+  768 +            _ => Err(Error::InvalidCast),
+  769 +        }
+  770 +    }
+  771 +
+  772 +    /// Checks if the JSONB value is an array.
+  773 +    ///
+  774 +    /// This function checks if the JSONB value represents a JSON array.
+  775 +    ///
+  776 +    /// # Arguments
+  777 +    ///
+  778 +    /// * `self` - The JSONB value.
+  779 +    ///
+  780 +    /// # Returns
+  781 +    ///
+  782 +    /// * `Ok(true)` - If the value is an array.
+  783 +    /// * `Ok(false)` - If the value is not an array.
+  784 +    /// * `Err(Error)` - If the JSONB data is invalid.
+  785 +    ///
+  786 +    /// # Examples
+  787 +    ///
+  788 +    /// ```rust
+  789 +    /// use lance_jsonb::OwnedJsonb;
+  790 +    ///
+  791 +    /// // Array value
+  792 +    /// let arr_jsonb = "[1, 2, 3]".parse::<OwnedJsonb>().unwrap();
+  793 +    /// let raw_arr = arr_jsonb.as_raw();
+  794 +    /// assert!(raw_arr.is_array().unwrap());
+  795 +    ///
+  796 +    /// // Non-array values
+  797 +    /// let num_jsonb = "123".parse::<OwnedJsonb>().unwrap();
+  798 +    /// let raw_num = num_jsonb.as_raw();
+  799 +    /// assert!(!raw_num.is_array().unwrap());
+  800 +    ///
+  801 +    /// let bool_jsonb = "true".parse::<OwnedJsonb>().unwrap();
+  802 +    /// let raw_bool = bool_jsonb.as_raw();
+  803 +    /// assert!(!raw_bool.is_array().unwrap());
+  804 +    ///
+  805 +    /// let str_jsonb = r#""hello""#.parse::<OwnedJsonb>().unwrap();
+  806 +    /// let raw_str = str_jsonb.as_raw();
+  807 +    /// assert!(!raw_str.is_array().unwrap());
+  808 +    ///
+  809 +    /// let obj_jsonb = r#"{"a": 1}"#.parse::<OwnedJsonb>().unwrap();
+  810 +    /// let raw_obj = obj_jsonb.as_raw();
+  811 +    /// assert!(!raw_obj.is_array().unwrap());
+  812 +    ///
+  813 +    /// let null_jsonb = "null".parse::<OwnedJsonb>().unwrap();
+  814 +    /// let raw_null = null_jsonb.as_raw();
+  815 +    /// assert!(!raw_null.is_array().unwrap());
+  816 +    ///
+  817 +    /// // Invalid JSONB
+  818 +    /// let invalid_jsonb = OwnedJsonb::from(vec![1, 2, 3, 4]);
+  819 +    /// let invalid_raw_jsonb = invalid_jsonb.as_raw();
+  820 +    /// let result = invalid_raw_jsonb.is_array();
+  821 +    /// assert!(result.is_err());
+  822 +    /// ```
+  823 +    pub fn is_array(&self) -> Result<bool> {
+  824 +        let jsonb_item_type = self.jsonb_item_type()?;
+  825 +        Ok(matches!(jsonb_item_type, JsonbItemType::Array(_)))
+  826 +    }
+  827 +
+  828 +    /// Checks if the JSONB value is an object.
+  829 +    ///
+  830 +    /// This function checks if the JSONB value represents a JSON object.
+  831 +    ///
+  832 +    /// # Arguments
+  833 +    ///
+  834 +    /// * `self` - The JSONB value.
+  835 +    ///
+  836 +    /// # Returns
+  837 +    ///
+  838 +    /// * `Ok(true)` - If the value is an object.
+  839 +    /// * `Ok(false)` - If the value is not an object.
+  840 +    /// * `Err(Error)` - If the JSONB data is invalid.
+  841 +    ///
+  842 +    /// # Examples
+  843 +    ///
+  844 +    /// ```rust
+  845 +    /// use lance_jsonb::OwnedJsonb;
+  846 +    ///
+  847 +    /// // Object value
+  848 +    /// let obj_jsonb = r#"{"a": 1}"#.parse::<OwnedJsonb>().unwrap();
+  849 +    /// let raw_obj = obj_jsonb.as_raw();
+  850 +    /// assert!(raw_obj.is_object().unwrap());
+  851 +    ///
+  852 +    /// // Non-object values
+  853 +    /// let num_jsonb = "123".parse::<OwnedJsonb>().unwrap();
+  854 +    /// let raw_num = num_jsonb.as_raw();
+  855 +    /// assert!(!raw_num.is_object().unwrap());
+  856 +    ///
+  857 +    /// let bool_jsonb = "true".parse::<OwnedJsonb>().unwrap();
+  858 +    /// let raw_bool = bool_jsonb.as_raw();
+  859 +    /// assert!(!raw_bool.is_object().unwrap());
+  860 +    ///
+  861 +    /// let str_jsonb = r#""hello""#.parse::<OwnedJsonb>().unwrap();
+  862 +    /// let raw_str = str_jsonb.as_raw();
+  863 +    /// assert!(!raw_str.is_object().unwrap());
+  864 +    ///
+  865 +    /// let arr_jsonb = "[1, 2, 3]".parse::<OwnedJsonb>().unwrap();
+  866 +    /// let raw_arr = arr_jsonb.as_raw();
+  867 +    /// assert!(!raw_arr.is_object().unwrap());
+  868 +    ///
+  869 +    /// let null_jsonb = "null".parse::<OwnedJsonb>().unwrap();
+  870 +    /// let raw_null = null_jsonb.as_raw();
+  871 +    /// assert!(!raw_null.is_object().unwrap());
+  872 +    ///
+  873 +    /// // Invalid JSONB
+  874 +    /// let invalid_jsonb = OwnedJsonb::from(vec![1, 2, 3, 4]);
+  875 +    /// let invalid_raw_jsonb = invalid_jsonb.as_raw();
+  876 +    /// let result = invalid_raw_jsonb.is_object();
+  877 +    /// assert!(result.is_err());
+  878 +    /// ```
+  879 +    pub fn is_object(&self) -> Result<bool> {
+  880 +        let jsonb_item_type = self.jsonb_item_type()?;
+  881 +        Ok(matches!(jsonb_item_type, JsonbItemType::Object(_)))
+  882 +    }
+  883 +
+  884 +    /// Extracts a extension value from a JSONB value.
+  885 +    ///
+  886 +    /// This function attempts to extract a extension value from the JSONB value.
+  887 +    ///
+  888 +    /// # Arguments
+  889 +    ///
+  890 +    /// * `self` - The JSONB value.
+  891 +    ///
+  892 +    /// # Returns
+  893 +    ///
+  894 +    /// * `Ok(Some(ExtensionValue))` - If the value is a extension value, the extracted extension value.
+  895 +    /// * `Ok(None)` - If the value is not a extension value.
+  896 +    /// * `Err(Error)` - If the JSONB data is invalid or if the extension value cannot be decoded.
+  897 +    pub(crate) fn as_extension_value(&self) -> Result<Option<ExtensionValue<'_>>> {
+  898 +        let jsonb_item = JsonbItem::from_raw_jsonb(*self)?;
+  899 +        match jsonb_item {
+  900 +            JsonbItem::Extension(ext) => {
+  901 +                let val = ext.as_extension_value()?;
+  902 +                Ok(Some(val))
+  903 +            }
+  904 +            _ => Ok(None),
+  905 +        }
+  906 +    }
+  907 +}
+  908 +
+  909 +fn parse_string_to_i64(s: &str) -> Option<i64> {
+  910 +    if let Ok(v) = s.parse::<i64>() {
+  911 +        return Some(v);
+  912 +    }
+  913 +
+  914 +    s.parse::<f64>()
+  915 +        .ok()
+  916 +        .and_then(|value| Number::Float64(value).to_i64())
+  917 +}

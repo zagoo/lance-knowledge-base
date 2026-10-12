@@ -1,0 +1,140 @@
+@@ -607,9 +607,11 @@ fn sort_to_interleave_indices(
+  607      num_partitions: usize,
+  608  ) -> Result<InterleaveResult> {
+  609      let total_rows: usize = part_id_columns.iter().map(|a| a.len()).sum();
+  610 -    let mut keys: Vec<(u32, u32, u32)> = Vec::with_capacity(total_rows);
+  610 +
+  611 +    // Partition ids are bounded by `num_partitions`, so counting sort orders the
+  612 +    // rows in O(n + num_partitions) passes instead of sorting n key tuples.
+  613 +    let mut partition_counts = vec![0u64; num_partitions];
+  614      for (batch_idx, col) in part_id_columns.iter().enumerate() {
+  612 -        let batch_idx = batch_idx as u32;
+  615          for row_idx in 0..col.len() {
+  616              if col.is_null(row_idx) {
+  617                  return Err(Error::invalid_input(format!(
+
+@@ -617,24 +619,35 @@ fn sort_to_interleave_indices(
+  619                      batch_idx, row_idx
+  620                  )));
+  621              }
+  620 -            keys.push((col.value(row_idx), batch_idx, row_idx as u32));
+  622 +            let part_id = col.value(row_idx) as usize;
+  623 +            if part_id >= num_partitions {
+  624 +                return Err(Error::invalid_input(format!(
+  625 +                    "partition ID {} is out of range [0, {})",
+  626 +                    part_id, num_partitions
+  627 +                )));
+  628 +            }
+  629 +            partition_counts[part_id] += 1;
+  630          }
+  631      }
+  623 -    keys.sort_unstable_by_key(|k| k.0);
+  632  
+  625 -    let mut partition_counts = vec![0u64; num_partitions];
+  626 -    let mut interleave_indices = Vec::with_capacity(total_rows);
+  627 -    for (part_id, batch_idx, row_idx) in &keys {
+  628 -        let pid = *part_id as usize;
+  629 -        if pid >= num_partitions {
+  630 -            return Err(Error::invalid_input(format!(
+  631 -                "partition ID {} is out of range [0, {})",
+  632 -                pid, num_partitions
+  633 -            )));
+  633 +    // Prefix sums turn the counts into the first slot of each partition's run,
+  634 +    // then the scatter pass below consumes them as a write cursor per partition.
+  635 +    let mut cursors = Vec::with_capacity(num_partitions);
+  636 +    let mut running = 0usize;
+  637 +    for &count in partition_counts.iter() {
+  638 +        cursors.push(running);
+  639 +        running += count as usize;
+  640 +    }
+  641 +
+  642 +    let mut interleave_indices = vec![(0usize, 0usize); total_rows];
+  643 +    for (batch_idx, col) in part_id_columns.iter().enumerate() {
+  644 +        for (row_idx, &part_id) in col.values().iter().enumerate() {
+  645 +            let cursor = &mut cursors[part_id as usize];
+  646 +            interleave_indices[*cursor] = (batch_idx, row_idx);
+  647 +            *cursor += 1;
+  648          }
+  635 -        partition_counts[pid] += 1;
+  636 -        interleave_indices.push((*batch_idx as usize, *row_idx as usize));
+  649      }
+  650 +
+  651      Ok((interleave_indices, partition_counts))
+  652  }
+  653  
+
+@@ -872,6 +885,33 @@ enum OffsetPreloadSource {
+  885      Sidecar,
+  886  }
+  887  
+  888 +/// Ranges of `partition_id`'s rows in the shuffle data file, one per flush
+  889 +/// group that holds any.
+  890 +///
+  891 +/// A partition is usually absent from most groups, and a zero-length range
+  892 +/// still costs the reader a range entry, so the empty ones are dropped.
+  893 +fn preloaded_partition_ranges(
+  894 +    offsets: &[u64],
+  895 +    num_batches: usize,
+  896 +    num_partitions: usize,
+  897 +    partition_id: usize,
+  898 +) -> Vec<Range<u64>> {
+  899 +    let mut ranges = Vec::with_capacity(num_batches);
+  900 +    for batch_idx in 0..num_batches {
+  901 +        let end_index = batch_idx * num_partitions + partition_id;
+  902 +        let start = if end_index == 0 {
+  903 +            0
+  904 +        } else {
+  905 +            offsets[end_index - 1]
+  906 +        };
+  907 +        let end = offsets[end_index];
+  908 +        if start < end {
+  909 +            ranges.push(start..end);
+  910 +        }
+  911 +    }
+  912 +    ranges
+  913 +}
+  914 +
+  915  impl TwoFileShuffleReader {
+  916      pub(super) async fn try_new(
+  917          object_store: Arc<ObjectStore>,
+
+@@ -1049,19 +1089,12 @@ impl TwoFileShuffleReader {
+ 1089          }
+ 1090  
+ 1091          match &self.offsets {
+ 1052 -            ShuffleOffsets::Preloaded(offsets) => {
+ 1053 -                let mut ranges = Vec::with_capacity(self.num_batches);
+ 1054 -                for batch_idx in 0..self.num_batches {
+ 1055 -                    let end_index = batch_idx * self.num_partitions + partition_id;
+ 1056 -                    let start = if end_index == 0 {
+ 1057 -                        0
+ 1058 -                    } else {
+ 1059 -                        offsets[end_index - 1]
+ 1060 -                    };
+ 1061 -                    ranges.push(start..offsets[end_index]);
+ 1062 -                }
+ 1063 -                Ok(ranges)
+ 1064 -            }
+ 1092 +            ShuffleOffsets::Preloaded(offsets) => Ok(preloaded_partition_ranges(
+ 1093 +                offsets,
+ 1094 +                self.num_batches,
+ 1095 +                self.num_partitions,
+ 1096 +                partition_id,
+ 1097 +            )),
+ 1098              ShuffleOffsets::OnDemand(offsets_reader) => {
+ 1099                  self.read_partition_ranges(offsets_reader, partition_id)
+ 1100                      .await
+
+@@ -1154,7 +1187,11 @@ impl TwoFileShuffleReader {
+ 1187                      format!("missing end offset for partition {}", partition_id),
+ 1188                  )
+ 1189              })?;
+ 1157 -            ranges.push(start..end);
+ 1190 +            // Same as the preloaded path: skip the groups this partition has no
+ 1191 +            // rows in rather than passing empty ranges to the reader.
+ 1192 +            if start < end {
+ 1193 +                ranges.push(start..end);
+ 1194 +            }
+ 1195          }
+ 1196          Ok(ranges)
+ 1197      }

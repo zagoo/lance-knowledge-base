@@ -1,0 +1,49 @@
+@@ -491,6 +491,10 @@ enum Unsupported {
+  491      /// can be accepted after the check and before the commit. That row is then
+  492      /// in a table whose schema forbids it, and every later merge of it fails.
+  493      Tightening,
+  494 +    /// Writers cache the primary key by name. A writer that has not seen the
+  495 +    /// rename can send a row to the wrong shard or store values under the
+  496 +    /// wrong field ids, and nothing later repairs it.
+  497 +    RenameKey,
+  498  }
+  499  
+  500  /// Refuse `unsupported` when the table has a MemWAL attached.
+
+@@ -507,6 +511,7 @@ async fn reject_on_mem_wal(dataset: &Dataset, unsupported: Option<Unsupported>)
+  511      if dataset.mem_wal_index_details().await?.is_none() {
+  512          return Ok(());
+  513      }
+  514 +
+  515      Err(Error::invalid_input(match unsupported {
+  516          Unsupported::Retype => {
+  517              "cannot change a column's type on a table with a MemWAL attached: a cast takes a \
+
+@@ -518,6 +523,11 @@ async fn reject_on_mem_wal(dataset: &Dataset, unsupported: Option<Unsupported>)
+  523               runs against the base table, and a write admitted into the WAL while it runs is \
+  524               not there to be checked. Drop the MemWAL first."
+  525          }
+  526 +        Unsupported::RenameKey => {
+  527 +            "cannot rename a primary key column on a table with a MemWAL attached: the key is \
+  528 +             how a writer identifies a row, and one that has not yet seen the new name reads \
+  529 +             the same batch differently. Drop the MemWAL first."
+  530 +        }
+  531      }))
+  532  }
+  533  
+
+@@ -851,6 +861,14 @@ pub(super) async fn alter_columns(
+  861                  .is_none_or(|field| field.nullable)
+  862      }) {
+  863          Some(Unsupported::Tightening)
+  864 +    } else if alterations.iter().any(|a| {
+  865 +        a.rename.is_some()
+  866 +            && dataset
+  867 +                .schema()
+  868 +                .field(&a.path)
+  869 +                .is_some_and(|field| field.is_unenforced_primary_key())
+  870 +    }) {
+  871 +        Some(Unsupported::RenameKey)
+  872      } else {
+  873          None
+  874      };

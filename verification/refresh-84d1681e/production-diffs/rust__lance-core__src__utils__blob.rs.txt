@@ -1,0 +1,33 @@
+@@ -3,6 +3,32 @@
+    3  
+    4  use object_store::path::Path;
+    5  
+    6 +use crate::{Error, Result};
+    7 +
+    8 +/// Validate a Managed descriptor's object-relative path and known byte range.
+    9 +pub fn validate_managed_reference(uri: &str, position: u64, size: u64) -> Result<Path> {
+   10 +    if uri.is_empty()
+   11 +        || uri.starts_with('/')
+   12 +        || uri.ends_with('/')
+   13 +        || uri.contains("://")
+   14 +        || uri.contains('\\')
+   15 +        || uri
+   16 +            .split('/')
+   17 +            .any(|part| part.is_empty() || part == "." || part == "..")
+   18 +    {
+   19 +        return Err(Error::invalid_input(format!(
+   20 +            "Managed blob_uri must be a non-empty canonical relative object path, got {uri:?}"
+   21 +        )));
+   22 +    }
+   23 +    position.checked_add(size).ok_or_else(|| {
+   24 +        Error::invalid_input(format!(
+   25 +            "Managed blob range overflows u64: position={position}, size={size}"
+   26 +        ))
+   27 +    })?;
+   28 +    Path::parse(uri)
+   29 +        .map_err(|error| Error::invalid_input(format!("Invalid Managed blob_uri {uri:?}: {error}")))
+   30 +}
+   31 +
+   32  /// Format a blob sidecar path for a data file.
+   33  ///
+   34  /// Layout: `<base>/<data_file_key>/<obfuscated_blob_id>.blob`

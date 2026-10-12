@@ -1,0 +1,70 @@
+@@ -356,36 +356,46 @@ impl ObjectStoreProvider for GcsStoreProvider {
+  356  }
+  357  
+  358  impl StorageOptions {
+  359 -    /// Add values from the environment to storage options
+  359 +    /// Add values from the environment without overriding explicit options,
+  360 +    /// including aliases, case variants, and empty-string values.
+  361      pub fn with_env_gcs(&mut self) {
+  362 +        self.merge_env_options(std::env::vars_os(), |key| {
+  363 +            GoogleConfigKey::from_str(key)
+  364 +                .ok()
+  365 +                .map(|key| key.as_ref().to_string())
+  366 +        });
+  367 +        // Check for GOOGLE_STORAGE_TOKEN until GoogleConfigKey supports storage token.
+  368 +        let token_key = "google_storage_token";
+  369          for (os_key, os_value) in std::env::vars_os() {
+  362 -            if let (Some(key), Some(value)) = (os_key.to_str(), os_value.to_str()) {
+  363 -                let lowercase_key = key.to_ascii_lowercase();
+  364 -                let token_key = "google_storage_token";
+  365 -
+  366 -                if let Ok(config_key) = GoogleConfigKey::from_str(&lowercase_key) {
+  367 -                    if !self.0.contains_key(config_key.as_ref()) {
+  368 -                        self.0
+  369 -                            .insert(config_key.as_ref().to_string(), value.to_string());
+  370 -                    }
+  371 -                }
+  372 -                // Check for GOOGLE_STORAGE_TOKEN until GoogleConfigKey supports storage token
+  373 -                else if lowercase_key == token_key && !self.0.contains_key(token_key) {
+  374 -                    self.0.insert(token_key.to_string(), value.to_string());
+  375 -                }
+  370 +            if let (Some(key), Some(value)) = (os_key.to_str(), os_value.to_str())
+  371 +                && key.eq_ignore_ascii_case(token_key)
+  372 +                && !self.0.contains_key(token_key)
+  373 +            {
+  374 +                self.0.insert(token_key.to_string(), value.to_string());
+  375              }
+  376          }
+  377      }
+  378  
+  380 -    /// Subset of options relevant for gcs storage
+  379 +    /// Return options recognized by [`GoogleConfigKey`], ignoring unknown keys.
+  380 +    ///
+  381 +    /// When aliases conflict, the exact canonical name (such as
+  382 +    /// `google_service_account`) wins, followed by case variants of that name.
+  383 +    /// Remaining ties use the lexicographically smallest original key. Empty
+  384 +    /// values are preserved.
+  385 +    ///
+  386 +    /// ```
+  387 +    /// use std::collections::HashMap;
+  388 +    /// use lance_io::object_store::StorageOptions;
+  389 +    /// use object_store::gcp::GoogleConfigKey;
+  390 +    ///
+  391 +    /// let options = StorageOptions(HashMap::from([
+  392 +    ///     ("service_account".into(), "alias.json".into()),
+  393 +    ///     ("google_service_account".into(), "canonical.json".into()),
+  394 +    /// ]));
+  395 +    /// assert_eq!(options.as_gcs_options()[&GoogleConfigKey::ServiceAccount], "canonical.json");
+  396 +    /// ```
+  397      pub fn as_gcs_options(&self) -> HashMap<GoogleConfigKey, String> {
+  382 -        self.0
+  383 -            .iter()
+  384 -            .filter_map(|(key, value)| {
+  385 -                let gcs_key = GoogleConfigKey::from_str(&key.to_ascii_lowercase()).ok()?;
+  386 -                Some((gcs_key, value.clone()))
+  387 -            })
+  388 -            .collect()
+  398 +        self.as_cloud_options()
+  399      }
+  400  }
+  401  

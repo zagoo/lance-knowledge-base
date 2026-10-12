@@ -1,0 +1,110 @@
+@@ -6,7 +6,9 @@ use log::trace;
+    6  use crate::{
+    7      Result,
+    8      buffer::LanceBuffer,
+    9 -    compression::MiniBlockDecompressor,
+    9 +    compression::{
+   10 +        BlockCompressor, BlockDecompressor, MiniBlockDecompressor, require_block_payload,
+   11 +    },
+   12      data::DataBlock,
+   13      encodings::{
+   14          logical::primitive::miniblock::{
+
+@@ -16,6 +18,77 @@ use crate::{
+   18      },
+   19      format::{ProtobufUtils21, pb21::CompressiveEncoding},
+   20  };
+   21 +use lance_core::Error;
+   22 +
+   23 +/// General-purpose compressor that wraps one payload-bearing block codec.
+   24 +#[derive(Debug)]
+   25 +pub struct GeneralBlockCompressor {
+   26 +    child: Box<dyn BlockCompressor>,
+   27 +    compression: CompressionConfig,
+   28 +}
+   29 +
+   30 +impl GeneralBlockCompressor {
+   31 +    pub fn new(child: Box<dyn BlockCompressor>, compression: CompressionConfig) -> Self {
+   32 +        Self { child, compression }
+   33 +    }
+   34 +}
+   35 +
+   36 +impl BlockCompressor for GeneralBlockCompressor {
+   37 +    fn compress(&self, data: DataBlock) -> Result<(Option<LanceBuffer>, CompressiveEncoding)> {
+   38 +        let (payload, child_encoding) = self.child.compress(data)?;
+   39 +        let payload = payload.ok_or_else(|| {
+   40 +            Error::invalid_input("General block compression requires a payload-bearing child")
+   41 +        })?;
+   42 +        let compressor = GeneralBufferCompressor::get_compressor(self.compression)?;
+   43 +        let mut compressed = Vec::new();
+   44 +        compressor.compress(&payload, &mut compressed)?;
+   45 +        Ok((
+   46 +            Some(LanceBuffer::from(compressed)),
+   47 +            ProtobufUtils21::wrapped(self.compression, child_encoding)?,
+   48 +        ))
+   49 +    }
+   50 +}
+   51 +
+   52 +/// Bounded fixed-width decoder for a general-compressed block payload.
+   53 +#[derive(Debug)]
+   54 +pub(crate) struct FixedWidthGeneralBlockDecompressor {
+   55 +    child: Box<dyn BlockDecompressor>,
+   56 +    compression: CompressionConfig,
+   57 +    bits_per_value: u64,
+   58 +}
+   59 +
+   60 +impl FixedWidthGeneralBlockDecompressor {
+   61 +    pub(crate) fn new(
+   62 +        child: Box<dyn BlockDecompressor>,
+   63 +        compression: CompressionConfig,
+   64 +        bits_per_value: u64,
+   65 +    ) -> Self {
+   66 +        Self {
+   67 +            child,
+   68 +            compression,
+   69 +            bits_per_value,
+   70 +        }
+   71 +    }
+   72 +}
+   73 +
+   74 +impl BlockDecompressor for FixedWidthGeneralBlockDecompressor {
+   75 +    fn decompress(&self, data: Option<LanceBuffer>, num_values: u64) -> Result<DataBlock> {
+   76 +        let data = require_block_payload(data, "General fixed-width block")?;
+   77 +        let expected_bytes = usize::try_from(num_values)
+   78 +            .ok()
+   79 +            .and_then(|num_values| {
+   80 +                num_values.checked_mul(usize::try_from(self.bits_per_value / 8).ok()?)
+   81 +            })
+   82 +            .ok_or_else(|| {
+   83 +                Error::invalid_input("General fixed-width output length overflows usize")
+   84 +            })?;
+   85 +        let compressor = GeneralBufferCompressor::get_compressor(self.compression)?;
+   86 +        let mut decompressed = Vec::new();
+   87 +        compressor.decompress_exact(&data, &mut decompressed, expected_bytes)?;
+   88 +        self.child
+   89 +            .decompress(Some(LanceBuffer::from(decompressed)), num_values)
+   90 +    }
+   91 +}
+   92  
+   93  /// A miniblock compressor that wraps another miniblock compressor and applies
+   94  /// general-purpose compression (LZ4, Zstd) to the resulting buffers.
+
+@@ -129,7 +202,18 @@ impl GeneralMiniBlockDecompressor {
+  202  }
+  203  
+  204  impl MiniBlockDecompressor for GeneralMiniBlockDecompressor {
+  205 +    fn num_buffers(&self) -> usize {
+  206 +        self.inner.num_buffers()
+  207 +    }
+  208 +
+  209      fn decompress(&self, mut data: Vec<LanceBuffer>, num_values: u64) -> Result<DataBlock> {
+  210 +        if data.len() != self.num_buffers() || data.is_empty() {
+  211 +            return Err(Error::invalid_input(format!(
+  212 +                "General mini-block has {} buffers, expected {}",
+  213 +                data.len(),
+  214 +                self.num_buffers()
+  215 +            )));
+  216 +        }
+  217          let mut decompressed_buffer = Vec::new();
+  218  
+  219          let decompressor = GeneralBufferCompressor::get_compressor(self.compression)?;

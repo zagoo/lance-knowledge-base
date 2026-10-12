@@ -1,0 +1,87 @@
+@@ -2,6 +2,7 @@
+    2  // SPDX-FileCopyrightText: Copyright The Lance Authors
+    3  
+    4  use super::{InvertedIndexParams, index::*};
+    5 +use crate::scalar::RowAddrTranslatorRef;
+    6  use crate::scalar::inverted::document_tokenizer::DocType;
+    7  use crate::scalar::inverted::json::JsonTextStream;
+    8  use crate::scalar::inverted::tokenizer::LEGACY_BLOCK_SIZE;
+
+@@ -26,6 +27,7 @@ use lance_core::error::LanceOptionExt;
+   27  use lance_core::utils::row_addr_remap::RowAddrRemap;
+   28  use lance_core::utils::tokio::{IO_CORE_RESERVATION, get_num_compute_intensive_cpus, spawn_cpu};
+   29  use lance_core::{Error, ROW_ID, Result};
+   30 +use lance_index_core::remapping::RowAddrTranslator;
+   31  use lance_io::object_store::ObjectStore;
+   32  use lance_select::RowSetOps;
+   33  use object_store::path::Path;
+
+@@ -587,11 +589,33 @@ impl InvertedIndexBuilder {
+  589          index_build.await
+  590      }
+  591  
+  592 +    /// Remap through an in-memory mapping (the legacy entry point).
+  593      pub async fn remap(
+  594          &mut self,
+  595          mapping: &RowAddrRemap,
+  596          src_store: Arc<dyn IndexStore>,
+  597          dest_store: &dyn IndexStore,
+  598 +    ) -> Result<Vec<IndexFile>> {
+  599 +        self.remap_with(mapping.into(), src_store, dest_store).await
+  600 +    }
+  601 +
+  602 +    /// Remap through a translator whose payload may need reads, one
+  603 +    /// partition's documents at a time.
+  604 +    pub async fn remap_streaming(
+  605 +        &mut self,
+  606 +        mapping: &RowAddrTranslator,
+  607 +        src_store: Arc<dyn IndexStore>,
+  608 +        dest_store: &dyn IndexStore,
+  609 +    ) -> Result<Vec<IndexFile>> {
+  610 +        self.remap_with(mapping.as_ref(), src_store, dest_store)
+  611 +            .await
+  612 +    }
+  613 +
+  614 +    pub(crate) async fn remap_with(
+  615 +        &mut self,
+  616 +        mapping: RowAddrTranslatorRef<'_>,
+  617 +        src_store: Arc<dyn IndexStore>,
+  618 +        dest_store: &dyn IndexStore,
+  619      ) -> Result<Vec<IndexFile>> {
+  620          let mut files = Vec::new();
+  621          for part in self.partitions.iter() {
+
+@@ -604,7 +628,7 @@ impl InvertedIndexBuilder {
+  628              )
+  629              .await?;
+  630              let mut builder = part.into_builder().await?;
+  607 -            builder.remap(mapping).await?;
+  631 +            builder.remap_with(mapping).await?;
+  632              files.extend(
+  633                  builder
+  634                      .write_to(dest_store, self.partition_write_target())
+
+@@ -1014,10 +1038,22 @@ impl InnerBuilder {
+ 1038          self.posting_lists = posting_lists;
+ 1039      }
+ 1040  
+ 1041 +    /// Remap through an in-memory mapping (the legacy entry point).
+ 1042      pub async fn remap(&mut self, mapping: &RowAddrRemap) -> Result<()> {
+ 1043 +        self.remap_with(mapping.into()).await
+ 1044 +    }
+ 1045 +
+ 1046 +    /// Remap through a translator whose payload may need reads.
+ 1047 +    pub async fn remap_streaming(&mut self, mapping: &RowAddrTranslator) -> Result<()> {
+ 1048 +        self.remap_with(mapping.as_ref()).await
+ 1049 +    }
+ 1050 +
+ 1051 +    pub(crate) async fn remap_with(&mut self, mapping: RowAddrTranslatorRef<'_>) -> Result<()> {
+ 1052 +        // One partition's documents are the unit of translation.
+ 1053 +        let mapping = mapping.resolve(self.docs.row_ids().iter().copied()).await?;
+ 1054          // for the docs, we need to remove the rows that are removed from the doc set,
+ 1055          // and update the row ids of the rows that are updated
+ 1020 -        let removed = self.docs.remap(mapping);
+ 1056 +        let removed = self.docs.remap(&mapping);
+ 1057  
+ 1058          // for the posting lists, we need to remap the doc ids:
+ 1059          // - if the a row is removed, we need to shift the doc ids of the following rows

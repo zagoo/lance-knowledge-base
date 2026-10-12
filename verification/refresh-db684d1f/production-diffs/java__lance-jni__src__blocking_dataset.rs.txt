@@ -1,0 +1,161 @@
+@@ -4030,73 +4030,105 @@ pub extern "system" fn Java_org_lance_Dataset_nativeCountIndexedRows(
+ 4030  fn inner_count_indexed_rows(
+ 4031      env: &mut JNIEnv,
+ 4032      java_dataset: JObject,
+ 4033 -    _jindex_name: JString,
+ 4033 +    jindex_name: JString,
+ 4034      jfilter: JString,
+ 4035      jfragment_ids: JObject, // Optional<List<Integer>>
+ 4036  ) -> Result<i64> {
+ 4037 +    let index_name: String = jindex_name.extract(env)?;
+ 4038      let filter: String = jfilter.extract(env)?;
+ 4039 +    let fragment_ids = extract_count_fragment_ids(env, &jfragment_ids)?;
+ 4040  
+ 4039 -    // Extract optional fragment IDs
+ 4040 -    let fragment_ids: Option<Vec<u32>> = if env
+ 4041 -        .call_method(&jfragment_ids, "isPresent", "()Z", &[])?
+ 4042 -        .z()?
+ 4043 -    {
+ 4044 -        let list_obj = env
+ 4045 -            .call_method(&jfragment_ids, "get", "()Ljava/lang/Object;", &[])?
+ 4046 -            .l()?;
+ 4047 -        let list = env.get_list(&list_obj)?;
+ 4048 -        let mut ids = Vec::new();
+ 4049 -        let mut iter = list.iter(env)?;
+ 4050 -        while let Some(elem) = iter.next(env)? {
+ 4051 -            let int_val = env.call_method(&elem, "intValue", "()I", &[])?.i()?;
+ 4052 -            ids.push(int_val as u32);
+ 4053 -        }
+ 4054 -        Some(ids)
+ 4055 -    } else {
+ 4056 -        None
+ 4057 -    };
+ 4058 -
+ 4059 -    let count = {
+ 4060 -        let dataset_guard =
+ 4061 -            unsafe { env.get_rust_field::<_, _, BlockingDataset>(java_dataset, NATIVE_DATASET) }?;
+ 4062 -
+ 4063 -        // Use a scanner with fragment filtering to count rows
+ 4064 -        // This ensures we only count rows in the specified fragments
+ 4065 -        let inner = dataset_guard.inner.clone();
+ 4041 +    count_indexed_rows(env, java_dataset, index_name, filter, None, fragment_ids)
+ 4042 +}
+ 4043  
+ 4067 -        block_on(async {
+ 4068 -            let mut scanner = inner.scan();
+ 4044 +#[unsafe(no_mangle)]
+ 4045 +pub extern "system" fn Java_org_lance_Dataset_nativeCountIndexedRowsWithSegments(
+ 4046 +    mut env: JNIEnv,
+ 4047 +    java_dataset: JObject,
+ 4048 +    jindex_name: JString,
+ 4049 +    jfilter: JString,
+ 4050 +    jsegment_uuids: JObject, // List<UUID>
+ 4051 +    jfragment_ids: JObject,  // Optional<List<Integer>>
+ 4052 +) -> jlong {
+ 4053 +    ok_or_throw_with_return!(
+ 4054 +        env,
+ 4055 +        inner_count_indexed_rows_with_segments(
+ 4056 +            &mut env,
+ 4057 +            java_dataset,
+ 4058 +            jindex_name,
+ 4059 +            jfilter,
+ 4060 +            jsegment_uuids,
+ 4061 +            jfragment_ids,
+ 4062 +        ),
+ 4063 +        -1
+ 4064 +    )
+ 4065 +}
+ 4066  
+ 4070 -            // Apply filter
+ 4071 -            if !filter.is_empty() {
+ 4072 -                scanner.filter(&filter)?;
+ 4073 -            }
+ 4067 +fn inner_count_indexed_rows_with_segments(
+ 4068 +    env: &mut JNIEnv,
+ 4069 +    java_dataset: JObject,
+ 4070 +    jindex_name: JString,
+ 4071 +    jfilter: JString,
+ 4072 +    jsegment_uuids: JObject,
+ 4073 +    jfragment_ids: JObject,
+ 4074 +) -> Result<i64> {
+ 4075 +    let index_name: String = jindex_name.extract(env)?;
+ 4076 +    let filter: String = jfilter.extract(env)?;
+ 4077 +    let segment_uuids =
+ 4078 +        import_vec_to_rust(env, &jsegment_uuids, |env, obj| obj.extract_object(env))?;
+ 4079 +    let fragment_ids = extract_count_fragment_ids(env, &jfragment_ids)?;
+ 4080  
+ 4075 -            // Empty projection and enable row_id for count_rows to work
+ 4076 -            // count_rows() requires metadata-only projection
+ 4077 -            scanner.project::<String>(&[])?;
+ 4078 -            scanner.with_row_id();
+ 4079 -
+ 4080 -            // Apply fragment filter if specified
+ 4081 -            if let Some(frag_ids) = fragment_ids {
+ 4082 -                // Convert FileFragment to Fragment by extracting metadata
+ 4083 -                let filtered_fragments: Vec<_> = inner
+ 4084 -                    .get_fragments()
+ 4085 -                    .into_iter()
+ 4086 -                    .filter(|f| frag_ids.contains(&(f.id() as u32)))
+ 4087 -                    .map(|f| f.metadata().clone())
+ 4088 -                    .collect();
+ 4089 -                scanner.with_fragments(filtered_fragments);
+ 4090 -            }
+ 4081 +    count_indexed_rows(
+ 4082 +        env,
+ 4083 +        java_dataset,
+ 4084 +        index_name,
+ 4085 +        filter,
+ 4086 +        Some(segment_uuids),
+ 4087 +        fragment_ids,
+ 4088 +    )
+ 4089 +}
+ 4090  
+ 4092 -            // Use the scanner's count_rows method
+ 4093 -            let count = scanner.count_rows().await?;
+ 4091 +fn extract_count_fragment_ids(
+ 4092 +    env: &mut JNIEnv,
+ 4093 +    jfragment_ids: &JObject,
+ 4094 +) -> Result<Option<Vec<u32>>> {
+ 4095 +    env.get_ints_opt(jfragment_ids)?
+ 4096 +        .map(|fragment_ids| {
+ 4097 +            fragment_ids
+ 4098 +                .into_iter()
+ 4099 +                .map(|fragment_id| {
+ 4100 +                    u32::try_from(fragment_id).map_err(|_| {
+ 4101 +                        Error::input_error(format!(
+ 4102 +                            "fragment ID must be non-negative, got {fragment_id}"
+ 4103 +                        ))
+ 4104 +                    })
+ 4105 +                })
+ 4106 +                .collect()
+ 4107 +        })
+ 4108 +        .transpose()
+ 4109 +}
+ 4110  
+ 4095 -            Ok::<i64, lance::Error>(count as i64)
+ 4096 -        })?
+ 4111 +fn count_indexed_rows(
+ 4112 +    env: &mut JNIEnv,
+ 4113 +    java_dataset: JObject,
+ 4114 +    index_name: String,
+ 4115 +    filter: String,
+ 4116 +    segment_uuids: Option<Vec<Uuid>>,
+ 4117 +    fragment_ids: Option<Vec<u32>>,
+ 4118 +) -> Result<i64> {
+ 4119 +    let count = {
+ 4120 +        let dataset_guard =
+ 4121 +            unsafe { env.get_rust_field::<_, _, BlockingDataset>(java_dataset, NATIVE_DATASET) }?;
+ 4122 +        block_on(dataset_guard.inner.count_indexed_rows(
+ 4123 +            &index_name,
+ 4124 +            &filter,
+ 4125 +            segment_uuids.as_deref(),
+ 4126 +            fragment_ids.as_deref(),
+ 4127 +        ))?
+ 4128      };
+ 4129  
+ 4099 -    Ok(count)
+ 4130 +    i64::try_from(count)
+ 4131 +        .map_err(|_| Error::input_error(format!("indexed row count {count} exceeds Java long")))
+ 4132  }
+ 4133  
+ 4134  //////////////////////////////

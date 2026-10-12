@@ -1,0 +1,32 @@
+@@ -30,10 +30,16 @@ fn validate_compressive_encoding(encoding: &pb21::CompressiveEncoding) -> Result
+   30          Some(Compression::Flat(_))
+   31          | Some(Compression::InlineBitpacking(_))
+   32          | Some(Compression::Constant(_)) => Ok(()),
+   33 -        Some(Compression::Variable(variable)) => validate_compressive_encoding(required(
+   34 -            variable.offsets.as_deref(),
+   35 -            "variable offsets",
+   36 -        )?),
+   33 +        Some(Compression::Variable(variable)) => {
+   34 +            let offsets = required(variable.offsets.as_deref(), "variable offsets")?;
+   35 +            validate_compressive_encoding(offsets)?;
+   36 +            if !matches!(offsets.compression.as_ref(), Some(Compression::Flat(_))) {
+   37 +                return Err(Error::invalid_input_source(
+   38 +                    "Generic variable offsets require Lance v2.3; stable formats require Flat offsets".into(),
+   39 +                ));
+   40 +            }
+   41 +            Ok(())
+   42 +        }
+   43          Some(Compression::OutOfLineBitpacking(bitpacking)) => {
+   44              validate_compressive_encoding(required(
+   45                  bitpacking.values.as_deref(),
+
+@@ -99,6 +105,9 @@ fn validate_compressive_encoding(encoding: &pb21::CompressiveEncoding) -> Result
+  105              }
+  106              Ok(())
+  107          }
+  108 +        Some(Compression::Range(_) | Compression::Delta(_)) => Err(Error::invalid_input_source(
+  109 +            "Range and delta compression are not part of the Lance v2.2 grammar".into(),
+  110 +        )),
+  111          None => Err(Error::invalid_input_source(
+  112              "Lance v2.2 compressive encoding is missing its compression variant".into(),
+  113          )),

@@ -1,0 +1,442 @@
+@@ -0,0 +1,669 @@
+    1 +// SPDX-License-Identifier: Apache-2.0
+    2 +// SPDX-FileCopyrightText: Copyright The Lance Authors
+    3 +
+    4 +//! Physical optimizer rule that late-materializes the non-sort columns of a
+    5 +//! top-k (`ORDER BY ... LIMIT k`) over a single [`FilteredReadExec`].
+    6 +//!
+    7 +//! ```text
+    8 +//!   [SortPreservingMergeExec]             ProjectionExec (original column order)
+    9 +//!     SortExec(TopK)                        TakeExec (every other column)
+   10 +//!       [pass-through]*          ==>          [SortPreservingMergeExec]
+   11 +//!         FilteredReadExec                      SortExec(TopK)
+   12 +//!                                                 [pass-through]*
+   13 +//!                                                   FilteredReadExec (sort keys + _rowid)
+   14 +//! ```
+   15 +//!
+   16 +//! A `TableProvider::scan` carries no ordering, so a DataFusion-planned top-k
+   17 +//! otherwise reads every projected column for every matching row and then
+   18 +//! discards all but `k` of them. [`Scanner::order_by`](crate::dataset::scanner::Scanner::order_by)
+   19 +//! makes the same split when it plans the sort itself; this rule does it for
+   20 +//! plans built elsewhere, such as SQL over [`LanceTableProvider`](crate::datafusion::LanceTableProvider).
+   21 +//!
+   22 +//! A pass-through node is one the rule can rebuild over the narrowed read
+   23 +//! without changing any value the take later fetches:
+   24 +//!
+   25 +//! - a [`ProjectionExec`] that only selects columns, narrowed to the columns
+   26 +//!   the read still has;
+   27 +//! - a [`RepartitionExec`] that does not hash (hash partitioning holds column
+   28 +//!   indices into the wide schema);
+   29 +//! - a [`CoalescePartitionsExec`] or [`CooperativeExec`];
+   30 +//! - a custom node the caller certifies with
+   31 +//!   [`TopKLateMaterialization::with_pass_through`], such as one a
+   32 +//!   `TableProvider` wraps around the scan. A certified node that rewrites
+   33 +//!   schema metadata is applied again above the take, since [`TakeExec`] emits
+   34 +//!   the dataset's metadata.
+   35 +//!
+   36 +//! A [`TakeExec`] or row-stream [`FilteredReadExec`] in the chain (the
+   37 +//! scanner's own late materialization behind a filter) is dropped: the take
+   38 +//! above the sort fetches its columns instead.
+   39 +
+   40 +use std::collections::HashSet;
+   41 +use std::fmt::{Debug, Formatter};
+   42 +use std::sync::Arc;
+   43 +
+   44 +use arrow_schema::Schema as ArrowSchema;
+   45 +use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
+   46 +use datafusion::config::ConfigOptions;
+   47 +use datafusion::error::Result as DFResult;
+   48 +use datafusion::physical_optimizer::PhysicalOptimizerRule;
+   49 +use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
+   50 +use datafusion::physical_plan::coop::CooperativeExec;
+   51 +use datafusion::physical_plan::execution_plan::CardinalityEffect;
+   52 +use datafusion::physical_plan::projection::ProjectionExec;
+   53 +use datafusion::physical_plan::repartition::RepartitionExec;
+   54 +use datafusion::physical_plan::sorts::sort::SortExec;
+   55 +use datafusion::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
+   56 +use datafusion::physical_plan::{ExecutionPlan, Partitioning};
+   57 +use datafusion_physical_expr::expressions::Column;
+   58 +use datafusion_physical_expr::utils::{collect_columns, reassign_expr_columns};
+   59 +use datafusion_physical_expr::{LexOrdering, PhysicalExpr, PhysicalSortExpr};
+   60 +use lance_core::ROW_ID;
+   61 +use lance_core::datatypes::OnMissing;
+   62 +use lance_select::RowSetOps;
+   63 +
+   64 +use super::TakeExec;
+   65 +use super::filtered_read::FilteredReadExec;
+   66 +
+   67 +/// Decides whether a read may be narrowed. Returning `false` leaves the top-k
+   68 +/// over that read unchanged.
+   69 +pub type ReadEligibility = Arc<dyn Fn(&FilteredReadExec, &ConfigOptions) -> bool + Send + Sync>;
+   70 +
+   71 +/// Decides whether a custom node may be walked through. See
+   72 +/// [`TopKLateMaterialization::with_pass_through`].
+   73 +pub type PassThrough = Arc<dyn Fn(&dyn ExecutionPlan) -> bool + Send + Sync>;
+   74 +
+   75 +/// Defer every non-sort column of a top-k over a Lance read to a take of the
+   76 +/// surviving rows. See the module docs.
+   77 +///
+   78 +/// ```
+   79 +/// # use std::sync::Arc;
+   80 +/// # use datafusion::execution::SessionStateBuilder;
+   81 +/// # use lance::io::exec::topk_late_materialization::TopKLateMaterialization;
+   82 +/// let state = SessionStateBuilder::new()
+   83 +///     .with_default_features()
+   84 +///     .with_physical_optimizer_rule(Arc::new(TopKLateMaterialization::new()))
+   85 +///     .build();
+   86 +/// ```
+   87 +#[derive(Clone, Default)]
+   88 +pub struct TopKLateMaterialization {
+   89 +    /// `None`: every read qualifies.
+   90 +    read_eligibility: Option<ReadEligibility>,
+   91 +    /// `None`: only the built-in pass-through nodes.
+   92 +    pass_through: Option<PassThrough>,
+   93 +}
+   94 +
+   95 +impl Debug for TopKLateMaterialization {
+   96 +    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+   97 +        f.debug_struct("TopKLateMaterialization")
+   98 +            .field("read_eligibility", &self.read_eligibility.is_some())
+   99 +            .field("pass_through", &self.pass_through.is_some())
+  100 +            .finish()
+  101 +    }
+  102 +}
+  103 +
+  104 +impl TopKLateMaterialization {
+  105 +    pub fn new() -> Self {
+  106 +        Self::default()
+  107 +    }
+  108 +
+  109 +    /// Only narrow reads for which `eligibility` returns `true`, for callers
+  110 +    /// that know a read cannot be served by a take (for example, one unioned
+  111 +    /// with rows that have no row id).
+  112 +    pub fn with_read_eligibility(
+  113 +        mut self,
+  114 +        eligibility: impl Fn(&FilteredReadExec, &ConfigOptions) -> bool + Send + Sync + 'static,
+  115 +    ) -> Self {
+  116 +        self.read_eligibility = Some(Arc::new(eligibility));
+  117 +        self
+  118 +    }
+  119 +
+  120 +    /// Also walk through custom nodes for which `pass_through` returns `true`.
+  121 +    /// Such a node must keep every row, column, and value of its single input
+  122 +    /// (it may rewrite schema metadata), and must hold no column indices, as
+  123 +    /// it is rebuilt over the narrowed read with `with_new_children`. It must
+  124 +    /// also report [`CardinalityEffect::Equal`] and no fetch, or the rule
+  125 +    /// declines.
+  126 +    pub fn with_pass_through(
+  127 +        mut self,
+  128 +        pass_through: impl Fn(&dyn ExecutionPlan) -> bool + Send + Sync + 'static,
+  129 +    ) -> Self {
+  130 +        self.pass_through = Some(Arc::new(pass_through));
+  131 +        self
+  132 +    }
+  133 +
+  134 +    /// `Ok(None)`: not a top-k. `Err`: a top-k this rule declines, and why.
+  135 +    fn rewrite(
+  136 +        &self,
+  137 +        node: &Arc<dyn ExecutionPlan>,
+  138 +        config: &ConfigOptions,
+  139 +    ) -> Result<Option<Arc<dyn ExecutionPlan>>, String> {
+  140 +        let (merge, sort) = if let Some(merge) = node.downcast_ref::<SortPreservingMergeExec>() {
+  141 +            match merge.input().downcast_ref::<SortExec>() {
+  142 +                Some(sort) if merge.fetch().is_some() && sort.preserve_partitioning() => {
+  143 +                    (Some(merge), sort)
+  144 +                }
+  145 +                _ => return Ok(None),
+  146 +            }
+  147 +        } else if let Some(sort) = node.downcast_ref::<SortExec>() {
+  148 +            if sort.preserve_partitioning() {
+  149 +                // The merge above it is the top-k root.
+  150 +                return Ok(None);
+  151 +            }
+  152 +            (None, sort)
+  153 +        } else {
+  154 +            return Ok(None);
+  155 +        };
+  156 +        let Some(fetch) = sort.fetch() else {
+  157 +            return Ok(None);
+  158 +        };
+  159 +
+  160 +        let mut chain = Vec::new();
+  161 +        let mut dropped_takes = Vec::new();
+  162 +        let mut current = sort.input().clone();
+  163 +        loop {
+  164 +            if let Some(read) = current.downcast_ref::<FilteredReadExec>() {
+  165 +                if read.row_stream_input().is_none() {
+  166 +                    break;
+  167 +                }
+  168 +                // Row-stream reads take every input row: their constructor
+  169 +                // rejects filters, scan ranges, and deleted rows.
+  170 +                dropped_takes.push(read.dataset().clone());
+  171 +            } else if let Some(take) = current.downcast_ref::<TakeExec>() {
+  172 +                dropped_takes.push(take.dataset().clone());
+  173 +            } else {
+  174 +                self.check_pass_through(&current)?;
+  175 +                chain.push(current.clone());
+  176 +            }
+  177 +            let [child] = &current.children()[..] else {
+  178 +                return Err(format!(
+  179 +                    "{} does not have exactly one child",
+  180 +                    current.name()
+  181 +                ));
+  182 +            };
+  183 +            current = (*child).clone();
+  184 +        }
+  185 +        let read = current
+  186 +            .downcast_ref::<FilteredReadExec>()
+  187 +            .ok_or("the loop exits on a FilteredReadExec")?;
+  188 +        let dataset = read.dataset().clone();
+  189 +        if dropped_takes.iter().any(|take| {
+  190 +            take.uri() != dataset.uri() || take.version().version != dataset.version().version
+  191 +        }) {
+  192 +            return Err("a take in the chain reads a different dataset".into());
+  193 +        }
+  194 +        if read.options().with_deleted_rows {
+  195 +            // Deleted rows carry a null row id, which a take cannot follow.
+  196 +            return Err("read includes deleted rows".into());
+  197 +        }
+  198 +        if let Some(eligibility) = &self.read_eligibility
+  199 +            && !eligibility(read, config)
+  200 +        {
+  201 +            return Err("read is not eligible".into());
+  202 +        }
+  203 +
+  204 +        if max_rows(read).is_some_and(|rows| fetch >= rows) {
+  205 +            // The sort drops nothing, so the take would re-read every row.
+  206 +            return Err("the limit keeps every row".into());
+  207 +        }
+  208 +
+  209 +        let original = node.schema();
+  210 +        let full = &read.options().projection;
+  211 +        let wanted = dataset
+  212 +            .empty_projection()
+  213 +            .union_arrow_schema(&original, OnMissing::Ignore)
+  214 +            .map_err(|e| e.to_string())?
+  215 +            .with_blob_handling(full.blob_handling.clone());
+  216 +        let mut narrow = dataset
+  217 +            .empty_projection()
+  218 +            .union_columns(sort_column_names(sort.expr()), OnMissing::Ignore)
+  219 +            .map_err(|e| e.to_string())?
+  220 +            .with_row_id();
+  221 +        narrow.with_row_addr = full.with_row_addr;
+  222 +        narrow.with_row_last_updated_at_version = full.with_row_last_updated_at_version;
+  223 +        narrow.with_row_created_at_version = full.with_row_created_at_version;
+  224 +        narrow.blob_handling = full.blob_handling.clone();
+  225 +        let narrow_read = read.with_projection(narrow).map_err(|e| e.to_string())?;
+  226 +        let mut input: Arc<dyn ExecutionPlan> = Arc::new(narrow_read);
+  227 +        for node in chain.iter().rev() {
+  228 +            input = rebuild(node, input)?;
+  229 +        }
+  230 +
+  231 +        let schema = input.schema();
+  232 +        let mut top: Arc<dyn ExecutionPlan> = Arc::new(
+  233 +            SortExec::new(rebind(sort.expr(), &schema)?, input)
+  234 +                .with_preserve_partitioning(sort.preserve_partitioning())
+  235 +                .with_fetch(sort.fetch()),
+  236 +        );
+  237 +        if let Some(merge) = merge {
+  238 +            top = Arc::new(
+  239 +                SortPreservingMergeExec::new(rebind(merge.expr(), &schema)?, top)
+  240 +                    .with_fetch(merge.fetch()),
+  241 +            );
+  242 +        }
+  243 +
+  244 +        let take = TakeExec::try_new(dataset, top, wanted)
+  245 +            .map_err(|e| e.to_string())?
+  246 +            .ok_or("the sort reads every output column")?;
+  247 +        let names = original.fields().iter().map(|f| f.name().as_str());
+  248 +        let mut output = project(Arc::new(take), names)?;
+  249 +        for node in chain.iter().rev().filter(|node| rewrites_metadata(node)) {
+  250 +            output = node
+  251 +                .clone()
+  252 +                .with_new_children(vec![output])
+  253 +                .map_err(|e| e.to_string())?;
+  254 +        }
+  255 +        if output.schema() != original {
+  256 +            return Err(format!(
+  257 +                "rewritten plan does not reproduce the original schema: expected {original:?}, got {:?}",
+  258 +                output.schema()
+  259 +            ));
+  260 +        }
+  261 +        Ok(Some(output))
+  262 +    }
+  263 +
+  264 +    /// `Ok` if [`rebuild`] can re-create `node` over the narrowed read.
+  265 +    fn check_pass_through(&self, node: &Arc<dyn ExecutionPlan>) -> Result<(), String> {
+  266 +        let decline = |why: &str| {
+  267 +            Err(format!(
+  268 +                "{} between the sort and the read {why}",
+  269 +                node.name()
+  270 +            ))
+  271 +        };
+  272 +        if node.fetch().is_some() {
+  273 +            // `CoalescePartitionsExec` reports `Equal` even when a fetch caps its rows.
+  274 +            return decline("has a fetch");
+  275 +        }
+  276 +        if let Some(projection) = node.downcast_ref::<ProjectionExec>() {
+  277 +            let selects_columns = projection.expr().iter().all(|projected| {
+  278 +                projected
+  279 +                    .expr
+  280 +                    .downcast_ref::<Column>()
+  281 +                    .is_some_and(|column| column.name() == projected.alias)
+  282 +            });
+  283 +            return if selects_columns {
+  284 +                Ok(())
+  285 +            } else {
+  286 +                decline("computes or renames columns")
+  287 +            };
+  288 +        }
+  289 +        if let Some(repartition) = node.downcast_ref::<RepartitionExec>() {
+  290 +            return if matches!(repartition.partitioning(), Partitioning::Hash(..)) {
+  291 +                decline("hash-partitions")
+  292 +            } else {
+  293 +                Ok(())
+  294 +            };
+  295 +        }
+  296 +        if node.is::<CoalescePartitionsExec>() || node.is::<CooperativeExec>() {
+  297 +            return Ok(());
+  298 +        }
+  299 +        // `Equal` cardinality and unchanged columns do not mean unchanged values.
+  300 +        if !self
+  301 +            .pass_through
+  302 +            .as_ref()
+  303 +            .is_some_and(|pass_through| pass_through(node.as_ref()))
+  304 +        {
+  305 +            return decline("is not a known pass-through node");
+  306 +        }
+  307 +        if !matches!(node.cardinality_effect(), CardinalityEffect::Equal) {
+  308 +            return decline("may change the row count");
+  309 +        }
+  310 +        let [input] = &node.children()[..] else {
+  311 +            return decline("does not have exactly one child");
+  312 +        };
+  313 +        if node.schema().fields() != input.schema().fields() {
+  314 +            return decline("changes the columns");
+  315 +        }
+  316 +        Ok(())
+  317 +    }
+  318 +}
+  319 +
+  320 +impl PhysicalOptimizerRule for TopKLateMaterialization {
+  321 +    fn optimize(
+  322 +        &self,
+  323 +        plan: Arc<dyn ExecutionPlan>,
+  324 +        config: &ConfigOptions,
+  325 +    ) -> DFResult<Arc<dyn ExecutionPlan>> {
+  326 +        Ok(plan
+  327 +            .transform_down(|node| match self.rewrite(&node, config) {
+  328 +                Ok(Some(rewritten)) => {
+  329 +                    Ok(Transformed::new(rewritten, true, TreeNodeRecursion::Jump))
+  330 +                }
+  331 +                Ok(None) => Ok(Transformed::no(node)),
+  332 +                Err(reason) => {
+  333 +                    log::debug!("Skipping topk_late_materialization: {reason}");
+  334 +                    Ok(Transformed::no(node))
+  335 +                }
+  336 +            })?
+  337 +            .data)
+  338 +    }
+  339 +
+  340 +    fn name(&self) -> &str {
+  341 +        "topk_late_materialization"
+  342 +    }
+  343 +
+  344 +    fn schema_check(&self) -> bool {
+  345 +        true
+  346 +    }
+  347 +}
+  348 +
+  349 +fn rewrites_metadata(node: &Arc<dyn ExecutionPlan>) -> bool {
+  350 +    !node.is::<ProjectionExec>()
+  351 +        && !node.is::<RepartitionExec>()
+  352 +        && !node.is::<CoalescePartitionsExec>()
+  353 +        && !node.is::<CooperativeExec>()
+  354 +        && node
+  355 +            .children()
+  356 +            .first()
+  357 +            .is_some_and(|input| input.schema().metadata() != node.schema().metadata())
+  358 +}
+  359 +
+  360 +/// `node` over the narrowed `input`.
+  361 +fn rebuild(
+  362 +    node: &Arc<dyn ExecutionPlan>,
+  363 +    input: Arc<dyn ExecutionPlan>,
+  364 +) -> Result<Arc<dyn ExecutionPlan>, String> {
+  365 +    if let Some(projection) = node.downcast_ref::<ProjectionExec>() {
+  366 +        // Keep the selected columns the narrowed read still has, plus the row id.
+  367 +        let schema = input.schema();
+  368 +        let kept = projection
+  369 +            .expr()
+  370 +            .iter()
+  371 +            .map(|projected| projected.alias.as_str())
+  372 +            .filter(|name| *name != ROW_ID && schema.index_of(name).is_ok())
+  373 +            .chain([ROW_ID])
+  374 +            .collect::<Vec<_>>();
+  375 +        return project(input, kept);
+  376 +    }
+  377 +    node.clone()
+  378 +        .with_new_children(vec![input])
+  379 +        .map_err(|e| e.to_string())
+  380 +}
+  381 +
+  382 +/// Select `names` from `input`, in that order.
+  383 +fn project<'a>(
+  384 +    input: Arc<dyn ExecutionPlan>,
+  385 +    names: impl IntoIterator<Item = &'a str>,
+  386 +) -> Result<Arc<dyn ExecutionPlan>, String> {
+  387 +    let schema = input.schema();
+  388 +    let columns = names
+  389 +        .into_iter()
+  390 +        .map(|name| {
+  391 +            let index = schema.index_of(name).map_err(|e| e.to_string())?;
+  392 +            Ok((
+  393 +                Arc::new(Column::new(name, index)) as Arc<dyn PhysicalExpr>,
+  394 +                name.to_string(),
+  395 +            ))
+  396 +        })
+  397 +        .collect::<Result<Vec<_>, String>>()?;
+  398 +    Ok(Arc::new(
+  399 +        ProjectionExec::try_new(columns, input).map_err(|e| e.to_string())?,
+  400 +    ))
+  401 +}
+  402 +
+  403 +fn sort_column_names(ordering: &LexOrdering) -> Vec<String> {
+  404 +    ordering
+  405 +        .iter()
+  406 +        .flat_map(|sort| collect_columns(&sort.expr))
+  407 +        .map(|column| column.name().to_string())
+  408 +        .collect::<HashSet<_>>()
+  409 +        .into_iter()
+  410 +        .collect()
+  411 +}
+  412 +
+  413 +/// `ordering` with each column re-resolved by name against `schema`.
+  414 +fn rebind(ordering: &LexOrdering, schema: &ArrowSchema) -> Result<LexOrdering, String> {
+  415 +    let exprs = ordering
+  416 +        .iter()
+  417 +        .map(|sort| {
+  418 +            let expr =
+  419 +                reassign_expr_columns(sort.expr.clone(), schema).map_err(|e| e.to_string())?;
+  420 +            Ok(PhysicalSortExpr::new(expr, sort.options))
+  421 +        })
+  422 +        .collect::<Result<Vec<_>, String>>()?;
+  423 +    LexOrdering::new(exprs).ok_or_else(|| "empty ordering".into())
+  424 +}
+  425 +
+  426 +/// An upper bound on the rows `read` can produce: the rows its precomputed plan
+  427 +/// selects, else the live rows of its fragments.
+  428 +fn max_rows(read: &FilteredReadExec) -> Option<usize> {
+  429 +    if let Some(rows) = read.plan().and_then(|plan| plan.rows.len()) {
+  430 +        return Some(rows as usize);
+  431 +    }
+  432 +    read.options()
+  433 +        .fragments
+  434 +        .as_deref()
+  435 +        .map(Vec::as_slice)
+  436 +        .unwrap_or_else(|| read.dataset().fragments().as_slice())
+  437 +        .iter()
+  438 +        .map(|fragment| fragment.num_rows().or(fragment.physical_rows))
+  439 +        .sum()
+  440 +}
+  441 +

@@ -1,0 +1,855 @@
+{
+  "iteration": 29,
+  "files": [
+    {
+      "path": "rust/lance-table/src/rowids/version.rs",
+      "module": "L1-modules/rust-lance-table.md",
+      "reviewed": true,
+      "role": "Public positional dataset-version runs, inline/column metadata codecs and synchronous fragment-update helpers; crate-internal range cursor.",
+      "ranges": [
+        [
+          1,
+          24,
+          "SPDX/module purpose and imports: HashMap, Range, Arc, core Error/Result/DeepSizeOf, prost Message, custom serde traits, Fragment/generated protobuf, U64Segment, RowIdSequence and read_row_ids. Dataset update version is not a file-format version or stable row ID. The module is public through rowids::version (rust/lance-table/src/rowids.rs:17-24)."
+        ],
+        [
+          25,
+          43,
+          "LoadedRowLineage is public Debug/Clone/Default with optional Arc row_ids, created_at and last_updated_at sequences. SpilledRowLineage aliases HashMap<u64,LoadedRowLineage> keyed by fragment ID. The contract says an IO-capable caller preloads spilled sequences because synchronous manifest construction has no store; inline sequences need not be included. Defaults are all None/empty map; no loader, validation, timestamp or IO is implemented by these declarations."
+        ],
+        [
+          44,
+          71,
+          "RowDatasetVersionRun derives Debug/Clone/PartialEq/Eq/DeepSizeOf with public span:U64Segment and version:u64. Docs define span over positional offsets rather than stable IDs, enabling alignment with RowIdSequence order. len()->usize and is_empty delegate to span; version copies the scalar. Direct construction permits arbitrary segment shape/values, including empty runs; no invariant validator here."
+        ],
+        [
+          72,
+          99,
+          "RowDatasetVersionSequence derives Debug/Clone/PartialEq/Eq/DeepSizeOf/Default around public Vec<RowDatasetVersionRun>. RowDatasetVersionCursor is pub(crate), Debug/Default, with private run index, intra-run offset, absolute position, optional cached run length, optional Vec run starts and indexed total; tests add seek counter. Cursor does not borrow, identify or hash its source sequence, so reuse assumes the same unchanged sequence."
+        ],
+        [
+          100,
+          120,
+          "Private seek_indexed lazily builds one start offset per run and total length by ordinary usize additions. This allocates O(number of runs) memory once; it does not rebuild when another/mutated sequence is supplied. Empty runs produce duplicate starts. Construction calls general run.len, and overflow/malformed segment arithmetic is not checked here."
+        ],
+        [
+          121,
+          146,
+          "Indexed seek rejects position>=cached total with Internal text containing position and total. Otherwise unwrap cached starts, binary-search position or take preceding start, then advance across every following start<=position to skip duplicate starts/empty runs. Sets run index, relative offset and position, clears cached length, increments test counter. Bounds failure may leave a newly built index installed but does not set a new position."
+        ],
+        [
+          147,
+          167,
+          "current_run repeatedly gets the current run, caching its length. Range fast path uses (end-start) as usize; all other spans delegate len. If offset>=length, advance run and reset offset/cache until a usable run or None. It skips any number of empty runs and never consults absolute span positions for ordering. Range subtraction/cast and index increments are ordinary arithmetic; malformed reverse ranges are not rejected here."
+        ],
+        [
+          168,
+          195,
+          "extend_range appends to caller Vec. Empty or reversed Range<usize> returns Ok immediately without validating bounds or moving cursor. A backwards start triggers indexed seek; after an index exists, every non-adjacent start in either direction uses it. Before indexing, forward gaps advance run lengths in place without output, returning Internal if exhausted. Existing cursor/output is not reset or cleared."
+        ],
+        [
+          196,
+          211,
+          "For each selected portion, current_run yields version/length and repeat_n appends count=min(request remainder,run remainder), then advances position/offset. Exhaustion returns Internal at current consumed position; output and cursor may already contain partial progress. No reserve, cancellation or async boundary. Adjacent traversal costs visited runs plus emitted values; repeated unindexed forward scanning is monotonic, indexed jumps add binary-search work."
+        ],
+        [
+          212,
+          229,
+          "new returns no runs. from_uniform_row_count(row_count:u64,version) returns empty for zero, otherwise exactly one Range(0..row_count) run. It neither checks fragment maximum count/usize fit nor rejects any version, and allocates only the run vector rather than per-row versions."
+        ],
+        [
+          230,
+          251,
+          "from_versions scans adjacent u64 values, emits a Range for each change and one final run if nonempty. Spans use global slice positions starting0, versions are exact values; empty input gives empty, uniform input one run. O(input rows) scan and up to O(rows) runs; usize indices/length cast to u64 without checked conversion. It merges adjacent equal values only, not equal values separated by others."
+        ],
+        [
+          252,
+          271,
+          "len sums run.len() cast to u64 with ordinary addition. is_empty is true for no runs or all-empty runs. versions constructs a borrowing VersionsIter; cursor returns a default unbound cursor and does not inspect self. Public runs remain mutable and no cached index lives in the sequence itself."
+        ],
+        [
+          272,
+          284,
+          "version_at linearly accumulates usize run lengths and returns the first run whose cumulative end exceeds index, else None. It ignores span numeric values and gaps, using concatenated positional lengths; zero-length runs contribute nothing. Cost O(visited runs), ordinary offset+length arithmetic, no random-access index in this method."
+        ],
+        [
+          285,
+          300,
+          "get_version_for_row_id scans RowIdSequence segments in stored order, first checks segment bounding range contains the ID and then position(row_id). On first match it calls version_at(prefix lengths+local position), otherwise adds segment length and continues. It does not assert equal row-ID/version lengths or unique IDs. Segment range/position details remain pending; no whole-dataset lookup or IO occurs."
+        ],
+        [
+          301,
+          313,
+          "rows_with_version_greater_than zips row_ids.iter with lazy versions, filters strictly greater than threshold and collects owned Vec IDs. Zip silently stops at the shorter iterator, with no alignment error. It preserves row-ID iteration order and includes no deletion filtering beyond what supplied sequences already encode. VersionsIter empty-run caveat applies."
+        ],
+        [
+          314,
+          342,
+          "mask consumes u32 positions once, tracks cumulative original run lengths before mutating each run and passes relative positions to span.mask. It implicitly needs ascending valid positions, but does not sort, deduplicate or validate them; a later position below the current run start can underflow subtraction. Remaining positions at/above final cutoff are ignored. Removes empty spans afterward, does not merge equal-version neighbors or rebase surviving span values, and always returns Ok locally. Segment masking semantics remain delegated."
+        ],
+        [
+          343,
+          374,
+          "Public VersionsIter borrows runs and stores private run index, remaining count and current value. new initializes zeros then advance_run loads only the current run, or leaves remaining0 at exhaustion. It does not skip empty runs in advance_run. No allocation, size_hint override or ExactSize/DoubleEnded/FusedIterator implementation appears."
+        ],
+        [
+          375,
+          391,
+          "Iterator::next advances by at most one run when remaining count is0, returning None if beyond the list; otherwise it loads that run, saturating-decrements count and returns the version even if the loaded run is empty. Thus [length1/version7,length0/version9] expands to [7,9], a source-derived counterexample not executed here. Consecutive empty runs can likewise emit phantom values. This differs from cursor/version_at, which skip empty spans."
+        ],
+        [
+          392,
+          419,
+          "RowDatasetVersionMeta derives Debug/Clone/equality/DeepSizeOf: Inline(Arc<[u8]>) shares encoded bytes; Column is an empty marker locating reserved creation/update hidden fields via Fragment::row_lineage_file. Column requires IO through a dataset loader; this type stores no path or count. Private serde ColumnMarker has no fields, defining the empty-object column arm."
+        ],
+        [
+          420,
+          442,
+          "Serialize creates an untagged local Helper: Inline {inline:&[u8]} or Column {column:ColumnMarker}. JSON inline is a numeric byte sequence under inline; column is {column:{}}. Bytes are borrowed for serialization, not decoded. Serializer failures propagate; local helper variants exist only within serialize."
+        ],
+        [
+          443,
+          462,
+          "Deserialize uses untagged local Helper with Vec<u8> or empty marker, then allocates Arc::from(inline) or returns Column. It does not decode/validate version bytes, intern equivalent payloads or require a dataset context. No deny_unknown_fields annotation is present; exact unknown-field/ambiguous-arm acceptance delegates serde."
+        ],
+        [
+          463,
+          484,
+          "from_sequence writes protobuf bytes and wraps Arc, returning Ok with no explicit Result error branch. load_sequence decodes Inline; Column returns NotSupported explaining fragment metadata alone cannot decode a data-file column. These synchronous methods perform no IO and no physical-row count validation."
+        ],
+        [
+          485,
+          503,
+          "last_updated_at_version_meta_to_pb maps None to absent, Inline to copied Vec bytes under InlineLastUpdatedAtVersions, and Column to an empty RowLineageColumn under ColumnLastUpdatedAtVersions. It returns Option directly, with no validation, feature flag setting or version restamping."
+        ],
+        [
+          504,
+          519,
+          "created_at_version_meta_to_pb mirrors the same mapping under creation-version oneof alternatives. Inline bytes are copied and column carries no file metadata. Correct carrier/feature validation belongs to separate metadata and transaction paths."
+        ],
+        [
+          520,
+          536,
+          "write_dataset_versions clones every run.span into pb::U64Segment, stores Some(span) and exact version, collects all protobuf runs then encode_to_vec. It returns owned protobuf bytes directly without format prefix, separate version discriminator, checksum or validation. Segment wire conversion remains in rowids/serde.rs pending full analysis. Clone+protobuf+output buffers can coexist."
+        ],
+        [
+          537,
+          560,
+          "read_dataset_versions uses prost decode, mapping malformed protobuf to Internal with Failed to decode RowDatasetVersionSequence text. Every run must have span or Internal Missing positions in RowDatasetVersionRun; U64Segment::try_from errors propagate. Collects decoded runs, preserving order/versions. No cross-run positional normalization, equal-neighbor merge, empty-run filter, unique-row or length-alignment check is performed here."
+        ],
+        [
+          561,
+          589,
+          "rechunk_version_sequences consumes owned sequences and u64 chunk sizes plus allow_incomplete. Collects all sizes first and allocates result Vec to that count; flattens owned run vectors through Peekable. Private closures build InvalidInput diagnostics for too few (chunk index, expected size, remaining) and too many runs (processed/expected chunk counts). It returns all output sequences, not a streaming interface."
+        ],
+        [
+          590,
+          612,
+          "For each requested chunk create empty output and remaining size, tracking an offset into the current input run across chunks. A zero remaining input length consumes that run and retries. At true exhaustion allow_incomplete breaks, otherwise returns too-few error. Zero-size output chunks skip this loop entirely. Empty input runs are skipped only while a positive output remainder is being filled."
+        ],
+        [
+          613,
+          639,
+          "If input remainder exceeds chunk remainder, slice that positional portion, copy its version and retain input run with increased segment_offset. Otherwise consume run, slice its remainder, reset offset and reduce needed count. Slicing delegates U64Segment::slice with unchecked u64->usize casts. No adjacent equal-version coalescing or explicit span rebasing; actual sliced span values follow the segment implementation."
+        ],
+        [
+          640,
+          653,
+          "Every requested size produces one output sequence, including short/empty sequences under allow_incomplete and zero-size chunks. After all chunks, any peeked run causes too-many error even if it is empty; allow_incomplete does not permit excess input. Errors discard local outputs but consumed owned input/iterator progress is not recoverable from Result. No checked arithmetic or aggregate length prevalidation."
+        ],
+        [
+          654,
+          679,
+          "build_version_meta returns uniform inline metadata only for known positive physical_rows. It panics if row_id_meta is absent, treating presence as stable-ID sanity check without decoding it. physical_rows is authoritative even if row-ID bytes disagree. from_sequence is unwrapped although locally always Ok. Leading comment says no existing metadata, but body never checks existing creation/update metadata; caller decides whether to replace. Zero/unknown physical rows yield None."
+        ],
+        [
+          680,
+          712,
+          "Full-fragment rewrite refresh chooses any Some physical_rows first (including0), otherwise inline row-ID decode length using unwrap, Column/absent row IDs as0. Positive count replaces last_updated_at with uniform current version; zero count leaves existing metadata unchanged. It does not require row-ID metadata when count is known, use spilled sequences or touch creation versions. Malformed inline row IDs can panic despite Result return."
+        ],
+        [
+          713,
+          749,
+          "Partial refresh documents updated local offsets and preserving untouched versions/default prev_version. Count selection prefers physical_rows, else inline row-ID decode unwrap; unlike full refresh, Column row IDs without physical_rows return NotSupported, and missing row IDs imply0. It does not consult spilled.row_ids to recover unknown count. Zero count later causes a no-op."
+        ],
+        [
+          750,
+          782,
+          "Positive-count partial refresh allocates per-row Vec<u64>. Existing Column last-updated metadata requires spilled[fragment.id].last_updated_at or contextual NotSupported; loaded Arc payload is deep-cloned to an owned sequence. Existing Inline decode uses load_sequence().ok(), silently replacing a decode error with prev_version defaults. A decoded/loaded sequence is lazily expanded, truncated to count and padded with prev_version; no length mismatch error. Missing metadata also defaults every row."
+        ],
+        [
+          783,
+          816,
+          "Partial refresh assigns current_version only for offsets<len, silently ignores out-of-range positions, and tolerates duplicates/unsorted input. It scans the full version Vec into maximal equal-version Range runs and serializes to Inline before assigning last_updated_at. No monotonic version check, creation metadata change or column-file deletion. Empty updated_offsets still recompresses/replaces metadata when row count>0. Allocation is O(rows+runs+encoded bytes); returned errors before final assignment leave fragment unchanged, though unwrap/allocation panic is possible."
+        ],
+        [
+          817,
+          833,
+          "TryFrom last-updated protobuf arm declares Error but both arms return Ok: copied/moved Vec becomes new Arc or empty marker becomes Column. It validates neither payload bytes nor field carrier/flags/count."
+        ],
+        [
+          834,
+          848,
+          "TryFrom creation-version protobuf arm has the same infallible local control flow and allocation/validation boundaries. Separate implementations are needed because protobuf uses distinct oneof types."
+        ],
+        [
+          849,
+          864,
+          "Private cfg(test) imports parent; JSON test asserts exact column object string and roundtrips it, then roundtrips inline bytes[1,2,3] without interpreting those bytes as a valid sequence."
+        ],
+        [
+          865,
+          889,
+          "from_versions fixture checks empty input, uniform[3,3,3] one run/version3/len3, and alternating[1,2,1,2] run versions plus expanded values. It does not directly assert span coordinates."
+        ],
+        [
+          890,
+          915,
+          "Random-access fixture uses run spans0..3,0..2,0..1 with versions1/2/3, proving the reader uses concatenated lengths rather than absolute span positions. Checks positions0,2,3,4,5 and out-of-range6."
+        ],
+        [
+          916,
+          952,
+          "Partial-refresh fixture creates10,000 alternating single-row runs inline, updates only final offset to3, then asserts length and first two/last two values. Despite test name streams, implementation materializes the per-row vector. This is a correctness fixture, not timing/memory measurement; source tests were not executed."
+        ],
+        [
+          953,
+          975,
+          "Protobuf roundtrip uses two overlapping-coordinate Range runs of lengths4 and3 with versions42/99. Asserts two runs,total7,versions at0/5, not exact byte equality or every span field. No corrupt/missing-span case here."
+        ],
+        [
+          976,
+          997,
+          "Row-ID lookup fixture pairs IDs10..14 with length2 version8 then length2 version9; asserts all four and absent99. No unsorted/sparse/duplicate/mismatched-length ID fixture locally."
+        ],
+        [
+          998,
+          1035,
+          "Cursor fixture includes an empty middle run version99. Adjacent0..2/2..5 plus forward gap7..9 produce exact versions without99; backward1..6 matches expected slice and empty6..6 changes nothing. This exercises cursor empty-run handling, not VersionsIter."
+        ],
+        [
+          1036,
+          1059,
+          "Descending cursor fixture creates10,000 single-row runs and reads one position at a time in reverse, asserting exact reversed values and a10,000-entry index. Does not measure latency or assert seek counter."
+        ],
+        [
+          1060,
+          1098,
+          "Alternating cursor fixture repeatedly selects last then first position over10,000 runs, asserts exact values/index length and RUNS-1 indexed seeks. First forward read scans without building index; first rewind creates it and subsequent nonadjacent jumps use it."
+        ],
+        [
+          1099,
+          1113,
+          "Out-of-bounds cursor fixture selects4..5 from length4 and asserts Internal, exact position4/total_len4 diagnostic substring and unchanged empty output. It does not cover a selection that first appends valid values then overflows."
+        ],
+        [
+          1114,
+          1134,
+          "Non-range cursor fixture constructs span from[0,2,4,6,8], asserts it is not Range, pairs with three-row version8 span and expects five4s then three8s. Local suite lacks direct mask/rechunk/build/full-refresh, corrupt-inline fallback, unloaded Column, length mismatch, invalid offsets, stale cursor source and VersionsIter empty-run tests; other files may test these but remain pending."
+        ]
+      ],
+      "limits": "All1,134 lines read in bounded chunks. Public rowids::version and selected format facade reexports are distinguished from pub(crate) cursor. Segment/serde/RowIdSequence, dataset loaders, stream consumers and transaction call sites remain pending full analysis; lexical references are not a completed call graph. No source edits, network, builds, tests or benchmarks."
+    },
+    {
+      "path": "rust/lance-table/src/rowids/runs.rs",
+      "module": "L1-modules/rust-lance-table.md",
+      "reviewed": true,
+      "role": "Private-module HoleRuns encoding of missing u32 offsets, validated construction, rank/select conversion and batched present-value expansion.",
+      "ranges": [
+        [
+          1,
+          13,
+          "SPDX/module docs identify run-length holes for U64Segment::Ranges; imports Range,Result,DeepSizeOf, sibling Bitmap and corrupt_row_id_metadata. runs is a private child module with no facade reexport (rust/lance-table/src/rowids.rs:17-24); pub declarations here are not a publicly nameable module route. Error helper returns CorruptFile named row ID metadata (rust/lance-table/src/rowids/serde.rs:13-17)."
+        ],
+        [
+          14,
+          35,
+          "HoleRuns derives Debug/Clone/PartialEq/Eq/DeepSizeOf with private span:u32, starts:Vec<u32> and present_before:Vec<u32>. Offsets are relative to enclosing range base. present_before[k] counts present offsets before missing run k; terminal element counts all present. Ends are reconstructed, not retained. Doc8 bytes/run compares raw two-u32 arrays, not Vec capacity/struct overhead or serialized wire size; storage also has one terminal u32."
+        ],
+        [
+          36,
+          61,
+          "try_new(span,starts,ends) first rejects differing list lengths, then each empty/reversed run and end>span through corrupt metadata error with lengths/index/bounds. Allocates present_before capacity starts.len()+1 and tracks total missing and previous end. Zero span with no runs is valid; a nonempty run in it fails."
+        ],
+        [
+          62,
+          82,
+          "Reject previous_end>=start, covering unsorted, overlapping and adjacent runs; adjacency is invalid because runs must be maximal. Append start-missing before each hole, add end-start and finally span-total_missing. Valid disjoint bounded runs make u32 subtraction/addition fit; starts.len()+1/capacity allocation remain ordinary usize operations. Returns owned starts/prefix table, dropping input ends. No external bitmap/IO needed."
+        ],
+        [
+          83,
+          105,
+          "from_bitmap assumes bitmap.len fits u32 but does not checked-convert it. Iterates bytes with valid_bits=min(span-offset,8); ORs bits beyond logical length to present via checked_shl so padding cannot open a hole. All-present byte closes an open run at byte start; all-missing byte opens/continues a run. The compacted-table byte distribution is a performance rationale in comments, not measured here."
+        ],
+        [
+          106,
+          131,
+          "Mixed bytes scan valid low-order bits, opening missing and closing present transitions at offset+bit. Advance offset8 and stop once>=span, then close a trailing hole at span. Cast all bounds to u32 and call try_new(...).expect; violating length/bitmap assumptions can truncate or panic. Two temporary bounds vectors coexist with constructed prefix vector; no unsafe block. Under valid input cost O(bytes+edge bits+runs)."
+        ],
+        [
+          132,
+          155,
+          "num_runs returns starts.len; present_len directly indexes terminal prefix. Private start_or_span returns supplied run start or span sentinel; missing_before(k)=start_or_span(k)-present_before[k]; end(k)=starts[k]+missing_before(k+1)-missing_before(k). These O(1) helpers assume constructor invariants and valid private indices."
+        ],
+        [
+          156,
+          172,
+          "position(offset) rejects offset>=span, upper-bounds starts<=offset, rejects membership in preceding missing run, otherwise subtracts missing_before(k) to produce present ordinal. runs_before_position upper-bounds present_before excluding terminal by <=position; this skips missing runs before the selected present value. Partition operations are O(log number of runs) under sorted invariants."
+        ],
+        [
+          173,
+          181,
+          "offset_at(position) rejects position>=total present, counts preceding runs and returns position+missing_before(k). It is inverse of position for present offsets under validated state; empty/all-missing spans return None for every input. No Result/error for out-of-range lookup."
+        ],
+        [
+          182,
+          191,
+          "present_ranges lazily iterates k=0..=num_runs, constructs gap from0 or preceding hole end to next hole start/span, and filters empty gaps. Returns a borrowing DoubleEndedIterator; leading/trailing holes disappear naturally and no per-offset Vec is allocated."
+        ],
+        [
+          192,
+          216,
+          "extend_values appends base+offset for an ordinal Range<u32>. Silently clamps end to present_len; start>=clamped end/reversed range emits nothing. One upper-bound search locates initial gap, then walks gaps, appending contiguous u64 ranges and advancing ordinal position. Existing Vec contents remain. Ordinary base+offset+length arithmetic can overflow, including exclusive endpoint when a final actual value would be u64::MAX; no checked error channel. Runtime cost O(log runs+visited gaps+emitted values), plus Vec growth."
+        ],
+        [
+          217,
+          242,
+          "cfg(test) helper span20 holes3..7 and8..15; counts/ranges test asserts11missing/9present, reconstructed ends[7,15], and present gaps[0..3,7..8,15..20] in forward and reversed order."
+        ],
+        [
+          243,
+          265,
+          "Rank/select fixture materializes exact present offsets[0,1,2,7,15,16,17,18,19], asserts both lookup directions for all nine, and None for listed missing/out-of-range offsets3,4,6,8,14,20,100 plus ordinal9."
+        ],
+        [
+          266,
+          279,
+          "Expansion fixture with base100 checks ordinal1..7 ->[101,102,107,115,116,117], clipped4..40 ->[115..119], and9..12 ->empty. It clears the vector between calls, so append preservation is implementation-derived, not tested here."
+        ],
+        [
+          280,
+          310,
+          "Bitmap conversion matrix uses lengths20,1,9,17,64,70 and explicit cleared sets covering clustered/all/none/edge bits. Reconstructs every missing offset using position, compares to cleared list, checks total missing and strictly separated runs. No zero-length or wider-than-u32 fixture. Tests read only."
+        ],
+        [
+          311,
+          325,
+          "Malformed-constructor cases are unequal counts, empty run,beyond span,overlap,adjacency. Each asserts returned diagnostic contains Ranges, without asserting CorruptFile variant. No separate reverse-order/reversed-range, arithmetic-max or base overflow fixture locally."
+        ]
+      ],
+      "limits": "All325 lines fully read. Parent visibility and corruption helper were inspected narrowly but their files are not claimed analyzed. HoleRuns methods are pub in a private module; segment selection, bitmap storage, wire serde and integration callers remain pending. Source-derived costs/counterexamples are not executed benchmark or test results."
+    },
+    {
+      "path": "rust/lance-table/src/format.rs",
+      "module": "L1-modules/rust-lance-table.md",
+      "reviewed": true,
+      "role": "Public metadata facade, generated table bindings, manifest footer identifiers and UUID conversions.",
+      "ranges": [
+        [
+          1,
+          14,
+          "Imports Arrow byte-slice conversion and UUID. fragment, index, manifest, row_ids and transaction are private child modules, while key_existence and overlay are public. Visibility of reexported types is determined by the following explicit facade declarations."
+        ],
+        [
+          15,
+          30,
+          "Reexports the three row dataset-version types from rowids::version; every public fragment item; IndexFile/IndexMetadata/index_metadata_codec/list_index_files_with_sizes; the listed manifest/version/schema-reader helpers; external/inline row-id types and reserved field IDs; Transaction and operation_may_change_schema. Private-module paths themselves remain inaccessible externally. Fragment, manifest and row-ID/transaction wrappers are now covered in their L2 entries; index metadata is now covered; row-version implementation is now covered at rust/lance-table/src/rowids/version.rs:1-1134; transaction consumers and complete row-ID segment codecs remain pending."
+        ],
+        [
+          31,
+          38,
+          "Uses core Error/Result. Public Index aliases IndexMetadata with deprecated(since=0.36.1, note=Use IndexMetadata instead); the preceding comment attributes the rename to trait-name conflicts. No wrapper object or conversion is introduced."
+        ],
+        [
+          39,
+          50,
+          "Public pb module includes OUT_DIR/lance.table.rs generated during the build. Generated code relaxes the named Clippy/naming/unused/improper_ctypes lints locally. The module contains no handwritten wire definitions."
+        ],
+        [
+          51,
+          56,
+          "Manifest footer identifiers are signed i16 MAJOR_VERSION=0, MINOR_VERSION=1 and four-byte MAGIC=LANC. These are table-manifest identifiers; this file does not specify footer byte order or data-file v2 version handling."
+        ],
+        [
+          57,
+          70,
+          "TryFrom<&pb::Uuid> for uuid::Uuid rejects lengths other than16 with InvalidInput text Protobuf UUID is malformed. Otherwise copies bytes into a stack [u8;16] and constructs Uuid::from_bytes. It validates length, not UUID version/variant semantics."
+        ],
+        [
+          71,
+          78,
+          "From<&Uuid> for pb::Uuid copies the UUID bytes into a new Vec field. Conversion is infallible and does not parse or format a textual UUID."
+        ]
+      ],
+      "limits": "Only this file is analyzed; imported implementations and downstream consumers remain pending unless separately listed in the manifest. No Rust build or test was run."
+    },
+    {
+      "path": "rust/lance-table/src/format/fragment.rs",
+      "module": "L1-modules/rust-lance-table.md",
+      "reviewed": true,
+      "role": "Data-file and fragment metadata, schema projection, deduplicated manifest conversion, lineage-carrier validation and protobuf/JSON boundaries. Public declarations are reexported by format; this is metadata logic, not a dataset reader or writer.",
+      "ranges": [
+        [
+          1,
+          27,
+          "SPDX and dependencies: HashMap, NonZero, Arc; core Error/Result/DeepSizeOf/Schema; ConcreteFileVersion, CachedFileSize, object-store Path and serde; overlay sorting/tombstone, row-ID constants/metadata and row-version converters. Implementations of file-version parsing, cached size and overlay/version codecs lie outside this file."
+        ],
+        [
+          28,
+          62,
+          "DataFile derives Debug/Clone/PartialEq/Eq/DeepSizeOf with public path:String, fields/column_indices:Arc<[i32]>, major/minor:u32, CachedFileSize and optional base_id:u32. fields identify schema IDs; column_indices map corresponding positions, with -1 meaning no top-level column and extra unassociated columns allowed. Shared Arc arrays reduce duplicate owned lists; no size saving was measured. path is documented relative to dataset root, with base_id for external data."
+        ],
+        [
+          63,
+          78,
+          "Custom Serialize emits exactly seven named fields: path, fields, column_indices, file_major_version, file_minor_version, file_size_bytes, base_id. Arc arrays serialize as slices, making JSON arrays transparent; serializer errors propagate. It does not sort, validate or omit None base IDs."
+        ],
+        [
+          79,
+          108,
+          "Deserialize uses a local DataFileHelper: path/fields, Vec column_indices default empty, major/minor default zero, CachedFileSize and Option base_id. Moves vectors into new Arc slices, preserving other values. No validate/file_version call occurs, so serde decoding is not metadata validation or interning."
+        ],
+        [
+          109,
+          144,
+          "new takes explicit ConcreteFileVersion, converts it via to_data_file_numbers, moves path/vectors into String/Arc, wraps Option<NonZero<u64>> in CachedFileSize and preserves base_id. new_unstarted uses exact version but empty field/column lists, default size and no base. Neither constructor validates array lengths or field ordering."
+        ],
+        [
+          145,
+          170,
+          "Legacy constructors are frozen compatibility helpers: new_legacy_from_fields forwards supplied IDs unchanged with empty columns, V1 and unknown size; new_legacy obtains all schema IDs, sorts them (without deduplication), then forwards V1 plus supplied size/base. Their existence does not establish current writer usage."
+        ],
+        [
+          171,
+          216,
+          "schema nested project_field treats blob/packed struct as atomic: clone entire field only if its own ID is mapped. Otherwise recursively projects children; any surviving children retain a cloned parent even if parent ID is absent. A leaf survives only if mapped. With no surviving children, V2.0 alone retains a mapped structural parent with empty children, preserving its physical header. Comments explain evolved child IDs must not be substituted from current schema; actual null filling belongs to a reader outside this file."
+        ],
+        [
+          217,
+          240,
+          "V1-encoding metadata projects by IDs with include_all_children=false. Other encodings build HashMap from zipped fields/column_indices, keep only indices>=0, and recurse over full schema in its existing order, cloning schema metadata. Zip stops at the shorter list, duplicate IDs collapse in the map, negative columns are ignored and extra columns have no field mapping. Exact raw pairs (0,3) or (2,0) activate V2.0 structural-header retention; no full version validation is performed here."
+        ],
+        [
+          241,
+          252,
+          "Private uses_v1_data_file_encoding is exactly major==0 && minor<3; it is a local layout predicate, not the general version parser. Public file_version delegates both stored numbers to ConcreteFileVersion::from_data_file_numbers and propagates its errors. Exact mapping is now covered at rust/lance-file/src/version.rs:198-224."
+        ],
+        [
+          253,
+          281,
+          "validate checks only two shape rules. For V1 encoding, remove every TOMBSTONE_FIELD_ID then require strictly increasing live IDs (no duplicates); failure is CorruptFile at base_path.join(path) with unsorted/duplicate message. For other encodings require columns.len>=fields.len; extra columns accepted, failure contextual CorruptFile. It does not verify exact file version, nonnegative values, file existence, row count, base IDs or column uniqueness/range. V1 branch allocates a live-ID Vec."
+        ],
+        [
+          282,
+          311,
+          "DataFile to protobuf clones path and copies both Arc slices to Vec, preserves exact numbers/base, and writes cached size as value or zero. TryFrom protobuf moves path, creates fresh Arc slices, wraps raw size using CachedFileSize::new and always returns Ok; no validation. Size-zero interpretation belongs to CachedFileSize implementation, not an error here."
+        ],
+        [
+          312,
+          338,
+          "Default DataFileFieldInterner holds separate caches for field IDs and column indices plus one shared cache for inline created/updated version bytes. Private InternCache<T:Eq+Hash+Clone> is Small(Vec<Arc<[T]>>) or Large(HashMap<Arc<[T]>,()>), threshold16. Documentation claims multi-GB savings at20M fragments and a favorable linear-scan crossover for20-200-byte payloads; these are source assertions, not measured results."
+        ],
+        [
+          339,
+          377,
+          "InternCache starts Small(empty). Small scans for content equality and returns a cloned existing Arc; on miss converts Vec to Arc, inserts a clone, and promotes only when unique entries exceed16 (the17th miss). Promotion drains all stored Arcs into a HashMap. Large performs borrowed slice lookup, returning stored Arc or inserting new Arc. Caches grow without eviction; no interning across the two separate i32 caches. Lookup complexity is linear in unique entries and comparison length before promotion; map hashing/equality still depends on payload contents after it."
+        ],
+        [
+          378,
+          410,
+          "Private row-version converters receive generated oneof directly: inline Vec bytes pass through the shared u8 cache into RowDatasetVersionMeta::Inline; column marker becomes Column. Both functions return Result but known arms all succeed; no byte decoding or column validation. The shared cache can deduplicate equal created-at and last-updated-at byte payloads."
+        ],
+        [
+          411,
+          423,
+          "intern_data_file performs the same structural protobuf conversion as DataFile::try_from, but routes fields and column_indices through their respective caches. It preserves exact version numbers and base ID, wraps raw size and returns Ok without shape validation."
+        ],
+        [
+          424,
+          463,
+          "intern_fragment maps physical_rows>0 to Some(as usize), otherwise None; interns updated/created inline version bytes, then all base DataFiles. Overlay entries use DataOverlayFile::try_from and sort_overlays_newest_last, without this field interner. Deletion/row-ID metadata use optional TryFrom+transpose. Inline row IDs are not routed through inline_bytes. Conversion failures propagate after any earlier cache insertions, without rollback; it does not call carrier or DataFile validation."
+        ],
+        [
+          464,
+          490,
+          "DeletionFileType Array/Bitmap derives equality, serde and sizing; serde names lowercase array/bitmap, while suffix() returns arrow/bin respectively. DeletionFile contains read_version/id:u64, type, optional num_deleted_rows:usize and optional base_id:u32. Unknown deleted count is None; no path is constructed here."
+        ],
+        [
+          491,
+          518,
+          "DeletionFile protobuf conversion recognizes integer type0 Array and1 Bitmap, otherwise returns not_supported_source(\"Unknown deletion file type\") without including the offending value. Deleted count zero maps None, positive casts to usize without checked conversion. Other fields move through; no count/file validation."
+        ],
+        [
+          519,
+          558,
+          "Fragment public fields: id:u64, base files Vec<DataFile>, overlays Vec<DataOverlayFile>, optional deletion/row-ID metadata, physical_rows:Option<usize>, optional updated/created row-version metadata. Docs define one fragment as different columns of the same rows and missing schema columns as null. Overlays have default empty serde and skip when empty; deletion/lineage options skip when None, while physical_rows remains serialized even when unknown. Overlay order is significant, later newer by contract; serde itself does not normalize it."
+        ],
+        [
+          559,
+          588,
+          "new(id) constructs empty base/overlay vectors and all optional metadata None. num_rows returns physical count if no deletion file, or physical minus known deleted count if both are known, otherwise None. Contrary to the nearby comment, the subtraction branch requires a known deleted count. Subtraction is unchecked and can underflow if metadata claims more deletions than rows; no Result is returned."
+        ],
+        [
+          589,
+          634,
+          "referenced_lance_files and mutable counterpart yield base DataFiles first then every overlay.data_file, without allocation/deduplication. Exhaustive destructuring intentionally forces future Fragment fields to be considered. They omit deletion files and lineage metadata objects; lineage columns residing in base files are included through those base files. The documentation still mentions external raw-byte lineage ranges, whereas current RowIdMeta variants are Inline/Column (rust/lance-table/src/format/row_ids.rs:141-156)."
+        ],
+        [
+          635,
+          671,
+          "has_spilled_row_lineage is OR of RowIdMeta::Column and the two RowDatasetVersionMeta::Column states. row_lineage_file(field_id) scans only base files for fields.contains(id), returns None if absent, first file if unique, or CorruptFile naming the second carrier path and fragment/field IDs if duplicated across files. It accepts arbitrary i32 input and does not reject repeated IDs within one file or inspect column_indices/metadata state. Missing carrier is not itself an error in this lookup."
+        ],
+        [
+          672,
+          699,
+          "spilled_row_lineage_field_ids creates a Vec of reserved IDs in row-ID, created-at, last-updated-at order, including each only when its metadata is Column. It consults metadata, not schema/files; this is a retention requirement for consumers deciding which data files can be removed."
+        ],
+        [
+          700,
+          726,
+          "crate-visible validate_row_lineage_carriers loops the spilled IDs, propagates duplicate-carrier errors, returns Internal if a carrier is missing, delegates exact version decoding, and returns Internal when decoded V1 carries a spilled column. Non-V1 versions pass this check; absent spills pass vacuously. It reads metadata only, with no IO or column-index/page/count checks. Error messages include fragment/field and V1 path; it does not invoke feature-gate support."
+        ],
+        [
+          727,
+          750,
+          "from_json delegates serde_json::from_str with error conversion and no extra validation or overlay sorting. with_file_legacy creates one V1 DataFile using schema IDs, supplied physical_rows, empty overlays and absent deletion/lineage. It performs no IO."
+        ],
+        [
+          751,
+          799,
+          "with_file consumes/mutates self by appending DataFile::new with explicit IDs/columns/exact version/size and base_id=None; add_file does the same through &mut self. with_physical_rows sets Some, including zero. add_file_legacy appends schema-based V1 metadata with unknown size/base. None checks count consistency or writes files."
+        ],
+        [
+          800,
+          830,
+          "try_infer_version considers all referenced_lance_files across fragments, including overlays. If no referenced file exists, returns Ok(None). Otherwise parses first exact version, then parses every file (including first again) and rejects any unequal ConcreteFileVersion with InvalidInput naming both versions. It ignores manifest mixed-version capability bits and does no IO. This strict helper is used for missing-format inference, not proof all supported manifests must be homogeneous."
+        ],
+        [
+          831,
+          870,
+          "Noninterning Fragment::try_from follows the same physical zero->None and overlay conversion/sorting rules, uses DataFile::try_from for bases and RowDatasetVersionMeta::try_from for created/updated instead of shared version-byte cache. Row-ID and deletion optional conversions propagate errors. It neither validates field arrays nor checks lineage carriers, stable-row flags or schema consistency."
+        ],
+        [
+          871,
+          910,
+          "Fragment->protobuf maps deletion type enum, writes unknown deleted/physical counts as zero, clones inline RowIdMeta Bytes handle, emits empty RowLineageColumn marker for Column, delegates version oneofs, copies base and overlay vectors in current order. It does not sort overlays or validate; Some(0) counts lose their known-zero distinction on later decode. Other cloning/memory costs depend on nested converters."
+        ],
+        [
+          911,
+          957,
+          "cfg(test) imports Arrow schemas, legacy file constants, bitmap/JSON helpers. Dense overlay fixture carries offsets1/3, version7 and a legacy metadata DataFile; protobuf roundtrip checks complete Fragment equality and coverage_for_field at positions0 and5 returns same bitmap. It exercises metadata conversion, not on-disk legacy overlays."
+        ],
+        [
+          958,
+          984,
+          "Sparse overlay fixture with fields2/4 and coverage{2,3}/{1} roundtrips protobuf then asserts coverage by position0/1. No IO, null values, overlapping overlay resolution or feature-gate enforcement is exercised."
+        ],
+        [
+          985,
+          1016,
+          "Out-of-order overlay versions5,2,2,3 roundtrip to2,2,3,5; field IDs2 then3 assert original relative order among equal-version overlays. This pins stable load ordering for ordinary Fragment conversion; interner sorting calls the same helper."
+        ],
+        [
+          1017,
+          1045,
+          "New legacy Fragment fixture builds nested struct(si:Int32,sb:Binary) plus Boolean schema, asserts fragment ID123 and single DataFile with sorted IDs0..3. It does not assert physical_rows or actual file data."
+        ],
+        [
+          1046,
+          1068,
+          "Fragment protobuf roundtrip uses Float16 schema and Array deletion descriptor with known count10, then repeats with no deletion. Equality asserts metadata preservation for these cases only; no row-ID, zero-count or error fixture."
+        ],
+        [
+          1069,
+          1135,
+          "Exact-version fixture checks no files->None, new/new_unstarted V2_0 persist(2,0), two V2_0 fragments infer V2_0, and V2_1 overlay/base mismatches error with2.0/2.1 context. Base mismatch also matches InvalidInput. No file bytes are generated."
+        ],
+        [
+          1136,
+          1199,
+          "Evolved-struct fixture changes current child ID while stale files keep old child: V2_0 projection preserves empty values parent plus id, V2_1 parent index-1 projection retains only id, and current V2_0 mapped child returns full schema. This tests projection metadata, not reader null materialization or blob/packed-struct branches."
+        ],
+        [
+          1200,
+          1233,
+          "JSON fixture pins path/field array/empty columns/legacy major-minor constants, null size/base, lowercase array deletion fields, physical_rows null and omission of empty overlays/None lineage. from_json roundtrip equals original. No malformed JSON or old release fixture is used."
+        ],
+        [
+          1234,
+          1252,
+          "Extra-column fixture constructs two fields and three column indices, using imported lance_file::format major/minor constants, and expects validate success. This test does not set an explicit nonlegacy ConcreteFileVersion, so the source here alone does not prove it reaches the non-V1 length branch. All tests in this file were read, not executed."
+        ]
+      ],
+      "limits": "All1252 lines read in bounded chunks. Public facade is rust/lance-table/src/format.rs:7-25. Manifest conversion and shallow clone consumers are traced in rust/lance-table/src/format/manifest.rs:249-268 and rust/lance-table/src/format/manifest.rs:987-1021. Exact file-version, overlay and row-version implementations are now covered in their own L2 entries; CachedFileSize, cleanup and actual read/write/commit consumers remain incomplete; no runtime qualification or compatibility claim beyond source behavior."
+    },
+    {
+      "path": "rust/lance-table/src/format/manifest.rs",
+      "module": "L1-modules/rust-lance-table.md",
+      "reviewed": true,
+      "role": "In-memory dataset manifest, metadata transformations, fragment accounting, protobuf conversion, writer/version descriptors and frozen V1 self-describing reader adapter. Selected public types/functions are reexported by format; ManifestSummary and VersionPart are public inside the private child but not reexported.",
+      "ranges": [
+        [
+          1,
+          31,
+          "SPDX/imports connect async_trait, Bytes, chrono, DeepSizeOf, file schema adapters/exact versions and V1 dictionaries/reader, IO ProtoStruct/Reader/read_struct, Path, prost/Timestamp, maps/ranges/Arc, Fragment/interner/row IDs, feature bits, LanceCache/Schema/errors and ObjectStore/Registry. External IO/file parsing implementations remain pending."
+        ],
+        [
+          32,
+          109,
+          "Manifest derives Debug/Clone/PartialEq/DeepSizeOf. Public fields hold schema, dataset version/branch, optional writer version, Arc<Vec<Fragment>>, aux/index/transaction positions, u128 nanosecond timestamp, tag, reader/writer words, optional u32 max-fragment high-water mark, optional transaction path, next_row_id:u64, exact DataStorageFormat, config/table_metadata/base_paths maps. Only fragment_offsets:Vec<usize> is private. Docs require fragments sorted by ID with gaps, but constructors/conversion below do not sort or enforce this; public fragments replacement can stale the private offsets. Dataset version, writer-library version and data-file version are separate values."
+        ],
+        [
+          110,
+          129,
+          "DETACHED_VERSION_MASK is bit63 (0x8000000000000000); is_detached_version tests it only. compute_fragment_offsets maps each Fragment::num_rows().unwrap_or_default(), chains final zero, and scans prefix sums into N+1 entries, including terminal total (empty list->[0]). Unknown row count contributes zero; ordinary usize addition is unchecked. It preserves fragment order and performs no row-ID mapping."
+        ],
+        [
+          130,
+          172,
+          "Default ManifestSummary has seven u64 counters. Consuming conversion to BTreeMap<String,String> writes exactly total_fragments, total_data_files, total_files_size, total_deletion_files, total_data_file_rows, total_deletion_file_rows, total_rows, all decimal strings. Type is pub in private module, not facade-reexported, though callers can infer the summary return type and use its public fields."
+        ],
+        [
+          173,
+          205,
+          "Manifest::new accepts owned Schema, shared fragment Vec, storage format and base-path map; computes offsets, starts version1/current WriterVersion, zero timestamp/feature words/aux position/next row ID, absent branch/tag/index/transaction/high-water mark, and empty config/table metadata. It does not inspect formats, assign fragment IDs, validate schema/carriers or perform IO."
+        ],
+        [
+          206,
+          236,
+          "new_from_previous uses supplied schema/fragments and recomputed offsets; increments previous version with unchecked +1, retains branch/high-water/next row ID/storage/config/table metadata/bases and refreshes writer version. It clears aux/index/time/tag/transaction references and preserves only STICKY_PAIRED_FLAGS separately in reader/writer words. It neither normalizes nor validates half-set pairs and does not preserve covered-index bit here. Caller must restore index metadata as comment states."
+        ],
+        [
+          237,
+          269,
+          "shallow_clone is in-memory: clones each Fragment, stamps ref_base_id only on base and overlay DataFiles whose base_id is None via referenced_lance_files_mut, and similarly stamps local deletion descriptor. Existing external base IDs remain. Inline/column metadata remains cloned; no files are opened/copied."
+        ],
+        [
+          270,
+          309,
+          "Shallow clone keeps source version/writer/aux position/time/high-water/offsets/next row ID/storage/config/table metadata, uses new branch and transaction_file=Some(input), clears tag/index/transaction_section, and allocates a new fragment Arc. It masks each feature word to covered-index bit OR sticky pairs, preserving each side independently. Source comments justify conservative covered-index retention; index metadata copy happens outside this function. Base map is cloned and insert(ref_base_id, BasePath(...,is_dataset_root=true)) can replace an existing entry without collision validation."
+        ],
+        [
+          310,
+          340,
+          "timestamp splits u128 nanos into remainder<1e9 and casts whole seconds to i64, uses chrono from_timestamp with unwrap_or_default fallback for unrepresentable date, then Utc. No error returned. set_timestamp actually accepts u128 raw nanos despite DateTime doc wording. config_mut/table_metadata_mut/schema_metadata_mut return mutable maps with no validation, persistence or feature recomputation."
+        ],
+        [
+          341,
+          362,
+          "field_metadata_mut delegates recursive schema field_by_id_mut then yields metadata or None. Deprecated update_config extends config with key overwrite semantics; deprecated delete_config_keys retains entries whose names are absent from supplied slice. No table configuration semantics are checked."
+        ],
+        [
+          363,
+          390,
+          "Deprecated replace_schema_metadata replaces whole schema map. Deprecated replace_field_metadata replaces selected field map and returns Ok, or InvalidInput with field ID if missing. The preceding no-op comment is inconsistent with the implemented error branch; document the error as behavior. No primary-key validation is invoked."
+        ],
+        [
+          391,
+          420,
+          "detach_sparse_inline_row_ids sums visible lengths of Inline row-ID payloads (not deduplicated, not created/updated versions). Returns unchanged if sum==0 or sum.saturating_mul(4)>=buffer_len, preserving exact quarter boundary. Otherwise Arc::make_mut obtains fragments and each Inline gets Bytes::copy_from_slice wrapped in a fresh InlineRowIds (new digest memo); other metadata unchanged. A shared fragments Arc triggers clone-on-write. Caller-provided buffer_len is trusted; whole original buffer release is not guaranteed while other owners/slices survive. Ordinary sum can overflow; multiplication is saturating."
+        ],
+        [
+          421,
+          451,
+          "update_max_fragment_id returns for empty fragments, otherwise takes maximum u64 ID then try_into u32 and unwraps (panic above u32::MAX). It initializes absent mark or raises it only, retaining historic high water after deletes. No Result or ID validation; a stored larger mark is preserved."
+        ],
+        [
+          452,
+          486,
+          "max_fragment_id returns stored u32 mark widened to u64 if present, otherwise computes maximum existing fragment ID, with None only for unset+empty. max_field_id compares schema max (default-1) with every field ID in base and overlay referenced files (default-1); includes dropped schema fields and does not explicitly filter tombstone or reserved IDs. No field IDs are assigned."
+        ],
+        [
+          487,
+          504,
+          "fragments_since rejects since.version>=self.version, including equality, with InvalidInput describing newer version. It uses since.max_fragment_id as threshold and clones current fragments with strictly greater IDs, or all if absent. This is an ID-high-water heuristic, not content comparison; docs exclude recycling and it does not validate common lineage/branch."
+        ],
+        [
+          505,
+          541,
+          "fragments_by_offset_range uses logical row offsets, not row IDs: binary_search start in cached N+1 prefix offsets, otherwise insertion index minus1, then walk fragment indices. Break when fragment start>=end OR fragment end<=start; append(start,&Fragment) otherwise. Unknown current length acts as zero. It does not validate/recompute offsets, sort, deduplicate equal offsets or explicitly validate empty/reversed ranges. Duplicated offsets/zero-length fragments may select a zero-length entry and break before later data; callers need valid coherent counts. Returned elements borrow fragments, despite doc return wording showing owned Fragment."
+        ],
+        [
+          542,
+          553,
+          "uses_stable_row_ids checks reader word FLAG_STABLE_ROW_IDS only, not per-fragment metadata or writer word. serialized builds pb::Manifest then encode_to_vec: raw protobuf bytes suitable for IPC/temp storage, not a complete on-disk manifest with footer/sections/dictionaries."
+        ],
+        [
+          554,
+          600,
+          "summary folds fragments: total_data_files counts base f.files only and total_files_size sums only known sizes of those base files, excluding overlays/deletion/index files despite broad docs. total_rows sums only known f.num_rows; deletion_file presence counts even if deleted count unknown, known deletion counts sum separately. total_fragments is Vec length; total_data_file_rows=total_rows+total_deletion_file_rows, not sum of all physical counts when some lengths unknown. Ordinary u64 additions are unchecked; no IO resolves missing sizes/counts."
+        ],
+        [
+          601,
+          634,
+          "Async populate_manifest_schema_dictionaries is a V1 compatibility adapter. Exact V1 delegates populate_schema_dictionaries(&mut schema,reader).await; V2_0/V2_1/V2_2/V2_3 are explicit no-ops. No version selector or writer-library comparison is used. Included doctest wraps an async Result function, not ignore; it was not compiled."
+        ],
+        [
+          635,
+          669,
+          "BasePath stores public id:u32, optional name, is_dataset_root:bool and full URI/path String. new assigns without URI/ID validation; extract_path synchronously delegates ObjectStore::extract_path_from_uri(registry,&path), propagating Result. Actual parsing/registry behavior is pending; no store initialization in this body."
+        ],
+        [
+          670,
+          677,
+          "BasePath custom DeepSizeOf children adds name children + twice path children + size_of<bool>(). This literally overcounts path allocation relative to normal one-string ownership and adds inline bool as a child; source gives no rationale. It is an estimator, not measured retained heap."
+        ],
+        [
+          678,
+          724,
+          "WriterVersion stores public library/version Strings plus optional prerelease/build metadata. DataStorageFormat stores public file_format:String and ConcreteFileVersion; new uses literal lance, getter returns exact enum, Default uses stable_file_version() resolved elsewhere. TryFrom protobuf preserves file_format without checking it equals lance and parses version via from_manifest_string. Exact mappings are now covered at rust/lance-file/src/version.rs:19-27 and rust/lance-file/src/version.rs:172-261; selector acceptance remains distinct from persisted strings."
+        ],
+        [
+          725,
+          761,
+          "ManifestBuildConfig is a data-only public Debug/Clone struct with auto_set_feature_flags, resolved timestamp_nanos, use_stable_row_ids, optional legacy mode/storage_format, disable_transaction_file, migration_next_row_id and Arc<SpilledRowLineage>. Docs specify sticky row IDs, overwrite-only storage override precedence, migration bypass and prefetched spilled sequences needed for rewrite/update; no enforcement/default implementation occurs in this file. Clock resolution deliberately belongs to caller; cfg(test) clock mocking in lance is a source comment, consumer implementation pending."
+        ],
+        [
+          762,
+          785,
+          "VersionPart Major/Minor/Patch is pub in private module with no facade reexport. Private bump_version increments chosen semver u64 component, resets lower components for major/minor, leaves prerelease/build intact and uses ordinary unchecked additions."
+        ],
+        [
+          786,
+          816,
+          "Private split_version parses semver, returns None on error, extracts nonempty pre/build as optional Strings, clears both in parsed object and returns clean major.minor.patch plus separate components. Docs include rc/build/invalid examples. No library check here."
+        ],
+        [
+          817,
+          838,
+          "Deprecated semver is a distinct lenient parser: split self.version at first dash, parse first three dot-separated components as u32 with missing minor/patch default0, return remainder after dash as optional borrowed tag. Extra dot parts are ignored, explicit prerelease/build fields and library are ignored; plus-build in patch can cause parse failure. It is not equivalent to full semver::Version parsing despite doc wording."
+        ],
+        [
+          839,
+          863,
+          "lance_lib_version rejects library != exact lowercase lance, parses self.version with semver, then when separate prerelease/build fields are Some parses and overwrites corresponding parsed components. None leaves components embedded in version string intact. Any parse error returns None. Arbitrary nonsemver WriterVersion values remain constructible; only this interpretation fails."
+        ],
+        [
+          864,
+          910,
+          "Deprecated semver_or_panic wraps old parser and panics with raw version on failure. older_than uses lance_lib_version().expect then compares against release major/minor/patch with empty pre/build, so prerelease ordering follows semver. Deprecated bump expects valid Lance version, increments numeric part, clears only prerelease if keep_tag=false (build retained), splits back to clean fields and clones library. Non-Lance/invalid versions panic; future-private wording is intent, not current restriction."
+        ],
+        [
+          911,
+          941,
+          "WriterVersion Default outside cfg(test) parses compile-time CARGO_PKG_VERSION and emits library lance, clean version and separate pre/build, panicking if invalid. Under this crate cfg(test), same fields then bump(Patch,true), retaining pre/build but using next patch. Dependency builds do not automatically inherit cfg(test); no actual Cargo version value is asserted here."
+        ],
+        [
+          942,
+          962,
+          "ProtoStruct maps Manifest::Proto=pb::Manifest. BasePath From conversions copy/move matching id/name/root/path fields, no URI/duplicate validation. Converting owned BasePath to protobuf consumes Strings."
+        ],
+        [
+          963,
+          987,
+          "Manifest TryFrom starts timestamp conversion by casting signed seconds/nanos to u128 then sec*1e9+nanos; absent timestamp defaults later to0. Negative or out-of-range values are not validated and casts/arithmetic can wrap/panic according to overflow policy. Any Some writer_version message becomes Some even with empty library/version; the fully-set comment does not enforce nonempty fields."
+        ],
+        [
+          988,
+          1005,
+          "A fresh DataFileFieldInterner converts all protobuf fragments, sharing repeated base field/column lists and inline version bytes across this manifest, preserving fragment order. It computes logical offsets and wraps fields/schema metadata. If reader stable-row bit is set but any fragment lacks row_id_meta, returns Internal All fragments must have row ids; empty fragment set passes. It does not decode inline sequences or validate Column carriers."
+        ],
+        [
+          1006,
+          1024,
+          "If data_format absent, infer exact version from all base/overlay files, rejecting mixed versions; with no files use stable_file_version when deprecated writer bit2 set, else V1. If data_format present, trust converted DataStorageFormat without comparing per-file versions. Then convert schema via FieldsWithMeta. This conversion alone does not invoke ensure_can_read_manifest/paired flag checks or reject fragment_tree."
+        ],
+        [
+          1025,
+          1057,
+          "Final Manifest retains raw version/branch/flags/high-water/next row/config/table metadata, casts aux/index/transaction offsets to usize without checked conversion, normalizes empty tag/transaction_file to None, and collects base-path entries by id into HashMap (later duplicate ID replaces earlier). Uses converted fragments/schema/format and computed offsets. Unknown/ignored protobuf fields including fragment_tree have no Rust representation here."
+        ],
+        [
+          1058,
+          1090,
+          "Manifest->protobuf omits timestamp if nanos==0, else divides into seconds cast i64 and subsecond i32 without overflow validation. Converts schema through FieldsWithMeta and separately encodes schema metadata String values as UTF8 Vec; clones branch/writer strings including separate pre/build and converts fragments in order. This conversion does not validate inputs."
+        ],
+        [
+          1091,
+          1125,
+          "Output sets fragment_tree=None, preserves metadata/flags/high-water/counts, casts usize positions to u64, writes absent tag/transaction file as empty String, always includes data_format with exact to_manifest_string, clones config and emits base_paths from HashMap values in unspecified order. transaction_section presence retained. This is a protobuf object conversion, not atomic manifest publication or canonical byte ordering."
+        ],
+        [
+          1126,
+          1154,
+          "Public async_trait SelfDescribingFileReader offers default try_new_self_described(ObjectStore,Path,optional&LanceCache): await store.open, convert reader into Arc then delegate required try_new_self_described_from_reader. Both require Self:Sized; from_reader accepts Arc<dyn Reader>. Docs prefer fragment readers for cached schemas; no caching algorithm or format detection is implemented by the trait default."
+        ],
+        [
+          1155,
+          1183,
+          "Only implementation here is V1FileReader: read_metadata(reader,cache), require metadata.manifest_position or Internal with reader path, read_struct<Manifest> at position, hydrate V1 dictionaries, take schema/max_field_id(default0), then call V1 try_new_from_reader with path, reader clone, Some(metadata), schema, numeric0,0,max ID and cache. Errors propagate at awaits; compatibility adapter does not add a V2 self-describing implementation. Meaning of delegated numeric arguments and file IO remain pending."
+        ],
+        [
+          1184,
+          1238,
+          "cfg(test) imports feature bit, overlay/data/deletion types, Arrow/core fields and bitmap. Shallow clone fixture with one base and one overlay asserts both local base IDs become7. It does not assert existing external IDs, deletion stamping, feature retention, URI behavior or disk clone."
+        ],
+        [
+          1239,
+          1275,
+          "Old empty manifest fixture with absent data_format recovers V1 without deprecated writer bit, current stable with it. Persistence rejection loops stable,next,legacy,0.3 and asserts conversion error. These are constructed protobuf values, not released historical fixtures or proof all version aliases are covered."
+        ],
+        [
+          1276,
+          1333,
+          "Canonical output fixture asserts V2_0 serializes version string2.0. Missing-format fixture recovers exact V2_0 from a file even when prior in-memory storage field was V1, then rejects V2_0/V2_1 files when protobuf format is removed. Explicit-format mixed-version validation is not tested here."
+        ],
+        [
+          1334,
+          1368,
+          "Detach fixture holds two10-byte slices of one64-byte buffer, supplies logical buffer_len80 then81. Exact quarter retains original pointers; below quarter copies both pointers outside original allocation and verifies second payload contents. It trusts the provided length, does not assert deallocation/RSS, Arc sharing or digest behavior."
+        ],
+        [
+          1369,
+          1422,
+          "Writer default fixture asserts lance, three-part clean version, cargo prerelease tag, no build metadata for this package, reconstructed Cargo major/minor and patch+1 under cfg(test), and each numeric bump produces greater version. expected_tag is split from Cargo text; fixture assumes package metadata layout, not a general parser proof."
+        ],
+        [
+          1423,
+          1455,
+          "Split-version test covers release, rc.1, rc.1+build.123, build-only and invalid string, with exact clean/pre/build components. Does not cover the deprecated lenient parser."
+        ],
+        [
+          1456,
+          1514,
+          "Writer tests compare rc.1<release, reconstruct rc.1+build.123 and all numeric/pre/build fields, and allow nonsemver WriterVersion custom-build-v1 while lance_lib_version returns None. No other-library or invalid separate-component fixture."
+        ],
+        [
+          1515,
+          1548,
+          "Deprecated older_than fixture requires rc2.0.0 below2.0.0/2.0.1 but not1.9.9, release2.0.0 not older than itself but older than2.0.1. Panic behavior for invalid/non-Lance input is not tested."
+        ],
+        [
+          1549,
+          1594,
+          "Offset-range fixture has three fragments of10/15/20 rows, expects0..10 first only,5..15 first two,15..50 latter two at offsets10/25;45..100 and200..400 empty. It does not cover zero/unknown counts, reversed/empty interior ranges or stale offsets."
+        ],
+        [
+          1595,
+          1648,
+          "Max-field fixture uses schema IDs0/2, multiple files/fragments including dropped ID43 and expects43. Tests dropped physical IDs beyond schema maximum without reading data or assigning IDs through Manifest."
+        ],
+        [
+          1649,
+          1684,
+          "Overlay max-field fixture puts ID43 only in overlay over base0 and expects43, proving referenced overlay IDs participate in high-water calculation. No tombstone/reserved-ID boundary case."
+        ],
+        [
+          1685,
+          1716,
+          "Config fixture constructs three-fragment manifest, extends config_mut with two keys and removes one; equality confirms in-memory map mutation. It does not recompute feature flags, persist metadata or test deprecated APIs."
+        ],
+        [
+          1717,
+          1786,
+          "Summary test starts empty manifest (all seven zero), two known-zero fragments (two files/fragments but zero rows/sizes), then three in-memory fragments100/250/75 (425 rows, three files, unknown sizes contribute0). Comments saying write files do not correspond to IO in this test."
+        ],
+        [
+          1787,
+          1825,
+          "Summary deletion fixture sets one known1000-byte file/50 physical rows/10 deleted, expects40 live,50 total-data rows,10 deleted and one deletion/file/fragment, then seven string-map entries. Overlay omission and unknown physical/deleted-count combinations are not tested. All file tests/doctest were read, not executed."
+        ]
+      ],
+      "limits": "All1825 lines read in bounded chunks. Visibility facade: rust/lance-table/src/format.rs:21-25. Local metadata conversion, counters and helpers are covered; transaction builder enforcement, commit flags/support checks, IO framing, nested row-ID segment codecs and dataset consumers remain pending. Exact file-version, overlay and row-version implementations are now covered in their own L2 entries. No build/test/benchmark, file-format release qualification or external-dependency behavior verification was performed."
+    }
+  ]
+}

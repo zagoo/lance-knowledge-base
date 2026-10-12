@@ -1,0 +1,28 @@
+import fs from 'node:fs';import assert from 'node:assert/strict';import{root}from './inventory.mjs';import{inspect,wire}from './inspect-embedded-fixtures.mjs';import{inspectStructural}from './inspect-structural-fixtures.mjs';
+const read=p=>JSON.parse(fs.readFileSync(p)),v=read('verification/iteration-076.json'),a=inspectStructural('v2_1'),a22=inspectStructural('v2_2'),out=[];
+const clean=x=>JSON.parse(JSON.stringify(x,(k,v)=>k==='wire'?undefined:v)),align=(x,n=8)=>Math.ceil(x/n)*n;
+function chunks(a){const data=fs.readFileSync(root+'/'+a.source),pages=[];for(const col of a.columns)for(const[page,p]of col.pages.entries()){const layout=p.layout.inner??p.layout,cs=[];if(layout.kind!=='MiniBlock')continue;let at=p.offsets[1],used=0;const large=!!layout.has_large_chunk,w=large?4:2;for(let j=0;j<p.sizes[0]/w;j++){const word=data.readUIntLE(p.offsets[0]+j*w,w),log=word&15,size=(Math.floor(word/16)+1)*8,start=at,end=start+size,n=log?2**log:layout.num_items-used;let pos=start;const num_levels=data.readUInt16LE(pos);pos+=2;const rep_size=layout.rep?data.readUInt16LE(pos):0;if(layout.rep)pos+=2;const def_size=layout.def?data.readUInt16LE(pos):0;if(layout.def)pos+=2;const value_size=data.readUIntLE(pos,w);pos+=w;const header_end=pos;pos=align(pos);const segments=[];for(const[kind,sz]of[['rep',rep_size],['def',def_size],['values',value_size]])if(sz){segments.push({kind,start:pos,end:pos+sz});pos=align(pos+sz);}assert.equal(pos,end);cs.push({j,start,end,n,num_levels,rep_size,def_size,value_size,header_end,segments});at=end;used+=n;}assert.equal(at,p.offsets[1]+p.sizes[1]);assert.equal(used,layout.num_items);pages.push({column:col.index,page,p,layout,chunks:cs});}return pages;}
+const pages=chunks(a),pages22=chunks(a22);
+for(const s of v.checks.accuracy.samples.filter(s=>s.unit==='bytes')){
+ const b=fs.readFileSync(root+'/'+s.path),bytes=b.subarray(s.start,s.end);let decoded;
+ if([1,10,12].includes(s.id)){
+  const name=s.id===1?'v2_0_mini':'v2_0',pi=({1:106,10:74,12:95})[s.id],x=inspect(name),p=x.columns[1].pages[pi],first=x.columns[1].pages.slice(0,pi).reduce((n,p)=>n+p.length,0),end=p.offsets[1]+p.sizes[1];
+  assert.equal(p.offsets[0],s.start);assert.equal(name==='v2_0'?align(end,64):end,s.end);assert.equal(p.encoding.kind,'Binary');assert.equal(p.encoding.indices.kind,'Nullable');assert.equal(p.encoding.indices.mode,1);assert.equal(p.encoding.indices.children[0].encoding.bits,64);assert.equal(p.encoding.bytes.bits,8);assert.equal(p.encoding.bytes.buffer_index,1);assert.equal(p.encoding.bytes.compression.hex,'0a046e6f6e65');
+  const raw=Array.from({length:p.length},(_,i)=>Number(b.readBigUInt64LE(p.offsets[0]+i*8))),adj=p.encoding.null_adjustment,ends=raw.map(o=>o>=adj?o-adj:o),values=[];let prev=0;
+  for(let i=0;i<p.length;i++){const r=first+i,expected=r%7===0?'':`value-${String(r).padStart(4,'0')}-deterministic-fixture`,value=b.subarray(p.offsets[1]+prev,p.offsets[1]+ends[i]).toString();assert.equal(value,expected);assert.equal(raw[i]>=adj,r%7===0);values.push(expected||null);prev=ends[i];}
+  assert.equal(prev,p.sizes[1]);let pad=0;for(let i=0;i<2;i++)if(name==='v2_0'){const e=p.offsets[i]+p.sizes[i],aligned=align(e,64);assert(b.subarray(e,aligned).every(x=>x===72));pad+=aligned-e;}
+  assert.equal(p.priority,0);assert(!p.wire.some(x=>x.number===5));assert.equal(first,({1:212,10:592,12:760})[s.id]);assert.deepEqual(raw,s.id===1?[32,64]:[32,64,96,321,128,160,192,224]);assert.equal(adj,s.id===1?65:225);assert.equal(pad,s.id===1?0:32);
+  if(s.id!==1)assert.deepEqual([p.metadata_start,p.metadata_end],s.id===10?[631181,631275]:[633155,633249]);
+  decoded={page:pi,rows:[first,first+p.length],offsets:p.offsets,sizes:p.sizes,raw,adjustment:adj,ends,values,padding:pad,metadata:[p.metadata_start,p.metadata_end],encoding:clean(p.encoding)};
+ }else if(s.id===2){
+  const p=pages22.find(p=>p.column===4&&p.page===2),c=p.chunks[0];assert.equal(p.layout.has_large_chunk,1);assert.deepEqual([p.p.offsets[0],p.p.offsets[0]+4],[s.start,s.end]);assert.equal(bytes.readUInt32LE(),8200);assert.deepEqual([c.start,c.end,c.n],[356160,360264,256]);assert.equal(8200&15,8);assert.equal(Math.floor(8200/16),512);decoded={word:8200,log:8,high:512,size:4104,chunk:c,layout:clean(p.layout)};
+ }else if(s.id===9){
+  const g=a22.globals[0];assert.equal(g.position,s.start);assert.equal(g.size,327);assert.equal(bytes.toString('hex'),'0ac102');const w=wire(b,g.position,g.position+g.size);assert.equal(w[0].number,1);assert.equal(w[0].type,2);assert.equal(w[0].data_start,s.end);assert.equal(w[0].end-w[0].data_start,321);decoded={global:g,schema:{tag:1,wire:2,start:w[0].data_start,end:w[0].end,length:321},prefix:bytes.toString('hex')};
+ }else if(s.id===14){
+  const p=pages.find(p=>p.column===1&&p.page===3);assert.equal(p.p.offsets[1]+p.p.sizes[1],s.start);assert.equal(align(s.start,64),s.end);assert.equal(bytes.length,32);assert(bytes.every(x=>x===72));decoded={column:1,page:3,buffer:p.p.offsets[1],size:p.p.sizes[1],padding:32,fill:'48'};
+ }else if(s.id===16){
+  const p=pages.find(p=>p.column===1&&p.page===3),c=p.chunks[2],seg=c.segments.find(x=>x.kind==='values');assert.deepEqual([seg.end,c.end],[s.start,s.end]);assert.equal(bytes.length,4);assert(bytes.every(x=>x===254));decoded={column:1,page:3,chunk:2,value_end:seg.end,chunk_end:c.end,padding:4,fill:'fe'};
+ }else throw Error('Unhandled '+s.id);
+ out.push({id:s.id,path:s.path,start:s.start,end:s.end,pass:true,claim:s.claim,decoded});console.log(JSON.stringify({id:s.id,path:s.path,range:[s.start,s.end],pass:true,decoded}));
+}
+fs.writeFileSync('verification/iteration-076-binary-claim-reads.json',JSON.stringify(out,null,2)+'\n');

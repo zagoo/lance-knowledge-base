@@ -1,0 +1,15 @@
+> **Historical archive — superseded scope.** Coverage counts, pending work and acceptance outcomes below are dated historical evidence. They do not define current work or completion. Tests/binaries remain excluded; see [V2.1 protocol](../../V21-PROTOCOL.md).
+
+# Historical sections from rust-lance-table-row-index.md
+
+## Tests and benchmark interpretation
+
+Unit/property fixtures cover heuristic choices, deep overlap, merged/probe duplicate behavior, multi-block bitmap ranks, unsorted physical pairing, sparse/deleted/moved rows, empty inputs and compact Ranges batch ordering. A 25-million-row Range fixture times construction and asserts under one second; its typically<1ms comment was not measured here. All tests were read, not executed. (rust/lance-table/src/rowids/index.rs:745-1641)
+
+The benchmark's environment knobs are BENCH_NUM_ROWS (default 1,000,000), BENCH_SHOT_FRAGMENTS (default 2,000) and optional BENCH_SIZE_STATS_FILE (created/truncated CSV). Numeric parse failures panic; zero/too-small values are not generally validated. Basic setup uses100 equal fragments, discards division remainder, and removes at most every other ID from sequences. Empty deletion vectors mean these are compacted sequence gaps, not physical tombstones; an80% label therefore removes at most roughly50%. (rust/lance-table/benches/row_id_index.rs:40-115; rust/lance-table/benches/row_id_index.rs:205-229; rust/lance-table/benches/row_id_index.rs:317-323)
+
+GetIndex times one get per iteration, but GetHashMap scans every ID0..num_rows per iteration. There is no common throughput normalization, and results are discarded. These raw per-iteration values cannot support a single-lookup performance comparison. CSV RowIdIndex size is serialized sequence bytes; FlatData is16 bytes per live row, neither being exact retained index/HashMap memory. Creation setup is outside timing, constructors/destruction inside. (rust/lance-table/benches/row_id_index.rs:116-277)
+
+Shot-table fixtures use870,000 nominal slots per fragment, groups of16 with a44% compaction draw, shuffled half-span pairs and nominal82% bitmap or1% hole thresholds. Byte modulo100 introduces possible density bias; pairs are not guaranteed to come from different originals. A100,000-query pool samples fragment/segment then rejects holes, not uniformly across all live rows. Build and get/get_many workloads assert Some and normalize lookup throughput. Mask workloads separately compare density and local versus dataset-wide allow sets with black_box. No measurements were run. (rust/lance-table/benches/row_id_index.rs:325-610)
+
+Linux adds PProfProfiler(100, Flamegraph); other platforms run the same six targets without it. The row_id_index Cargo bench disables the test harness. Repository policy requires release-with-debug for actual performance work. The table stream adapter is covered in its supplement; full Dataset cache lifecycle and production caller behavior remain pending. (rust/lance-table/benches/row_id_index.rs:611-626; rust/lance-table/Cargo.toml:70-72; AGENTS.md:27-31)

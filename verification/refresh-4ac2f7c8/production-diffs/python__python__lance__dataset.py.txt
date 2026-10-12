@@ -1,0 +1,246 @@
+@@ -786,18 +786,20 @@ class MergeInsertBuilder(_MergeInsertBuilder):
+  786                CoalescePartitionsExec, elapsed=..., metrics=[output_rows=..., elapsed_compute=...]
+  787                  ProjectionExec: elapsed=..., expr=[...], metrics=[...]
+  788                    RepartitionExec: ...
+  789 -                    HashJoinExec: elapsed=..., mode=CollectLeft, join_type=Left, ...
+  789 +                    HashJoinExec: elapsed=..., mode=CollectLeft, join_type=Right, ...
+  790 +                      LanceRead: elapsed=..., ..., metrics=[..., bytes_read=..., ...]
+  791                        ProjectionExec: elapsed=..., expr=[..., true as __merge_source_sentinel], metrics=[...]
+  792                          DataSourceExec: ..., metrics=[]
+  792 -                      LanceRead: elapsed=..., ..., metrics=[..., bytes_read=..., ...]
+  793  
+  794          The reported plan follows how the source was passed. `new_data` above is a
+  795          `pa.Table`, so it is wrapped in an in-memory table that reports exact
+  796 -        statistics, while a `pa.RecordBatchReader` reports none. DataFusion chooses
+  797 -        which side of the join to collect from those statistics and from the two
+  798 -        sides' sizes, so the same merge can plan differently depending on which one
+  799 -        you hand it. Use `explain_plan` only for the streaming shape: it takes a
+  800 -        schema rather than data, so it cannot know how the source would be wrapped.
+  796 +        statistics, while a `pa.RecordBatchReader` reports none. DataFusion picks
+  797 +        the side it collects from those statistics and from the two sides' sizes.
+  798 +        The target here is three rows, so it is the collected side either way; with
+  799 +        a larger target the same merge can plan differently depending on which
+  800 +        source you hand it. Use `explain_plan` only for the streaming shape: it
+  801 +        takes a schema rather than data, so it cannot know how the source would be
+  802 +        wrapped.
+  803  
+  804          The two key parts of the plan analysis are LanceRead and MergeInsert.
+  805          LanceRead scans join keys and columns in conditions. MergeInsert writes
+
+@@ -5519,10 +5521,10 @@ class LanceDataset(pa.dataset.Dataset):
+ 5521          if has_compared_against:
+ 5522              builder = builder.compared_against_version(compared_against)
+ 5523          else:
+ 5522 -            if begin_version:
+ 5524 +            if begin_version is not None:
+ 5525                  builder = builder.with_begin_version(begin_version)
+ 5526  
+ 5525 -            if end_version:
+ 5527 +            if end_version is not None:
+ 5528                  builder = builder.with_end_version(end_version)
+ 5529  
+ 5530          return builder.build()
+
+@@ -6291,8 +6293,6 @@ class LanceOperation:
+ 6293          initial_bases: Optional[List[DatasetBasePath]] = None
+ 6294  
+ 6295          def __post_init__(self):
+ 6294 -            if isinstance(self.new_schema, pa.Schema):
+ 6295 -                self.new_schema = LanceSchema.from_pyarrow(self.new_schema)
+ 6296              LanceOperation._validate_fragments(self.fragments)
+ 6297  
+ 6298      @dataclass
+
+@@ -6534,7 +6534,6 @@ class LanceOperation:
+ 6534                      "Please use a LanceSchema instead.",
+ 6535                      DeprecationWarning,
+ 6536                  )
+ 6537 -                self.schema = LanceSchema.from_pyarrow(self.schema)
+ 6537              LanceOperation._validate_fragments(self.fragments)
+ 6538  
+ 6539      @dataclass
+
+@@ -7067,7 +7066,9 @@ class ScannerBuilder:
+ 7066          if isinstance(filter, FullTextQuery):
+ 7067              self._search_filter = PySearchFilter.from_full_text_query(filter.inner)
+ 7068          elif isinstance(filter, VectorSearchQuery):
+ 7070 -            self._search_filter = PySearchFilter.from_vector_search_query(filter.inner)
+ 7069 +            self._search_filter = PySearchFilter.from_vector_search_query(
+ 7070 +                filter.inner()
+ 7071 +            )
+ 7072          elif isinstance(filter, str):
+ 7073              self._filter = filter
+ 7074          elif isinstance(filter, pa.compute.Expression):
+
+@@ -7204,6 +7205,7 @@ class ScannerBuilder:
+ 7205          query_parallelism: Optional[int] = None,
+ 7206          approx_mode: Literal["fast", "normal", "accurate"] = "normal",
+ 7207          distance_range: Optional[tuple[Optional[float], Optional[float]]] = None,
+ 7208 +        search_effort: Optional[float] = None,
+ 7209      ) -> ScannerBuilder:
+ 7210          """Configure nearest neighbor search.
+ 7211  
+
+@@ -7226,6 +7228,15 @@ class ScannerBuilder:
+ 7228              the CPU pool size. Value 1 uses the single-worker sequential path.
+ 7229              Values >= 2 use the partition-parallel path and are clamped to the
+ 7230              CPU pool size.
+ 7231 +        search_effort: float, optional
+ 7232 +            Initial IVF search budget, a finite value in [0, 1]. None resolves
+ 7233 +            to 0.5, preserving Auto. Zero starts at the caller minimum (at least one
+ 7234 +            available partition); one starts at all available partitions, subject
+ 7235 +            to maximum_nprobes. Intermediate values interpolate geometrically.
+ 7236 +            Later expansion to find enough candidates is unchanged. This is
+ 7237 +            independent of approx_mode, ef and refinement, and is not a recall
+ 7238 +            guarantee. When supplied, effort ignores nprobes, including an explicit
+ 7239 +            0.5. With None, an explicitly supplied nprobes remains effective.
+ 7240          approx_mode: {"fast", "normal", "accurate"}, default "normal"
+ 7241              Controls the speed / accuracy tradeoff for approximate vector search
+ 7242              when supported by the selected index. This currently only affects
+
+@@ -7248,6 +7259,7 @@ class ScannerBuilder:
+ 7259              ef=ef,
+ 7260              query_parallelism=query_parallelism,
+ 7261              approx_mode=approx_mode,
+ 7262 +            search_effort=search_effort,
+ 7263              distance_range=distance_range,
+ 7264          )
+ 7265          return self
+
+@@ -8487,6 +8499,7 @@ def _build_vector_search_query(
+ 8499      query_parallelism: Optional[int] = None,
+ 8500      approx_mode: Literal["fast", "normal", "accurate"] = "normal",
+ 8501      distance_range: Optional[tuple[Optional[float], Optional[float]]] = None,
+ 8502 +    search_effort: Optional[float] = None,
+ 8503  ) -> dict:
+ 8504      """Configure nearest neighbor search.
+ 8505  
+
+@@ -8513,7 +8526,8 @@ def _build_vector_search_query(
+ 8526      minimum_nprobes: int, optional
+ 8527          The minimum number of partitions to search.
+ 8528      maximum_nprobes: int, optional
+ 8516 -        The maximum number of partitions to search.
+ 8529 +        The maximum number of partitions to search per index segment. This bounds
+ 8530 +        both initial and later probing without disabling Auto probing.
+ 8531      refine_factor: int, optional
+ 8532          The refine factor for the search.
+ 8533      use_index: bool, default True
+
+@@ -8526,6 +8540,15 @@ def _build_vector_search_query(
+ 8540          maps to the single-worker sequential path. Value -1 uses the CPU pool
+ 8541          size. Value 1 uses the single-worker sequential path. Values >= 2 use
+ 8542          the partition-parallel path and are clamped to the CPU pool size.
+ 8543 +    search_effort: float, optional
+ 8544 +        Initial IVF search budget, a finite value in [0, 1]. None resolves
+ 8545 +        to 0.5, preserving Auto. Zero starts at the caller minimum (at least one
+ 8546 +        available partition); one starts at all available partitions, subject
+ 8547 +        to maximum_nprobes. Intermediate values interpolate geometrically.
+ 8548 +        Later expansion to find enough candidates is unchanged. This is
+ 8549 +        independent of approx_mode, ef and refinement, and is not a recall
+ 8550 +        guarantee. When supplied, effort ignores nprobes, including an explicit
+ 8551 +        0.5. With None, an explicitly supplied nprobes remains effective.
+ 8552      approx_mode: {"fast", "normal", "accurate"}, default "normal"
+ 8553          Controls the speed / accuracy tradeoff for approximate vector search
+ 8554          when supported by the selected index. This currently only affects
+
+@@ -8546,33 +8569,34 @@ def _build_vector_search_query(
+ 8569      """
+ 8570      q, q_dim = _coerce_query_vector(q)
+ 8571  
+ 8549 -    lance_field = dataset._ds.lance_schema.field_case_insensitive(column)
+ 8550 -    if lance_field is None:
+ 8551 -        raise ValueError(f"Embedding column {column} is not in the dataset")
+ 8552 -
+ 8553 -    column_field = lance_field.to_arrow()
+ 8554 -    column_type = column_field.type
+ 8555 -    if hasattr(column_type, "storage_type"):
+ 8556 -        column_type = column_type.storage_type
+ 8557 -    if pa.types.is_fixed_size_list(column_type):
+ 8558 -        dim = column_type.list_size
+ 8559 -    elif pa.types.is_list(column_type) and pa.types.is_fixed_size_list(
+ 8560 -        column_type.value_type
+ 8561 -    ):
+ 8562 -        dim = column_type.value_type.list_size
+ 8563 -    else:
+ 8564 -        raise TypeError(
+ 8565 -            f"Query column {column} must be a vector. Got {column_field.type}."
+ 8566 -        )
+ 8572 +    if dataset is not None:
+ 8573 +        lance_field = dataset._ds.lance_schema.field_case_insensitive(column)
+ 8574 +        if lance_field is None:
+ 8575 +            raise ValueError(f"Embedding column {column} is not in the dataset")
+ 8576 +
+ 8577 +        column_field = lance_field.to_arrow()
+ 8578 +        column_type = column_field.type
+ 8579 +        if hasattr(column_type, "storage_type"):
+ 8580 +            column_type = column_type.storage_type
+ 8581 +        if pa.types.is_fixed_size_list(column_type):
+ 8582 +            dim = column_type.list_size
+ 8583 +        elif pa.types.is_list(column_type) and pa.types.is_fixed_size_list(
+ 8584 +            column_type.value_type
+ 8585 +        ):
+ 8586 +            dim = column_type.value_type.list_size
+ 8587 +        else:
+ 8588 +            raise TypeError(
+ 8589 +                f"Query column {column} must be a vector. Got {column_field.type}."
+ 8590 +            )
+ 8591  
+ 8568 -    if q_dim != dim:
+ 8569 -        raise ValueError(
+ 8570 -            f"Query vector size {len(q)} does not match index column size {dim}"
+ 8571 -        )
+ 8592 +        if q_dim != dim:
+ 8593 +            raise ValueError(
+ 8594 +                f"Query vector size {len(q)} does not match index column size {dim}"
+ 8595 +            )
+ 8596  
+ 8597      if k is not None and int(k) <= 0:
+ 8598          raise ValueError(f"Nearest-K must be > 0 but got {k}")
+ 8575 -    if nprobes is not None and int(nprobes) <= 0:
+ 8599 +    if search_effort is None and nprobes is not None and int(nprobes) <= 0:
+ 8600          raise ValueError(f"Nprobes must be > 0 but got {nprobes}")
+ 8601      if minimum_nprobes is not None and int(minimum_nprobes) < 0:
+ 8602          raise ValueError(f"Minimum nprobes must be >= 0 but got {minimum_nprobes}")
+
+@@ -8622,6 +8646,7 @@ def _build_vector_search_query(
+ 8646          "ef": ef,
+ 8647          "query_parallelism": query_parallelism,
+ 8648          "approx_mode": approx_mode,
+ 8649 +        "search_effort": search_effort,
+ 8650          "distance_range": distance_range,
+ 8651      }
+ 8652  
+
+@@ -8763,6 +8788,13 @@ class VectorIndexReader:
+ 8788  
+ 8789  
+ 8790  class VectorSearchQuery:
+ 8791 +    """Vector search parameters, including continuous ``search_effort`` in [0, 1].
+ 8792 +
+ 8793 +    Effort defaults to None, which resolves to 0.5 (Auto). Explicit effort
+ 8794 +    ignores nprobes. See :meth:`ScannerBuilder.nearest` for probe bounds and
+ 8795 +    other search parameters.
+ 8796 +    """
+ 8797 +
+ 8798      _inner: dict
+ 8799  
+ 8800      def __init__(
+
+@@ -8779,6 +8811,7 @@ class VectorSearchQuery:
+ 8811          ef: Optional[int] = None,
+ 8812          query_parallelism: Optional[int] = None,
+ 8813          approx_mode: Literal["fast", "normal", "accurate"] = "normal",
+ 8814 +        search_effort: Optional[float] = None,
+ 8815      ):
+ 8816          self._inner = _build_vector_search_query(
+ 8817              column,
+
+@@ -8793,6 +8826,7 @@ class VectorSearchQuery:
+ 8826              ef=ef,
+ 8827              query_parallelism=query_parallelism,
+ 8828              approx_mode=approx_mode,
+ 8829 +            search_effort=search_effort,
+ 8830          )
+ 8831  
+ 8832      def inner(self):

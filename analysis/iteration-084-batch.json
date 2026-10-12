@@ -1,0 +1,273 @@
+{
+  "iteration": 84,
+  "files": [
+    {
+      "path": "rust/lance-encoding/src/encodings/logical/primitive/blob.rs",
+      "module": "L1-modules/rust-lance-encoding.md",
+      "role": "Original binary BlobLayout descriptor-only and payload schedulers, page cache state, sharded payload I/O and binary materialization.",
+      "reviewed": true,
+      "limits": "Every physical line read in bounded untruncated primary-source outputs. No repository execution. Potential panic/invalid-input behavior is source deduction; contextual parent/testing snippets do not count as full-file analysis. Original binary Blob and five-field Blob-v2 representations are kept distinct.",
+      "ranges": [
+        [
+          1,
+          37,
+          "License/docs specify same-file out-of-line payloads and inline descriptions encoded with another structural layout. Imports connect parent-private page initialization/cache contracts, Arrow UInt64 descriptors, Bytes and rep/def. Public TARGET_SHARD_SIZE=32*1024*1024 bytes is a target, not a hard cap or benchmarked default."
+        ],
+        [
+          38,
+          69,
+          "Parent-visible Debug BlobDescriptionPageScheduler owns boxed inner scheduler and shared outer definition meanings. Its pub new remains bounded by parent-visible type. wrap_decoder_fut awaits inner static future and creates description wrapper, preserving Result errors without extra payload I/O or task spawning."
+        ],
+        [
+          70,
+          109,
+          "Description scheduler delegates needs_initialization, layout, initialization and try_load directly to inner. cache_view is BlobDescriptor. schedule_ranges delegates selection and maps every PageLoadTask to wrapped decoder while preserving num_rows; it does not load blob bytes."
+        ],
+        [
+          110,
+          150,
+          "Private BlobDescriptionPageDecoder and BlobDescriptionDecodePageTask each own boxed inner object and shared meanings. drain delegates first, then wraps CPU task; num_rows forwards inner semantics. No decoded_bytes override, independent cache or validation."
+        ],
+        [
+          151,
+          173,
+          "Description CPU decode consumes inner task then requires DataBlock::Struct and first two children FixedWidth, returning contextual Internal on missing/wrong variants. Borrows both buffers as u64 without checking declared widths, child counts, equality of physical lengths or exact two-child arity. Extra children survive in returned original data."
+        ],
+        [
+          174,
+          193,
+          "Reserve rep/def by declared data num_values, then zip physical positions/sizes, silently limiting to shorter length. Nonzero size gives levels0/0. Zero size with position0 gives0/0; other zero-size positions decode low16 bits as rep, next16 as def and ignore upper32. No level-range validation."
+        ],
+        [
+          194,
+          216,
+          "Keep rep only if any nonzero. Keep def unless meanings exactly[AllValidItem]; empty meanings indexes[0] and panics. RepDefUnraveler fallback count uses positions.len, not zip length or declared num_values. Return original decoded.data, discarding original inner repdef in favor of reconstructed outer levels."
+        ],
+        [
+          217,
+          234,
+          "Private BlobCacheableState shares UInt64Array positions/sizes. DeepSizeOf delegates both arrays through same Context for allocation accounting. CachedPageData erases Arc type without cloning arrays or decoding. Cache contains descriptors, not fetched blob bytes."
+        ],
+        [
+          235,
+          261,
+          "Parent-visible Debug BlobPageScheduler owns inner scheduler, page priority row_number, declared num_rows and outer meanings plus optional descriptor arrays. pub new only stores fields; no descriptor/range/meaning validation and cache state starts absent."
+        ],
+        [
+          262,
+          292,
+          "create_page_load_task records loaded descriptor count as task rows and calls submit_request immediately (physical I/O timing delegated), including an empty request vector. Future awaits Bytes results, fills only def0 descriptors lacking bytes, errors on too few results via expect_ok and debug-asserts no extra result. Prefilled empties do not consume following payload results. Release builds ignore extra replies. Builds private BlobPageDecoder; no spawn/cancellation policy local."
+        ],
+        [
+          293,
+          317,
+          "Payload scheduler inherits needs_initialization=true from parent trait, while init_layout delegates. init_from_buffers borrows self in future, clones I/O, awaits inner initialization, explicitly loads inner cache and schedules whole descriptor page[0,num_rows). Requires exactly one task or NotSupported. This eager full-descriptor read differs from descriptor-only range scheduling."
+        ],
+        [
+          318,
+          345,
+          "Await the single descriptor future, drain its reported num_rows, decode synchronously inside initialization async body, and convert DataBlock into BLOB_DESC_TYPE with argumenttrue. Cast Struct and downcast two UInt64 children with unwrap. Clone array wrappers into Arc and return BlobCacheableState; outer positions/sizes remain unset until try_load. Inner repdef is not applied here. No local check returned descriptor count equals scheduler num_rows."
+        ],
+        [
+          346,
+          362,
+          "try_load downcasts exact BlobCacheableState or InvalidInput and clones both descriptor Arcs; it does not validate counts/nulls/meanings. cache_view=BlobPayload keeps this state separate from descriptor view. Parent key additionally includes target dtype."
+        ],
+        [
+          363,
+          385,
+          "schedule_ranges sums unchecked end-start, requires descriptor Options via expect_ok, reserves request/LoadedBlob vectors using summed count as usize, and iterates caller ranges/order. First row in shard plus page row_number supplies priority. Arrow value(row as usize) assumes in-bounds and ignores null validity; unsorted/duplicate selections are not locally rejected."
+        ],
+        [
+          386,
+          405,
+          "Zero-size descriptor decodes rep/def from position; def0 becomes prefilled Bytes::new and schedules no I/O, including rep!=0. Nonzero size ignores packed levels, creates0/0 placeholder and queues position..position+size with unchecked addition. bytes_so_far also adds unchecked. No EOF, overlap, range or payload-length validation."
+        ],
+        [
+          406,
+          434,
+          "After each row, flush shard when accumulated nonempty payload sizes >=32MiB, taking vectors, preserving first-row priority and resetting counter. One large blob can exceed target; null/empty rows consume no byte budget and can accumulate without a row bound. Flush final nonempty descriptor vector, even with zero read ranges. Empty selection emits no tasks after requiring cache."
+        ],
+        [
+          435,
+          472,
+          "LoadedBlob stores optional shared Bytes and u16 levels; constructors/setter unchecked. BlobPageDecoder converts Vec to VecDeque, caches initial length as num_rows and shares meanings. No memory size guard or per-blob expected-length record retained."
+        ],
+        [
+          473,
+          498,
+          "BlobPageDecoder drain removes first requested rows with VecDeque::drain and collects owned Vec; out-of-bounds drain panics, u64 casts to usize unchecked. num_rows remains original total. Private BlobDecodePageTask owns drained blobs and meanings. No rollback or decoded-byte estimate implementation."
+        ],
+        [
+          499,
+          533,
+          "CPU decode sums actual loaded Bytes lengths, reserves contiguous output plus u64 offsets and rep/def, copies every payload and repeats offset for absent bytes. Builds VariableWidthBlock(bits_per_offset64,num_values=descriptor count, fresh BlockInfo). It trusts actual reply lengths, not descriptor sizes, and ordinary arithmetic can overflow. Final output is copied, not a zero-copy concatenation; loaded bytes coexist during allocation/copy."
+        ],
+        [
+          534,
+          552,
+          "Drop all-zero rep; keep def unless meanings exactly[AllValidItem], with empty-meanings indexing panic. Return DataBlock and RepDefUnraveler using all descriptor count, no local nested visibility/count validation. No inline tests, unsafe blocks, feature gates, environment reads or version parameters in this552-line file; parent/version layers determine applicability."
+        ]
+      ]
+    },
+    {
+      "path": "rust/lance-encoding/src/encodings/logical/blob.rs",
+      "module": "L1-modules/rust-lance-encoding.md",
+      "role": "Original binary BlobLayout encoder and Blob-v2 prepared-record to stable five-field descriptor encoder, with source-only test cases.",
+      "reviewed": true,
+      "limits": "Every physical line read in bounded untruncated primary-source outputs. No repository execution. Potential panic/invalid-input behavior is source deduction; contextual parent/testing snippets do not count as full-file analysis. Original binary Blob and five-field Blob-v2 representations are kept distinct.",
+      "ranges": [
+        [
+          1,
+          42,
+          "Imports supply Arrow descriptor builders, core BlobV2 schema/classification/kind, field metadata, external-buffer collector and encoder/repdef contracts. Public BlobStructuralEncoder stores descriptor FieldEncoder and optional cached definition meanings. External here means outside page structure in same file, not automatically remote URI/sidecar."
+        ],
+        [
+          43,
+          72,
+          "BlobStructuralEncoder::new creates Struct(position UInt64 nonnull,size UInt64 nonnull) with original name/outer nullability and metadata containing only packed=true. Despite comment about preserving original metadata, input metadata is not cloned. Field::try_from supplies a new field; original IDs/children are not directly copied. Caller closure creates descriptor encoder and errors propagate."
+        ],
+        [
+          73,
+          104,
+          "wrap_tasks maps futures with then: await each inner encode, require Structural layout or Internal, wrap BlobLayout with supplied meanings, preserve data buffers, column index, row number and row count. It does not execute tasks or write external buffers. Errors from inner futures pass through."
+        ],
+        [
+          105,
+          132,
+          "maybe_encode first appends array validity/no-null to supplied RepDefBuilder, then requires LargeBinary/i64 offsets (InvalidInput for other arrays), serializes levels and derives meanings. Existing builder assertions can happen before type rejection. Direct Binary/i32 input is not cast here, despite broader factory type predicate."
+        ],
+        [
+          133,
+          145,
+          "If current meanings differ from cached meanings, flush buffered descriptor pages and wrap them with old meanings before replacing cache with new meanings. Flush failure returns before replacement; after success later failures can still leave state/external-buffer side effects. This prevents mixing all-valid and nullable arrays under one page interpretation."
+        ],
+        [
+          146,
+          178,
+          "For each binary row: null requires definition buffer and stores (def<<16)+rep (if any) in position with size0, debug-asserting nonzero; empty valid stores0/0; other valid value copies bytes into Arrow Buffer/LanceBuffer and reserves out-of-line position, storing byte length. Nonnull values do not retain repetition level here. Level indexing assumes serialized positions correspond to binary rows; arbitrary nested correctness is not established by this loop alone."
+        ],
+        [
+          179,
+          203,
+          "Construct nonnull two-child descriptor StructArray with no parent null bitmap, delegate maybe_encode with fresh empty RepDefBuilder and original row_number/num_rows, wrap resulting pages with outer meanings and append any prior flush tasks. Descriptor/data count and supplied row metadata consistency is delegated. Failure does not roll back buffers already added."
+        ],
+        [
+          204,
+          228,
+          "flush delegates descriptor flush and wraps using cached meanings or dummy[AllValidItem] before any data. finish and num_columns simply delegate; finish does not independently wrap final_pages or force flush here. Lifecycle correctness follows caller/inner encoder contract."
+        ],
+        [
+          229,
+          254,
+          "Public BlobV2StructuralEncoder owns one descriptor encoder. new creates stable BLOB_V2_DESC_FIELDS Struct, original field name/nullability and only packed=true metadata, then invokes caller FnOnce. There is no local format version check, upstream payload preparation or storage backend."
+        ],
+        [
+          255,
+          285,
+          "V2 maybe_encode requires StructArray then BlobV2Layout::Prepared, otherwise InvalidInput with actual dtype or classified/unrecognized layout. Classifier is called twice on rejection. This verifies six-field prepared schema shape, not row-level required values or kind-specific consistency. Logical and already-descriptor arrays are rejected."
+        ],
+        [
+          286,
+          322,
+          "Read kind UInt8,data LargeBinary,uri Utf8,blob_id UInt32,blob_size UInt64,position UInt64 by name, with contextual missing-field errors then infallible typed casts. Shape classification normally proves types/names; direct row null/value requirements remain unchecked."
+        ],
+        [
+          323,
+          344,
+          "Allocate five output builders by row count, URI capacity row_count*16 unchecked. Parent-null OR kind-null row emits valid placeholder child values Inline/0/0/0/empty URI; output later preserves only parent null bitmap, so a null kind under valid parent becomes a valid empty-looking inline descriptor. Dedicated emits kind,position0,raw blob_size/blob_id and empty URI, ignoring those child validities."
+        ],
+        [
+          345,
+          376,
+          "External copies URI even if its validity is null, defaults missing position/size/base-id child values to0, otherwise copies them. Packed directly copies position/blob_size/blob_id without checking their validity and emits empty URI. No URI validation, sidecar existence, positive size/ID, offset bounds or checked range arithmetic here. Unknown nonnull kind fails BlobKind::try_from."
+        ],
+        [
+          377,
+          400,
+          "Inline directly reads data even if child null, copies bytes to external-buffer collector even when empty, stores reserved position/length and id0/empty URI. Append all output children as nonnull values. Earlier rows can already have appended external buffers when a later unknown kind fails. No local rollback."
+        ],
+        [
+          401,
+          422,
+          "Finish builders and create five-field descriptor StructArray with cloned original parent nulls only; pass original repdef,row metadata and collector to descriptor encoder. No BlobLayout wrapper or original-binary sentinel scheme. V2 null structure is ordinary Arrow parent validity."
+        ],
+        [
+          423,
+          438,
+          "V2 flush, finish and num_columns delegate unchanged. This module does not create packed/dedicated sidecar files, fetch external objects, resolve bases or persist manifests. It prepares descriptor data for normal structural encoding. No local unsafe or environment/feature dispatch."
+        ],
+        [
+          439,
+          473,
+          "Private tests import encoding harness and Arrow fixtures. Creation test uses original binary blob metadata, StructuralU16 strategy and only asserts constructor success. It does not encode or decode values."
+        ],
+        [
+          474,
+          518,
+          "V2 rejection test gives extension-marked two-field logical layout to StructuralU32 encoder, invokes maybe_encode and requires InvalidInput plus expected prepared/got logical message. Does not test unknown kind, missing per-kind values or malformed prepared child types."
+        ],
+        [
+          519,
+          565,
+          "Simple async test has hello/null/100KiB/empty binary rows. Calls maybe_encode and optionally flush, but never awaits returned encode futures; checks positive column count and nonempty external buffers only. It proves setup/collection source assertions, not encoded pages or roundtrip."
+        ],
+        [
+          566,
+          591,
+          "Original Blob roundtrip test has1KiB,null,10KiB,100KiB and uses Array plus StructuralU16 harness modes. Harness invocation was read, not executed; does not exercise32MiB shard boundary."
+        ],
+        [
+          592,
+          617,
+          "Empty-value regression places empties before payloads with interspersed nulls, invoking default harness. This can detect accidentally consuming a following nonempty read result for an empty descriptor. Exact default mode/matrix is in contextual testing.rs; no test was run."
+        ],
+        [
+          618,
+          637,
+          "Nullability transition regression feeds all-valid, nullable with empty/null, then all-valid arrays to StructuralU16 harness. It targets descriptor buffering across changing meanings, not a direct assertion of exact page counts or flush timings."
+        ],
+        [
+          638,
+          675,
+          "V2 external test prepares Inline plus two External rows with nullable six-field schema, payload inline, URI file:///tmp/external.bin and s3://bucket/blob, IDs/sizes/positions0. These are literal descriptor strings, not fetched remote resources."
+        ],
+        [
+          676,
+          715,
+          "Expected external-test descriptor has nonnull children kind[Inline,External,External],position[0,0,0],size[6,0,0],id0,URIs empty/file/s3. Harness compares descriptor output in StructuralU32 and StructuralSparse modes, not external blob contents. Position0 depends on collector starting offset in harness."
+        ],
+        [
+          716,
+          745,
+          "Dedicated test prepares Dedicated id42,size12 and Inline abc, with null irrelevant data/URI. Uses exact prepared field order and types; it does not create the sidecar containing12 bytes."
+        ],
+        [
+          746,
+          780,
+          "Expected dedicated-test descriptor preserves id42,size12,position0 and Inline size3,id0,position0, empty URIs. Runs same U32/Sparse descriptor harness. It does not qualify actual sidecar retrieval or dedicated range validity."
+        ],
+        [
+          781,
+          810,
+          "External range test prepares one External URI memory://container.pack,position7,size42,id0. It provides metadata only, no corresponding object."
+        ],
+        [
+          811,
+          842,
+          "Expected range descriptor exactly preserves kind/position7/size42/id0/URI and runs U32/Sparse harness. There is no assertion of byte-range fetching or rejecting invalid external ranges."
+        ],
+        [
+          843,
+          872,
+          "Packed test prepares one Packed id7,position10,size5 with absent data/URI. Schema uses nullable prepared children. No packing/sidecar allocation is performed by this test."
+        ],
+        [
+          873,
+          904,
+          "Expected packed descriptor preserves kind/id7/position10/size5, empty URI and runs U32/Sparse harness. Ten local tests total; none directly cover payload scheduler cache views, malformed descriptors, oversized shards, all-empty request vectors, null-kind-only V2 rows, invalid required children or errors after collector mutation. Parent/harness tests elsewhere remain separate pending context."
+        ]
+      ]
+    }
+  ]
+}

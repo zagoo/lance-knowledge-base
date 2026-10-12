@@ -1,0 +1,694 @@
+@@ -45,6 +45,8 @@
+   45  //! into one builder. The on-disk format is unchanged from Lance's existing
+   46  //! inverted index.
+   47  
+   48 +#![allow(clippy::type_complexity)]
+   49 +
+   50  use std::cmp::Reverse;
+   51  use std::collections::{BinaryHeap, HashMap, HashSet};
+   52  use std::sync::atomic::{AtomicUsize, Ordering};
+
+@@ -55,23 +57,34 @@ use arrow_array::{Array, RecordBatch, UInt64Array};
+   57  use crossbeam_skiplist::SkipMap;
+   58  use fst::{Map, Streamer};
+   59  use lance_bitpacking::{BitPacker, BitPacker4x};
+   60 +use lance_core::cache::LanceCache;
+   61  use lance_core::datatypes::Schema as LanceSchema;
+   62  use lance_core::{Error, Result};
+   63 +use lance_index::scalar::IndexStore as _;
+   64  use lance_index::scalar::InvertedIndexParams;
+   65  use lance_index::scalar::inverted::query::{FtsQuery, Operator, Tokens};
+   66  use lance_index::scalar::inverted::tokenizer::document_tokenizer::{DocType, LanceTokenizer};
+   67  use lance_index::scalar::inverted::{DocSet, MemBM25Scorer, Scorer, TokenSet};
+   68 +use lance_table::format::IndexMetadata;
+   69  use lance_tokenizer::TokenStream;
+   70  use rayon::prelude::*;
+   71  use rustc_hash::{FxHashMap, FxHashSet};
+   72  
+   73 +use lance_index::IndexType;
+   74 +use lance_index::pbold;
+   75 +use lance_index::scalar::inverted::INVERTED_INDEX_VERSION_V3;
+   76 +use lance_index::scalar::lance_format::LanceIndexStore;
+   77 +use lance_index::scalar::registry::{TrainingCriteria, TrainingOrdering};
+   78 +use prost::Message as _;
+   79 +
+   80  use super::RowPosition;
+   81 +use super::plugin::{
+   82 +    FlushContext, FlushOutcome, MemIndex, MemIndexBuildContext, MemIndexPlugin, MemIndexSpec,
+   83 +    ResolveContext, ResolvedIndex,
+   84 +};
+   85 +use super::query::{FtsMemQuery, MemMatches, MemQuery, RankedMatch, SearchContext};
+   86  use crate::index::scalar::inverted::{ResolvedFtsField, resolve_fts_field};
+   87  
+   71 -// ============================================================================
+   72 -// Public types preserved from previous API
+   73 -// ============================================================================
+   74 -
+   88  /// In-memory FTS index entry returned from search.
+   89  #[derive(Debug, Clone)]
+   90  pub struct FtsEntry {
+
+@@ -506,6 +519,42 @@ impl FtsQueryExpr {
+  519          }
+  520      }
+  521  
+  522 +    /// Every leaf that names a column, with that column, in tree order.
+  523 +    pub fn bound_leaves(&self) -> Vec<(&str, &Self)> {
+  524 +        fn visit<'a>(expr: &'a FtsQueryExpr, out: &mut Vec<(&'a str, &'a FtsQueryExpr)>) {
+  525 +            match expr {
+  526 +                FtsQueryExpr::Boolean {
+  527 +                    must,
+  528 +                    should,
+  529 +                    must_not,
+  530 +                } => must
+  531 +                    .iter()
+  532 +                    .chain(should)
+  533 +                    .chain(must_not)
+  534 +                    .for_each(|child| visit(child, out)),
+  535 +                FtsQueryExpr::Boost {
+  536 +                    positive, negative, ..
+  537 +                } => {
+  538 +                    visit(positive, out);
+  539 +                    if let Some(negative) = negative {
+  540 +                        visit(negative, out);
+  541 +                    }
+  542 +                }
+  543 +                FtsQueryExpr::MultiMatch { children } => {
+  544 +                    children.iter().for_each(|child| visit(child, out))
+  545 +                }
+  546 +                leaf => {
+  547 +                    if let Some(column) = leaf.column() {
+  548 +                        out.push((column, leaf));
+  549 +                    }
+  550 +                }
+  551 +            }
+  552 +        }
+  553 +        let mut out = Vec::new();
+  554 +        visit(self, &mut out);
+  555 +        out
+  556 +    }
+  557 +
+  558      /// Distinct columns this tree's leaves name, in tree order. An unbound leaf
+  559      /// contributes nothing, so an all-unbound tree yields an empty vec.
+  560      pub fn columns(&self) -> Vec<&str> {
+
+@@ -1189,7 +1238,7 @@ impl IndexState {
+ 1238  /// model and visibility contract.
+ 1239  pub struct FtsMemIndex {
+ 1240      field_id: i32,
+ 1192 -    source_column_name: String,
+ 1241 +    column: String,
+ 1242      params: InvertedIndexParams,
+ 1243      resolved_field: OnceLock<ResolvedFtsField>,
+ 1244  
+
+@@ -1325,7 +1374,7 @@ impl QueryLocalFtsIndex {
+ 1374          Self {
+ 1375              inner: FtsMemIndex {
+ 1376                  field_id: self.inner.field_id,
+ 1328 -                source_column_name: self.inner.source_column_name.clone(),
+ 1377 +                column: self.inner.column.clone(),
+ 1378                  params: self.inner.params.clone(),
+ 1379                  resolved_field,
+ 1380                  tokenizer_pool: self.inner.tokenizer_pool.clone(),
+
+@@ -1397,7 +1446,7 @@ impl std::fmt::Debug for FtsMemIndex {
+ 1446          let st = self.state.load();
+ 1447          f.debug_struct("FtsMemIndex")
+ 1448              .field("field_id", &self.field_id)
+ 1400 -            .field("source_column_name", &self.source_column_name)
+ 1449 +            .field("column", &self.column_name())
+ 1450              .field("doc_count", &self.doc_count())
+ 1451              .field("partitions", &st.partitions.len())
+ 1452              .field("params", &self.params)
+
+@@ -1406,6 +1455,73 @@ impl std::fmt::Debug for FtsMemIndex {
+ 1455  }
+ 1456  
+ 1457  impl FtsMemIndex {
+ 1458 +    async fn write_fts_metadata(
+ 1459 +        &self,
+ 1460 +        index_store: &lance_index::scalar::lance_format::LanceIndexStore,
+ 1461 +        partition_id: u64,
+ 1462 +    ) -> Result<()> {
+ 1463 +        use arrow_array::{RecordBatch, StringArray};
+ 1464 +        use arrow_schema::{DataType, Field, Schema};
+ 1465 +        use std::sync::Arc;
+ 1466 +
+ 1467 +        use lance_index::scalar::inverted::{
+ 1468 +            FTS_FORMAT_VERSION_KEY, POSITIONS_CODEC_KEY, POSITIONS_LAYOUT_KEY,
+ 1469 +            POSITIONS_LAYOUT_SHARED_STREAM_V2, POSTING_BLOCK_SIZE_KEY, POSTING_TAIL_CODEC_KEY,
+ 1470 +            TOKEN_SET_FORMAT_KEY, TokenSetFormat,
+ 1471 +        };
+ 1472 +
+ 1473 +        // The reader takes params and partitions from the schema metadata.
+ 1474 +        let params_json = serde_json::to_string(&self.params)?;
+ 1475 +        let partitions_json = serde_json::to_string(&[partition_id])?;
+ 1476 +        let token_set_format = TokenSetFormat::default().to_string();
+ 1477 +        let format_version = self.params.resolved_format_version();
+ 1478 +        let mut metadata = [
+ 1479 +            ("params".to_string(), params_json),
+ 1480 +            ("partitions".to_string(), partitions_json),
+ 1481 +            (TOKEN_SET_FORMAT_KEY.to_string(), token_set_format),
+ 1482 +            (
+ 1483 +                POSTING_TAIL_CODEC_KEY.to_string(),
+ 1484 +                format_version.posting_tail_codec().as_str().to_string(),
+ 1485 +            ),
+ 1486 +            (
+ 1487 +                FTS_FORMAT_VERSION_KEY.to_string(),
+ 1488 +                format_version.index_version().to_string(),
+ 1489 +            ),
+ 1490 +            (
+ 1491 +                POSTING_BLOCK_SIZE_KEY.to_string(),
+ 1492 +                self.params.posting_block_size().to_string(),
+ 1493 +            ),
+ 1494 +        ]
+ 1495 +        .into_iter()
+ 1496 +        .collect::<std::collections::HashMap<_, _>>();
+ 1497 +        if self.params.has_positions()
+ 1498 +            && let Some(codec) = format_version
+ 1499 +                .position_codec()
+ 1500 +                .filter(|_| format_version.uses_shared_position_stream())
+ 1501 +        {
+ 1502 +            metadata.insert(
+ 1503 +                POSITIONS_LAYOUT_KEY.to_string(),
+ 1504 +                POSITIONS_LAYOUT_SHARED_STREAM_V2.to_string(),
+ 1505 +            );
+ 1506 +            metadata.insert(POSITIONS_CODEC_KEY.to_string(), codec.as_str().to_string());
+ 1507 +        }
+ 1508 +
+ 1509 +        let schema = Arc::new(
+ 1510 +            Schema::new(vec![Field::new("_placeholder", DataType::Utf8, true)])
+ 1511 +                .with_metadata(metadata),
+ 1512 +        );
+ 1513 +
+ 1514 +        // A placeholder row; only the schema metadata is read.
+ 1515 +        let placeholder_array = Arc::new(StringArray::from(vec![None::<&str>]));
+ 1516 +        let batch = RecordBatch::try_new(schema.clone(), vec![placeholder_array])?;
+ 1517 +
+ 1518 +        let mut writer = index_store.new_index_file("metadata.lance", schema).await?;
+ 1519 +        writer.write_record_batch(batch).await?;
+ 1520 +        writer.finish().await?;
+ 1521 +
+ 1522 +        Ok(())
+ 1523 +    }
+ 1524 +
+ 1525      /// Default reader-tokenizer pool capacity. Small but enough to absorb
+ 1526      /// short bursts of concurrent search calls without thrashing.
+ 1527      const DEFAULT_TOKENIZER_POOL_CAP: usize = 8;
+
+@@ -1476,7 +1592,7 @@ impl FtsMemIndex {
+ 1592          let writer_tokenizer = pool.template.box_clone();
+ 1593          Self {
+ 1594              field_id,
+ 1479 -            source_column_name: column_name,
+ 1595 +            column: column_name,
+ 1596              params,
+ 1597              resolved_field: OnceLock::new(),
+ 1598              tokenizer_pool: Arc::new(pool),
+
+@@ -1515,11 +1631,7 @@ impl FtsMemIndex {
+ 1631      }
+ 1632  
+ 1633      pub fn column_name(&self) -> &str {
+ 1518 -        &self.source_column_name
+ 1519 -    }
+ 1520 -
+ 1521 -    pub fn source_column_name(&self) -> &str {
+ 1522 -        &self.source_column_name
+ 1634 +        &self.column
+ 1635      }
+ 1636  
+ 1637      pub fn params(&self) -> &InvertedIndexParams {
+
+@@ -1683,7 +1795,7 @@ impl FtsMemIndex {
+ 1795              let schema = LanceSchema::try_from(batch.schema().as_ref())?;
+ 1796              let resolved = resolve_fts_field(
+ 1797                  &schema,
+ 1686 -                &self.source_column_name,
+ 1798 +                self.column_name(),
+ 1799                  self.params.get_document_granularity(),
+ 1800              )?;
+ 1801              let _ = self.resolved_field.set(resolved);
+
+@@ -2538,8 +2650,8 @@ impl FtsMemIndex {
+ 2650  
+ 2651      /// Score one `Match` / `Phrase` / `Fuzzy` leaf against this index.
+ 2652      ///
+ 2541 -    /// The leaf's own column binding is not consulted: routing a leaf to the
+ 2542 -    /// index holding its column is the caller's job ([`search_cross_column`]).
+ 2653 +    /// The leaf's own column binding is not consulted: the caller routes a leaf
+ 2654 +    /// to the index holding its column.
+ 2655      fn search_leaf_with_state(
+ 2656          &self,
+ 2657          leaf: &FtsQueryExpr,
+
+@@ -2597,28 +2709,6 @@ impl FtsMemIndex {
+ 2709          }
+ 2710      }
+ 2711  
+ 2600 -    /// Score one leaf, dropping hits past `max_row_position`.
+ 2601 -    ///
+ 2602 -    /// The bound is what makes leaves from *different* indexes safe to combine:
+ 2603 -    /// each index snapshots its own `{partitions, tail}` view, and those views
+ 2604 -    /// can disagree about how far the memtable has advanced. Clamping every
+ 2605 -    /// leaf to one row-position ceiling before the clauses meet keeps a MUST
+ 2606 -    /// across columns from dropping a row both columns actually contain.
+ 2607 -    pub fn search_leaf_bounded(
+ 2608 -        &self,
+ 2609 -        leaf: &FtsQueryExpr,
+ 2610 -        include_tail: bool,
+ 2611 -        max_row_position: Option<u64>,
+ 2612 -    ) -> Vec<FtsEntry> {
+ 2613 -        let st = self.state.load_full();
+ 2614 -        // No limit: a clause needs its full result set before the combine.
+ 2615 -        let mut results = self.search_leaf_with_state(leaf, &st, None, include_tail, true);
+ 2616 -        if let Some(max) = max_row_position {
+ 2617 -            results.retain(|entry| entry.row_position <= max);
+ 2618 -        }
+ 2619 -        results
+ 2620 -    }
+ 2621 -
+ 2712      /// Execute a query with options (sort + WAND prune + limit).
+ 2713      pub fn search_with_options(
+ 2714          &self,
+
+@@ -3574,45 +3664,33 @@ where
+ 3664          .collect()
+ 3665  }
+ 3666  
+ 3577 -/// Evaluate a tree whose leaves may name different columns, routing each leaf
+ 3578 -/// to the index holding its column.
+ 3579 -///
+ 3580 -/// `max_row_position` bounds every leaf to one visibility cut; see
+ 3581 -/// [`FtsMemIndex::search_leaf_bounded`] for why that matters here and not on
+ 3582 -/// the single-index path.
+ 3583 -///
+ 3584 -/// The routing is resolved before any leaf is scored, so a tree naming a column
+ 3585 -/// with no index fails outright instead of contributing a silently short arm.
+ 3586 -pub fn search_cross_column(
+ 3587 -    expr: &FtsQueryExpr,
+ 3588 -    indexes: &HashMap<&str, &FtsMemIndex>,
+ 3589 -    include_tail: bool,
+ 3590 -    max_row_position: Option<u64>,
+ 3591 -) -> Result<Vec<FtsEntry>> {
+ 3667 +/// Evaluate a tree whose leaves may name different columns: `eval_leaf`
+ 3668 +/// answers each leaf from the index on its column, and the first error it
+ 3669 +/// returns fails the search.
+ 3670 +pub fn search_cross_column<F>(expr: &FtsQueryExpr, eval_leaf: F) -> Result<Vec<FtsEntry>>
+ 3671 +where
+ 3672 +    F: Fn(&str, &FtsQueryExpr) -> Result<Vec<FtsEntry>>,
+ 3673 +{
+ 3674      if expr.has_unbound_leaf() {
+ 3675          return Err(Error::invalid_input(
+ 3594 -            "cross-column full-text search needs every leaf bound to a column; \
+ 3595 -             there is no single index to fall back to"
+ 3596 -                .to_string(),
+ 3676 +            "cross-column full-text search needs every leaf bound to a column".to_string(),
+ 3677          ));
+ 3678      }
+ 3599 -    if let Some(missing) = expr
+ 3600 -        .columns()
+ 3601 -        .into_iter()
+ 3602 -        .find(|column| !indexes.contains_key(column))
+ 3603 -    {
+ 3604 -        return Err(Error::invalid_input(format!(
+ 3605 -            "cross-column full-text search has no in-memory FTS index for column '{missing}'"
+ 3606 -        )));
+ 3607 -    }
+ 3608 -    Ok(combine_compound(expr, &|leaf| {
+ 3609 -        // Resolved above, so the tree and the index set cannot disagree here.
+ 3610 -        let Some(index) = leaf.column().and_then(|column| indexes.get(column)) else {
+ 3611 -            debug_assert!(false, "cross-column FTS leaf routing was validated");
+ 3679 +    let failure: std::cell::RefCell<Option<Error>> = std::cell::RefCell::new(None);
+ 3680 +    let combined = combine_compound(expr, &|leaf| {
+ 3681 +        let Some(column) = leaf.column() else {
+ 3682 +            debug_assert!(false, "every leaf was checked to be bound");
+ 3683              return Vec::new();
+ 3684          };
+ 3614 -        index.search_leaf_bounded(leaf, include_tail, max_row_position)
+ 3615 -    }))
+ 3685 +        eval_leaf(column, leaf).unwrap_or_else(|error| {
+ 3686 +            failure.borrow_mut().get_or_insert(error);
+ 3687 +            Vec::new()
+ 3688 +        })
+ 3689 +    });
+ 3690 +    match failure.into_inner() {
+ 3691 +        Some(error) => Err(error),
+ 3692 +        None => Ok(combined),
+ 3693 +    }
+ 3694  }
+ 3695  
+ 3696  fn apply_boost(results: &mut [FtsEntry], boost: f32) {
+
+@@ -3624,75 +3702,6 @@ fn apply_boost(results: &mut [FtsEntry], boost: f32) {
+ 3702      }
+ 3703  }
+ 3704  
+ 3627 -// ============================================================================
+ 3628 -// Configuration
+ 3629 -// ============================================================================
+ 3630 -
+ 3631 -/// Configuration for a Full-Text Search index.
+ 3632 -#[derive(Debug, Clone)]
+ 3633 -pub struct FtsIndexConfig {
+ 3634 -    pub name: String,
+ 3635 -    pub field_id: i32,
+ 3636 -    pub column: String,
+ 3637 -    pub params: InvertedIndexParams,
+ 3638 -    pub(crate) resolved_field: Option<Arc<ResolvedFtsField>>,
+ 3639 -}
+ 3640 -
+ 3641 -/// `resolved_field` is a cache of the schema lookup, not part of what the index
+ 3642 -/// is, so two configs that resolve the same way are equal whether or not either
+ 3643 -/// has resolved yet.
+ 3644 -impl PartialEq for FtsIndexConfig {
+ 3645 -    fn eq(&self, other: &Self) -> bool {
+ 3646 -        self.name == other.name
+ 3647 -            && self.field_id == other.field_id
+ 3648 -            && self.column == other.column
+ 3649 -            && self.params == other.params
+ 3650 -    }
+ 3651 -}
+ 3652 -
+ 3653 -impl FtsIndexConfig {
+ 3654 -    pub fn new(name: String, field_id: i32, column: String) -> Self {
+ 3655 -        Self {
+ 3656 -            name,
+ 3657 -            field_id,
+ 3658 -            column,
+ 3659 -            params: InvertedIndexParams::default(),
+ 3660 -            resolved_field: None,
+ 3661 -        }
+ 3662 -    }
+ 3663 -
+ 3664 -    pub fn with_params(
+ 3665 -        name: String,
+ 3666 -        field_id: i32,
+ 3667 -        column: String,
+ 3668 -        params: InvertedIndexParams,
+ 3669 -    ) -> Self {
+ 3670 -        Self::try_with_params(name, field_id, column, params)
+ 3671 -            .expect("invalid MemWAL FTS index config parameters")
+ 3672 -    }
+ 3673 -
+ 3674 -    pub fn try_with_params(
+ 3675 -        name: String,
+ 3676 -        field_id: i32,
+ 3677 -        column: String,
+ 3678 -        params: InvertedIndexParams,
+ 3679 -    ) -> Result<Self> {
+ 3680 -        params.validate_format_version()?;
+ 3681 -        Ok(Self {
+ 3682 -            name,
+ 3683 -            field_id,
+ 3684 -            column,
+ 3685 -            params,
+ 3686 -            resolved_field: None,
+ 3687 -        })
+ 3688 -    }
+ 3689 -
+ 3690 -    pub(crate) fn with_resolved_field(mut self, resolved_field: ResolvedFtsField) -> Self {
+ 3691 -        self.resolved_field = Some(Arc::new(resolved_field));
+ 3692 -        self
+ 3693 -    }
+ 3694 -}
+ 3695 -
+ 3705  // ============================================================================
+ 3706  // Immutable partition (compressed posting storage)
+ 3707  // ============================================================================
+
+@@ -5018,9 +5027,272 @@ impl<'a> PostingCursor<'a> {
+ 5027      }
+ 5028  }
+ 5029  
+ 5021 -// ============================================================================
+ 5022 -// Tests
+ 5023 -// ============================================================================
+ 5030 +#[async_trait::async_trait]
+ 5031 +impl MemIndex for FtsMemIndex {
+ 5032 +    fn columns(&self) -> &[String] {
+ 5033 +        std::slice::from_ref(&self.column)
+ 5034 +    }
+ 5035 +
+ 5036 +    /// Answers only a query at the granularity this index was built for.
+ 5037 +    fn can_answer(&self, query: &dyn MemQuery) -> bool {
+ 5038 +        self.text_query(query).is_some()
+ 5039 +    }
+ 5040 +
+ 5041 +    fn insert(&self, batch: &RecordBatch, row_offset: RowPosition) -> Result<()> {
+ 5042 +        Self::insert(self, batch, row_offset)
+ 5043 +    }
+ 5044 +
+ 5045 +    fn resident_bytes(&self) -> usize {
+ 5046 +        Self::resident_bytes(self)
+ 5047 +    }
+ 5048 +
+ 5049 +    /// A limit in the query's options applies before rows past
+ 5050 +    /// [`SearchContext::max_visible`] are dropped; set one only when every row
+ 5051 +    /// is visible.
+ 5052 +    fn search(&self, query: &dyn MemQuery, ctx: &SearchContext) -> Result<Option<MemMatches>> {
+ 5053 +        let Some(query) = self.text_query(query) else {
+ 5054 +            return Ok(None);
+ 5055 +        };
+ 5056 +        Ok(Some(MemMatches::Ranked(
+ 5057 +            self.search_with_options(&query.expr, query.options.clone())
+ 5058 +                .into_iter()
+ 5059 +                .filter(|entry| entry.row_position <= ctx.max_visible)
+ 5060 +                .map(RankedMatch::from)
+ 5061 +                .collect(),
+ 5062 +        )))
+ 5063 +    }
+ 5064 +
+ 5065 +    /// Writes the inverted index from the partitions it holds.
+ 5066 +    async fn flush(&self, ctx: &FlushContext<'_>) -> Result<FlushOutcome> {
+ 5067 +        let generation = ctx.generation()?;
+ 5068 +        if self.is_empty() {
+ 5069 +            return Ok(FlushOutcome::Skip);
+ 5070 +        }
+ 5071 +
+ 5072 +        let partition_id = uuid::Uuid::new_v4().as_u64_pair().0;
+ 5073 +        let mut builder = self.to_index_builder(partition_id, generation.total_rows)?;
+ 5074 +        let (uuid, dir) = generation.new_index_dir();
+ 5075 +        let store = LanceIndexStore::new(
+ 5076 +            generation.object_store.clone(),
+ 5077 +            dir,
+ 5078 +            Arc::new(LanceCache::no_cache()),
+ 5079 +        );
+ 5080 +        builder.write(&store).await?;
+ 5081 +        self.write_fts_metadata(&store, partition_id).await?;
+ 5082 +
+ 5083 +        let details =
+ 5084 +            prost_types::Any::from_msg(&pbold::InvertedIndexDetails::try_from(&self.params)?)
+ 5085 +                .map_err(|e| Error::internal(format!("failed to encode index details: {e}")))?;
+ 5086 +        let index_version = if self.params.get_document_granularity().is_list_element() {
+ 5087 +            INVERTED_INDEX_VERSION_V3
+ 5088 +        } else {
+ 5089 +            self.params.resolved_format_version().index_version()
+ 5090 +        };
+ 5091 +        Ok(FlushOutcome::Wrote(Box::new(generation.index_metadata(
+ 5092 +            uuid,
+ 5093 +            vec![self.field_id],
+ 5094 +            details,
+ 5095 +            index_version as i32,
+ 5096 +        ))))
+ 5097 +    }
+ 5098 +}
+ 5099 +
+ 5100 +impl FtsMemIndex {
+ 5101 +    /// `query` as a full-text search at this index's granularity.
+ 5102 +    fn text_query<'a>(&self, query: &'a dyn MemQuery) -> Option<&'a FtsMemQuery> {
+ 5103 +        query
+ 5104 +            .as_any()
+ 5105 +            .downcast_ref::<FtsMemQuery>()
+ 5106 +            .filter(|query| query.granularity == self.document_granularity())
+ 5107 +    }
+ 5108 +}
+ 5109 +
+ 5110 +impl From<FtsEntry> for RankedMatch {
+ 5111 +    fn from(entry: FtsEntry) -> Self {
+ 5112 +        Self {
+ 5113 +            position: entry.row_position,
+ 5114 +            score: entry.score,
+ 5115 +            element: entry.doc_index,
+ 5116 +        }
+ 5117 +    }
+ 5118 +}
+ 5119 +
+ 5120 +impl From<RankedMatch> for FtsEntry {
+ 5121 +    fn from(hit: RankedMatch) -> Self {
+ 5122 +        Self {
+ 5123 +            row_position: hit.position,
+ 5124 +            doc_index: hit.element,
+ 5125 +            score: hit.score,
+ 5126 +        }
+ 5127 +    }
+ 5128 +}
+ 5129 +
+ 5130 +/// Declares the built-in full-text memtable index.
+ 5131 +#[derive(Debug, Default)]
+ 5132 +pub struct FtsMemIndexPlugin;
+ 5133 +
+ 5134 +#[async_trait::async_trait]
+ 5135 +impl MemIndexPlugin for FtsMemIndexPlugin {
+ 5136 +    fn name(&self) -> &str {
+ 5137 +        "Inverted"
+ 5138 +    }
+ 5139 +
+ 5140 +    fn details_message(&self) -> &str {
+ 5141 +        "InvertedIndexDetails"
+ 5142 +    }
+ 5143 +
+ 5144 +    fn flush_index_type(&self) -> IndexType {
+ 5145 +        IndexType::Inverted
+ 5146 +    }
+ 5147 +
+ 5148 +    fn training_criteria(&self) -> TrainingCriteria {
+ 5149 +        // Unused: this index writes its own file at flush.
+ 5150 +        TrainingCriteria::new(TrainingOrdering::None)
+ 5151 +    }
+ 5152 +
+ 5153 +    async fn resolve(&self, ctx: &ResolveContext<'_>) -> Result<ResolvedIndex> {
+ 5154 +        Self::resolve_from_metadata(ctx.name, ctx.schema, ctx.index_meta)
+ 5155 +    }
+ 5156 +
+ 5157 +    fn validate(&self, ctx: &MemIndexBuildContext<'_>) -> Result<()> {
+ 5158 +        let (column, field_id) = ctx.single_column()?;
+ 5159 +        let params = ctx.params::<FtsParams>()?;
+ 5160 +        params
+ 5161 +            .params
+ 5162 +            .validate_format_version()
+ 5163 +            .map_err(|error| Error::invalid_input(format!("FTS index '{}': {error}", ctx.name)))?;
+ 5164 +
+ 5165 +        // Resolved at open, so an index that cannot be built fails the open
+ 5166 +        // rather than a durable write.
+ 5167 +        let resolved = match &params.resolved_field {
+ 5168 +            Some(resolved) => resolved.clone(),
+ 5169 +            None => resolve_fts_field(ctx.schema, column, params.params.get_document_granularity())
+ 5170 +                .map_err(|error| {
+ 5171 +                    Error::invalid_input(format!(
+ 5172 +                        "FTS index '{}' is invalid for field path '{column}': {error}",
+ 5173 +                        ctx.name
+ 5174 +                    ))
+ 5175 +                })?,
+ 5176 +        };
+ 5177 +
+ 5178 +        if resolved.final_field_id != field_id {
+ 5179 +            return Err(Error::invalid_input(format!(
+ 5180 +                "index '{}' is configured with field_id {field_id} but its field path \
+ 5181 +                 '{column}' has final field_id {} in the shard schema",
+ 5182 +                ctx.name, resolved.final_field_id,
+ 5183 +            )));
+ 5184 +        }
+ 5185 +        Ok(())
+ 5186 +    }
+ 5187 +
+ 5188 +    fn create(&self, ctx: &MemIndexBuildContext<'_>) -> Result<Arc<dyn MemIndex>> {
+ 5189 +        let (column, field_id) = ctx.single_column()?;
+ 5190 +        let params = ctx.params::<FtsParams>()?;
+ 5191 +        let index = match &params.resolved_field {
+ 5192 +            Some(resolved) => FtsMemIndex::try_with_resolved_field(
+ 5193 +                field_id,
+ 5194 +                column.to_string(),
+ 5195 +                params.params.clone(),
+ 5196 +                resolved.clone(),
+ 5197 +            )?,
+ 5198 +            None => {
+ 5199 +                FtsMemIndex::try_with_params(field_id, column.to_string(), params.params.clone())?
+ 5200 +            }
+ 5201 +        };
+ 5202 +        Ok(Arc::new(index))
+ 5203 +    }
+ 5204 +}
+ 5205 +
+ 5206 +impl FtsMemIndexPlugin {
+ 5207 +    /// What a full-text index covers and needs, read from the base-table index
+ 5208 +    /// entry and the schema alone.
+ 5209 +    pub(crate) fn resolve_from_metadata(
+ 5210 +        name: &str,
+ 5211 +        schema: &LanceSchema,
+ 5212 +        index_meta: &IndexMetadata,
+ 5213 +    ) -> Result<ResolvedIndex> {
+ 5214 +        let [field_id] = index_meta.fields.as_slice() else {
+ 5215 +            return Err(Error::invalid_input(format!(
+ 5216 +                "index '{name}' covers {} columns, but this kind covers exactly one",
+ 5217 +                index_meta.fields.len()
+ 5218 +            )));
+ 5219 +        };
+ 5220 +
+ 5221 +        let details = match &index_meta.index_details {
+ 5222 +            Some(details) => pbold::InvertedIndexDetails::decode(details.value.as_slice())
+ 5223 +                .map_err(|err| {
+ 5224 +                    Error::io(format!(
+ 5225 +                        "failed to decode InvertedIndexDetails for MemWAL FTS index \
+ 5226 +                         '{name}': {err}"
+ 5227 +                    ))
+ 5228 +                })?,
+ 5229 +            None => pbold::InvertedIndexDetails::default(),
+ 5230 +        };
+ 5231 +        let details =
+ 5232 +            crate::index::scalar::inverted::normalize_inverted_details(index_meta, details)?;
+ 5233 +        let params = InvertedIndexParams::try_from(&details)?;
+ 5234 +
+ 5235 +        // The index covers the resolved path, the name a query uses.
+ 5236 +        let resolved = crate::index::scalar::inverted::resolve_fts_field_by_id(
+ 5237 +            schema,
+ 5238 +            *field_id,
+ 5239 +            params.get_document_granularity(),
+ 5240 +        )?;
+ 5241 +
+ 5242 +        let field_id = resolved.final_field_id;
+ 5243 +        Ok(ResolvedIndex::with_params(
+ 5244 +            vec![resolved.canonical_path.clone()],
+ 5245 +            FtsParams {
+ 5246 +                params,
+ 5247 +                resolved_field: Some(resolved),
+ 5248 +            },
+ 5249 +        )
+ 5250 +        .with_field_ids(vec![field_id]))
+ 5251 +    }
+ 5252 +}
+ 5253 +
+ 5254 +/// What an in-memory full-text index needs before it takes a row.
+ 5255 +#[derive(Debug, Clone)]
+ 5256 +pub struct FtsParams {
+ 5257 +    /// Tokenizer, granularity and format, from the base-table index.
+ 5258 +    pub params: InvertedIndexParams,
+ 5259 +    /// The path through nested types the index covers; `None` resolves it
+ 5260 +    /// from the first batch.
+ 5261 +    pub(crate) resolved_field: Option<ResolvedFtsField>,
+ 5262 +}
+ 5263 +
+ 5264 +/// Compares `params` only: `resolved_field` caches a schema lookup.
+ 5265 +impl PartialEq for FtsParams {
+ 5266 +    fn eq(&self, other: &Self) -> bool {
+ 5267 +        self.params == other.params
+ 5268 +    }
+ 5269 +}
+ 5270 +
+ 5271 +impl MemIndexSpec {
+ 5272 +    /// A full-text index over one column, with default parameters.
+ 5273 +    pub fn fts(name: impl Into<String>, field_id: i32, column: impl Into<String>) -> Self {
+ 5274 +        Self::fts_with_params(name, field_id, column, Default::default())
+ 5275 +    }
+ 5276 +
+ 5277 +    /// A full-text index over one column.
+ 5278 +    pub fn fts_with_params(
+ 5279 +        name: impl Into<String>,
+ 5280 +        field_id: i32,
+ 5281 +        column: impl Into<String>,
+ 5282 +        params: InvertedIndexParams,
+ 5283 +    ) -> Self {
+ 5284 +        Self::single_column(
+ 5285 +            name,
+ 5286 +            field_id,
+ 5287 +            column,
+ 5288 +            Arc::new(FtsMemIndexPlugin),
+ 5289 +            Arc::new(FtsParams {
+ 5290 +                params,
+ 5291 +                resolved_field: None,
+ 5292 +            }),
+ 5293 +        )
+ 5294 +    }
+ 5295 +}
+ 5296  

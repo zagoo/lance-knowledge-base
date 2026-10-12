@@ -1,0 +1,349 @@
+@@ -14,7 +14,7 @@ use crate::index::mem_wal::{load_mem_wal_index_details, new_mem_wal_index_meta};
+   14  use crate::io::deletion::read_dataset_deletion_file;
+   15  use crate::{
+   16      Dataset,
+   17 -    dataset::transaction::{DataOverlayGroup, Operation, Transaction, UpdateMode},
+   17 +    dataset::transaction::{DataOverlayGroup, Operation, RewriteGroup, Transaction, UpdateMode},
+   18  };
+   19  use futures::{StreamExt, TryStreamExt};
+   20  use lance_core::{Error, Result, utils::deletion::DeletionVector};
+
+@@ -23,6 +23,7 @@ use lance_index::mem_wal::{CompactedSsTable, MEM_WAL_INDEX_NAME};
+   23  use lance_select::{RowAddrTreeMap, RowSetOps};
+   24  use lance_table::format::IndexMetadata;
+   25  use lance_table::format::overlay::OverlayCoverage;
+   26 +use lance_table::format::overlay::staleness::overlay_affects_index;
+   27  use lance_table::format::pb::fragment_reuse_index_details::{InlineContent, Transition};
+   28  use lance_table::system_index::frag_reuse::FragReuseVersion;
+   29  use lance_table::system_index::frag_reuse::lineage::TaggedLineage;
+
+@@ -57,6 +58,10 @@ pub struct TransactionRebase<'a> {
+   58      current_lineage: Option<TaggedLineage>,
+   59      /// The latest manifest's live fragments, loaded with `current_lineage`.
+   60      current_live: Option<RoaringBitmap>,
+   61 +    /// The latest manifest's untagged fragment reuse index, as a CreateIndex
+   62 +    /// on an untagged table sees it (empty when the table has none). Loaded by
+   63 +    /// [`Self::load_current_lineage`]; `None` otherwise.
+   64 +    untagged_reuse: Option<Box<UntaggedReuse>>,
+   65      /// The latest manifest's schema, loaded with `current_lineage`: a
+   66      /// rewritten field is expanded to its descendants through it (a packed
+   67      /// struct is rewritten whole while an index on a child records the
+
+@@ -276,6 +281,7 @@ impl<'a> TransactionRebase<'a> {
+  281                      frag_reuse_base,
+  282                      conflicting_mem_wal_compacted_sstables: Vec::new(),
+  283                      current_lineage: None,
+  284 +                    untagged_reuse: None,
+  285                      current_live: None,
+  286                      current_schema: None,
+  287                      read_fragments,
+
+@@ -312,6 +318,7 @@ impl<'a> TransactionRebase<'a> {
+  318                          frag_reuse_base: None,
+  319                          conflicting_mem_wal_compacted_sstables: Vec::new(),
+  320                          current_lineage: None,
+  321 +                        untagged_reuse: None,
+  322                          current_live: None,
+  323                          current_schema: None,
+  324                          read_fragments: None,
+
+@@ -332,6 +339,7 @@ impl<'a> TransactionRebase<'a> {
+  339                      frag_reuse_base: None,
+  340                      conflicting_mem_wal_compacted_sstables: Vec::new(),
+  341                      current_lineage: None,
+  342 +                    untagged_reuse: None,
+  343                      current_live: None,
+  344                      current_schema: None,
+  345                      read_fragments: None,
+
+@@ -370,6 +378,7 @@ impl<'a> TransactionRebase<'a> {
+  378                      frag_reuse_base,
+  379                      conflicting_mem_wal_compacted_sstables: Vec::new(),
+  380                      current_lineage: None,
+  381 +                    untagged_reuse: None,
+  382                      current_live: None,
+  383                      current_schema: None,
+  384                      read_fragments: None,
+
+@@ -392,6 +401,7 @@ impl<'a> TransactionRebase<'a> {
+  401                      frag_reuse_base: None,
+  402                      conflicting_mem_wal_compacted_sstables: Vec::new(),
+  403                      current_lineage: None,
+  404 +                    untagged_reuse: None,
+  405                      current_live: None,
+  406                      current_schema: None,
+  407                      read_fragments: None,
+
+@@ -414,6 +424,7 @@ impl<'a> TransactionRebase<'a> {
+  424                      frag_reuse_base: None,
+  425                      conflicting_mem_wal_compacted_sstables: Vec::new(),
+  426                      current_lineage: None,
+  427 +                    untagged_reuse: None,
+  428                      current_live: None,
+  429                      current_schema: None,
+  430                      read_fragments: None,
+
+@@ -435,6 +446,7 @@ impl<'a> TransactionRebase<'a> {
+  446                      frag_reuse_base: None,
+  447                      conflicting_mem_wal_compacted_sstables: Vec::new(),
+  448                      current_lineage: None,
+  449 +                    untagged_reuse: None,
+  450                      current_live: None,
+  451                      current_schema: None,
+  452                      read_fragments: None,
+
+@@ -539,6 +551,7 @@ impl<'a> TransactionRebase<'a> {
+  551              .iter()
+  552              .find(|index| lance_table::system_index::frag_reuse::metadata::is_tagged(index))
+  553          else {
+  554 +            self.load_untagged_reuse(dataset, &indices).await?;
+  555              return Ok(());
+  556          };
+  557          let ledger = crate::index::frag_reuse::decode_frag_reuse_ledger(dataset, entry).await?;
+
+@@ -548,6 +561,79 @@ impl<'a> TransactionRebase<'a> {
+  561          Ok(())
+  562      }
+  563  
+  564 +    /// The untagged counterpart of the tagged lineage. Skipped when the
+  565 +    /// CreateIndex writes the fragment reuse index itself, which
+  566 +    /// `finish_create_index` checks, or the MemWAL index, which covers no
+  567 +    /// fragments.
+  568 +    async fn load_untagged_reuse(
+  569 +        &mut self,
+  570 +        dataset: &Dataset,
+  571 +        indices: &[IndexMetadata],
+  572 +    ) -> Result<()> {
+  573 +        let Operation::CreateIndex { new_indices, .. } = &self.transaction.operation else {
+  574 +            return Ok(());
+  575 +        };
+  576 +        if new_indices
+  577 +            .iter()
+  578 +            .any(|index| index.name == FRAG_REUSE_INDEX_NAME || index.name == MEM_WAL_INDEX_NAME)
+  579 +        {
+  580 +            return Ok(());
+  581 +        }
+  582 +        let entry = indices
+  583 +            .iter()
+  584 +            .find(|index| index.name == FRAG_REUSE_INDEX_NAME);
+  585 +        if lance_table::system_index::frag_reuse::metadata::uses_tagged_fri(
+  586 +            &dataset.manifest,
+  587 +            entry,
+  588 +        ) {
+  589 +            return Ok(());
+  590 +        }
+  591 +        let mut reuse = UntaggedReuse {
+  592 +            groups: HashSet::new(),
+  593 +            sources: HashMap::new(),
+  594 +            manifest: dataset.manifest.clone(),
+  595 +        };
+  596 +        if let Some(entry) = entry {
+  597 +            let details = load_frag_reuse_index_details(dataset, entry).await?;
+  598 +            for group in details
+  599 +                .versions
+  600 +                .iter()
+  601 +                .flat_map(|version| version.groups.iter())
+  602 +            {
+  603 +                let old: Arc<[u64]> = sorted_ids(group.old_frags.iter().map(|f| f.id)).into();
+  604 +                for new in &group.new_frags {
+  605 +                    reuse.sources.insert(new.id as u32, old.clone());
+  606 +                }
+  607 +                reuse.groups.insert(old);
+  608 +            }
+  609 +        }
+  610 +        self.untagged_reuse = Some(Box::new(reuse));
+  611 +        Ok(())
+  612 +    }
+  613 +
+  614 +    /// Whether a version cleaned up from this attempt's window could hide a
+  615 +    /// change this CreateIndex must account for: it covers the source fragments
+  616 +    /// of a recorded deferred compaction, whose values must stay unchanged from
+  617 +    /// the build until that compaction read them, and its output's after.
+  618 +    /// Compactions before the build do not count: the index covers their
+  619 +    /// output under its own id.
+  620 +    pub(crate) fn needs_versions(&self, missing: &[u64]) -> bool {
+  621 +        let (Some(reuse), Operation::CreateIndex { new_indices, .. }) =
+  622 +            (&self.untagged_reuse, &self.transaction.operation)
+  623 +        else {
+  624 +            return false;
+  625 +        };
+  626 +        !missing.is_empty()
+  627 +            && reuse.groups.iter().any(|sources| {
+  628 +                new_indices.iter().any(|index| {
+  629 +                    index
+  630 +                        .fragment_bitmap
+  631 +                        .as_ref()
+  632 +                        .is_none_or(|bitmap| sources.iter().any(|id| bitmap.contains(*id as u32)))
+  633 +                })
+  634 +            })
+  635 +    }
+  636 +
+  637      pub fn check_txn(&mut self, other_transaction: &Transaction, other_version: u64) -> Result<()> {
+  638          // Either order: the claim was checked without the write's data.
+  639          let ours = &self.transaction.operation;
+
+@@ -1137,6 +1223,24 @@ impl<'a> TransactionRebase<'a> {
+ 1223                              live,
+ 1224                              Some(lineage),
+ 1225                          );
+ 1226 +                    } else if let Some(reuse) = &self.untagged_reuse {
+ 1227 +                        // An index built before a compaction covers its output's
+ 1228 +                        // rows under the fragments the output was compacted from,
+ 1229 +                        // and an index on a packed struct's child depends on the
+ 1230 +                        // parent's physical column.
+ 1231 +                        let updated = updated_fragments
+ 1232 +                            .iter()
+ 1233 +                            .map(|fragment| reuse.compacted_from(fragment.id as u32))
+ 1234 +                            .fold(RoaringBitmap::new(), |ids, more| ids | more);
+ 1235 +                        let fields = Transaction::with_descendants(
+ 1236 +                            &reuse.manifest.schema,
+ 1237 +                            fields_modified.clone(),
+ 1238 +                        );
+ 1239 +                        Transaction::prune_updated_fragment_ids_from_indices(
+ 1240 +                            new_indices,
+ 1241 +                            &updated,
+ 1242 +                            &fields,
+ 1243 +                        );
+ 1244                      } else {
+ 1245                          Transaction::prune_updated_fields_from_indices(
+ 1246                              new_indices,
+
+@@ -1248,15 +1352,30 @@ impl<'a> TransactionRebase<'a> {
+ 1352                      if self_is_tagged_trim {
+ 1353                          return Ok(());
+ 1354                      }
+ 1251 -                    // if a reuse update is present, index remapping is deferred and
+ 1252 -                    // there is no conflict with concurrent CreateIndex of column indices.
+ 1355 +                    // if index remapping is deferred, there is no conflict with
+ 1356 +                    // concurrent CreateIndex of column indices: the index keeps covering
+ 1357 +                    // the rewritten rows under their old fragments. On an untagged table
+ 1358 +                    // the remap was deferred if the rewrite carries a reuse update
+ 1359 +                    // (visible only in the process that committed it) or the latest
+ 1360 +                    // reuse index records it.
+ 1361                      // A frag_reuse_index cleanup is checked against the latest entry in
+ 1362                      // `finish_create_index`. A tagged entry (an in-process rewrite on a
+ 1363                      // tagged history) takes the durable-evidence path below instead.
+ 1256 -                    if frag_reuse_index
+ 1364 +                    let deferred = frag_reuse_index
+ 1365                          .as_ref()
+ 1366                          .is_some_and(|entry| !is_tagged(entry))
+ 1259 -                    {
+ 1367 +                        || self
+ 1368 +                            .untagged_reuse
+ 1369 +                            .as_ref()
+ 1370 +                            .is_some_and(|reuse| reuse.records(groups));
+ 1371 +                    if deferred {
+ 1372 +                        if let Some(reuse) = &self.untagged_reuse
+ 1373 +                            && !reuse.withdraw_folded_overlays(groups, new_indices)
+ 1374 +                        {
+ 1375 +                            return Err(
+ 1376 +                                self.retryable_conflict_err(other_transaction, other_version)
+ 1377 +                            );
+ 1378 +                        }
+ 1379                          let ngram_coverage = new_indices
+ 1380                              .iter()
+ 1381                              .filter(|idx| {
+
+@@ -1271,7 +1390,10 @@ impl<'a> TransactionRebase<'a> {
+ 1390                          if groups
+ 1391                              .iter()
+ 1392                              .flat_map(|group| group.old_fragments.iter())
+ 1274 -                            .any(|fragment| ngram_coverage.contains(fragment.id as u32))
+ 1393 +                            .any(|fragment| {
+ 1394 +                                !compacted_from(self.untagged_reuse.as_deref(), fragment.id as u32)
+ 1395 +                                    .is_disjoint(&ngram_coverage)
+ 1396 +                            })
+ 1397                          {
+ 1398                              return Err(
+ 1399                                  self.retryable_conflict_err(other_transaction, other_version)
+
+@@ -3175,6 +3297,92 @@ fn wrong_operation_err(op: &Operation) -> Error {
+ 3297      Error::internal(format!("function called against a wrong operation: {}", op))
+ 3298  }
+ 3299  
+ 3300 +/// The latest manifest's untagged fragment reuse index, as a CreateIndex sees it.
+ 3301 +#[derive(Debug)]
+ 3302 +struct UntaggedReuse {
+ 3303 +    /// Each recorded group's source fragment ids, sorted.
+ 3304 +    groups: HashSet<Arc<[u64]>>,
+ 3305 +    /// Each recorded group's output fragments, mapped to its source ids.
+ 3306 +    sources: HashMap<u32, Arc<[u64]>>,
+ 3307 +    /// The latest manifest, whose schema overlays are matched against.
+ 3308 +    manifest: Arc<lance_table::format::Manifest>,
+ 3309 +}
+ 3310 +
+ 3311 +impl UntaggedReuse {
+ 3312 +    /// Whether every group of a rewrite is recorded, so it deferred its index
+ 3313 +    /// remap and the record is still there to translate an index built before it.
+ 3314 +    fn records(&self, groups: &[RewriteGroup]) -> bool {
+ 3315 +        !groups.is_empty()
+ 3316 +            && groups.iter().all(|group| {
+ 3317 +                self.groups
+ 3318 +                    .contains(sorted_ids(group.old_fragments.iter().map(|f| f.id)).as_slice())
+ 3319 +            })
+ 3320 +    }
+ 3321 +
+ 3322 +    fn compacted_from(&self, fragment: u32) -> RoaringBitmap {
+ 3323 +        let mut ids = RoaringBitmap::new();
+ 3324 +        let mut pending = vec![fragment];
+ 3325 +        while let Some(id) = pending.pop() {
+ 3326 +            if ids.insert(id)
+ 3327 +                && let Some(sources) = self.sources.get(&id)
+ 3328 +            {
+ 3329 +                pending.extend(sources.iter().map(|source| *source as u32));
+ 3330 +            }
+ 3331 +        }
+ 3332 +        ids
+ 3333 +    }
+ 3334 +
+ 3335 +    /// Withdraws from each index the groups that folded in an overlay on one of
+ 3336 +    /// its fields newer than it: nothing is left to mask the stale values.
+ 3337 +    /// Returns false if an index with no fragment bitmap, which covers every
+ 3338 +    /// fragment, needs a group withdrawn.
+ 3339 +    fn withdraw_folded_overlays(
+ 3340 +        &self,
+ 3341 +        groups: &[RewriteGroup],
+ 3342 +        indices: &mut [IndexMetadata],
+ 3343 +    ) -> bool {
+ 3344 +        for group in groups {
+ 3345 +            for index in indices.iter_mut() {
+ 3346 +                let folded = group.old_fragments.iter().any(|fragment| {
+ 3347 +                    fragment.overlays.iter().any(|overlay| {
+ 3348 +                        overlay_affects_index(
+ 3349 +                            overlay,
+ 3350 +                            &index.fields,
+ 3351 +                            index.dataset_version,
+ 3352 +                            &self.manifest.schema,
+ 3353 +                        )
+ 3354 +                    })
+ 3355 +                });
+ 3356 +                if !folded {
+ 3357 +                    continue;
+ 3358 +                }
+ 3359 +                let Some(bitmap) = &mut index.fragment_bitmap else {
+ 3360 +                    return false;
+ 3361 +                };
+ 3362 +                for fragment in &group.old_fragments {
+ 3363 +                    *bitmap -= self.compacted_from(fragment.id as u32);
+ 3364 +                }
+ 3365 +            }
+ 3366 +        }
+ 3367 +        true
+ 3368 +    }
+ 3369 +}
+ 3370 +
+ 3371 +/// `fragment` and every fragment a recorded deferred compaction made it from:
+ 3372 +/// the ids an index built before those compactions covers its rows under.
+ 3373 +fn compacted_from(reuse: Option<&UntaggedReuse>, fragment: u32) -> RoaringBitmap {
+ 3374 +    match reuse {
+ 3375 +        Some(reuse) => reuse.compacted_from(fragment),
+ 3376 +        None => RoaringBitmap::from_iter([fragment]),
+ 3377 +    }
+ 3378 +}
+ 3379 +
+ 3380 +fn sorted_ids(ids: impl Iterator<Item = u64>) -> Vec<u64> {
+ 3381 +    let mut ids: Vec<u64> = ids.collect();
+ 3382 +    ids.sort_unstable();
+ 3383 +    ids
+ 3384 +}
+ 3385 +

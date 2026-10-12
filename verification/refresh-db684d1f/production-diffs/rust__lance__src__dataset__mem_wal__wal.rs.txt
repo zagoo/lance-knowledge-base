@@ -1,0 +1,171 @@
+@@ -41,6 +41,21 @@ use super::memtable::batch_store::{BatchStore, StoredBatch};
+   41  
+   42  /// Key for storing writer epoch in Arrow IPC file schema metadata.
+   43  pub const WRITER_EPOCH_KEY: &str = "writer_epoch";
+   44 +/// The memtable generation an entry's batches belong to. Absent in WAL-only
+   45 +/// mode.
+   46 +pub const GENERATION_KEY: &str = "generation";
+   47 +
+   48 +/// Metadata keys a WAL entry carries about itself rather than about its batches.
+   49 +const RESERVED_ENTRY_KEYS: &[&str] = &[
+   50 +    WRITER_EPOCH_KEY,
+   51 +    GENERATION_KEY,
+   52 +    FENCE_SENTINEL_KEY,
+   53 +    TARGET_GENERATION_KEY,
+   54 +    TARGET_GENERATION_DIR_KEY,
+   55 +    TARGET_DATA_FILE_KEY,
+   56 +    TARGET_CREATOR_EPOCH_KEY,
+   57 +    TARGET_BATCH_CAPACITY_KEY,
+   58 +];
+   59  const TARGET_GENERATION_KEY: &str = "mem_wal_target_generation";
+   60  const TARGET_GENERATION_DIR_KEY: &str = "mem_wal_target_generation_dir";
+   61  const TARGET_DATA_FILE_KEY: &str = "mem_wal_target_data_file";
+
+@@ -880,7 +895,11 @@ impl WalFlusher {
+  895          let start = Instant::now();
+  896          let append_result = self
+  897              .wal_appender
+  883 -            .append_for_target(record_batches, batch_store.target())
+  898 +            .append_for_target(
+  899 +                record_batches,
+  900 +                batch_store.target(),
+  901 +                Some(batch_store.generation()),
+  902 +            )
+  903              .await?;
+  904          let wal_io_duration = start.elapsed();
+  905  
+
+@@ -1098,6 +1117,8 @@ pub struct WalReadEntry {
+ 1117      /// Replay logic uses this to fence-check against the current epoch.
+ 1118      pub writer_epoch: u64,
+ 1119      pub(crate) target: Option<MemTableDataTarget>,
+ 1120 +    /// Generation the batches belong to, when the entry records one.
+ 1121 +    pub(crate) generation: Option<u64>,
+ 1122      pub batches: Vec<RecordBatch>,
+ 1123  }
+ 1124  
+
+@@ -1222,19 +1243,21 @@ impl WalAppender {
+ 1243  
+ 1244      /// Append batches as one durable WAL entry.
+ 1245      pub async fn append(&self, batches: Vec<RecordBatch>) -> Result<WalAppendResult> {
+ 1225 -        self.append_for_target(batches, None).await
+ 1246 +        self.append_for_target(batches, None, None).await
+ 1247      }
+ 1248  
+ 1249      pub(crate) async fn append_for_target(
+ 1250          &self,
+ 1251          batches: Vec<RecordBatch>,
+ 1252          target: Option<&MemTableDataTarget>,
+ 1253 +        generation: Option<u64>,
+ 1254      ) -> Result<WalAppendResult> {
+ 1255          validate_appender_batches(&batches)?;
+ 1256          let wal_data = Bytes::from(serialize_appender_batches(
+ 1257              &batches,
+ 1258              self.writer_epoch,
+ 1259              target,
+ 1260 +            generation,
+ 1261          )?);
+ 1262          let wal_bytes = wal_data.len();
+ 1263          let num_batches = batches.len();
+
+@@ -1458,7 +1481,12 @@ impl WalTailer {
+ 1481                  path, self.shard_id, e
+ 1482              ))
+ 1483          })?;
+ 1461 -        let (writer_epoch, target, batches) = deserialize_appender_batches(bytes)?;
+ 1484 +        let DecodedEntry {
+ 1485 +            writer_epoch,
+ 1486 +            target,
+ 1487 +            generation,
+ 1488 +            batches,
+ 1489 +        } = deserialize_appender_batches(bytes)?;
+ 1490  
+ 1491          self.highest_read
+ 1492              .fetch_max(entry_position, Ordering::Relaxed);
+
+@@ -1468,6 +1496,7 @@ impl WalTailer {
+ 1496              entry_position,
+ 1497              writer_epoch,
+ 1498              target,
+ 1499 +            generation,
+ 1500              batches,
+ 1501          }))
+ 1502      }
+
+@@ -1540,10 +1569,18 @@ fn serialize_appender_batches(
+ 1569      batches: &[RecordBatch],
+ 1570      writer_epoch: u64,
+ 1571      target: Option<&MemTableDataTarget>,
+ 1572 +    generation: Option<u64>,
+ 1573  ) -> Result<Vec<u8>> {
+ 1574      let schema = batches[0].schema();
+ 1575      let mut metadata = schema.metadata().clone();
+ 1576 +    // Only the writer sets these keys. Drop any the caller's schema carries.
+ 1577 +    for reserved in RESERVED_ENTRY_KEYS {
+ 1578 +        metadata.remove(*reserved);
+ 1579 +    }
+ 1580      metadata.insert(WRITER_EPOCH_KEY.to_string(), writer_epoch.to_string());
+ 1581 +    if let Some(generation) = generation {
+ 1582 +        metadata.insert(GENERATION_KEY.to_string(), generation.to_string());
+ 1583 +    }
+ 1584      if let Some(target) = target {
+ 1585          metadata.insert(
+ 1586              TARGET_GENERATION_KEY.to_string(),
+
+@@ -1608,9 +1645,14 @@ fn serialize_fence_sentinel(writer_epoch: u64) -> Result<Vec<u8>> {
+ 1645      Ok(buffer)
+ 1646  }
+ 1647  
+ 1611 -fn deserialize_appender_batches(
+ 1612 -    bytes: Bytes,
+ 1613 -) -> Result<(u64, Option<MemTableDataTarget>, Vec<RecordBatch>)> {
+ 1648 +struct DecodedEntry {
+ 1649 +    writer_epoch: u64,
+ 1650 +    target: Option<MemTableDataTarget>,
+ 1651 +    generation: Option<u64>,
+ 1652 +    batches: Vec<RecordBatch>,
+ 1653 +}
+ 1654 +
+ 1655 +fn deserialize_appender_batches(bytes: Bytes) -> Result<DecodedEntry> {
+ 1656      let cursor = Cursor::new(bytes);
+ 1657      let reader = StreamReader::try_new(cursor, None)
+ 1658          .map_err(|e| Error::io(format!("failed to open WAL IPC stream reader: {}", e)))?;
+
+@@ -1627,8 +1669,21 @@ fn deserialize_appender_batches(
+ 1669              ))
+ 1670          })?;
+ 1671      let target = target_from_metadata(schema.metadata())?;
+ 1672 +    let generation = schema
+ 1673 +        .metadata()
+ 1674 +        .get(GENERATION_KEY)
+ 1675 +        .map(|value| {
+ 1676 +            value.parse::<u64>().map_err(|e| {
+ 1677 +                Error::io(format!(
+ 1678 +                    "WAL entry has malformed {} metadata: {}",
+ 1679 +                    GENERATION_KEY, e
+ 1680 +                ))
+ 1681 +            })
+ 1682 +        })
+ 1683 +        .transpose()?;
+ 1684      let mut clean_metadata = schema.metadata().clone();
+ 1685      clean_metadata.remove(WRITER_EPOCH_KEY);
+ 1686 +    clean_metadata.remove(GENERATION_KEY);
+ 1687      clean_metadata.remove(TARGET_GENERATION_KEY);
+ 1688      clean_metadata.remove(TARGET_GENERATION_DIR_KEY);
+ 1689      clean_metadata.remove(TARGET_DATA_FILE_KEY);
+
+@@ -1646,7 +1701,12 @@ fn deserialize_appender_batches(
+ 1701              .map_err(|e| Error::io(format!("failed to strip WAL metadata: {}", e)))?;
+ 1702          batches.push(clean);
+ 1703      }
+ 1649 -    Ok((writer_epoch, target, batches))
+ 1704 +    Ok(DecodedEntry {
+ 1705 +        writer_epoch,
+ 1706 +        target,
+ 1707 +        generation,
+ 1708 +        batches,
+ 1709 +    })
+ 1710  }
+ 1711  
+ 1712  fn target_from_metadata(

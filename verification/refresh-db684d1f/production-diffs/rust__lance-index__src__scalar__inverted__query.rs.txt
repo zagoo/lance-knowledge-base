@@ -1,0 +1,94 @@
+@@ -554,33 +554,43 @@ pub struct MultiMatchQuery {
+  554      pub match_queries: Vec<MatchQuery>,
+  555  }
+  556  
+  557 +/// Serializes every leaf under `match_queries`. The legacy `query`, `columns`
+  558 +/// and `boost` keys are also written when every leaf names a column, so a reader
+  559 +/// that predates `match_queries` degrades as before: it rebuilds default leaves
+  560 +/// from the first leaf's terms.
+  561  impl Serialize for MultiMatchQuery {
+  562      fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+  563      where
+  564          S: serde::Serializer,
+  565      {
+  562 -        let mut map = serializer.serialize_map(Some(3))?;
+  563 -
+  564 -        let query = self.match_queries.first().ok_or(serde::ser::Error::custom(
+  566 +        let first = self.match_queries.first().ok_or(serde::ser::Error::custom(
+  567              "MultiMatchQuery must have at least one MatchQuery".to_string(),
+  568          ))?;
+  567 -        map.serialize_entry("query", &query.terms)?;
+  568 -        let columns = self
+  569 -            .match_queries
+  570 -            .iter()
+  571 -            .map(|q| q.column.as_ref().unwrap().clone())
+  572 -            .collect::<Vec<String>>();
+  573 -        map.serialize_entry("columns", &columns)?;
+  574 -        let boosts = self
+  569 +        let legacy_columns = self
+  570              .match_queries
+  571              .iter()
+  577 -            .map(|q| q.boost)
+  578 -            .collect::<Vec<f32>>();
+  579 -        map.serialize_entry("boost", &boosts)?;
+  572 +            .map(|q| q.column.as_deref())
+  573 +            .collect::<Option<Vec<&str>>>();
+  574 +
+  575 +        let mut map =
+  576 +            serializer.serialize_map(Some(if legacy_columns.is_some() { 4 } else { 1 }))?;
+  577 +        if let Some(columns) = legacy_columns {
+  578 +            map.serialize_entry("query", &first.terms)?;
+  579 +            map.serialize_entry("columns", &columns)?;
+  580 +            let boosts = self
+  581 +                .match_queries
+  582 +                .iter()
+  583 +                .map(|q| q.boost)
+  584 +                .collect::<Vec<f32>>();
+  585 +            map.serialize_entry("boost", &boosts)?;
+  586 +        }
+  587 +        map.serialize_entry("match_queries", &self.match_queries)?;
+  588          map.end()
+  589      }
+  590  }
+  591  
+  592 +/// Reads `match_queries` when present. Otherwise falls back to the legacy
+  593 +/// `{query, columns, boost}` shape, which carries no per-leaf settings.
+  594  impl<'de> Deserialize<'de> for MultiMatchQuery {
+  595      fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+  596      where
+
+@@ -588,15 +598,30 @@ impl<'de> Deserialize<'de> for MultiMatchQuery {
+  598      {
+  599          #[derive(Deserialize)]
+  600          struct MultiMatchQueryData {
+  591 -            query: String,
+  592 -            columns: Vec<String>,
+  601 +            match_queries: Option<Vec<MatchQuery>>,
+  602 +            query: Option<String>,
+  603 +            columns: Option<Vec<String>>,
+  604              boost: Option<Vec<f32>>,
+  605          }
+  606  
+  607          let data = MultiMatchQueryData::deserialize(deserializer)?;
+  597 -        let boosts = data.boost.unwrap_or(vec![1.0; data.columns.len()]);
+  608 +        if let Some(match_queries) = data.match_queries {
+  609 +            if match_queries.is_empty() {
+  610 +                return Err(serde::de::Error::custom(
+  611 +                    "Cannot create MultiMatchQuery with no match queries",
+  612 +                ));
+  613 +            }
+  614 +            return Ok(Self { match_queries });
+  615 +        }
+  616  
+  599 -        Self::try_new(data.query, data.columns)
+  617 +        let query = data
+  618 +            .query
+  619 +            .ok_or_else(|| serde::de::Error::missing_field("query"))?;
+  620 +        let columns = data
+  621 +            .columns
+  622 +            .ok_or_else(|| serde::de::Error::missing_field("columns"))?;
+  623 +        let boosts = data.boost.unwrap_or(vec![1.0; columns.len()]);
+  624 +        Self::try_new(query, columns)
+  625              .map_err(serde::de::Error::custom)?
+  626              .try_with_boosts(boosts)
+  627              .map_err(serde::de::Error::custom)

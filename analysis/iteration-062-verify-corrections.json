@@ -1,0 +1,1648 @@
+{
+  "iteration": 62,
+  "files": [
+    {
+      "path": "rust/lance-file/src/datatypes.rs",
+      "module": "L1-modules/rust-lance-file-runtime.md",
+      "reviewed": true,
+      "role": "Public wrappers and trait conversions between flat protobuf fields/dictionary metadata and Lance core field trees; arena reconstruction preserves historical duplicate-ID tie-breaking. No file IO is performed.",
+      "ranges": [
+        [
+          1,
+          10,
+          "SPDX and imports connect Arrow extension-name metadata, core Dictionary/Encoding/Field/LogicalType/Schema, Error/Result, HashMap and generated file protobuf. These conversions are shared schema boundaries, not an encoding implementation."
+        ],
+        [
+          11,
+          25,
+          "From<&pb::Field> is infallible despite the clippy allowance. Clone metadata keys and decode byte values with UTF-8 replacement, losing invalid original bytes. A nonempty dedicated extension_name overwrites the same metadata key; an empty dedicated name leaves an existing metadata extension intact."
+        ],
+        [
+          26,
+          41,
+          "Copy name/id/parent_id/nullability, wrap the logical type string, map numeric encodings 1 Plain,2 VarBinary,3 Dictionary,4 RLE and every other value to None. Start with no children and convert optional dictionary location; pb r#type is ignored. No logical-type, ID, encoding or dictionary-bound validation is performed here."
+        ],
+        [
+          42,
+          57,
+          "Primary-key position is Some(positive position), else Some(0) if the legacy primary-key boolean is true, else None. Clustering position is Some only for a positive position; its legacy boolean is ignored. These branches preserve primary-key legacy presence while clustering position zero decodes absent. Closing braces finish the field decoder."
+        ],
+        [
+          58,
+          79,
+          "From<&Field> for pb::Field copies IDs/name/logical-type/nullability, encodes string metadata as UTF-8 bytes and dictionary location, and maps the four Encoding variants to1..4, None to0. It does not recursively emit children; Fields handles flattening separately."
+        ],
+        [
+          80,
+          94,
+          "The protobuf field separately stores extension_name from core metadata or empty, forces r#type=0, sets legacy primary-key bool from Option presence and stores its position or0. It always writes legacy clustering bool=false and position or0. Core Some(0) primary survives via bool; Some(0) clustering would lose presence. No mutation of input."
+        ],
+        [
+          95,
+          101,
+          "Public tuple Fields owns Vec<pb::Field>. Private FieldNode owns one childless core Field plus child arena indices. No derives or validation occur in these declarations."
+        ],
+        [
+          102,
+          122,
+          "first_field_index_by_id iteratively traverses roots and children in pre-order using a LIFO stack populated in reverse order. Return first matching field ID, else None. Each call reserves up to all arena nodes and may scan all; it trusts internal indices. This reproduces the historical tree tie-break when duplicate IDs make a map lookup ambiguous."
+        ],
+        [
+          123,
+          130,
+          "From<&Field> for Fields recursively emits the parent followed by each child subtree in order, extending from newly built child Vecs. IDs/parent_id are retained, not reassigned or repaired. Deep trees still use recursive encoding and repeatedly move descendants through intermediate vectors; iterative decoding does not make all schema operations stack-safe."
+        ],
+        [
+          131,
+          159,
+          "TryFrom<&Fields> for Schema documents a flat pre-order list with parents before children, historical duplicates and legacy first-preorder matching. The compiling-style example reconstructs a single int32 root id0,parent-1 named value and asserts its name. Error associated type is core Error. The implementation actually requires earlier parents, not strictly contiguous pre-order input."
+        ],
+        [
+          160,
+          193,
+          "Preallocate nodes, root indices and HashMap<i32,Option<usize>> to input length. For each protobuf field, parent_id=-1 marks a root. Unique prior parent ID uses the constant-time map entry; duplicate marker None invokes DFS. Missing parent returns Schema with child name/id/parent and earlier-parent requirement. An impossible ambiguous-map/no-arena match returns Internal. Parent lookup happens before inserting this field, so no forward/self-new parent is accepted; referencing an earlier node with the same ID is possible."
+        ],
+        [
+          194,
+          210,
+          "Attach new arena index to parent or root list, convert the protobuf field, and insert its ID into the map. The second and every subsequent occurrence change the map entry to None, permanently marking ambiguity. Duplicate IDs are retained instead of rejected. Parent/root and child order are insertion order; valid unique-ID construction is expected linear hash-map work plus payload copies, while repeated ambiguous parents may make reconstruction quadratic."
+        ],
+        [
+          211,
+          228,
+          "Allocate Option<Field> slots and materialize nodes in reverse insertion order. Reserve each child list, take already built children in recorded order and set the parent slot. Missing/already-taken child is Internal with node index. Earlier-parent construction guarantees child indices are greater for normal inputs. No recursive reconstruction, but Field destruction and other consumers may still recurse."
+        ],
+        [
+          229,
+          246,
+          "Take root slots in recorded order, returning Internal if unexpectedly absent; collect through Result and return Schema with an empty metadata map. Empty field input yields an empty schema. No Schema::validate, uniqueness/type/nullability/key validation or parent-ID normalization follows reconstruction. Conversion errors discard temporary arena state without external effects."
+        ],
+        [
+          247,
+          272,
+          "Public FieldsWithMeta owns Fields plus HashMap<String,Vec<u8>> schema metadata, both public. TryFrom owned wrapper has core Error. Example supplies no fields and owner=lance bytes, then asserts decoded schema metadata; it does not validate a nonempty schema."
+        ],
+        [
+          273,
+          290,
+          "Owned schema metadata keys are moved and byte values lossily converted to strings before fallible field reconstruction. On success use its fields plus converted metadata, replacing the empty metadata map. Invalid UTF-8 is replacement-decoded; a later missing-parent error drops the converted metadata."
+        ],
+        [
+          291,
+          315,
+          "From<&Schema> for Fields flattens each top-level field subtree in order. From<&Schema> for FieldsWithMeta uses that flattening and clones the entire string metadata map before consuming values into bytes. Neither assigns IDs nor validates the input; there is no fallible result."
+        ],
+        [
+          316,
+          334,
+          "Dictionary protobuf i64 offset/length are cast directly to usize; values is always None. Reverse casts usize back to i64 and never serializes loaded dictionary values. Negative values/overflow/truncation are not rejected at this boundary; architecture width affects the cast. These are locations/counts, not loaded dictionaries."
+        ],
+        [
+          335,
+          345,
+          "Owned Encoding converts exhaustively to the matching protobuf enum, including RLE -> Rle. Unlike raw field encoding decode there is no unknown variant branch."
+        ],
+        [
+          346,
+          369,
+          "cfg(test) imports Arrow/core schema types and wrappers. Private proto_field helper sets id,parent_id,name,logical_type and leaves all other protobuf fields at Default. No historical fixture is loaded by this helper."
+        ],
+        [
+          370,
+          393,
+          "test_schema_set_ids constructs a,b-struct(f1,f2,f3),c Arrow fields, imports to core, flattens and asserts protobuf IDs exactly0..6. ID assignment comes from core import, not this flattening conversion. Does not assert parent IDs or roundtrip."
+        ],
+        [
+          394,
+          411,
+          "test_schema_metadata creates one int32 field plus k1/v1,k2/v2, imports core, encodes FieldsWithMeta, decodes and asserts Schema equality. Core Schema::PartialEq compares only fields (rust/lance-core/src/datatypes/schema.rs:874-878), so this test does not actually assert preservation of the top-level metadata map. Only valid UTF-8 values are exercised."
+        ],
+        [
+          412,
+          453,
+          "Wide reconstruction fixture builds4096 root structs, each with two int32 children and unique IDs (12288 fields total). It asserts root count, every root ID/name, two-child count and both child IDs/names in order. No timing, allocation or logical-type assertion; source intent does not prove a performance bound."
+        ],
+        [
+          454,
+          488,
+          "Deep reconstruction fixture builds1024 nodes in a single chain, struct except final int32. It asserts one root, each ID/name, exactly one child until the leaf and no leaf children. Iterative traversal tests construction depth; no measured stack bound or claim about recursive serialization/drop."
+        ],
+        [
+          489,
+          501,
+          "Missing-parent fixture supplies child id7,parent42 and asserts Error::Schema plus contextual message substring. It does not separately exercise a forward reference where that parent appears later."
+        ],
+        [
+          502,
+          521,
+          "Duplicate-ID fixture lists root_a1,root_b2,nested_duplicate2 under root_a,then child3 parent2. Decoding attaches child beneath the nested duplicate, which appears first in reconstructed pre-order even though root_b appeared earlier in the flat list. It asserts both root/child shapes, pinning the historical tie-break."
+        ],
+        [
+          522,
+          549,
+          "Clustering fixture gives region Utf8 metadata position1,date Int32 position2 and unmarked value Float64. Core import and unenforced_clustering_key must return two fields ordered region,date. Metadata keys are exactly lance-schema:unenforced-clustering-key:position."
+        ],
+        [
+          550,
+          565,
+          "Roundtrip through FieldsWithMeta preserves both clustering field names and Some(1)/Some(2); value remains not a clustering key. No local tests for invalid UTF-8, unknown encodings, extension-name precedence, dictionary negative casts or primary-key legacy-position combinations. Module ends; no tests were run."
+        ]
+      ],
+      "limits": "All565 lines read and authored. Callers include the analyzed table format conversion and contextual reader decode_schema at rust/lance-file/src/reader.rs:942-952. Core Field conversion has already been analyzed. Shared current reader and exact current writers are analyzed, and the complete V1 reader is now covered. V1 writer/statistics and binary historical fixture payloads remain pending; local roundtrip tests were read only."
+    },
+    {
+      "path": "rust/lance-file/src/reader/structural.rs",
+      "module": "L1-modules/rust-lance-file-composition.md",
+      "reviewed": true,
+      "role": "Shared structural metadata syntax, alignment, leaf-column mapping and projection length/preparation for exact V2_1+ readers. Helpers are public within crate-internal reader::structural; exact grammar remains supplied by per-version DecodeColumn.",
+      "ranges": [
+        [
+          1,
+          28,
+          "SPDX/imports connect BTreeMap/Arc, async_trait, Bytes, LanceCache/Field/Schema/errors, EncodingsIo/ColumnInfo/PageInfo/PageEncoding, legacy column and structural page protobufs, prost Name/Message, file protobuf and read-provider/projection helpers. PAGE_BUFFER_ALIGNMENT comes from writer (64 bytes)."
+        ],
+        [
+          29,
+          55,
+          "Private generic fetch_encoding<M:Default+Name+Sized> matches file encoding location. Indirect is InvalidInput unsupported; Direct clones payload Vec into Bytes, decodes Any envelope then to_msg<M>, mapping both errors to InvalidInput with M::NAME and original display. Explicit None encoding and absent location have distinct Missing description/location errors. It never follows external buffers; type URL/message validation is delegated to prost Any conversion."
+        ],
+        [
+          56,
+          72,
+          "decode_page_layout requires page.encoding or InvalidInput naming column/page, then uses fetch_encoding to decode pb21::PageLayout syntax. It does not examine layout variant, version, required subfields or buffer grammar; exact reader must validate those before building normalized page info."
+        ],
+        [
+          73,
+          92,
+          "build_page_info accepts already-supplied PageLayout. Before pairing offsets/sizes, reject unequal vector lengths with column/page and both counts. A caller can supply a layout not decoded from this page; no cross-check is performed here."
+        ],
+        [
+          93,
+          117,
+          "Zip page buffers, reject every offset not divisible by PAGE_BUFFER_ALIGNMENT=64, collect fallibly and Arc-own descriptor slice. Empty pairs pass; zero size does not waive alignment. Construct Structural encoding with provided layout, page.length as num_rows and page.priority. No offset+size overflow, file bounds, overlap, buffer-size or row-count validation here. Temporary Vec drops on first error."
+        ],
+        [
+          118,
+          143,
+          "build_column_info rejects unequal column buffer offset/size counts then copies pairs into Arc slice. Unlike page/global helpers, this column-level pairing performs no alignment check. page_infos is supplied by caller and is not compared against metadata.pages count or content."
+        ],
+        [
+          144,
+          156,
+          "Require metadata.encoding (column-specific InvalidInput) and fetch pb::ColumnEncoding. Arc<ColumnInfo> records caller-supplied column_index, Arc page_infos, descriptor slice and encoding. Column encoding grammar/version is not validated here; descriptor allocation occurs before encoding decode and drops on error."
+        ],
+        [
+          157,
+          172,
+          "validate_global_buffers iterates positions and rejects first unaligned position with zero-based buffer index/position/alignment. Empty buffers succeeds. Size, overlap, offset+size overflow and total file bounds are not inspected. No IO."
+        ],
+        [
+          173,
+          188,
+          "Private field_column_shape returns contributes=true,recurse=false for Blob/packed, otherwise children-empty versus nonempty. Public physical_column_count mirrors this: one for Blob/packed/leaf (including an empty struct), otherwise sum descendants without a parent header. Child shape, not only logical type, drives physical mapping. Recursion and unchecked usize sums have no local bound."
+        ],
+        [
+          189,
+          213,
+          "append_physical_fields recursively emits only leaves or opaque Blob/packed fields in source order, records existing i32 field ID and successive i32 counter then increments. Containers with children get no map entry. Public data_file_columns begins two empty vectors/counter0. Empty schema returns empty pair, no IDs assigned or validated; signed overflow not checked."
+        ],
+        [
+          214,
+          225,
+          "field_id_to_column_index zips owned mappings, filters negative column_index (not negative field ID), casts to u32 and collects BTreeMap. Duplicate field IDs overwrite earlier entries; negative field IDs cast. Normal nonoverflowed numbering is nonnegative, but no schema validation is added."
+        ],
+        [
+          226,
+          243,
+          "append_field_ids walks same shape, looks up contributing field.id as u32 and pushes found column index; absent IDs are silently omitted. Recursion is suppressed for opaque fields. It preserves schema traversal order and does not sort or deduplicate mapped columns."
+        ],
+        [
+          244,
+          260,
+          "projection_from_field_ids is infallible: collect mapped columns and Arc-own a complete schema clone. Missing mappings do not remove corresponding schema fields, so later projection length validation can fail or mismap if caller supplied inconsistent mapping. It does not prune schema or verify rectangularity."
+        ],
+        [
+          261,
+          277,
+          "projection_from_column_names first core schema.project(names)? then uses caller mapping with that schema. Errors from name projection propagate; no independent mapping validation. Private children_share_parent_length returns only logical_type.is_struct(); list-like children are intentionally not assumed to share parent row count."
+        ],
+        [
+          278,
+          296,
+          "validate_field_length accepts comparable flag, index list, shared mutable cursor and fallible column-length closure. For a contributing field consume next index or InvalidInput naming the field; increment cursor before invoking column_len(index as usize). Leaf/Blob/packed lengths come from that physical column; first error returns immediately."
+        ],
+        [
+          297,
+          318,
+          "For a recursing container, enforce_children = comparable && logical struct. Recurse with this flag and common cursor; first returned child length initializes field_rows. If enforced, any later child mismatch errors naming parent, child, actual and expected rows. Once a nonstruct ancestor makes comparable false, descendant structs do not reenable comparison. Container reports first child length; it does not multiply/divide list sizes or compute offsets. No resulting length gives maps-to-no-columns InvalidInput. Recursive depth unbounded locally."
+        ],
+        [
+          319,
+          337,
+          "prepared_read_length closure indexes prepared.column_infos by supplied decoder index, errors with index/available count if out of range, then calls normalized_column_num_rows. Contextual helper uses checked u64 sums and sparse first structural layer num_slots when present, otherwise page.num_rows (rust/lance-file/src/reader.rs:539-561). Pass decoder schema and indices to projection_length; no I/O in this path."
+        ],
+        [
+          338,
+          358,
+          "projection_length starts cursor0, reserves top-level length pairs, validates every field with comparable=true and stores borrowed name/length. After traversal reject surplus indices with supplied/required counts. Then verify_uniform_lengths enforces equal top-level lengths (empty schema+emptyindices =>0), contextual helper lists mismatching names/lengths (rust/lance-file/src/reader.rs:563-577). It does not independently reject duplicate column indices or zero fields."
+        ],
+        [
+          359,
+          370,
+          "DecodeColumn is a plain fn(u32,&pbfile::ColumnMetadata)->Result<Arc<ColumnInfo>> type alias; capturing closures cannot be stored. Private Debug StructuralReadProjection owns that function pointer. read_projection wraps it in Arc<dyn ReadProjection>; exact grammar selection is injected without a version enum in this struct."
+        ],
+        [
+          371,
+          392,
+          "async_trait ReadProjection impl: validate_indexed first calls provider structural validator, then requires projection_matches_indexed_metadata, else returns provider indexed_projection_error. read_length directly calls prepared_read_length. No metadata is fetched by these two methods."
+        ],
+        [
+          393,
+          408,
+          "Async prepare Full branch validates projection against metadata and clones column_infos plus ReaderProjection. Shared metadata/schema allocations may remain Arc-shared; it does not decode/revalidate each column here or read disk. Validation errors abort before preparation."
+        ],
+        [
+          409,
+          432,
+          "Indexed branch validates projection, awaits load_indexed_column_infos with exact decode fn, IO/cache and original column indices, then builds decoder projection with same schema Arc but dense 0..N indices cast to u32 in requested order. Metadata loader must return correspondingly ordered infos. After either branch, calculate read_length and return tuple; length failure can occur after indexed IO/cache work. No rollback/cancellation guard/spawn here; loader cache/concurrency/IO lifecycle remains delegated."
+        ],
+        [
+          433,
+          445,
+          "cfg(test) public test_projection_length calls private length engine using synthetic lengths indexed by column number; missing synthetic index returns InvalidInput identifying column. It is a helper, not an executing test, and supplies no local fixtures/assertions. This file has no unsafe blocks or inline test cases."
+        ]
+      ],
+      "limits": "Every physical line was read in ANALYZE53. No source execution/build/test was performed. Exact current-version reader/writer bodies are analyzed; delegated compression/encoder helper internals remain pending; delegated calls are not evidence of their full behavior. "
+    },
+    {
+      "path": "rust/lance-file/src/testing.rs",
+      "module": "L1-modules/rust-lance-file-v20-compatibility.md",
+      "reviewed": true,
+      "role": "Public testing module helpers create a temporary local filesystem/scheduler fixture, fully collect input batches for writing, read all output batches and count rows. These are public Rust test utilities, not streaming production interfaces.",
+      "limits": "All123 lines read. Helpers use unwrap/assert extensively and return values rather than Result. No source tests or IO were executed. ObjectStore/scheduler and delegated decoder internals remain pending; the full shared file reader is analyzed; no performance or durability result follows from these harness bodies.",
+      "ranges": [
+        [
+          1,
+          21,
+          "SPDX/imports connect Arc, Arrow RecordBatchReader/ArrowError, TryStreamExt, core cache/schema/tempfile, decoder plugins/filter, IO scheduler/params/cached size and file reader/version/writer options."
+        ],
+        [
+          22,
+          41,
+          "Public FsFixture exposes TempObjFile, Arc<ObjectStore>, Arc<ScanScheduler>. Default constructs temporary object path, local store and default_for_testing scheduler, retaining all three. Cleanup semantics are delegated to TempObjFile; no explicit Drop here."
+        ],
+        [
+          42,
+          60,
+          "WrittenFile publicly holds Arc<core Schema>, Vec<RecordBatch> and Vec<(u32,u32)> mapping. write_lance_file creates object writer then converts input reader schema and constructs exact-version facade writer; all failures unwrap. Returned original core schema is cloned into writer before later metadata mutations."
+        ],
+        [
+          61,
+          77,
+          "Collect entire RecordBatchReader into Result<Vec<_>,ArrowError> before any write_batch, unwrap errors, await each batch sequentially, clone mapping, add schema foo=bar, finish and discard summary. Return retained schema/data/mapping; returned schema does not receive added foo metadata because writer owned a clone. Input failure can occur after creating object and encoders."
+        ],
+        [
+          78,
+          81,
+          "test_cache returns fresh Arc<LanceCache> with128MiB capacity on every call; it is not shared global state."
+        ],
+        [
+          82,
+          101,
+          "read_lance_file opens scheduler with unknown file size, then FileReader::try_open with no explicit projection, supplied decoder plugins, a fresh test cache and default reader options. Each error unwraps; caller filter is retained for stream call."
+        ],
+        [
+          102,
+          112,
+          "Require read schema metadata foo=bar via unwrap/assert. Read RangeFull using batch size1024 and readahead16 with supplied filter, await stream creation then collect all RecordBatches into Vec. No comparison with original values in this helper."
+        ],
+        [
+          113,
+          123,
+          "count_lance_file calls full read helper, retains collected Vec until summation, sums each batch num_rows as usize. It is not a metadata-only count and inherits foo metadata assertion, decode/filter IO and unwrap panics."
+        ]
+      ]
+    },
+    {
+      "path": "rust/lance-file/src/versions/mod.rs",
+      "module": "L1-modules/rust-lance-file-runtime.md",
+      "reviewed": true,
+      "role": "Exact-version composition root for projection, metadata, reader and writer dispatch. It accepts ConcreteFileVersion after caller selector resolution and separates V1 compatibility from current-format runtime APIs.",
+      "ranges": [
+        [
+          1,
+          37,
+          "SPDX/module guidance prefers statically known version submodules and one exhaustive runtime dispatch. Imports core schema/errors/cache, bytes, encoding metadata/plugins/batches, scheduler/Writer, BTreeMap/Future/Arc and reader/writer types. Public modules are v1,v2_0,v2_1,v2_2,v2_3. No numeric version ordering or release-alias resolution occurs here."
+        ],
+        [
+          38,
+          49,
+          "Crate-visible read_projection returns Internal for V1 with current reader composition received Lance v1. Each V2 variant obtains its own module projection as Arc<dyn ReadProjection>. No fallback to a newer grammar."
+        ],
+        [
+          50,
+          62,
+          "Public OpenedFileReader has V1{major_version:u16,minor_version:u16}, retaining literal footer numbers for diagnostics, and Current(FileReader). V1 carries no opened legacy reader. No derive or third variant."
+        ],
+        [
+          63,
+          77,
+          "Crate-visible finish_metadata consumes RawFileMetadata and dispatches to exact V2 module; V1 returns Internal current metadata dispatch received a Lance v1 file. Ownership/error cleanup are ordinary Rust drops; no retry or IO in this wrapper."
+        ],
+        [
+          78,
+          108,
+          "validate_external_metadata builds a whole-schema projection for the requested exact version, rejects physical-column count mismatch as InvalidInput with expected/actual counts, then invokes FileReader::validate_projection. Require each ColumnInfo.index to equal its enumerate index as u32 or InvalidInput. Clone metadata column_infos into PreparedProjection and ask exact read_projection.read_length. No direct page-byte read or independent row-count arithmetic. Contextual validate_projection rejects zero schema fields, duplicate column indices and out-of-bounds indices (rust/lance-file/src/reader.rs:1117-1144); grammar-specific rectangularity remains delegated."
+        ],
+        [
+          109,
+          122,
+          "finish_metadata_index dispatches using index.version; V1 gives VersionConflict with numeric0,2 and message about current reader with v1 metadata index. That diagnostic uses canonical legacy footer numbers, not a preserved original alias. V2 modules own accepted metadata-index grammar."
+        ],
+        [
+          123,
+          137,
+          "decode_column_metadata takes exact version and protobuf slice, returning Vec<Arc<ColumnInfo>> via exact module. V1 is NotSupported because self-described batches are outside its grammar. Decoder/plugin/page validation is delegated, not implemented here."
+        ],
+        [
+          138,
+          150,
+          "validate_global_buffers dispatches V2 checks; V1 returns Ok(()) without examining the descriptors. This exception is not a promise that current-format global buffers can be written/read through V1 APIs."
+        ],
+        [
+          151,
+          172,
+          "Public reader_projection_from_field_ids delegates each of all five exact versions to its schema/BTreeMap<u32,u32> builder and wraps the returned ReaderProjection in Ok. No local error path or mapping validation; delegated builders may have their own assumptions. Argument order is version,schema,map."
+        ],
+        [
+          173,
+          185,
+          "Public reader_projection_from_whole_schema is infallible in its signature and dispatches all five modules. Its argument order is schema,version, unlike the neighboring projection helpers. Exact physical column layout remains module-defined."
+        ],
+        [
+          186,
+          199,
+          "Public reader_projection_from_column_names accepts version,schema,&[&str], delegates all five versions and propagates Result. Missing names and nesting rules belong to concrete builders."
+        ],
+        [
+          200,
+          224,
+          "physical_column_count returns usize for one core Field via each exact grammar. data_file_columns returns (Vec<i32>,Vec<i32>) persisted field-to-column entries via each module. No local range checks, normalization or format policy beyond exhaustive matching."
+        ],
+        [
+          225,
+          258,
+          "copy_external_metadata_column takes FnOnce()->Send Future<Result<()>>. V1 returns NotSupported and never calls the closure. V2_0 calls only if its schema/index/has-existing-pages predicate allows; otherwise successful no-op. V2_1/2/3 unconditionally call and await once. Closure failure propagates; cancellation does not roll back partial IO here. The concrete V2_0 predicate is now covered: recognized nonpacked logical struct header is skipped when pages already exist; unknown target is treated as nonheader (rust/lance-file/src/versions/v2_0/mod.rs:84-115)."
+        ],
+        [
+          259,
+          278,
+          "finalize_external_metadata_column takes mutable Vec<PageInfo> and row count. V1 NotSupported; V2_0 calls its infallible normalizer then returns Ok; V2_1/2/3 return Ok without mutating pages. No rollback or byte writes occur in this root."
+        ],
+        [
+          279,
+          314,
+          "open_projected_reader: V1 NotSupported without opening either closure; V2_0 always awaits open_full, ignoring prefer_indexed/projection. V2_1/2/3 try open_indexed only when prefer_indexed and FileMetadataProvider::projection_matches_indexed_metadata. Some(reader) returns immediately; None falls back to open_full; Err propagates without fallback. Both closures are FnOnce and Send futures; no concurrent opens. Contextual predicate rejects empty schema and compares checked grammar-count sum to column-index length (rust/lance-file/src/reader.rs:1542-1555), not selectivity alone."
+        ],
+        [
+          315,
+          327,
+          "open_self_described_reader takes FileScheduler,Arc<DecoderPlugins>,borrowed LanceCache,FileReaderOptions and awaits FileReader::try_open_for_dispatch with None metadata. Docs say its optimistic tail read detects exact identity without a separate footer probe; shared reader IO/cache orchestration is now analyzed, while delegated backend cost remains unmeasured. Returned enum retains V1 detection rather than constructing a v1 writer/reader here."
+        ],
+        [
+          328,
+          356,
+          "create_writer consumes object writer,schema,options, matching exact V2 create_writer and mapping successful concrete writers into FileWriter. V1 NotSupported directs callers to versions::v1::writer::FileWriter with its manifest provider. No local option validation; each concrete creator owns it. Error drops moved inputs; underlying Writer drop/abort guarantees remain pending."
+        ],
+        [
+          357,
+          373,
+          "create_lazy_writer consumes object writer/options with no schema. V1 NotSupported says explicit schema/manifest provider required. V2 lazy creators are wrapped in Ok and converted into the corresponding FileWriter variant. Root performs no option/schema validation, IO or first-batch initialization."
+        ],
+        [
+          374,
+          402,
+          "encode_self_described_batch and encode_mini_batch borrow EncodedBatch and dispatch to exact V2 encoder Result<Bytes>; V1 returns separate NotSupported messages. No automatic alias resolution or batch-version reconciliation occurs in this root; concrete file framing is now covered in the exact writer/shared structural analyses; codec payload internals remain pending."
+        ],
+        [
+          403,
+          428,
+          "Single cfg(test) case constructs empty EncodedBatch (empty data/page table/schema/top-level columns,0rows) and asserts both embedded encoders reject V1 with Error::NotSupported. Messages, V2 bytes, other V1 rejection methods and indexed-open fallback branches are not tested locally. No tests executed."
+        ]
+      ],
+      "limits": "All428 lines read. Every local exhaustive dispatch and wrapper contract is authored; exact current-version grammars, writers and shared/V1 readers are analyzed; delegated encoding and backend internals remain pending. Preserve the distinction between policy selection in version.rs, exact identity here and actual page/metadata mechanisms in version modules."
+    },
+    {
+      "path": "rust/lance-file/src/versions/v2_0/mod.rs",
+      "module": "L1-modules/rust-lance-file-composition.md",
+      "reviewed": true,
+      "role": "Public V2_0 composition module: header-inclusive physical column mapping, external-metadata structural-header normalization, original array field strategy and concrete writer factories.",
+      "ranges": [
+        [
+          1,
+          23,
+          "SPDX/module documentation and imports bind BTreeMap/Arc, Bytes, core Field/Schema/Result, PageInfo and encoder traits, object Writer and local ReadProjection/options. Private reader/writer children own concrete mechanisms. No IO is executed by module initialization."
+        ],
+        [
+          24,
+          37,
+          "cfg(test) exposes test_projection_length pub(crate); metadata decoding/finalization/global-buffer validation are pub(crate) reexports. Three projection constructors and Writer are public reexports. Crate-internal read_projection returns the exact V2_0 reader projection Arc, without additional validation."
+        ],
+        [
+          38,
+          49,
+          "Public physical_column_count returns one for Blob or packed-struct field (suppress descendants); otherwise one plus recursive children sum. Ordinary structs/lists contribute their own header column and their descendants. Counts use unchecked usize arithmetic and recursion proportional to field depth; invalid schema/type consistency is not checked."
+        ],
+        [
+          50,
+          67,
+          "Public data_file_columns allocates parallel Vec<i32> field IDs/column indices and traverses from signed counter0. pub(super) field_id_to_column_index consumes zipped vectors, casts both IDs and indices to u32 and collects BTreeMap; duplicate IDs keep the later entry, negative IDs are not rejected. This map is a projection lookup, not schema validation."
+        ],
+        [
+          68,
+          83,
+          "Private append_physical_fields appends each field before descendants, increments signed i32 column counter, recurses except for Blob/packed struct. Root and sibling order are preserved; empty schema gives empty vectors. No checked overflow, ID assignment, capacity estimate or cycle/depth guard is added."
+        ],
+        [
+          84,
+          104,
+          "Private is_external_metadata_structural_header walks the same physical traversal until target column. At the match return logical_type.is_struct() && !is_packed_struct(); there is no explicit !is_blob() in the match classification. Otherwise increment usize cursor and recurse only for non-Blob/nonpacked fields. Out-of-range target returns None. The search mutates only its local cursor and returns immediately on match."
+        ],
+        [
+          105,
+          116,
+          "pub(super) should_copy_external_metadata_column defaults missing target classification to false; return !is_header || !has_existing_pages. Thus a recognized ordinary structural header with existing pages is skipped; first header and every nonheader or unknown column is copied. Repeated calls rescan schema; no column bounds error is emitted."
+        ],
+        [
+          117,
+          133,
+          "pub(super) finalize_external_metadata_column rescans classification. If header and pages nonempty, replace only first page num_rows with supplied u64 and priority with0, then truncate to one page. Encoding and buffer descriptors of first page survive; later page metadata drops. Empty pages/nonheader/out-of-range target stay unchanged. It returns unit, does not validate row count, fetch/copy data, or rollback prior writes."
+        ],
+        [
+          134,
+          147,
+          "Public encoding_strategy allocates ArrayFieldEncodingStrategy::new behind Arc<dyn FieldEncodingStrategy>, without CompressionParams. create_writer consumes object writer/schema/options and directly propagates Writer::try_new result; concrete validation and ownership cleanup are delegated."
+        ],
+        [
+          148,
+          155,
+          "Public create_lazy_writer consumes object writer/options and returns Writer::new_lazy without Result. Documentation says first batch supplies schema; no inference is performed in this wrapper."
+        ],
+        [
+          156,
+          164,
+          "Public encode_self_described_batch and encode_mini_batch borrow EncodedBatch and delegate writer::concat_lance_footer with true/false respectively, returning Result<Bytes>. They do not locally validate EncodedBatch, inspect file version or write an object. No inline tests or unsafe code occur in this module."
+        ]
+      ],
+      "limits": "Every physical line was read in ANALYZE53. No source execution/build/test was performed. Exact current-version reader/writer bodies are analyzed; delegated compression/encoder helper internals remain pending; delegated calls are not evidence of their full behavior. "
+    },
+    {
+      "path": "rust/lance-file/src/versions/v2_0/reader.rs",
+      "module": "L1-modules/rust-lance-file-readers.md",
+      "reviewed": true,
+      "role": "Exact V2_0 reader metadata/projection implementation inside a private reader child module. The parent publicly reexports three projection constructors and reexports metadata functions pub(crate); other pub declarations are implementation interfaces, not independently external API.",
+      "ranges": [
+        [
+          1,
+          29,
+          "SPDX/imports connect Arc/BTreeMap, async_trait, Bytes, core cache/errors/schema/fields, EncodingsIo and normalized metadata, pb Array/Column encodings, prost Name/Message, file protobuf/provider/read-projection types and exact version. Unlike newer readers this file owns syntax decoding and header-inclusive traversal."
+        ],
+        [
+          30,
+          56,
+          "Private generic fetch_encoding accepts only Direct location, clones encoding bytes into Bytes, decodes prost Any envelope then to_msg<M>, wrapping failures as InvalidInput with message type and error display. Indirect unsupported, explicit None description and absent location each return contextual InvalidInput. No recursive ArrayEncoding grammar validation, IO or deferred-buffer lookup here."
+        ],
+        [
+          57,
+          76,
+          "decode_column enumerates pages in input order. Each requires encoding (InvalidInput names column/page), then decodes pb::ArrayEncoding through Any before checking buffer counts. This reader uses legacy array grammar namespace, not pb21 structural PageLayout. A syntactically valid ArrayEncoding with absent or otherwise invalid nested variant is not inspected at this stage."
+        ],
+        [
+          77,
+          103,
+          "Unequal page buffer offset/size counts return InvalidInput with column/page/counts. Equal pairs are copied into Arc slice; no alignment, bounds, overlap, size or checked end-position validation. Construct PageInfo with PageEncoding::Legacy(array_encoding), length as num_rows and priority unchanged; fallible Vec collection aborts on first bad page. Empty pages accepted."
+        ],
+        [
+          104,
+          134,
+          "After all pages decode, reject unequal column buffer counts, copy pairs to Arc, require column encoding and decode its Any to ColumnEncoding inferred by the target field type. Return Arc<ColumnInfo> with supplied index, Arc pages, descriptors and encoding. No column index validation, ColumnEncoding arm traversal or consistency between declared rows/schema/pages is added. Allocation before a later failure is dropped."
+        ],
+        [
+          135,
+          149,
+          "decode_column_metadata enumerates columns, checked-converts each zero-based index to u32 then calls decode_column and fallibly collects Vec<Arc<ColumnInfo>> in order. Error text says more than u32::MAX columns, but the actual check is on index: index u32::MAX itself is accepted. Empty input yields empty Vec. No decoded-column concurrency."
+        ],
+        [
+          150,
+          176,
+          "Async prepare_projection ignores supplied IO/cache. Full provider runs FileReader::validate_projection, clones column infos and projection, then succeeds. Indexed provider first runs structural validity checks (so malformed input error precedes unsupported), then always returns indexed_projection_error. No await/IO within this body despite async signature; no metadata decode or row-length check until caller. Contextual validators reject empty schema/duplicate/out-of-bounds indices (rust/lance-file/src/reader.rs:1117-1144; rust/lance-file/src/reader.rs:1557-1595)."
+        ],
+        [
+          177,
+          201,
+          "field_column_shape always contributes one column; Blob/packed stop recursion, other fields recurse only when children exist. append_field_ids traverses parent before descendants, looks up field.id as u32, silently omits missing mappings and never prunes schema. Preserve source order, no dedup/sort/checked ID conversion; recursion has no local depth bound."
+        ],
+        [
+          202,
+          221,
+          "projection_from_field_ids is infallible, builds traversal indices then Arc-wraps a complete Schema clone. projection_from_whole_schema constructs parent module physical ID map and invokes it. Duplicate/negative IDs inherit map collapse/cast semantics; this layer adds no schema or index validation."
+        ],
+        [
+          222,
+          237,
+          "projection_from_column_names builds the mapping from the full original schema before schema.project(names)?, then maps projected fields through it. Thus selected physical indices retain original file numbering rather than renumbering from selected schema. Name projection errors propagate. children_share_parent_length recognizes only logical structs."
+        ],
+        [
+          238,
+          257,
+          "validate_field_length consumes one supplied index per contributing field, errors with field name if exhausted, advances cursor then calls fallible column_len. Unlike leaf layout, ordinary container field_rows is initialized from its own header column. Missing column infos later produce their own bounds error."
+        ],
+        [
+          258,
+          278,
+          "When recursing, comparable && logical struct controls equality and is passed to descendants. Each child must equal the parent header length when enabled; error wording says children differ but expected is already the parent column count. A nonstruct ancestor disables comparisons for all deeper descendants. Parent returns its own header count (not first child) regardless of child counts when disabled. maps-to-no-columns guard is defensive because this shape always contributes. No list-size/offset arithmetic or local recursion bound."
+        ],
+        [
+          279,
+          301,
+          "prepared_read_length indexes column_infos using decoder indices and errors with index/available count when absent. normalized_column_num_rows computes each length. Walk all top-level fields with comparable=true, reserve name/length pairs. For columns decoded by this file PageEncoding is Legacy so helper sums page.num_rows with checked u64 addition; manually supplied PreparedProjection may contain other encodings (rust/lance-file/src/reader.rs:539-561)."
+        ],
+        [
+          302,
+          318,
+          "Reject surplus supplied indices after full traversal, then verify_uniform_lengths returns common top-level length or contextual mismatch; empty schema+empty indices yields0 at this helper layer (caller full-projection validation rejects zero fields). Private Debug unit V20ReadProjection stores no state; parent-visible read_projection allocates it in Arc<dyn ReadProjection>."
+        ],
+        [
+          319,
+          336,
+          "async_trait ReadProjection implementation validate_indexed first performs provider structural validation then always returns provider NotSupported diagnostic. read_length forwards prepared_read_length. Matching V2_0 FileMetadataIndex does not imply indexed projection support."
+        ],
+        [
+          337,
+          349,
+          "Trait async prepare awaits prepare_projection, then checks read_length and returns (PreparedProjection,u64). The inner V2_0 preparation performs no IO and ignores IO/cache; errors short-circuit in validation then length order. No task spawn, cancellation guard or rollback."
+        ],
+        [
+          350,
+          361,
+          "finish_metadata accepts raw footer pair exactly(0,3) or(2,0). Every other pair returns VersionConflict with actual major/minor and V2_0 reader message before column decoding. Then decode all raw column metadata. It does not call validate_global_buffers here (that function is a no-op below)."
+        ],
+        [
+          362,
+          379,
+          "Build CachedFileMetadata by moving raw schema, original protobuf column metadata, decoded infos, declared num_rows, file buffers, data/column-metadata/global/footer byte counts, raw footer major/minor, file size and retained global buffers; set exact version V2_0. Literal accepted alias is preserved in major/minor while concrete identity canonicalizes. No row/count/size reconciliation or metadata IO in finalization. Both protobuf and normalized metadata remain owned in the cache object."
+        ],
+        [
+          380,
+          396,
+          "validate_global_buffers unconditionally Ok without examining descriptors. finish_metadata_index accepts only exact enum V2_0 and returns index unchanged; mismatch converts actual enum to standard footer numbers and returns VersionConflict. It does not decode columns or validate global alignment/projection eligibility."
+        ],
+        [
+          397,
+          415,
+          "cfg(test) test_projection_length creates synthetic indexed length closure, uses the same header-inclusive field walker and uniform top-level check, errors for missing synthetic length. Unlike production prepared_read_length it does not reject leftover column_indices after traversal. Thus synthetic helper success alone does not test surplus-index validation. No executing test functions or fixtures are defined in this file; no unsafe blocks."
+        ]
+      ],
+      "limits": "All physical lines read in ANALYZE54. No source builds/tests/benchmarks run. Local metadata grammar, dispatch and projection behavior are covered; shared reader IO/cache orchestration and exact current writer pipelines are analyzed; delegated encoding byte decompression and backend lifecycle remain pending. Exact declarations/source appendix preserve every signature. No source modification."
+    },
+    {
+      "path": "rust/lance-file/src/versions/v2_1/compression.rs",
+      "module": "L1-modules/rust-lance-file-composition.md",
+      "reviewed": true,
+      "role": "Private version-specific compression Strategy, exposed only to its parent module and implementing CompressionStrategy; policy ordering for V2_1.",
+      "ranges": [
+        [
+          1,
+          18,
+          "SPDX/imports wire core error/Field, compression helpers, CompressionParams/FieldParams, DataBlock and three compressor traits. No general block/RLE block or packed-struct per-value creation helper is imported; packed per-value uses a rejecting helper."
+        ],
+        [
+          19,
+          28,
+          "pub(super) Debug+Clone Strategy owns CompressionParams privately; parent-visible new stores it unchanged, performs no validation and returns Self. Cloning Strategy clones tuning maps/values, not just an Arc handle."
+        ],
+        [
+          29,
+          47,
+          "field_params starts with self.params.get_field_params(field.name, field.data_type()), then merges parsed field metadata. Contextual implementation gives type params first, exact column params or first HashMap-iteration matching pattern next; each non-None field metadata value overrides that effective value (rust/lance-encoding/src/compression_config.rs:85-113; rust/lance-encoding/src/compression_config.rs:122-140). It uses local field name, not a constructed nested path. Pattern collision order is not made deterministic here. Metadata parsing/codec validity is delegated. V2_1 additionally examines only parsed metadata.minichunk_size: >=32*1024 (32768) logs value and clears that metadata override. The guarded unwrap is protected by is_some_and. Negative/zero/smaller metadata values and an oversized value already in CompressionParams are not rejected here. Clearing override preserves any configured base value, so log wording using default need not mean library default. No once-only log gate."
+        ],
+        [
+          48,
+          84,
+          "Compute effective field params once. Ordered first-match miniblock choice is explicit uncompressed fixed width, byte-stream split, RLE candidate, bitpacking, raw fixed width, variable width (fallible), fixed packed struct (fallible), raw fixed-size-list. Every None falls through; a helper Err stops selection. If no candidate returns a compressor, NotSupported names data.name(). Successful choice always passes finalize_miniblock_compressor(data, compressor, params), which may itself fail; this is selection, not execution of compression. The RLE slot specifically calls try_fixed_u8_rle_miniblock; fixed-u8 grammar is the selected helper, not a general child RLE grammar."
+        ],
+        [
+          85,
+          108,
+          "create_per_value computes field params, tries raw per-value first, then fallible reject_packed_struct_per_value, then fallible variable-width per-value. A returned Some is accepted even for the helper named reject; exact helper behavior is delegated. Remaining types return NotSupported with block name. No finalize_miniblock step runs for per-value selection."
+        ],
+        [
+          109,
+          129,
+          "create_block_compressor computes field params into unused _params (metadata parsing and warnings can still occur), then tries bitpacking followed by raw block. Neither call receives params. Unsupported block names produce NotSupported. No general or RLE block helper is invoked. No inline tests, async functions or unsafe code."
+        ]
+      ],
+      "limits": "Every physical line was read in ANALYZE53. No source execution/build/test was performed. Exact current-version reader/writer bodies are analyzed; delegated compression/encoder helper internals remain pending; delegated calls are not evidence of their full behavior. "
+    },
+    {
+      "path": "rust/lance-file/src/versions/v2_1/mod.rs",
+      "module": "L1-modules/rust-lance-file-composition.md",
+      "reviewed": true,
+      "role": "Public V2_1 composition module. It selects an ordered field-encoder and page-mechanism policy, reexports its exact reader/writer surface, and delegates physical column mapping to shared structural code.",
+      "ranges": [
+        [
+          1,
+          34,
+          "SPDX/version docs and imports connect CompressionParams, field strategy/context/encoder traits, primitive page mechanisms, binary Blob/list/struct helpers, core error/schema and object Writer. compression/reader/writer are private child modules. Shared structural reader is imported for leaf mapping."
+        ],
+        [
+          35,
+          49,
+          "Public projection constructor and Writer reexports; cfg(test) test_projection_length and metadata decode/finish/global-buffer methods are pub(crate). read_projection constructs shared structural ReadProjection with exact reader::decode_column function pointer; shared projection mechanics do not select a more recent grammar."
+        ],
+        [
+          50,
+          63,
+          "physical_column_count and data_file_columns are public leaf-layout forwards; pub(super) field_id_to_column_index forwards the map construction. These add no validation and inherit shared Blob/packed/leaf handling and signed counter/cast behavior."
+        ],
+        [
+          64,
+          80,
+          "Private Debug FieldStrategy owns PrimitiveFieldEncoding. Its trait create_field_encoder borrows field/context and mutable ColumnIndexSequence, first tries binary Blob; helper Err aborts, Some returns immediately, None continues. No speculative rollback of index state is implemented here."
+        ],
+        [
+          81,
+          93,
+          "If unhandled field is_blob, return InvalidInput source naming field and Arrow datatype. Otherwise try primitive and return success immediately. Primitive helper errors propagate before the explicit compound-type guards."
+        ],
+        [
+          94,
+          107,
+          "After primitive declines, direct FixedSizeList whose item datatype is Struct returns NotSupported with selected-format message; Map likewise returns NotSupported. The guard only pattern-matches immediate FSL<Struct>, not every possible nested list shape; overall acceptance also depends on primitive/helper recognition."
+        ],
+        [
+          108,
+          124,
+          "Try list then struct; each error propagates and first Some wins. If neither recognizes field, return NotSupported naming Lance v2.1, field and datatype. Strategy dispatch itself neither encodes data nor performs async IO."
+        ],
+        [
+          125,
+          135,
+          "encoding_strategy consumes CompressionParams into Arc<compression::Strategy>, builds PrimitiveFieldEncoding with ordered reject_sparse then dense_u16 mechanisms, wraps private FieldStrategy in Arc<dyn FieldEncodingStrategy>. There is no constant-page mechanism in this list. Actual page applicability and byte encoding are delegated."
+        ],
+        [
+          136,
+          154,
+          "Public create_writer calls Writer::try_new; create_writer_with_compression passes explicit CompressionParams to try_new_with_compression. Both consume object writer, Schema/options and return Result<Writer>; no default compression values or validation are supplied locally."
+        ],
+        [
+          155,
+          171,
+          "Public create_lazy_writer and create_lazy_writer_with_compression delegate corresponding infallible new_lazy constructors with options and optional explicit tuning. Schema inference from first batch is documented, not implemented at this layer."
+        ],
+        [
+          172,
+          180,
+          "encode_self_described_batch and encode_mini_batch call this exact version writer concat_lance_footer with true/false. Result<Bytes> propagates; no local version/metadata validation and no inline tests/unsafe code."
+        ]
+      ],
+      "limits": "Every physical line was read in ANALYZE53. No source execution/build/test was performed. Exact current-version reader/writer bodies are analyzed; delegated compression/encoder helper internals remain pending; delegated calls are not evidence of their full behavior. "
+    },
+    {
+      "path": "rust/lance-file/src/versions/v2_1/reader.rs",
+      "module": "L1-modules/rust-lance-file-readers.md",
+      "reviewed": true,
+      "role": "Exact V2_1 reader metadata/projection implementation inside a private reader child module. The parent publicly reexports three projection constructors and reexports metadata functions pub(crate); other pub declarations are implementation interfaces, not independently external API.",
+      "ranges": [
+        [
+          1,
+          17,
+          "SPDX/imports connect BTreeMap/Arc, core Schema/errors, ColumnInfo and pb21 grammar, file protobuf, shared structural normalization/projection, raw/cached/index metadata and ConcreteFileVersion. No IO scheduler, decompressor, plugin registry or environment input is used in this exact grammar validator."
+        ],
+        [
+          18,
+          25,
+          "Private required borrows Option<&T>, returns the same reference or InvalidInput source naming Lance v2.1, supplied label and missing nested encoding. It does not clone payloads or supply defaults."
+        ],
+        [
+          26,
+          45,
+          "Private validate_compressive_encoding requires compression oneof. Flat, InlineBitpacking and Constant immediately succeed without inspecting bit widths/data fields/literal size. Variable requires/revalidates offsets; OutOfLineBitpacking requires/revalidates values; Fsst likewise values. Local recursive validation has no explicit depth limit; external protobuf decode limits remain a separate concern."
+        ],
+        [
+          46,
+          55,
+          "Dictionary first requires and recursively validates indices, then items. Missing/invalid indices short-circuit before items. num_dictionary_items and index/value relationships are not checked. This is grammar validation, not decoding data bytes."
+        ],
+        [
+          56,
+          76,
+          "RLE requires values and run_lengths present before validating their shapes. Values must be direct Flat with bits_per_value 8/16/32/64 and data=None; lengths must be direct Flat8 with data=None. Flat.data is an optional BufferCompression descriptor, not the encoded bytes (protos/encodings_v2_1.proto:419-425). Wrappers, 128-bit values, any present buffer-compression descriptor (including a default descriptor), and any other shape fail InvalidInput requiring flat values and flat u8 run lengths. It does not inspect encoded runs or row totals."
+        ],
+        [
+          77,
+          101,
+          "ByteStreamSplit, General, FixedSizeList and PackedStruct each require and recursively validate their values child; scheme/level, dimensions, packed field widths and other properties are not inspected. VariablePackedStruct is rejected unconditionally as outside v2.1 grammar, even empty. Missing compression variant is InvalidInput."
+        ],
+        [
+          102,
+          127,
+          "validate_page_layout MiniBlock rejects has_large_chunk=true before nested checks. If false, validate optional rep then def, required value, optional dictionary, in order. Optional missing rep/def/dictionary are accepted. It does not inspect buffers, chunk counts, level widths or data values."
+        ],
+        [
+          128,
+          144,
+          "FullZip requires/revalidates value_compression only. Constant accepts only inline_value=None and both rep_compression/def_compression=None; any inline_value presence is first error (including empty), then compressed-level presence error, otherwise succeeds. Constant-layout acceptance includes all-null form even though writer policy list has no constant() mechanism. Other Constant fields are not inspected here."
+        ],
+        [
+          145,
+          160,
+          "Blob requires inner_layout with its own missing-inner InvalidInput, then recursively validates the same exact version. Nested Blob wrappers have no local recursion cap. Sparse is always InvalidInput outside v2.1 grammar; absent page layout has a distinct missing-layout error."
+        ],
+        [
+          161,
+          177,
+          "decode_column enumerates every page: shared syntax decode PageLayout, exact validate_page_layout, then shared build_page_info. First syntax/grammar failure precedes that page alignment checks. Fallibly collect pages then shared build_column_info decodes column encoding. No local ColumnEncoding variant validator, physical data read or schema comparison. Empty page list still requires a valid column-encoding envelope (rust/lance-file/src/reader/structural.rs:118-155)."
+        ],
+        [
+          178,
+          192,
+          "decode_column_metadata enumerates and checked-converts zero-based indices to u32, decodes in order and collects Result<Vec<Arc<ColumnInfo>>>. Message says more than u32::MAX columns; actual guard is per-index and permits index u32::MAX. No parallelism; first error drops constructed Vec."
+        ],
+        [
+          193,
+          214,
+          "projection_from_field_ids forwards shared leaf traversal. Whole-schema projection first creates parent module mapping from entire schema. Name projection passes original full schema and its mapping to shared schema.project wrapper, so indices preserve original file numbering. Unknown mapping entries remain silently omitted until downstream checks; these functions add no new validation."
+        ],
+        [
+          215,
+          224,
+          "finish_metadata requires literal footer pair(2,1) before any alignment or grammar work; wrong pair returns VersionConflict with actual raw footer numbers and exact version message. Then validate_global_buffers and decode all column metadata in that order."
+        ],
+        [
+          225,
+          242,
+          "On success construct CachedFileMetadata moving raw schema, original protobuf columns, decoded infos, declared row count, descriptors, all four byte-accounting fields, file size and retained global bytes. Preserve literal major/minor; set exact ConcreteFileVersion::V2_1. Full metadata and normalized descriptors both remain retained. This function does not reconcile schema, total rows, counts, file bounds or byte-accounting totals and performs no IO."
+        ],
+        [
+          243,
+          246,
+          "validate_global_buffers delegates shared64-byte position-alignment check; no size/file-bound check at this boundary."
+        ],
+        [
+          247,
+          259,
+          "finish_metadata_index requires enum V2_1; mismatch uses actual enum standard footer tuple for VersionConflict. Matching identity then checks global-buffer alignment and returns index unchanged. Does not load/decode individual columns or establish projection eligibility/length. Global alignment error follows version check."
+        ],
+        [
+          260,
+          268,
+          "cfg(test) test_projection_length delegates shared structural synthetic-length helper; unlike V2_0 helper it inherits surplus-index checking. It is a helper, not a test case."
+        ],
+        [
+          269,
+          290,
+          "Private cfg(test) grammar_tests imports pb21 types. rejects_nested_variable_packed_struct builds an empty VariablePackedStruct wrapped in General with compression=None and values=Some(Box(child)); it tests traversal through General, not codec scheme validity."
+        ],
+        [
+          291,
+          304,
+          "Wrap in FullZip with other fields Default; validate_page_layout must error and display contain Variable packed struct compression is not part. The test does not assert the error variant, use bytes/IO, or test a valid packed payload. No other local grammar fixtures; no unsafe or async functions."
+        ]
+      ],
+      "limits": "All physical lines read in ANALYZE54. No source builds/tests/benchmarks run. Local metadata grammar, dispatch and projection behavior are covered; shared reader IO/cache orchestration and exact current writer pipelines are analyzed; delegated encoding byte decompression and backend lifecycle remain pending. Exact declarations/source appendix preserve every signature. No source modification."
+    },
+    {
+      "path": "rust/lance-file/src/versions/v2_2/compression.rs",
+      "module": "L1-modules/rust-lance-file-composition.md",
+      "reviewed": true,
+      "role": "Parent-visible V2_2 Strategy with tuning ownership, variable packed-struct per-value handling and richer whole-block selection.",
+      "ranges": [
+        [
+          1,
+          21,
+          "SPDX/imports include Arc, shared compressor traits, fixed-u8 RLE miniblock/block helpers, general block and variable packed-struct per-value. They are mechanism functions in lance-encoding; this module owns order/version choice."
+        ],
+        [
+          22,
+          31,
+          "Debug+Clone parent-visible Strategy stores private CompressionParams; new stores unchanged without validation. Clone duplicates tuning content; Arc wrapping happens at use sites."
+        ],
+        [
+          32,
+          40,
+          "field_params starts with self.params.get_field_params(field.name, field.data_type()), then merges parsed field metadata. Contextual implementation gives type params first, exact column params or first HashMap-iteration matching pattern next; each non-None field metadata value overrides that effective value (rust/lance-encoding/src/compression_config.rs:85-113; rust/lance-encoding/src/compression_config.rs:122-140). It uses local field name, not a constructed nested path. Pattern collision order is not made deterministic here. Metadata parsing/codec validity is delegated. No V2_1 32768 metadata minichunk guard is present; actual supported size and codec validation belongs to downstream helpers."
+        ],
+        [
+          41,
+          76,
+          "Compute effective field params once. Ordered first-match miniblock choice is explicit uncompressed fixed width, byte-stream split, RLE candidate, bitpacking, raw fixed width, variable width (fallible), fixed packed struct (fallible), raw fixed-size-list. Every None falls through; a helper Err stops selection. If no candidate returns a compressor, NotSupported names data.name(). Successful choice always passes finalize_miniblock_compressor(data, compressor, params), which may itself fail; this is selection, not execution of compression. RLE slot is try_fixed_u8_rle_miniblock. Contextual finalizer only wraps FixedWidth data with requested general compression, returning other compressors unchanged (rust/lance-encoding/src/compression.rs:587-598)."
+        ],
+        [
+          77,
+          102,
+          "create_per_value computes params, tries raw then fallible try_variable_packed_struct_per_value(Arc::new(self.clone()),field,data), then variable-width helper with effective params. The new Arc/Strategy clone is evaluated whenever raw declines, even if packed helper declines. This allows nested compressor policy ownership; shared self is not mutated. First Some succeeds, first Err propagates; otherwise NotSupported names block."
+        ],
+        [
+          103,
+          129,
+          "create_block_compressor computes params; try fixed-u8 RLE block (fallible), bitpacking, general block (fallible), raw block, in order. Earlier match wins and errors do not fall back. Both RLE/general receive effective params; bitpacking/raw do not. Unsupported types return NotSupported with block name. No inline tests, async or unsafe code."
+        ]
+      ],
+      "limits": "Every physical line was read in ANALYZE53. No source execution/build/test was performed. Exact current-version reader/writer bodies are analyzed; delegated compression/encoder helper internals remain pending; delegated calls are not evidence of their full behavior. "
+    },
+    {
+      "path": "rust/lance-file/src/versions/v2_2/mod.rs",
+      "module": "L1-modules/rust-lance-file-composition.md",
+      "reviewed": true,
+      "role": "Public V2_2 composition module. It selects an ordered field-encoder and page-mechanism policy, reexports its exact reader/writer surface, and delegates physical column mapping to shared structural code.",
+      "ranges": [
+        [
+          1,
+          35,
+          "SPDX/version docs/imports include structural Blob, Map and structural fixed-size-list helpers in addition to binary Blob, primitive, list and struct mechanisms. Compression, reader and writer child modules remain private; core Result/Error and object Writer provide factory boundaries."
+        ],
+        [
+          36,
+          47,
+          "Metadata decode/finish/index/global-buffer reexports are pub(crate); projection constructors and Writer are public. read_projection is crate-internal shared structural projection composed with exact V2_2 reader::decode_column. No cfg(test) test_projection_length reexport appears here."
+        ],
+        [
+          48,
+          61,
+          "Public physical_column_count/data_file_columns and parent-visible field_id_to_column_index directly use shared leaf mapping. Exact V2_2 reader grammar stays distinct from the shared mapping algorithm."
+        ],
+        [
+          62,
+          83,
+          "Private Debug FieldStrategy contains primitive strategy. create_field_encoder tries binary Blob then structural Blob, returning first Some and propagating each Result error. Both use the primitive policy and shared mutable ColumnIndexSequence/context."
+        ],
+        [
+          84,
+          103,
+          "If still Blob, InvalidInput names field/type. Then try Map, structural fixed-size-list, and primitive, in that order; unlike V2_1 there are no unconditional Map/FSL<Struct> rejection guards. Presence of a helper is not proof that every nested/type combination is supported; helpers may decline or error."
+        ],
+        [
+          104,
+          120,
+          "Try list then struct; propagate first error, return first match. Final NotSupported names Lance v2.2 plus field/datatype. No transactional restoration of mutable column-index state on a helper error is provided in this dispatcher."
+        ],
+        [
+          121,
+          132,
+          "Public encoding_strategy consumes CompressionParams into shared Arc compression strategy and selects ordered reject_sparse, constant, dense_u32 page mechanisms. Constant comes before dense; sparse is explicitly rejected by a mechanism. Exact eligibility and serialized bytes live in encoder dependencies."
+        ],
+        [
+          133,
+          151,
+          "Public eager create_writer and create_writer_with_compression move object/schema/options and optional explicit CompressionParams to concrete try_new methods and propagate Result. They do not compute defaults or validate independently."
+        ],
+        [
+          152,
+          168,
+          "Public lazy factories move object/options and optional explicit tuning to infallible concrete new_lazy constructors. Documentation says schema inferred from first batch; wrapper has no inference or IO logic."
+        ],
+        [
+          169,
+          177,
+          "Public self-described/mini EncodedBatch helpers select true/false on exact V2_2 concat_lance_footer and return Result<Bytes>. No inline tests, format warning or unsafe code."
+        ]
+      ],
+      "limits": "Every physical line was read in ANALYZE53. No source execution/build/test was performed. Exact current-version reader/writer bodies are analyzed; delegated compression/encoder helper internals remain pending; delegated calls are not evidence of their full behavior. "
+    },
+    {
+      "path": "rust/lance-file/src/versions/v2_2/reader.rs",
+      "module": "L1-modules/rust-lance-file-readers.md",
+      "reviewed": true,
+      "role": "Exact V2_2 reader metadata/projection implementation inside a private reader child module. The parent publicly reexports three projection constructors and reexports metadata functions pub(crate); other pub declarations are implementation interfaces, not independently external API.",
+      "ranges": [
+        [
+          1,
+          17,
+          "SPDX/imports connect BTreeMap/Arc, core Schema/errors, ColumnInfo and pb21 grammar, file protobuf, shared structural normalization/projection, raw/cached/index metadata and ConcreteFileVersion. No IO scheduler, decompressor, plugin registry or environment input is used in this exact grammar validator."
+        ],
+        [
+          18,
+          25,
+          "Private required borrows Option<&T>, returns the same reference or InvalidInput source naming Lance v2.2, supplied label and missing nested encoding. It does not clone payloads or supply defaults."
+        ],
+        [
+          26,
+          45,
+          "Private validate_compressive_encoding requires compression oneof. Flat, InlineBitpacking and Constant immediately succeed without inspecting bit widths/data fields/literal size. Variable requires/revalidates offsets; OutOfLineBitpacking requires/revalidates values; Fsst likewise values. Local recursive validation has no explicit depth limit; external protobuf decode limits remain a separate concern."
+        ],
+        [
+          46,
+          55,
+          "Dictionary first requires and recursively validates indices, then items. Missing/invalid indices short-circuit before items. num_dictionary_items and index/value relationships are not checked. This is grammar validation, not decoding data bytes."
+        ],
+        [
+          56,
+          76,
+          "RLE requires both nested children, then demands direct Flat values at 8/16/32/64 bits with data=None and direct Flat8 run lengths with data=None. InvalidInput on any other shape; no recursive generic validation here because children must already be literal flat forms. Flat.data is an optional BufferCompression descriptor, not the encoded bytes; any present descriptor, including a default descriptor, is rejected (protos/encodings_v2_1.proto:419-425)."
+        ],
+        [
+          77,
+          107,
+          "ByteStreamSplit, General, FixedSizeList and PackedStruct require/revalidate values. VariablePackedStruct loops fields in order, requires each field.value and recursively validates; empty field list succeeds. Other packed field properties and width/schema correspondence are not checked. Missing compression variant errors; all other ancillary numeric/codec fields are unchecked locally."
+        ],
+        [
+          108,
+          133,
+          "MiniBlock requires has_large_chunk=true (u32 chunk grammar); false returns InvalidInput before rep/def/value/dictionary traversal. Validate optional rep then def, required value then optional dictionary. Absence of optional fields accepted; no buffer/chunk/row validation."
+        ],
+        [
+          134,
+          146,
+          "FullZip validates required value only. Constant validates optional rep then def encodings, otherwise succeeds; it does not reject or inspect inline_value presence/content. Thus both all-null and literal-bearing forms pass this local gate, subject to later decoding."
+        ],
+        [
+          147,
+          162,
+          "Blob requires inner_layout and recursively validates exact v2.2 grammar. Sparse always rejected, missing page-layout variant gets InvalidInput. No local depth limit; acceptance of syntax does not prove data payload validity."
+        ],
+        [
+          163,
+          179,
+          "decode_column enumerates every page: shared syntax decode PageLayout, exact validate_page_layout, then shared build_page_info. First syntax/grammar failure precedes that page alignment checks. Fallibly collect pages then shared build_column_info decodes column encoding. No local ColumnEncoding variant validator, physical data read or schema comparison. Empty page list still requires a valid column-encoding envelope (rust/lance-file/src/reader/structural.rs:118-155)."
+        ],
+        [
+          180,
+          194,
+          "decode_column_metadata enumerates and checked-converts zero-based indices to u32, decodes in order and collects Result<Vec<Arc<ColumnInfo>>>. Message says more than u32::MAX columns; actual guard is per-index and permits index u32::MAX. No parallelism; first error drops constructed Vec."
+        ],
+        [
+          195,
+          216,
+          "projection_from_field_ids forwards shared leaf traversal. Whole-schema projection first creates parent module mapping from entire schema. Name projection passes original full schema and its mapping to shared schema.project wrapper, so indices preserve original file numbering. Unknown mapping entries remain silently omitted until downstream checks; these functions add no new validation."
+        ],
+        [
+          217,
+          226,
+          "finish_metadata requires literal footer pair(2,2) before any alignment or grammar work; wrong pair returns VersionConflict with actual raw footer numbers and exact version message. Then validate_global_buffers and decode all column metadata in that order."
+        ],
+        [
+          227,
+          244,
+          "On success construct CachedFileMetadata moving raw schema, original protobuf columns, decoded infos, declared row count, descriptors, all four byte-accounting fields, file size and retained global bytes. Preserve literal major/minor; set exact ConcreteFileVersion::V2_2. Full metadata and normalized descriptors both remain retained. This function does not reconcile schema, total rows, counts, file bounds or byte-accounting totals and performs no IO."
+        ],
+        [
+          245,
+          248,
+          "validate_global_buffers delegates shared64-byte position-alignment check; no size/file-bound check at this boundary."
+        ],
+        [
+          249,
+          261,
+          "finish_metadata_index requires enum V2_2; mismatch uses actual enum standard footer tuple for VersionConflict. Matching identity then checks global-buffer alignment and returns index unchanged. Does not load/decode individual columns or establish projection eligibility/length. Global alignment error follows version check."
+        ],
+        [
+          262,
+          278,
+          "Private cfg(test) grammar_tests imports compression/layout types. flat(bits) constructs Flat with requested width and data=None without validation. No helper asserts the width itself."
+        ],
+        [
+          279,
+          300,
+          "rejects_nested_variable_width_rle builds RLE Flat32 values and Flat16 run lengths, nests as Dictionary indices with Flat32 items/count1, nests that in FullZip/default other fields. The disallowed shape here is sixteen-bit run lengths, not actual variable-width data payload."
+        ],
+        [
+          301,
+          308,
+          "Assert validate_page_layout errors and string contains flat values and flat u8 run lengths. No variant assertion, byte decode, file fixture or positive RLE matrix; nested wrapper traversal is what this test demonstrates. No unsafe/async functions in this file."
+        ]
+      ],
+      "limits": "All physical lines read in ANALYZE54. No source builds/tests/benchmarks run. Local metadata grammar, dispatch and projection behavior are covered; shared reader IO/cache orchestration and exact current writer pipelines are analyzed; delegated encoding byte decompression and backend lifecycle remain pending. Exact declarations/source appendix preserve every signature. No source modification."
+    },
+    {
+      "path": "rust/lance-file/src/versions/v2_3/compression.rs",
+      "module": "L1-modules/rust-lance-file-composition.md",
+      "reviewed": true,
+      "role": "Parent-visible unstable V2_3 compression Strategy: child RLE miniblocks, packed-struct per-value and variable RLE blocks.",
+      "ranges": [
+        [
+          1,
+          21,
+          "SPDX/imports bring Arc and core types; packed-struct per-value imported separately. Compared with V2_2, child RLE miniblock and variable RLE block helpers replace fixed-u8 RLE helpers. Common encoder traits/config/DataBlock remain shared."
+        ],
+        [
+          22,
+          31,
+          "Debug+Clone parent-visible Strategy owns private CompressionParams; new stores unchanged without validation or warning. Clone duplicates tuning; no mutable shared policy state is introduced."
+        ],
+        [
+          32,
+          40,
+          "field_params starts with self.params.get_field_params(field.name, field.data_type()), then merges parsed field metadata. Contextual implementation gives type params first, exact column params or first HashMap-iteration matching pattern next; each non-None field metadata value overrides that effective value (rust/lance-encoding/src/compression_config.rs:85-113; rust/lance-encoding/src/compression_config.rs:122-140). It uses local field name, not a constructed nested path. Pattern collision order is not made deterministic here. Metadata parsing/codec validity is delegated. No minichunk range guard is present in this version wrapper."
+        ],
+        [
+          41,
+          76,
+          "Compute effective field params once. Ordered first-match miniblock choice is explicit uncompressed fixed width, byte-stream split, RLE candidate, bitpacking, raw fixed width, variable width (fallible), fixed packed struct (fallible), raw fixed-size-list. Every None falls through; a helper Err stops selection. If no candidate returns a compressor, NotSupported names data.name(). Successful choice always passes finalize_miniblock_compressor(data, compressor, params), which may itself fail; this is selection, not execution of compression. The RLE candidate is try_child_rle_miniblock, enabling the helper-selected child grammar; eligibility and threshold details require its implementation."
+        ],
+        [
+          77,
+          101,
+          "create_per_value computes params then tries raw, fallible try_packed_struct_per_value(Arc::new(self.clone()),field,data), fallible variable-width helper with params. Clone/Arc allocated whenever raw declines, before packed helper recognition. Unlike V2_2 this calls the general packed helper, not try_variable_packed_struct_per_value. First match/error stops; unsupported block gives NotSupported."
+        ],
+        [
+          102,
+          128,
+          "create_block_compressor orders fallible variable RLE block, bitpacking, fallible general block, raw block. Effective params flow only to RLE/general. No match gives NotSupported block name. This Strategy emits no instability warning; outer writer factory owns that concern. No inline tests, async or unsafe code."
+        ]
+      ],
+      "limits": "Every physical line was read in ANALYZE53. No source execution/build/test was performed. Exact current-version reader/writer bodies are analyzed; delegated compression/encoder helper internals remain pending; delegated calls are not evidence of their full behavior. "
+    },
+    {
+      "path": "rust/lance-file/src/versions/v2_3/mod.rs",
+      "module": "L1-modules/rust-lance-file-composition.md",
+      "reviewed": true,
+      "role": "Public V2_3 composition module. It selects an ordered field-encoder and page-mechanism policy, reexports its exact reader/writer surface, and delegates physical column mapping to shared structural code.",
+      "ranges": [
+        [
+          1,
+          41,
+          "SPDX/version docs/imports mirror structural V2_2 selection plus AtomicBool/Ordering. Private compression/reader/writer own exact mechanisms. Arc shares policies and ReadProjection; object Writer is consumed only by factory calls."
+        ],
+        [
+          42,
+          55,
+          "Metadata decode/finish/index/global-buffer reexports are pub(crate); projection constructors and Writer public. read_projection composes shared structural engine with V2_3 reader::decode_column. Private process static WARNED_ON_UNSTABLE_FORMAT starts false; it is not per-writer, per-file or persistent configuration."
+        ],
+        [
+          56,
+          69,
+          "Public physical_column_count/data_file_columns and pub(super) field_id_to_column_index directly delegate shared leaf mapping. This module adds no separate column numbering or checked arithmetic."
+        ],
+        [
+          70,
+          91,
+          "Private Debug FieldStrategy owns primitive. Trait create_field_encoder tries binary Blob then structural Blob, propagating errors and returning first Some. Mutable column-index state is shared across candidates; no rollback is added here."
+        ],
+        [
+          92,
+          111,
+          "Unhandled Blob returns InvalidInput with name/datatype. Map then structural fixed-size-list then primitive are tried in that exact order, each short-circuiting. These helper names identify delegation, not universal type support."
+        ],
+        [
+          112,
+          128,
+          "Try list then struct, finally NotSupported identifying Lance v2.3/field/datatype. No data compression or asynchronous work is performed in this dispatcher itself."
+        ],
+        [
+          129,
+          140,
+          "encoding_strategy consumes tuning into Arc<compression::Strategy>, gives an Arc clone to sparse mechanism, then adds constant() with no compression argument and gives the original compression Arc to dense_u32. Only sparse and dense share this policy Arc. Ordered page choices are sparse, constant, dense_u32; no reject_sparse mechanism. Construction does not emit instability warning."
+        ],
+        [
+          141,
+          151,
+          "warn_unstable_format compare_exchange(false,true,Relaxed,Relaxed) makes at most one caller execute log::warn per process static lifetime; failed exchanges are ignored. Relaxed ordering is adequate for warning deduplication and publishes no other state. Warning says development/experimentation only and future unreadability; static becomes true even if logs filtered or later writer creation fails."
+        ],
+        [
+          152,
+          172,
+          "Eager create_writer and create_writer_with_compression call warning before corresponding fallible Writer factory. Warning is neither a format rejection nor evidence of successful file creation. Inputs moved, errors propagate. Direct use of public Writer or footer helpers is not guarded by these wrapper calls."
+        ],
+        [
+          173,
+          191,
+          "Lazy create_writer variants also warn before concrete infallible new_lazy methods, with/without explicit tuning. They can log before any batch/schema/file output exists."
+        ],
+        [
+          192,
+          200,
+          "Self-described and mini batch helpers call exact concat_lance_footer true/false and do not call warn_unstable_format. Both return Result<Bytes>; no inline tests or unsafe code."
+        ]
+      ],
+      "limits": "Every physical line was read in ANALYZE53. No source execution/build/test was performed. Exact current-version reader/writer bodies are analyzed; delegated compression/encoder helper internals remain pending; delegated calls are not evidence of their full behavior. "
+    },
+    {
+      "path": "rust/lance-file/src/versions/v2_3/reader.rs",
+      "module": "L1-modules/rust-lance-file-readers.md",
+      "reviewed": true,
+      "role": "Exact V2_3 reader metadata/projection implementation inside a private reader child module. The parent publicly reexports three projection constructors and reexports metadata functions pub(crate); other pub declarations are implementation interfaces, not independently external API.",
+      "ranges": [
+        [
+          1,
+          17,
+          "SPDX/imports connect BTreeMap/Arc, core Schema/errors, ColumnInfo and pb21 grammar, file protobuf, shared structural normalization/projection, raw/cached/index metadata and ConcreteFileVersion. No IO scheduler, decompressor, plugin registry or environment input is used in this exact grammar validator."
+        ],
+        [
+          18,
+          25,
+          "Private required borrows Option<&T>, returns the same reference or InvalidInput source naming Lance v2.3, supplied label and missing nested encoding. It does not clone payloads or supply defaults."
+        ],
+        [
+          26,
+          45,
+          "Private validate_compressive_encoding requires compression oneof. Flat, InlineBitpacking and Constant immediately succeed without inspecting bit widths/data fields/literal size. Variable requires/revalidates offsets; OutOfLineBitpacking requires/revalidates values; Fsst likewise values. Local recursive validation has no explicit depth limit; external protobuf decode limits remain a separate concern."
+        ],
+        [
+          46,
+          55,
+          "Dictionary first requires and recursively validates indices, then items. Missing/invalid indices short-circuit before items. num_dictionary_items and index/value relationships are not checked. This is grammar validation, not decoding data bytes."
+        ],
+        [
+          56,
+          76,
+          "RLE now recursively validates required values then required run lengths using full v2.3 grammar; direct Flat8 run lengths and fixed flat values are no longer mandatory here. ByteStreamSplit/General/FixedSizeList/PackedStruct likewise require/revalidate values only. No numeric width/domain/codec fields are checked on accepted leaf nodes."
+        ],
+        [
+          77,
+          90,
+          "VariablePackedStruct requires each field.value and recursively validates, first failure stops; empty fields accepted. Missing compression oneof returns v2.3 InvalidInput. Logical schema/child count and value decoding are outside this function."
+        ],
+        [
+          91,
+          108,
+          "validate_sparse_positions inspects only a present Positions::Explicit encoding and applies compressive validation; absent SparsePositionSet, absent positions oneof and nonexplicit variants all succeed. validate_sparse_validity does nothing for absent validity, otherwise delegates its optional positions. It does not require a complete set representation or check position ordering/count/range."
+        ],
+        [
+          109,
+          126,
+          "validate_sparse_layout first requires has_large_chunk=true, then required/validated value_compression. Iterate structural layers; Validity layer checks only optional validity set via helper. No check that layers is nonempty, num_slots agrees with row count or sparse data exists."
+        ],
+        [
+          127,
+          147,
+          "List layer validates optional non_empty_positions, only explicit counts encoding, then optional validity. Absent count set/oneof and nonexplicit counts pass. FixedSizeList checks only optional validity. Missing structural layer variant returns InvalidInput; all layers otherwise complete with Ok. Fixed-size dimension/counts/slot arithmetic are not checked here."
+        ],
+        [
+          148,
+          172,
+          "validate_page_layout MiniBlock requires has_large_chunk=true then traverses optional rep, optional def, required values and optional dictionary in order. Error precedence follows this order; this dense page branch is separate from sparse layout checks."
+        ],
+        [
+          173,
+          200,
+          "FullZip validates required value only. Constant validates optional rep/def and leaves inline_value unchecked. Sparse invokes validate_sparse_layout; Blob requires inner_layout then recursive exact validation. Missing layout errors. No local recursion limit, file-bound/data-byte/codec-level validation or fallback to earlier grammar."
+        ],
+        [
+          201,
+          217,
+          "decode_column enumerates every page: shared syntax decode PageLayout, exact validate_page_layout, then shared build_page_info. First syntax/grammar failure precedes that page alignment checks. Fallibly collect pages then shared build_column_info decodes column encoding. No local ColumnEncoding variant validator, physical data read or schema comparison. Empty page list still requires a valid column-encoding envelope (rust/lance-file/src/reader/structural.rs:118-155)."
+        ],
+        [
+          218,
+          232,
+          "decode_column_metadata enumerates and checked-converts zero-based indices to u32, decodes in order and collects Result<Vec<Arc<ColumnInfo>>>. Message says more than u32::MAX columns; actual guard is per-index and permits index u32::MAX. No parallelism; first error drops constructed Vec."
+        ],
+        [
+          233,
+          254,
+          "projection_from_field_ids forwards shared leaf traversal. Whole-schema projection first creates parent module mapping from entire schema. Name projection passes original full schema and its mapping to shared schema.project wrapper, so indices preserve original file numbering. Unknown mapping entries remain silently omitted until downstream checks; these functions add no new validation."
+        ],
+        [
+          255,
+          264,
+          "finish_metadata requires literal footer pair(2,3) before any alignment or grammar work; wrong pair returns VersionConflict with actual raw footer numbers and exact version message. Then validate_global_buffers and decode all column metadata in that order."
+        ],
+        [
+          265,
+          282,
+          "On success construct CachedFileMetadata moving raw schema, original protobuf columns, decoded infos, declared row count, descriptors, all four byte-accounting fields, file size and retained global bytes. Preserve literal major/minor; set exact ConcreteFileVersion::V2_3. Full metadata and normalized descriptors both remain retained. This function does not reconcile schema, total rows, counts, file bounds or byte-accounting totals and performs no IO."
+        ],
+        [
+          283,
+          286,
+          "validate_global_buffers delegates shared64-byte position-alignment check; no size/file-bound check at this boundary."
+        ],
+        [
+          287,
+          299,
+          "finish_metadata_index requires enum V2_3; mismatch uses actual enum standard footer tuple for VersionConflict. Matching identity then checks global-buffer alignment and returns index unchanged. Does not load/decode individual columns or establish projection eligibility/length. Global alignment error follows version check."
+        ],
+        [
+          300,
+          316,
+          "Private cfg(test) grammar_tests imports pb21 types and defines flat(bits) with data=None. No sparse fixture appears in this file despite v2.3 sparse validation code."
+        ],
+        [
+          317,
+          338,
+          "accepts_nested_variable_width_rle uses Flat32 RLE values with Flat16 run lengths, nested as Dictionary indices with Flat32 items/count1, then FullZip with defaults. It is structurally the v2.2 rejection fixture with opposite outcome; name variable_width describes broader grammar, not a constructed Variable encoding."
+        ],
+        [
+          339,
+          341,
+          "The sole test unwraps validate_page_layout success. It asserts local grammar acceptance only, not actual compression/decompression, offsets, data correctness or compatibility. No async/unsafe code and no source test execution."
+        ]
+      ],
+      "limits": "All physical lines read in ANALYZE54. No source builds/tests/benchmarks run. Local metadata grammar, dispatch and projection behavior are covered; shared reader IO/cache orchestration and exact current writer pipelines are analyzed; delegated encoding byte decompression and backend lifecycle remain pending. Exact declarations/source appendix preserve every signature. No source modification."
+    },
+    {
+      "path": "rust/lance-table/src/format/manifest.rs",
+      "module": "L1-modules/rust-lance-table.md",
+      "reviewed": true,
+      "role": "In-memory dataset manifest, metadata transformations, fragment accounting, protobuf conversion, writer/version descriptors and frozen V1 self-describing reader adapter. Selected public types/functions are reexported by format; ManifestSummary and VersionPart are public inside the private child but not reexported.",
+      "ranges": [
+        [
+          1,
+          31,
+          "SPDX/imports connect async_trait, Bytes, chrono, DeepSizeOf, file schema adapters/exact versions and V1 dictionaries/reader, IO ProtoStruct/Reader/read_struct, Path, prost/Timestamp, maps/ranges/Arc, Fragment/interner/row IDs, feature bits, LanceCache/Schema/errors and ObjectStore/Registry. External IO/file parsing implementations remain pending."
+        ],
+        [
+          32,
+          109,
+          "Manifest derives Debug/Clone/PartialEq/DeepSizeOf. Public fields hold schema, dataset version/branch, optional writer version, Arc<Vec<Fragment>>, aux/index/transaction positions, u128 nanosecond timestamp, tag, reader/writer words, optional u32 max-fragment high-water mark, optional transaction path, next_row_id:u64, exact DataStorageFormat, config/table_metadata/base_paths maps. Only fragment_offsets:Vec<usize> is private. Docs require fragments sorted by ID with gaps, but constructors/conversion below do not sort or enforce this; public fragments replacement can stale the private offsets. Dataset version, writer-library version and data-file version are separate values."
+        ],
+        [
+          110,
+          129,
+          "DETACHED_VERSION_MASK is bit63 (0x8000000000000000); is_detached_version tests it only. compute_fragment_offsets maps each Fragment::num_rows().unwrap_or_default(), chains final zero, and scans prefix sums into N+1 entries, including terminal total (empty list->[0]). Unknown row count contributes zero; ordinary usize addition is unchecked. It preserves fragment order and performs no row-ID mapping."
+        ],
+        [
+          130,
+          172,
+          "Default ManifestSummary has seven u64 counters. Consuming conversion to BTreeMap<String,String> writes exactly total_fragments, total_data_files, total_files_size, total_deletion_files, total_data_file_rows, total_deletion_file_rows, total_rows, all decimal strings. Type is pub in private module, not facade-reexported, though callers can infer the summary return type and use its public fields."
+        ],
+        [
+          173,
+          205,
+          "Manifest::new accepts owned Schema, shared fragment Vec, storage format and base-path map; computes offsets, starts version1/current WriterVersion, zero timestamp/feature words/aux position/next row ID, absent branch/tag/index/transaction/high-water mark, and empty config/table metadata. It does not inspect formats, assign fragment IDs, validate schema/carriers or perform IO."
+        ],
+        [
+          206,
+          236,
+          "new_from_previous uses supplied schema/fragments and recomputed offsets; increments previous version with unchecked +1, retains branch/high-water/next row ID/storage/config/table metadata/bases and refreshes writer version. It clears aux/index/time/tag/transaction references and preserves only STICKY_PAIRED_FLAGS separately in reader/writer words. It neither normalizes nor validates half-set pairs and does not preserve covered-index bit here. Caller must restore index metadata as comment states."
+        ],
+        [
+          237,
+          269,
+          "shallow_clone is in-memory: clones each Fragment, stamps ref_base_id only on base and overlay DataFiles whose base_id is None via referenced_lance_files_mut, and similarly stamps local deletion descriptor. Existing external base IDs remain. Inline/column metadata remains cloned; no files are opened/copied."
+        ],
+        [
+          270,
+          309,
+          "Shallow clone keeps source version/writer/aux position/time/high-water/offsets/next row ID/storage/config/table metadata, uses new branch and transaction_file=Some(input), clears tag/index/transaction_section, and allocates a new fragment Arc. It masks each feature word to covered-index bit OR sticky pairs, preserving each side independently. Source comments justify conservative covered-index retention; index metadata copy happens outside this function. Base map is cloned and insert(ref_base_id, BasePath(...,is_dataset_root=true)) can replace an existing entry without collision validation."
+        ],
+        [
+          310,
+          340,
+          "timestamp splits u128 nanos into remainder<1e9 and casts whole seconds to i64, uses chrono from_timestamp with unwrap_or_default fallback for unrepresentable date, then Utc. No error returned. set_timestamp actually accepts u128 raw nanos despite DateTime doc wording. config_mut/table_metadata_mut/schema_metadata_mut return mutable maps with no validation, persistence or feature recomputation."
+        ],
+        [
+          341,
+          362,
+          "field_metadata_mut delegates recursive schema field_by_id_mut then yields metadata or None. Deprecated update_config extends config with key overwrite semantics; deprecated delete_config_keys retains entries whose names are absent from supplied slice. No table configuration semantics are checked."
+        ],
+        [
+          363,
+          390,
+          "Deprecated replace_schema_metadata replaces whole schema map. Deprecated replace_field_metadata replaces selected field map and returns Ok, or InvalidInput with field ID if missing. The preceding no-op comment is inconsistent with the implemented error branch; document the error as behavior. No primary-key validation is invoked."
+        ],
+        [
+          391,
+          420,
+          "detach_sparse_inline_row_ids sums visible lengths of Inline row-ID payloads (not deduplicated, not created/updated versions). Returns unchanged if sum==0 or sum.saturating_mul(4)>=buffer_len, preserving exact quarter boundary. Otherwise Arc::make_mut obtains fragments and each Inline gets Bytes::copy_from_slice wrapped in a fresh InlineRowIds (new digest memo); other metadata unchanged. A shared fragments Arc triggers clone-on-write. Caller-provided buffer_len is trusted; whole original buffer release is not guaranteed while other owners/slices survive. Ordinary sum can overflow; multiplication is saturating."
+        ],
+        [
+          421,
+          451,
+          "update_max_fragment_id returns for empty fragments, otherwise takes maximum u64 ID then try_into u32 and unwraps (panic above u32::MAX). It initializes absent mark or raises it only, retaining historic high water after deletes. No Result or ID validation; a stored larger mark is preserved."
+        ],
+        [
+          452,
+          486,
+          "max_fragment_id returns stored u32 mark widened to u64 if present, otherwise computes maximum existing fragment ID, with None only for unset+empty. max_field_id compares schema max (default-1) with every field ID in base and overlay referenced files (default-1); includes dropped schema fields and does not explicitly filter tombstone or reserved IDs. No field IDs are assigned."
+        ],
+        [
+          487,
+          504,
+          "fragments_since rejects since.version>=self.version, including equality, with InvalidInput describing newer version. It uses since.max_fragment_id as threshold and clones current fragments with strictly greater IDs, or all if absent. This is an ID-high-water heuristic, not content comparison; docs exclude recycling and it does not validate common lineage/branch."
+        ],
+        [
+          505,
+          541,
+          "fragments_by_offset_range uses logical row offsets, not row IDs: binary_search start in cached N+1 prefix offsets, otherwise insertion index minus1, then walk fragment indices. Break when fragment start>=end OR fragment end<=start; append(start,&Fragment) otherwise. Unknown current length acts as zero. It does not validate/recompute offsets, sort, deduplicate equal offsets or explicitly validate empty/reversed ranges. Duplicated offsets/zero-length fragments may select a zero-length entry and break before later data; callers need valid coherent counts. Returned elements borrow fragments, despite doc return wording showing owned Fragment."
+        ],
+        [
+          542,
+          553,
+          "uses_stable_row_ids checks reader word FLAG_STABLE_ROW_IDS only, not per-fragment metadata or writer word. serialized builds pb::Manifest then encode_to_vec: raw protobuf bytes suitable for IPC/temp storage, not a complete on-disk manifest with footer/sections/dictionaries."
+        ],
+        [
+          554,
+          600,
+          "summary folds fragments: total_data_files counts base f.files only and total_files_size sums only known sizes of those base files, excluding overlays/deletion/index files despite broad docs. total_rows sums only known f.num_rows; deletion_file presence counts even if deleted count unknown, known deletion counts sum separately. total_fragments is Vec length; total_data_file_rows=total_rows+total_deletion_file_rows, not sum of all physical counts when some lengths unknown. Ordinary u64 additions are unchecked; no IO resolves missing sizes/counts."
+        ],
+        [
+          601,
+          634,
+          "Async populate_manifest_schema_dictionaries is a V1 compatibility adapter. Exact V1 delegates populate_schema_dictionaries(&mut schema,reader).await; V2_0/V2_1/V2_2/V2_3 are explicit no-ops. No version selector or writer-library comparison is used. Included doctest wraps an async Result function, not ignore; it was not compiled."
+        ],
+        [
+          635,
+          669,
+          "BasePath stores public id:u32, optional name, is_dataset_root:bool and full URI/path String. new assigns without URI/ID validation; extract_path synchronously delegates ObjectStore::extract_path_from_uri(registry,&path), propagating Result. Actual parsing/registry behavior is pending; no store initialization in this body."
+        ],
+        [
+          670,
+          677,
+          "BasePath custom DeepSizeOf children adds name children + twice path children + size_of<bool>(). This literally overcounts path allocation relative to normal one-string ownership and adds inline bool as a child; source gives no rationale. It is an estimator, not measured retained heap."
+        ],
+        [
+          678,
+          724,
+          "WriterVersion stores public library/version Strings plus optional prerelease/build metadata. DataStorageFormat stores public file_format:String and ConcreteFileVersion; new uses literal lance, getter returns exact enum, Default uses stable_file_version() resolved elsewhere. TryFrom protobuf preserves file_format without checking it equals lance and parses version via from_manifest_string. Exact mappings are now covered at rust/lance-file/src/version.rs:19-27 and rust/lance-file/src/version.rs:172-261; selector acceptance remains distinct from persisted strings."
+        ],
+        [
+          725,
+          761,
+          "ManifestBuildConfig is a data-only public Debug/Clone struct with auto_set_feature_flags, resolved timestamp_nanos, use_stable_row_ids, optional legacy mode/storage_format, disable_transaction_file, migration_next_row_id and Arc<SpilledRowLineage>. Docs specify sticky row IDs, overwrite-only storage override precedence, migration bypass and prefetched spilled sequences needed for rewrite/update; no enforcement/default implementation occurs in this file. Clock resolution deliberately belongs to caller; cfg(test) clock mocking in lance is a source comment, consumer implementation pending."
+        ],
+        [
+          762,
+          785,
+          "VersionPart Major/Minor/Patch is pub in private module with no facade reexport. Private bump_version increments chosen semver u64 component, resets lower components for major/minor, leaves prerelease/build intact and uses ordinary unchecked additions."
+        ],
+        [
+          786,
+          816,
+          "Private split_version parses semver, returns None on error, extracts nonempty pre/build as optional Strings, clears both in parsed object and returns clean major.minor.patch plus separate components. Docs include rc/build/invalid examples. No library check here."
+        ],
+        [
+          817,
+          838,
+          "Deprecated semver is a distinct lenient parser: split self.version at first dash, parse first three dot-separated components as u32 with missing minor/patch default0, return remainder after dash as optional borrowed tag. Extra dot parts are ignored, explicit prerelease/build fields and library are ignored; plus-build in patch can cause parse failure. It is not equivalent to full semver::Version parsing despite doc wording."
+        ],
+        [
+          839,
+          863,
+          "lance_lib_version rejects library != exact lowercase lance, parses self.version with semver, then when separate prerelease/build fields are Some parses and overwrites corresponding parsed components. None leaves components embedded in version string intact. Any parse error returns None. Arbitrary nonsemver WriterVersion values remain constructible; only this interpretation fails."
+        ],
+        [
+          864,
+          910,
+          "Deprecated semver_or_panic wraps old parser and panics with raw version on failure. older_than uses lance_lib_version().expect then compares against release major/minor/patch with empty pre/build, so prerelease ordering follows semver. Deprecated bump expects valid Lance version, increments numeric part, clears only prerelease if keep_tag=false (build retained), splits back to clean fields and clones library. Non-Lance/invalid versions panic; future-private wording is intent, not current restriction."
+        ],
+        [
+          911,
+          941,
+          "WriterVersion Default outside cfg(test) parses compile-time CARGO_PKG_VERSION and emits library lance, clean version and separate pre/build, panicking if invalid. Under this crate cfg(test), same fields then bump(Patch,true), retaining pre/build but using next patch. Dependency builds do not automatically inherit cfg(test); no actual Cargo version value is asserted here."
+        ],
+        [
+          942,
+          962,
+          "ProtoStruct maps Manifest::Proto=pb::Manifest. BasePath From conversions copy/move matching id/name/root/path fields, no URI/duplicate validation. Converting owned BasePath to protobuf consumes Strings."
+        ],
+        [
+          963,
+          987,
+          "Manifest TryFrom starts timestamp conversion by casting signed seconds/nanos to u128 then sec*1e9+nanos; absent timestamp defaults later to0. Negative or out-of-range values are not validated and casts/arithmetic can wrap/panic according to overflow policy. Any Some writer_version message becomes Some even with empty library/version; the fully-set comment does not enforce nonempty fields."
+        ],
+        [
+          988,
+          1005,
+          "A fresh DataFileFieldInterner converts all protobuf fragments, sharing repeated base field/column lists and inline version bytes across this manifest, preserving fragment order. It computes logical offsets and wraps fields/schema metadata. If reader stable-row bit is set but any fragment lacks row_id_meta, returns Internal All fragments must have row ids; empty fragment set passes. It does not decode inline sequences or validate Column carriers."
+        ],
+        [
+          1006,
+          1024,
+          "If data_format absent, infer exact version from all base/overlay files, rejecting mixed versions; with no files use stable_file_version when deprecated writer bit2 set, else V1. If data_format present, trust converted DataStorageFormat without comparing per-file versions. Then convert schema via FieldsWithMeta. This conversion alone does not invoke ensure_can_read_manifest/paired flag checks or reject fragment_tree."
+        ],
+        [
+          1025,
+          1057,
+          "Final Manifest retains raw version/branch/flags/high-water/next row/config/table metadata, casts aux/index/transaction offsets to usize without checked conversion, normalizes empty tag/transaction_file to None, and collects base-path entries by id into HashMap (later duplicate ID replaces earlier). Uses converted fragments/schema/format and computed offsets. Unknown/ignored protobuf fields including fragment_tree have no Rust representation here."
+        ],
+        [
+          1058,
+          1090,
+          "Manifest->protobuf omits timestamp if nanos==0, else divides into seconds cast i64 and subsecond i32 without overflow validation. Converts schema through FieldsWithMeta and separately encodes schema metadata String values as UTF8 Vec; clones branch/writer strings including separate pre/build and converts fragments in order. This conversion does not validate inputs."
+        ],
+        [
+          1091,
+          1125,
+          "Output sets fragment_tree=None, preserves metadata/flags/high-water/counts, casts usize positions to u64, writes absent tag/transaction file as empty String, always includes data_format with exact to_manifest_string, clones config and emits base_paths from HashMap values in unspecified order. transaction_section presence retained. This is a protobuf object conversion, not atomic manifest publication or canonical byte ordering."
+        ],
+        [
+          1126,
+          1154,
+          "Public async_trait SelfDescribingFileReader offers default try_new_self_described(ObjectStore,Path,optional&LanceCache): await store.open, convert reader into Arc then delegate required try_new_self_described_from_reader. Both require Self:Sized; from_reader accepts Arc<dyn Reader>. Docs prefer fragment readers for cached schemas; no caching algorithm or format detection is implemented by the trait default."
+        ],
+        [
+          1155,
+          1183,
+          "Only implementation here is V1FileReader: read_metadata(reader,cache), require metadata.manifest_position or Internal with reader path, read_struct<Manifest> at position, hydrate V1 dictionaries, take schema/max_field_id(default0), then call V1 try_new_from_reader with path, reader clone, Some(metadata), schema, numeric0,0,max ID and cache. Errors propagate at awaits; compatibility adapter does not add a V2 self-describing implementation. The numeric arguments are fragment_id=0, field_id_offset=0 and schema max_field_id. Complete V1 reader construction/cache/metadata behavior is now covered (rust/lance-file/src/versions/v1/reader.rs:165-294); backend IO remains pending."
+        ],
+        [
+          1184,
+          1238,
+          "cfg(test) imports feature bit, overlay/data/deletion types, Arrow/core fields and bitmap. Shallow clone fixture with one base and one overlay asserts both local base IDs become7. It does not assert existing external IDs, deletion stamping, feature retention, URI behavior or disk clone."
+        ],
+        [
+          1239,
+          1275,
+          "Old empty manifest fixture with absent data_format recovers V1 without deprecated writer bit, current stable with it. Persistence rejection loops stable,next,legacy,0.3 and asserts conversion error. These are constructed protobuf values, not released historical fixtures or proof all version aliases are covered."
+        ],
+        [
+          1276,
+          1333,
+          "Canonical output fixture asserts V2_0 serializes version string2.0. Missing-format fixture recovers exact V2_0 from a file even when prior in-memory storage field was V1, then rejects V2_0/V2_1 files when protobuf format is removed. Explicit-format mixed-version validation is not tested here."
+        ],
+        [
+          1334,
+          1368,
+          "Detach fixture holds two10-byte slices of one64-byte buffer, supplies logical buffer_len80 then81. Exact quarter retains original pointers; below quarter copies both pointers outside original allocation and verifies second payload contents. It trusts the provided length, does not assert deallocation/RSS, Arc sharing or digest behavior."
+        ],
+        [
+          1369,
+          1422,
+          "Writer default fixture asserts lance, three-part clean version, cargo prerelease tag, no build metadata for this package, reconstructed Cargo major/minor and patch+1 under cfg(test), and each numeric bump produces greater version. expected_tag is split from Cargo text; fixture assumes package metadata layout, not a general parser proof."
+        ],
+        [
+          1423,
+          1455,
+          "Split-version test covers release, rc.1, rc.1+build.123, build-only and invalid string, with exact clean/pre/build components. Does not cover the deprecated lenient parser."
+        ],
+        [
+          1456,
+          1514,
+          "Writer tests compare rc.1<release, reconstruct rc.1+build.123 and all numeric/pre/build fields, and allow nonsemver WriterVersion custom-build-v1 while lance_lib_version returns None. No other-library or invalid separate-component fixture."
+        ],
+        [
+          1515,
+          1548,
+          "Deprecated older_than fixture requires rc2.0.0 below2.0.0/2.0.1 but not1.9.9, release2.0.0 not older than itself but older than2.0.1. Panic behavior for invalid/non-Lance input is not tested."
+        ],
+        [
+          1549,
+          1594,
+          "Offset-range fixture has three fragments of10/15/20 rows, expects0..10 first only,5..15 first two,15..50 latter two at offsets10/25;45..100 and200..400 empty. It does not cover zero/unknown counts, reversed/empty interior ranges or stale offsets."
+        ],
+        [
+          1595,
+          1648,
+          "Max-field fixture uses schema IDs0/2, multiple files/fragments including dropped ID43 and expects43. Tests dropped physical IDs beyond schema maximum without reading data or assigning IDs through Manifest."
+        ],
+        [
+          1649,
+          1684,
+          "Overlay max-field fixture puts ID43 only in overlay over base0 and expects43, proving referenced overlay IDs participate in high-water calculation. No tombstone/reserved-ID boundary case."
+        ],
+        [
+          1685,
+          1716,
+          "Config fixture constructs three-fragment manifest, extends config_mut with two keys and removes one; equality confirms in-memory map mutation. It does not recompute feature flags, persist metadata or test deprecated APIs."
+        ],
+        [
+          1717,
+          1786,
+          "Summary test starts empty manifest (all seven zero), two known-zero fragments (two files/fragments but zero rows/sizes), then three in-memory fragments100/250/75 (425 rows, three files, unknown sizes contribute0). Comments saying write files do not correspond to IO in this test."
+        ],
+        [
+          1787,
+          1825,
+          "Summary deletion fixture sets one known1000-byte file/50 physical rows/10 deleted, expects40 live,50 total-data rows,10 deleted and one deletion/file/fragment, then seven string-map entries. Overlay omission and unknown physical/deleted-count combinations are not tested. All file tests/doctest were read, not executed."
+        ]
+      ],
+      "limits": "All1825 lines read in bounded chunks. Visibility facade: rust/lance-table/src/format.rs:21-25. Local metadata conversion, counters and helpers are covered; transaction builder enforcement, commit flags/support checks, IO framing, full RowIdSequence and dataset consumers remain pending; nested wire codecs are now covered at rust/lance-table/src/rowids/serde.rs:1-884. Exact file-version, overlay and row-version implementations are now covered in their own L2 entries. No build/test/benchmark, file-format release qualification or external-dependency behavior verification was performed."
+    }
+  ],
+  "changes": [
+    {
+      "document": "L1-modules/rust-lance-file.md",
+      "before": "delegated modern encoding/IO scheduling and the [full V1 reader](rust-lance-file-v1-reader.md) is covered; V1 writer/statistics remain pending.",
+      "after": "the [full V1 reader](rust-lance-file-v1-reader.md) is covered. Delegated modern encoding/IO scheduling and V1 writer/statistics remain pending.",
+      "reason": "Nonrandom VERIFY scope review found an ambiguous coordination introduced by status refresh; the replacement explicitly keeps modern encoding/IO scheduling pending."
+    },
+    {
+      "document": "L4-crosscutting/cookbook.md",
+      "before": "AGENTS.md:81-87",
+      "after": "AGENTS.md:82-91",
+      "reason": "Widen citation to include the actual historical-fixture requirement at line91; fresh root guide reviewed."
+    },
+    {
+      "path": "rust/lance-file/src/datatypes.rs",
+      "kind": "coverage status",
+      "before": "All565 lines read and authored. Callers include the analyzed table format conversion and contextual reader decode_schema at rust/lance-file/src/reader.rs:942-952. Core Field conversion has already been analyzed. Full reader/writer and historical fixture coverage remain pending; local roundtrip tests were read only.",
+      "after": "All565 lines read and authored. Callers include the analyzed table format conversion and contextual reader decode_schema at rust/lance-file/src/reader.rs:942-952. Core Field conversion has already been analyzed. Shared current reader and exact current writers are analyzed, and the complete V1 reader is now covered. V1 writer/statistics and binary historical fixture payloads remain pending; local roundtrip tests were read only.",
+      "reason": "Nonrandom VERIFY found stale remaining-scope wording; current MANIFEST confirms the named file-reader/writer analyses."
+    },
+    {
+      "path": "rust/lance-file/src/reader/structural.rs",
+      "kind": "coverage status",
+      "before": "Every physical line was read in ANALYZE53. No source execution/build/test was performed. Exact version reader/writer bodies and compression/encoder helper internals remain separately pending; delegated calls are not evidence of their full behavior. ",
+      "after": "Every physical line was read in ANALYZE53. No source execution/build/test was performed. Exact current-version reader/writer bodies are analyzed; delegated compression/encoder helper internals remain pending; delegated calls are not evidence of their full behavior. ",
+      "reason": "Nonrandom VERIFY found stale remaining-scope wording; current MANIFEST confirms the named file-reader/writer analyses."
+    },
+    {
+      "path": "rust/lance-file/src/testing.rs",
+      "kind": "coverage status",
+      "before": "All123 lines read. Helpers use unwrap/assert extensively and return values rather than Result. No source tests or IO were executed. ObjectStore/scheduler/reader and decoder internals remain pending; no performance or durability result follows from these harness bodies.",
+      "after": "All123 lines read. Helpers use unwrap/assert extensively and return values rather than Result. No source tests or IO were executed. ObjectStore/scheduler and delegated decoder internals remain pending; the full shared file reader is analyzed; no performance or durability result follows from these harness bodies.",
+      "reason": "Nonrandom VERIFY found stale remaining-scope wording; current MANIFEST confirms the named file-reader/writer analyses."
+    },
+    {
+      "path": "rust/lance-file/src/versions/mod.rs",
+      "kind": "coverage status",
+      "before": "All428 lines read. Every local exhaustive dispatch and wrapper contract is authored; version-specific grammars and reader internals remain pending. Preserve the distinction between policy selection in version.rs, exact identity here and actual page/metadata mechanisms in version modules.",
+      "after": "All428 lines read. Every local exhaustive dispatch and wrapper contract is authored; exact current-version grammars, writers and shared/V1 readers are analyzed; delegated encoding and backend internals remain pending. Preserve the distinction between policy selection in version.rs, exact identity here and actual page/metadata mechanisms in version modules.",
+      "reason": "Nonrandom VERIFY found stale remaining-scope wording; current MANIFEST confirms the named file-reader/writer analyses."
+    },
+    {
+      "path": "rust/lance-file/src/versions/mod.rs",
+      "start": 315,
+      "end": 327,
+      "before": "open_self_described_reader takes FileScheduler,Arc<DecoderPlugins>,borrowed LanceCache,FileReaderOptions and awaits FileReader::try_open_for_dispatch with None metadata. Docs say its optimistic tail read detects exact identity without a separate footer probe; actual IO/caching costs require reader analysis. Returned enum retains V1 detection rather than constructing a v1 writer/reader here.",
+      "after": "open_self_described_reader takes FileScheduler,Arc<DecoderPlugins>,borrowed LanceCache,FileReaderOptions and awaits FileReader::try_open_for_dispatch with None metadata. Docs say its optimistic tail read detects exact identity without a separate footer probe; shared reader IO/cache orchestration is now analyzed, while delegated backend cost remains unmeasured. Returned enum retains V1 detection rather than constructing a v1 writer/reader here.",
+      "reason": "Nonrandom scope clarification reconciles completed file analyses with the remaining delegated mechanisms."
+    },
+    {
+      "path": "rust/lance-file/src/versions/mod.rs",
+      "start": 374,
+      "end": 402,
+      "before": "encode_self_described_batch and encode_mini_batch borrow EncodedBatch and dispatch to exact V2 encoder Result<Bytes>; V1 returns separate NotSupported messages. No automatic alias resolution or batch-version reconciliation occurs in this root; concrete format framing is pending.",
+      "after": "encode_self_described_batch and encode_mini_batch borrow EncodedBatch and dispatch to exact V2 encoder Result<Bytes>; V1 returns separate NotSupported messages. No automatic alias resolution or batch-version reconciliation occurs in this root; concrete file framing is now covered in the exact writer/shared structural analyses; codec payload internals remain pending.",
+      "reason": "Nonrandom scope clarification reconciles completed file analyses with the remaining delegated mechanisms."
+    },
+    {
+      "path": "rust/lance-file/src/versions/v2_0/mod.rs",
+      "kind": "coverage status",
+      "before": "Every physical line was read in ANALYZE53. No source execution/build/test was performed. Exact version reader/writer bodies and compression/encoder helper internals remain separately pending; delegated calls are not evidence of their full behavior. ",
+      "after": "Every physical line was read in ANALYZE53. No source execution/build/test was performed. Exact current-version reader/writer bodies are analyzed; delegated compression/encoder helper internals remain pending; delegated calls are not evidence of their full behavior. ",
+      "reason": "Nonrandom VERIFY found stale remaining-scope wording; current MANIFEST confirms the named file-reader/writer analyses."
+    },
+    {
+      "path": "rust/lance-file/src/versions/v2_0/reader.rs",
+      "kind": "coverage status",
+      "before": "All physical lines read in ANALYZE54. No source builds/tests/benchmarks run. Local metadata grammar, dispatch and projection behavior are covered; full reader IO/cache lifecycle, encoding byte decompression and concrete writer pipelines remain pending. Exact declarations/source appendix preserve every signature. No source modification.",
+      "after": "All physical lines read in ANALYZE54. No source builds/tests/benchmarks run. Local metadata grammar, dispatch and projection behavior are covered; shared reader IO/cache orchestration and exact current writer pipelines are analyzed; delegated encoding byte decompression and backend lifecycle remain pending. Exact declarations/source appendix preserve every signature. No source modification.",
+      "reason": "Nonrandom VERIFY found stale remaining-scope wording; current MANIFEST confirms the named file-reader/writer analyses."
+    },
+    {
+      "path": "rust/lance-file/src/versions/v2_1/compression.rs",
+      "kind": "coverage status",
+      "before": "Every physical line was read in ANALYZE53. No source execution/build/test was performed. Exact version reader/writer bodies and compression/encoder helper internals remain separately pending; delegated calls are not evidence of their full behavior. ",
+      "after": "Every physical line was read in ANALYZE53. No source execution/build/test was performed. Exact current-version reader/writer bodies are analyzed; delegated compression/encoder helper internals remain pending; delegated calls are not evidence of their full behavior. ",
+      "reason": "Nonrandom VERIFY found stale remaining-scope wording; current MANIFEST confirms the named file-reader/writer analyses."
+    },
+    {
+      "path": "rust/lance-file/src/versions/v2_1/mod.rs",
+      "kind": "coverage status",
+      "before": "Every physical line was read in ANALYZE53. No source execution/build/test was performed. Exact version reader/writer bodies and compression/encoder helper internals remain separately pending; delegated calls are not evidence of their full behavior. ",
+      "after": "Every physical line was read in ANALYZE53. No source execution/build/test was performed. Exact current-version reader/writer bodies are analyzed; delegated compression/encoder helper internals remain pending; delegated calls are not evidence of their full behavior. ",
+      "reason": "Nonrandom VERIFY found stale remaining-scope wording; current MANIFEST confirms the named file-reader/writer analyses."
+    },
+    {
+      "path": "rust/lance-file/src/versions/v2_1/reader.rs",
+      "kind": "coverage status",
+      "before": "All physical lines read in ANALYZE54. No source builds/tests/benchmarks run. Local metadata grammar, dispatch and projection behavior are covered; full reader IO/cache lifecycle, encoding byte decompression and concrete writer pipelines remain pending. Exact declarations/source appendix preserve every signature. No source modification.",
+      "after": "All physical lines read in ANALYZE54. No source builds/tests/benchmarks run. Local metadata grammar, dispatch and projection behavior are covered; shared reader IO/cache orchestration and exact current writer pipelines are analyzed; delegated encoding byte decompression and backend lifecycle remain pending. Exact declarations/source appendix preserve every signature. No source modification.",
+      "reason": "Nonrandom VERIFY found stale remaining-scope wording; current MANIFEST confirms the named file-reader/writer analyses."
+    },
+    {
+      "path": "rust/lance-file/src/versions/v2_2/compression.rs",
+      "kind": "coverage status",
+      "before": "Every physical line was read in ANALYZE53. No source execution/build/test was performed. Exact version reader/writer bodies and compression/encoder helper internals remain separately pending; delegated calls are not evidence of their full behavior. ",
+      "after": "Every physical line was read in ANALYZE53. No source execution/build/test was performed. Exact current-version reader/writer bodies are analyzed; delegated compression/encoder helper internals remain pending; delegated calls are not evidence of their full behavior. ",
+      "reason": "Nonrandom VERIFY found stale remaining-scope wording; current MANIFEST confirms the named file-reader/writer analyses."
+    },
+    {
+      "path": "rust/lance-file/src/versions/v2_2/mod.rs",
+      "kind": "coverage status",
+      "before": "Every physical line was read in ANALYZE53. No source execution/build/test was performed. Exact version reader/writer bodies and compression/encoder helper internals remain separately pending; delegated calls are not evidence of their full behavior. ",
+      "after": "Every physical line was read in ANALYZE53. No source execution/build/test was performed. Exact current-version reader/writer bodies are analyzed; delegated compression/encoder helper internals remain pending; delegated calls are not evidence of their full behavior. ",
+      "reason": "Nonrandom VERIFY found stale remaining-scope wording; current MANIFEST confirms the named file-reader/writer analyses."
+    },
+    {
+      "path": "rust/lance-file/src/versions/v2_2/reader.rs",
+      "kind": "coverage status",
+      "before": "All physical lines read in ANALYZE54. No source builds/tests/benchmarks run. Local metadata grammar, dispatch and projection behavior are covered; full reader IO/cache lifecycle, encoding byte decompression and concrete writer pipelines remain pending. Exact declarations/source appendix preserve every signature. No source modification.",
+      "after": "All physical lines read in ANALYZE54. No source builds/tests/benchmarks run. Local metadata grammar, dispatch and projection behavior are covered; shared reader IO/cache orchestration and exact current writer pipelines are analyzed; delegated encoding byte decompression and backend lifecycle remain pending. Exact declarations/source appendix preserve every signature. No source modification.",
+      "reason": "Nonrandom VERIFY found stale remaining-scope wording; current MANIFEST confirms the named file-reader/writer analyses."
+    },
+    {
+      "path": "rust/lance-file/src/versions/v2_3/compression.rs",
+      "kind": "coverage status",
+      "before": "Every physical line was read in ANALYZE53. No source execution/build/test was performed. Exact version reader/writer bodies and compression/encoder helper internals remain separately pending; delegated calls are not evidence of their full behavior. ",
+      "after": "Every physical line was read in ANALYZE53. No source execution/build/test was performed. Exact current-version reader/writer bodies are analyzed; delegated compression/encoder helper internals remain pending; delegated calls are not evidence of their full behavior. ",
+      "reason": "Nonrandom VERIFY found stale remaining-scope wording; current MANIFEST confirms the named file-reader/writer analyses."
+    },
+    {
+      "path": "rust/lance-file/src/versions/v2_3/mod.rs",
+      "kind": "coverage status",
+      "before": "Every physical line was read in ANALYZE53. No source execution/build/test was performed. Exact version reader/writer bodies and compression/encoder helper internals remain separately pending; delegated calls are not evidence of their full behavior. ",
+      "after": "Every physical line was read in ANALYZE53. No source execution/build/test was performed. Exact current-version reader/writer bodies are analyzed; delegated compression/encoder helper internals remain pending; delegated calls are not evidence of their full behavior. ",
+      "reason": "Nonrandom VERIFY found stale remaining-scope wording; current MANIFEST confirms the named file-reader/writer analyses."
+    },
+    {
+      "path": "rust/lance-file/src/versions/v2_3/reader.rs",
+      "kind": "coverage status",
+      "before": "All physical lines read in ANALYZE54. No source builds/tests/benchmarks run. Local metadata grammar, dispatch and projection behavior are covered; full reader IO/cache lifecycle, encoding byte decompression and concrete writer pipelines remain pending. Exact declarations/source appendix preserve every signature. No source modification.",
+      "after": "All physical lines read in ANALYZE54. No source builds/tests/benchmarks run. Local metadata grammar, dispatch and projection behavior are covered; shared reader IO/cache orchestration and exact current writer pipelines are analyzed; delegated encoding byte decompression and backend lifecycle remain pending. Exact declarations/source appendix preserve every signature. No source modification.",
+      "reason": "Nonrandom VERIFY found stale remaining-scope wording; current MANIFEST confirms the named file-reader/writer analyses."
+    },
+    {
+      "path": "rust/lance-table/src/format/manifest.rs",
+      "start": 1155,
+      "end": 1183,
+      "before": "Only implementation here is V1FileReader: read_metadata(reader,cache), require metadata.manifest_position or Internal with reader path, read_struct<Manifest> at position, hydrate V1 dictionaries, take schema/max_field_id(default0), then call V1 try_new_from_reader with path, reader clone, Some(metadata), schema, numeric0,0,max ID and cache. Errors propagate at awaits; compatibility adapter does not add a V2 self-describing implementation. Meaning of delegated numeric arguments and file IO remain pending.",
+      "after": "Only implementation here is V1FileReader: read_metadata(reader,cache), require metadata.manifest_position or Internal with reader path, read_struct<Manifest> at position, hydrate V1 dictionaries, take schema/max_field_id(default0), then call V1 try_new_from_reader with path, reader clone, Some(metadata), schema, numeric0,0,max ID and cache. Errors propagate at awaits; compatibility adapter does not add a V2 self-describing implementation. The numeric arguments are fragment_id=0, field_id_offset=0 and schema max_field_id. Complete V1 reader construction/cache/metadata behavior is now covered (rust/lance-file/src/versions/v1/reader.rs:165-294); backend IO remains pending.",
+      "reason": "Nonrandom scope clarification reconciles completed file analyses with the remaining delegated mechanisms."
+    }
+  ],
+  "derived_symbol_descriptions_synchronized": 5
+}

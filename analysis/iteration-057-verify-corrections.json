@@ -1,0 +1,324 @@
+{
+  "iteration": 57,
+  "files": [
+    {
+      "path": "rust/lance-core/src/cache/mod.rs",
+      "module": "L1-modules/rust-lance-core-cache.md",
+      "reviewed": true,
+      "role": "Cache public facade, typed and unsized logical-key traits, shared-state LanceCache and WeakLanceCache handles, type-aware memory sizing, hit statistics and backend integration tests.",
+      "limits": "All1485 lines and local APIs/tests are analyzed. This does not reconstruct external Moka/quick_cache scheduling internals, production value codecs, dataset/session consumers or performance measurements. The ignored codec example disagrees with the current trait; exact declarations below and codec.rs govern the extracted API. Tests were read, not run. (rust/lance-core/src/cache/mod.rs:15-29; rust/lance-core/src/cache/codec.rs:209-228; rust/lance-core/src/cache/mod.rs:723-1485)",
+      "ranges": [
+        [
+          1,
+          30,
+          "SPDX and module overview introduce typed cache users and serializable values. The ignored CacheCodecImpl example is stale: it supplies serialize(&mut dyn Write) and deserialize(&Bytes) and omits required TYPE_ID/CURRENT_VERSION; actual trait takes CacheEntryWriter/Reader and those constants. Treat this as documentation mismatch, not a supported alternate API. The key example itself sets ValueType/key/type_name/codec but elides application bodies. (rust/lance-core/src/cache/codec.rs:209-228)"
+        ],
+        [
+          31,
+          47,
+          "Backend overview identifies opaque InternalCacheKey and erased CacheEntry. Serialization flow describes wrapper passing an optional codec and memory backends ignoring it. Its prose deserialize(reader) is schematic and does not establish actual CacheCodec::deserialize signature, persistent implementation or disk IO. LanceCache passes Copy descriptors directly, not a newly allocated wrapper per call."
+        ],
+        [
+          48,
+          67,
+          "Only backend and codec are public child modules. backend_uri,entry_io,key,moka,quick,registry are private modules with selected re-exports: backend trait/entry; URI build/parse; CacheCodec/Impl/Decode/MissReason/MAGIC/has_cache_envelope; reader/writer; format/schema/namespace/internalkey/builder; Moka backend; Quick backend/policy/recommended count; registry function type/config/build/register. MOKA_BACKEND_KIND, though pub inside private moka, is not publicly re-exported."
+        ],
+        [
+          68,
+          85,
+          "Private imports include TypeId,Cow,HashMap,Arc/RwLock/Weak,AtomicU64/Ordering,Future and crate Error/Result. Context and DeepSizeOf are publicly re-exported from core deepsize for cache users. Section separators add no runtime behavior."
+        ],
+        [
+          86,
+          118,
+          "Public CacheKey requires associated ValueType:static (sized implicitly), key(&self)->Cow<str> and static type_name. Send/Sync/DeepSizeOf are not trait-level ValueType bounds; operations add them. Docs require differing value types to have different short stable names, avoiding std::any::type_name across builds. This uniqueness is not dynamically validated. Ignored example constructs owned string from u64."
+        ],
+        [
+          119,
+          151,
+          "Default stable_type_id calls type_name; default schema is LEGACY_TEXT; default write_key writes the logical key as one framed string. Typed implementations may override write_key to avoid creating key(), but required key method remains. codec defaultsNone, and docs require codec-less values remain memory-only in persistence-capable backends. No check ties codec TYPE_ID/concrete type to stable_type_id; these are caller contracts."
+        ],
+        [
+          152,
+          183,
+          "Public UnsizedCacheKey has ValueType:static+?Sized, required key/type_name and the same stable_type_id/schema/write_key defaults. It has no codec method: high-level unsized APIs always passNone and wrap Arc<T> in an extra sized Arc for erasure. The trait itself adds no Send/Sync/DeepSizeOf bound; operations enforce them."
+        ],
+        [
+          184,
+          210,
+          "Private cache_entry_size computes DeepSizeOf::deep_size_of plus two AtomicUsize counters as outer Arc overhead using ordinary usize arithmetic. CacheEntrySizeAccessor is a plain function pointer returning Option<usize> with mutable Context. Generic contextual accessor first downcasts entry toT; wrong type returnsNone. It then marks erased Arc allocation address; an already-seen pointer returnsSome0, otherwise counts size_of_val(T), child allocations using the shared context and two outer counters. Allocator padding/alignment overhead is not independently measured."
+        ],
+        [
+          211,
+          229,
+          "Private Debug CacheState owns Arc<dyn CacheBackend>, Relaxed-used atomic hits/misses and RwLock<HashMap<TypeId,fn accessor>>. new sets both counters0 and empty accessor map. State ownership and per-Rust-TypeId memory callbacks are separate from stable serialized string IDs."
+        ],
+        [
+          230,
+          254,
+          "entry_size<T> checks TypeId under read lock, recovers poisoned guards with into_inner, then conditionally writes entry.or_insert(contextual accessor). Race-safe insertion does not require holding read and write locks together. All guards are dropped before cache_entry_size(value), permitting custom DeepSizeOf to reenter cache APIs. Registry persists for state lifetime and is not bounded/cleared here. Poison recovery does not clear the poison flag."
+        ],
+        [
+          255,
+          272,
+          "Public Clone LanceCache has private shared Arc<CacheState> and by-value32-byte namespace. Debug shows backend only and marks struct nonexhaustive; it does not expose counters/prefix. Documentation defaults to Moka via with_capacity/no_cache, with custom backend accepted explicitly; no Default impl appears."
+        ],
+        [
+          273,
+          296,
+          "DeepSizeOf marks CacheState allocation address first and returns0 for subsequent handles/cycles in the same Context. It clones the TypeId-accessor map while read-locked, releases lock, then asks backend to traverse entries with runtime Any TypeId dispatch. Backend None falls back to approx_size_bytes. Neither CacheState/Arc allocation, accessor-map heap nor backend internals are independently added; the inherited deep_size_of includes only inline LanceCache plus this estimate. Values loaded directly by custom backend without prior typed insertion/load registration can fall back to declared weights. (rust/lance-core/src/deepsize.rs:38-44)"
+        ],
+        [
+          297,
+          313,
+          "with_capacity builds a new Moka backend; with_backend creates a new CacheState and deterministic root namespace; no_cache builds the disabled Moka form. Passing the same backend Arc to separate with_backend calls gives distinct counters/accessor maps but identical root key namespaces and shared stored values/clear effects; this differs from clone/prefix sharing one state. No uniqueness isolation is added."
+        ],
+        [
+          314,
+          342,
+          "with_key_prefix clones state and derives one child hash segment, so nested a thenb differs from a/b. size awaits backend num_entries; approx_size delegates approximate count; size_bytes awaits weighted byte report; capacity_bytes forwards optional requested capacity. These measurements cover entire shared backend, not this namespace."
+        ],
+        [
+          343,
+          359,
+          "stats loads hits then misses with Relaxed before separately awaiting backend count and bytes; it is not an atomic multi-field snapshot. clear awaits backend clear then stores both counters0 Relaxed. Concurrent calls may race/reset counts; clear operates on all backend entries and does not reset namespace or size-accessor registrations. Cancellation while awaiting backend clear can prevent subsequent counter resets."
+        ],
+        [
+          360,
+          374,
+          "insert_with_key borrows a sized key and takes Arc<ValueType>, requiring ValueType DeepSizeOf+Send+Sync+static. It registers/measures value first, constructs canonical key, then awaits backend insert with K::codec. It returns unit, does not verify retention or update hit/miss counts, and performs no serialization itself."
+        ],
+        [
+          375,
+          403,
+          "get_with_key builds canonical key and awaits backend get with codec. None increments misses once; successful downcast increments hits once and returns Arc<T>. Wrong concrete type warns with stable type ID, increments misses and returnsNone; it does not evict/retry/recompute. A pure get does not register a memory-size accessor forT. Cancellation before a backend result records neither counter."
+        ],
+        [
+          404,
+          419,
+          "get_or_insert_with_key delegates to the hit-returning variant and strips bool while preserving Result. It ownsK and accepts Send FnOnce producing Send Future<Result<T>>; no explicit K:Send bound or static loader requirement is written. Values are created by loader asT then wrapped by the delegated method."
+        ],
+        [
+          420,
+          445,
+          "get_or_insert_with_key_hit documents bool as whether this caller skipped its loader; true includes waiting for another concurrent load, false means its loader ran. The boolean alone cannot distinguish an already-present value from a coalesced load. Exact generic signature adds operation-level ValueType bounds and Send closure/future, not Send onK."
+        ],
+        [
+          446,
+          458,
+          "The hit-returning implementation computes key, clones state, builds a pinned erased loader future; polling that future invokes loader, awaits Result, wrapsT inArc, registers/measuresT and returns(entry,size). Backend receives key/future/codec. Backend or loader Err propagates through await? before any hit/miss update, so failed loads are absent from these counters. Actual coalescing/cancellation comes from selected backend."
+        ],
+        [
+          459,
+          473,
+          "Returned entry is downcast toT. Failure increments misses and returns Error::io naming stable type ID, irrespective of backend was_cached; no recovery loader is rerun. Success increments hits if backend bool true, otherwise misses, then returns Arc/bool. The wrapper trusts backend bool and does not independently observe loader execution."
+        ],
+        [
+          474,
+          484,
+          "insert_unsized_with_key wraps incoming Arc<?Sized T> in outer Arc, registers/measures the sized inner Arc<T>, builds unsized key and calls backend insert withNone codec. Declared size includes inner Arc inline representation, pointee deep size and outer counters; generic DeepSizeOf for Arc does not add inner Arc counters itself. No insertion metric or admission signal is returned. (rust/lance-core/src/deepsize.rs:182-189)"
+        ],
+        [
+          485,
+          508,
+          "get_or_insert_unsized_with_key owns key and Send loader returning Result<Arc<T>>. Its lazy future awaits loader, registers/measures Arc<T>, wraps it into an outer erased Arc and passesNone codec to backend. Backend/loader errors propagate before metrics; trait-object sizing invokes dynamic DeepSizeOf through Arc."
+        ],
+        [
+          509,
+          523,
+          "Unsized load result downcasts to Arc<T> inside erased outer Arc; mismatch increments miss and returns contextual IO error. Successful backend bool updates hit/miss exactly once; returned inner Arc is cloned, then outer local Arc may drop. There is no public unsized hit-returning variant in this file."
+        ],
+        [
+          524,
+          552,
+          "get_unsized_with_key builds key, passesNone codec and counts absent as miss. It downcasts outer entry to Arc<T>, clones inner Arc and counts hit; wrong type warns with unsized stable ID, counts miss and returnsNone without invalidation. As with sized get, it does not registerT or Arc<T> accessors."
+        ],
+        [
+          553,
+          569,
+          "Private sized_key and unsized_key perform identical builder pipeline: namespace,stable_type_id,schema; call respective trait write_key; finish16-byte digest. There is no independent sized/unsized discriminator, runtime TypeId or codec identity in this pipeline. Users must use distinct stable identity/schema/fields where stored concrete layouts differ; collisions become downcast misses/errors."
+        ],
+        [
+          570,
+          592,
+          "Public Clone/Debug WeakLanceCache stores Weak<CacheState> and namespace. Inherent from(&LanceCache) downgrades state and copies namespace; it is not a std From trait impl. with_key_prefix clones weak state and derives one child segment without retaining a strong state. Docs say indices use it to avoid cycles; production index consumers are still unreviewed."
+        ],
+        [
+          593,
+          619,
+          "Weak capacity_bytes upgrades and returnsNone if expired or backend unknown. Weak sized get upgrades or returnsNone silently; a successful upgrade keeps state alive through await. Sized insert warns/returnsfalse on expiry, otherwise delegates and returnstrue. True means a live-cache insertion call finished, not proof backend admitted or retained the value."
+        ],
+        [
+          620,
+          659,
+          "Weak sized get_or_insert strips bool from hit variant. Hit variant upgrades once; if expired it warns, directly awaits its own loader and wraps success into(Arc<T>,false), with no cache/state/metrics/dedup. If live, forwards to strong method while holding upgraded state. Loader error remains Result error in either branch."
+        ],
+        [
+          660,
+          688,
+          "Weak unsized get returnsNone on failed upgrade; unsized insert warns and returns unit on expiry, otherwise delegates. There is no weak unsized get_or_insert method. Private upgrade combines upgraded state with preserved namespace into a temporary LanceCache, returningNone only if Weak upgrade fails."
+        ],
+        [
+          689,
+          722,
+          "Public Debug/Clone CacheStats exposes hits/misses u64 and num_entries/size_bytes usize. hit_ratio/miss_ratio return f32 zero when integer hits+misses==0, otherwise ratio using f32 casts. Sum uses ordinary u64 addition (debug overflow panic/release wrap under ordinary profiles), conversions lose precision for large counts. Counter descriptions are approximate prose: implementation excludes loader errors and treats coalesced results as hits."
+        ],
+        [
+          723,
+          757,
+          "cfg(test) module imports sync/thread/time and Poll utilities. report_first_pending pins any Future, polls it through poll_fn and sends a oneshot only at its first Poll::Pending, ignoring send error; Ready forwards output and drops unsent sender. This supports explicit contender-pending handshakes instead of a simple scheduling yield, but does not expose dependency waiter internals."
+        ],
+        [
+          758,
+          791,
+          "Clone const-generic VersionedTestKey storesu64 id; TestKey/TestKeyV2 alias versions1/2. CacheKey value is Vec<u32>, required string key allocates id text, stable type name test.VecU32, schema test.vec-u32-key/version parameter, typed writer emitsu64. Hot key construction calls typed writer rather than allocating string."
+        ],
+        [
+          792,
+          823,
+          "SharedTestValue owns Arc<Vec<u8>> and forwards child sizing using same Context. SharedTestKey tupleu64 uses value type SharedTestValue, required decimal string, stable type test.SharedValue, schema test.shared-value-key/v1 and typedu64 writer. This fixture distinguishes per-entry eviction weights from shared-allocation traversal."
+        ],
+        [
+          824,
+          845,
+          "ReentrantValue holds a strong LanceCache clone and delegates child sizing to that cache. ReentrantKey uses borrowed reentrant string, test.ReentrantValue type and default schema/writer. Once retained, this strong cache-in-entry can form an ownership cycle; the later test checks deadlock-free insertion, not leak-free teardown."
+        ],
+        [
+          846,
+          875,
+          "Private Clone/Copy/Debug TestBackendKind selects Moka via LanceCache::with_capacity or Quick via with_backend(Arc). LegacyBridgeKey borrowed static string stores Vec<u32> under test.LegacyBridge with default string bridge/schema; this is cache-key compatibility terminology, not a legacy data-file writer."
+        ],
+        [
+          876,
+          904,
+          "ExplicitBridgeKey uses same value/name/schema as LegacyBridgeKey but explicitly write_strs its borrowed field, setting up identical digest expectation. Private TestDynValue:DeepSizeOf+Send+Sync exposes values()->&[u32]; Vec<u32> returns itself as slice."
+        ],
+        [
+          905,
+          936,
+          "LegacyUnsizedBridgeKey/ExplicitUnsizedBridgeKey store dyn TestDynValue and use shared test.LegacyUnsizedBridge identity. Both borrowstatic string; explicit version overrides write_key with write_str while other uses default. No codec or altered schema is defined."
+        ],
+        [
+          937,
+          965,
+          "Test-only Default/Debug HashMapBackend owns tokio Mutex<HashMap<InternalCacheKey,(CacheEntry,usize)>>. get clones matching Arc under lock; insert copies opaque key and replaces tuple under lock. Both ignore codec and count only declared payload bytes later, without fixed key overhead."
+        ],
+        [
+          966,
+          997,
+          "Test HashMapBackend get_or_insert first separately awaits get, then on miss awaits loader outside lock and inserts. It does not coalesce concurrent misses; this fixture is not a conforming production single-flight reference. clear/count/size lock map and clear/len/sum declared sizes; default approximate/deep/capacity trait methods remain."
+        ],
+        [
+          998,
+          1039,
+          "Test WrongTypeBackend always returns new Arc<String> from get and(entry,true) from get_or_insert without polling supplied loader. insert/clear are no-ops,count/size0. It deliberately violates requested type to exercise defensive downcasts, not real storage."
+        ],
+        [
+          1040,
+          1060,
+          "Moka typed-roundtrip test inserts key7 underleft, hitsleft/missesright and checks root sharedstats(1,1,1); root clear then leftstats(0,0,0). It validates namespace key separation but global metrics/clear. No concurrent reset behavior asserted."
+        ],
+        [
+          1061,
+          1084,
+          "Strong/weak test derives child, weakfromchild, inserts throughweak thenstrong, reads through opposite handles and checks root hits2/count2. It confirms shared state and preserved namespace while original strong handles remain alive."
+        ],
+        [
+          1085,
+          1104,
+          "Nested namespace test inserts under segmentsa,b and expects miss under singlea/b. Schema-change test inserts version1key and expects sameid version2 miss. They do not assert raw digest bytes or physical removal of older namespace/schema entries."
+        ],
+        [
+          1105,
+          1127,
+          "Hit-reporting test first loads vector1,2,3 andfalse, then requests samekey with panic loader and expectstrue/value. It verifies sequential skip/execution semantics, not concurrent bool discrimination."
+        ],
+        [
+          1128,
+          1157,
+          "Sized bridge test inserts with default string-key encoding and retrieves via explicitwrite_str; unsized analogue stores dyn Vec values10,20 and retrieves via explicit key. These assert defaults preserve identical logical encoding, not earlier on-disk cache revision compatibility."
+        ],
+        [
+          1158,
+          1178,
+          "Custom HashMap backend fixture inserts under child, checks typed value/rawmaplen1 and backend weighted bytes equal cache_entry_size only, then rootclear emptiesmap and childhits0. It demonstrates weight policies differ because this fixture excludes key cost and is not production cache accounting."
+        ],
+        [
+          1179,
+          1192,
+          "Wrong-type fixture checks sized get yieldsNone, sizedget_or_insert returns error containingtest.VecU32 and stats0hits/2misses. It does not assert error category or unsized collision paths, nor check supplied loader counter explicitly."
+        ],
+        [
+          1193,
+          1203,
+          "Moka physical-key weight test computes cache_entry_size(value)=value.deep_size_of()+2*size_of::<AtomicUsize>(), then checked_adds size_of::<InternalCacheKey>(), chooses twice expected capacity, inserts and asserts weighted bytes equal expected. Only the key addition is checked; the helper adds Arc counter overhead with ordinary arithmetic. Small capacity gives weight_unit1, avoiding coarse Moka units. Supporting helpers: rust/lance-core/src/cache/mod.rs:189-192; rust/lance-core/src/cache/moka.rs:34-46."
+        ],
+        [
+          1204,
+          1223,
+          "Parameterized Moka/Quick deep-memory test loads two distinct SharedTestValue entries that reference same1024-byte Vec allocation under1MiB capacity. Successful loads register concrete memory accessors and create two outer entries."
+        ],
+        [
+          1224,
+          1246,
+          "Expected unique memory is two key footprints plus two SharedTestValue inline sizes/outer-counter pairs plus one Vec inline/capacity allocation. Weighted bytes equal that plus another shared allocation, showing independent per-entry weights double count it. deep_size_of adds inline LanceCache; sharedContext firstchildren gives expectedentries and secondprefixhandle0. This is the chosen estimator contract, excluding CacheState/accessor-map and nested Arc counter metadata."
+        ],
+        [
+          1247,
+          1269,
+          "Reentrant sizing test spawns OSthread with current-thread Tokio runtime, inserts ReentrantValue(cacheclone), sends completion, requires receive within1second, then joins. It targets lock reentry deadlock during initial sizing; it does not traverse the retained cycle afterward or assert eventual deallocation."
+        ],
+        [
+          1270,
+          1288,
+          "No-cache fixture calls samekey loader twice sequentially, checks each[42],counter2 and retainedcount0. Concurrent independence is covered separately in moka.rs, not by this sequential test."
+        ],
+        [
+          1289,
+          1314,
+          "Two-worker Tokio success single-flight fixture uses four contenders, Moka capacity4096, SeqCst loader count,Notify release and oneshot ownerstarted. Owner increments/signals then waits before returning[10]; test awaits start before spawning contenders."
+        ],
+        [
+          1315,
+          1349,
+          "Each success contender is wrapped in report_first_pending and would load[99]. Test waits every pending signal, asserts onlyone loader and all unfinished, then releases owner. Owner/allcontenders yield[10] and finalstats(4hits,1miss). No timeout surrounds start/parking/joins here; this is source coverage, not an executed liveness proof."
+        ],
+        [
+          1350,
+          1375,
+          "Error single-flight fixture similarly starts owner withfour contenders and2threads; owner eventually returns Timeout(owner loader timed out), requiring Vec<u32> value through key. It waits ownerstarted before constructing contenders."
+        ],
+        [
+          1376,
+          1412,
+          "Error contenders would produce their own Timeout text but are handshakenPending before release; test asserts loadercount1/unfinished, releasesowner, requires ownerandallcontenders Timeout variants and finalcount1. It does not assert error text identity, stats after errors or timing bound. Moka selective CloneableError must preserve Timeout for shared results."
+        ],
+        [
+          1413,
+          1434,
+          "Cancellation single-flight fixture starts Moka owner forkey30, signalsafterincrement, then awaits permanentlyPending before hypothetical[30]. Test waits ownerstarted before spawning one contender."
+        ],
+        [
+          1435,
+          1466,
+          "Contender wrapped with pending handshake would return[31]; test awaits parked, checkscount1/unfinished, abortsowner and checks cancelled JoinError. Contender must finishwithin5seconds with[31] andtotalcount2. Timeout starts only after ownerabort; earlier ownerstart/park waits are unbounded. No stats assertion here."
+        ],
+        [
+          1467,
+          1485,
+          "Expired weak-cache fixture createsweak, dropsonlystrong cache, checks getNone andinsertfalse, then uncached get_or_insert yields[7]. It does not explicitly check hitflag, capacity, unsized expiry or concurrent expired-load independence. Testmodule andfileend; no production runtime or benchmark executed."
+        ]
+      ]
+    }
+  ],
+  "changes": [
+    {
+      "path": "rust/lance-core/src/cache/mod.rs",
+      "start": 1193,
+      "end": 1203,
+      "before": "Moka physical-key weight test computes value declared deep size plus size_ofInternalCacheKey checked_add, chooses twice expected capacity, inserts and asserts weighted bytes equal expected. Small capacity avoids coarse Moka units.",
+      "after": "Moka physical-key weight test computes cache_entry_size(value)=value.deep_size_of()+2*size_of::<AtomicUsize>(), then checked_adds size_of::<InternalCacheKey>(), chooses twice expected capacity, inserts and asserts weighted bytes equal expected. Only the key addition is checked; the helper adds Arc counter overhead with ordinary arithmetic. Small capacity gives weight_unit1, avoiding coarse Moka units. Supporting helpers: rust/lance-core/src/cache/mod.rs:189-192; rust/lance-core/src/cache/moka.rs:34-46.",
+      "reason": "Random accuracy claim8 omitted two atomic counter words charged by cache_entry_size; make the exact tested formula explicit."
+    }
+  ]
+}

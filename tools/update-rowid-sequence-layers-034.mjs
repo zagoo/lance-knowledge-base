@@ -1,0 +1,127 @@
+import fs from 'node:fs';import path from 'node:path';import{output,root,linesOf}from './inventory.mjs';
+const read=f=>fs.readFileSync(path.join(output,f),'utf8');const write=(f,s)=>fs.writeFileSync(path.join(output,f),s);const append=(f,s)=>write(f,read(f)+'\n'+s+'\n');
+const replacements=[
+['L1-modules/rust-lance-table.md','Twenty-four of 54 inventory entries are analyzed, covering 11,637 physical lines','Twenty-five of 54 inventory entries are analyzed, covering 13,946 physical lines'],
+['L1-modules/rust-lance-table.md','Full Row-ID sequence operations, transaction algorithms, system-index contents and IO remain pending.','Row-ID sequence operations are covered; transaction algorithms, row-ID index contents, other system indices and IO remain pending.'],
+['L1-modules/rust-lance-table.md','|-- rowids: version runs/cursor, hole-run/bitmap/array helpers and codecs; full sequence operations pending','|-- rowids: sequences/cursors, version runs, segment/bitmap/array/runs and codecs; index implementation pending'],
+['L1-modules/rust-lance-table.md','Full sequence/cache consumers and commit validation/inline selection remain pending.','Sequence operations are covered below; full cache/stream consumers and commit validation/inline selection remain pending.'],
+['L1-modules/rust-lance-table.md','It allocates HoleRuns even when rejected and has no table opt-in parameter; caller policy remains pending.','It allocates HoleRuns even when rejected and has no table opt-in parameter. RowIdSequence::use_range_segments also has no gate; a narrowly inspected manifest-builder caller supplies the table config policy, with full commit integration pending.'],
+['L1-modules/rust-lance-table.md','Complete RowIdSequence ownership/reset policy remains pending.','RowIdSequence cursor reset and density selection are now documented below; full stream ownership remains pending.'],
+['L4-crosscutting/scenarios.md','Full sequence and dataset consumers remain pending; segment operations are covered in the local segment trace below.','Sequence and segment operations are now covered in the local traces below; dataset consumers remain pending.'],
+['L4-crosscutting/scenarios.md','Full sequence concatenation, cursor reset, opt-in, transaction triggers and on-disk placement remain untraced.','Sequence concatenation and cursor reset are now covered below. A contextual manifest-builder snippet locates the opt-in, while complete transaction triggers and on-disk placement remain untraced.'],
+['L4-crosscutting/cookbook.md','Segment selection is now covered; finish full rowids.rs and integration analysis','Segment selection and rowids.rs are now covered; finish integration analysis'],
+['L4-crosscutting/cookbook.md','This is a local touch map; full rowids.rs and dataset/transaction consumers remain prerequisites.','This is a local touch map; rowids.rs is now covered, while full dataset/transaction consumers remain prerequisites.']
+];for(const[f,a,b]of replacements){const s=read(f);if(!s.includes(a))throw Error('Missing '+f+' '+a);write(f,s.replace(a,b));}
+append('L0-orientation.md',`## Row-ID sequences and ordinal selection
+
+RowIdSequence preserves fragment row order across segments. Stable numeric IDs, ordinal positions and tree-map set membership are distinct: set conversion discards order, while masks translate selected IDs back into ordinal ranges. Public checked construction rejects duplicates within one input; raw range/slice conversions and extend do not enforce table-wide uniqueness. [Sequence analysis](L2-files/rust/lance-table/src/rowids.rs.md). (rust/lance-table/src/rowids.rs:39-52; rust/lance-table/src/rowids.rs:209-265; rust/lance-table/src/rowids.rs:302-319; rust/lance-table/src/rowids.rs:609-797; rust/lance-table/src/rowids.rs:865-905)
+
+RowIdSeqSlice is a borrowed positional view. RowIdSequenceCursor instead owns scan counters without a source lifetime: it rewinds for decreasing requests and resets segment state at boundaries, but callers must keep its sequence stable across calls. Internal selection clips at EOF; the public ReadBatchParams adapter has separate bounds/error behavior. (rust/lance-table/src/rowids.rs:54-170; rust/lance-table/src/rowids.rs:456-494; rust/lance-table/src/rowids.rs:559-592; rust/lance-table/src/rowids.rs:908-943; rust/lance-table/src/rowids.rs:1055-1127)
+`);
+append('L1-modules/rust-lance-table.md',`## RowIdSequence public contract
+
+[Complete sequence L2](../L2-files/rust/lance-table/src/rowids.rs.md) covers all 2,309 lines. RowIdSequence owns a private segment Vec; RowIdSeqSlice borrows segments; RowIdSequenceCursor is crate-visible and owns counters only. No function in this file performs IO. The facade reexports the pending RowIdIndex/FragmentRowIdIndex implementation and reviewed byte codecs. (rust/lance-table/src/rowids.rs:17-65; rust/lance-table/src/rowids.rs:908-916)
+
+| Entry | Contract and costs | Evidence |
+|---|---|---|
+| new / Default | Empty segment Vec | rust/lance-table/src/rowids.rs:51-52; rust/lance-table/src/rowids.rs:237-240 |
+| From range / slice | One segment, assumes valid bounds/unique IDs; empty input still has a segment | rust/lance-table/src/rowids.rs:209-219 |
+| try_from_iter | Collect; check strict order or sort a copy to detect duplicates; contextual InvalidInput; preserve original order | rust/lance-table/src/rowids.rs:221-265 |
+| iter / len / is_empty | Double-ended values; sum segment counts; structural empty-Vec test, not len==0 | rust/lance-table/src/rowids.rs:267-277 |
+| row_id_range | Two-pass conservative extrema from segment bounds; can report bounds for zero-present bitmap | rust/lance-table/src/rowids.rs:279-300; rust/lance-table/src/rowids/segment.rs:360-376 |
+| extend | Move segments, merge only touching boundary plain ranges; no duplicate validation | rust/lance-table/src/rowids.rs:302-319 |
+| delete | Find every matching ID, sort local positions, clone untouched segments, reconstruct affected ones; retains empty segments | rust/lance-table/src/rowids.rs:340-365; rust/lance-table/src/rowids.rs:398-454 |
+| mask | Mutate by assumed sorted unique u32 positions; ignore tail beyond EOF; remove empty segments; Result has no Err branch | rust/lance-table/src/rowids.rs:367-396 |
+| slice | Borrowed view; len0 ignores offset, positive invalid bounds panic; no data copy until iteration | rust/lance-table/src/rowids.rs:456-494; rust/lance-table/src/rowids.rs:918-943 |
+| get / select | Independent get scans from start; select is lazy, permits duplicates, drops EOF and panics on strict decrease | rust/lance-table/src/rowids.rs:504-535 |
+| use_range_segments | Explicit bitmap-to-Ranges conversions, returns changed; no local opt-in gate | rust/lance-table/src/rowids.rs:321-338 |
+
+find_ids examines every segment for every requested ID despite its cycling optimization comment; matches do not break the loop. It sorts but does not deduplicate requests. Duplicate delete IDs can leave a stale peek in segment.delete and prevent later requested removals; callers need uniqueness. A no-match delete still clones every segment. Display is also not canonical: it concatenates up to11 front values without separators and appends up to11 tail values. (rust/lance-table/src/rowids.rs:173-206; rust/lance-table/src/rowids.rs:340-454; rust/lance-table/src/rowids/segment.rs:670-692)
+
+## Cursor policy and ReadBatchParams adapter
+
+get/range cursor operations rewind on backward requests, cache each segment length and reset SegmentCursorState when advancing. Reusing a cursor with changed/different sequence can retain wrong cached lengths/counters. Dense policy applies only to a single bitmap segment and seeds its computed cardinality; multi-segment sequences use sparse mode. Range selection preallocates requested cardinality even when EOF clips output. (rust/lance-table/src/rowids.rs:67-170; rust/lance-table/src/rowids.rs:538-591)
+
+| ReadBatchParams | Validation and order |
+|---|---|
+| Indices | Reads values buffer without validity check; sorted path validates last and uses cursor; unsorted path independent get; preserves duplicates |
+| Range / RangeTo | Checks end only; reversed Range subtraction is unchecked |
+| Ranges | Preallocates sum before per-range end validation; preserves supplied range order; casts u64 to usize |
+| RangeFrom | No explicit start bound check; subtracting an excessive start can panic |
+| RangeFull | Collects all values |
+
+These exact branches are at rust/lance-table/src/rowids.rs:1055-1127. Error diagnostics convert endpoints to u32 and may truncate large values. This adapter is stricter on ordinary EOF than select/cursor methods, but it is not comprehensive malformed-input validation. Contextually inspected utils/stream decode_row_id_chunk calls cursor methods and rejects a decoded-length mismatch; full async lifecycle remains pending. (rust/lance-table/src/utils/stream.rs:407-444; rust/lance-table/src/utils/stream.rs:648-666)
+
+## ID masks, set conversion and rechunking
+
+mask_to_offset_ranges returns ordered half-open ordinals grouped within each segment; adjacent groups across segment boundaries stay separate. Plain ranges walk tree-map runs. Holes remove missing IDs, sort decoded holes and subtract earlier-hole count. Bitmaps use finite allow IDs when allowed cardinality<=summed bitmap span: a single bitmap filters the iterator, multiple bitmaps cache sorted IDs once and binary-search subranges. Other masks fall back to a full-span set/bitmap scan. Ranges inserts present gaps and translates rank; arrays test mask membership in stored order. (rust/lance-table/src/rowids.rs:609-798)
+
+The bitmap helper popcounts only intervals between selected present IDs, retaining the prior position so the next interval includes that selected bit. RowAddrMask cannot carry both allow and block lists simultaneously. The dependency row_addrs allocates a Vec of iterators even on the streaming path, so no-copy of all IDs is not zero allocation. (rust/lance-table/src/rowids.rs:843-863; rust/lance-select/src/mask.rs:24-79; rust/lance-select/src/mask.rs:497-515)
+
+Set conversion unions independently built segment sets so one bitmap's holes cannot erase IDs belonging to another overlapping segment. Order and multiplicity disappear. Contextual dependency inspection exposes two edge cases: empty Range0..0 inserts0 through saturating excluded-end conversion, and mask's plain-range run-end expression mishandles a low32 carry for odd high32 values. These are source-derived, unexecuted counterexamples requiring dedicated regressions before any fix. (rust/lance-table/src/rowids.rs:621-646; rust/lance-table/src/rowids.rs:865-905; rust/lance-select/src/mask.rs:545-588; rust/lance-select/src/mask.rs:801-810; rust/lance-select/src/mask.rs:1014-1019)
+
+rechunk_sequences returns one sequence per requested size, consuming owned inputs. It slices/re-encodes even whole segments, so range input can materialize every row; it is not a metadata-only split. allow_incomplete permits short/empty outputs but not excess input. Empty input segments are skipped only while filling a positive remaining count; a trailing empty after the final full chunk still triggers too-many error. (rust/lance-table/src/rowids.rs:959-1052; rust/lance-table/src/rowids/segment.rs:378-387)
+
+The narrowly read manifest helper gates use_range_segments through config key lance.row_ids.range_segments and str_is_truthy. It skips prior opted-in inline data by fragment ID and byte-start pointer, decodes other inline sequences and rewrites only if conversion changed; column metadata is skipped. Full manifest preparation, exact truthy parsing, atomic commit and release compatibility remain pending. (rust/lance-table/src/transaction/manifest_build.rs:73-122)
+`);
+const symbols=JSON.parse(read('L3-symbols/symbols.json')).filter(s=>s.path==='rust/lance-table/src/rowids.rs');
+append('L1-modules/rust-lance-table.md','## Exact reviewed sequence declarations\n\n| Symbol | Exact declaration | Visibility | Evidence |\n|---|---|---|---|\n'+symbols.map(s=>'| `'+s.name+'` | `'+s.signature.replaceAll('|','\\|')+'` | '+s.visibility+' | ['+s.path+':'+s.line+'-'+s.end_line+'](../'+s.analysis+') |').join('\n'));
+append('L3-symbols/behavior-contracts.md',`## Row-ID sequence contracts and change hazards
+
+Do not substitute structural is_empty for len==0: the former checks the Vec only. From(empty), delete-all and new have different representations and equality/empty outcomes. Changing normalization can affect callers relying on exact representation tests and serde folding. Checked construction validates local uniqueness; infallible conversions and extend retain the uniqueness precondition. (rust/lance-table/src/rowids.rs:209-277; rust/lance-table/src/rowids.rs:302-365; rust/lance-table/src/rowids.rs:1191-1232; rust/lance-table/src/rowids.rs:1524-1533)
+
+delete and mask have different input domains and cleanup: delete takes IDs, finds/sorts positions without deduplication and retains empty segments; mask takes assumed sorted unique u32 ordinals, mutates incrementally and removes empties. Neither validates malformed ordering/duplication fully. A new validation rule must decide rollback behavior, since panic during mutation can leave partial state. (rust/lance-table/src/rowids.rs:340-454; rust/lance-table/src/rowids/segment.rs:670-746)
+
+Public select checks nondecreasing offsets lazily and drops missing values; internal select_with_cursor allows decreases through reset. Range cursors clip, while positive out-of-bounds slice panics and select_row_ids returns InvalidInput for several, but not all, invalid bounds. Preserve these distinct contracts or introduce explicit API amendments with tests. (rust/lance-table/src/rowids.rs:75-170; rust/lance-table/src/rowids.rs:456-591; rust/lance-table/src/rowids.rs:1055-1127)
+
+Mask output ranges stay split at segment boundaries even when adjacent. Fast bitmap selection relies on ordered finite tree-map IDs and zero-padded valid bitmap state; its offset accounting differs from fallback on malformed storage. Do not benchmark or claim equivalence using only one representation or shared GroupingIterator oracle. (rust/lance-table/src/rowids.rs:609-798; rust/lance-table/src/rowids.rs:843-863; rust/lance-table/src/rowids.rs:1880-1899; rust/lance-table/src/rowids.rs:2072-2117)
+
+rechunk_sequences copies/re-encodes selected values and rejects leftover empty segments after requested chunks, even with allow_incomplete. Its returned Vec and collected sizes are additional memory. New streaming/reuse designs must preserve order, zero-chunk behavior, adjacency merge and exact error policy explicitly. (rust/lance-table/src/rowids.rs:959-1052; rust/lance-table/src/rowids/segment.rs:378-387)
+`);
+append('L3-symbols/format-spec.md',`## Sequence representation versus wire identity
+
+RowIdSequence equality and is_empty operate on the in-memory segment vector. Two sequences with equal yielded values may compare unequal, and empty payloads may retain a Range0..0 segment. use_range_segments transforms only eligible bitmaps; the byte writer still flattens Ranges into existing Range messages and the decoder can refold them. Do not use Rust structural equality as a universal canonical wire identity. (rust/lance-table/src/rowids.rs:51-52; rust/lance-table/src/rowids.rs:209-219; rust/lance-table/src/rowids.rs:267-277; rust/lance-table/src/rowids.rs:329-337; rust/lance-table/src/rowids/serde.rs:232-299; rust/lance-table/src/rowids/serde.rs:346-398)
+
+Local conversion does not gate by file version or table config. A contextual manifest-builder helper checks lance.row_ids.range_segments before rewriting changed inline row-ID bytes; full caller ordering remains untraced. This is a reader-performance opt-in using existing wire arms, not evidence of a new stable format revision. (rust/lance-table/src/rowids.rs:321-338; rust/lance-table/src/transaction/manifest_build.rs:73-122)
+`);
+append('L4-crosscutting/scenarios.md',`## Local trace: selection, deletion and rechunking
+
+1. Build from untrusted IDs through try_from_iter: collect, reject duplicate, construct one segment while retaining input order. A table-wide duplicate check is not implemented by this method. (rust/lance-table/src/rowids.rs:221-265)
+2. For sorted offset selection, public select creates a cursor and validates monotonicity lazily. At each segment boundary, cache length, translate ordinal and reset bitmap state on advance; backward internal requests reset the full cursor. (rust/lance-table/src/rowids.rs:67-170; rust/lance-table/src/rowids.rs:516-591)
+3. For an ID mask, select each segment's IDs then compute their present ordinals; bitmap finite allow lists may take the cached-ID path. Preserve separate ranges at segment boundaries. (rust/lance-table/src/rowids.rs:609-798)
+4. Delete by IDs through find_ids and segment reconstruction, or mask by original u32 positions; these have distinct empty cleanup and malformed-input assumptions. (rust/lance-table/src/rowids.rs:340-454)
+5. Rechunk to new physical sizes by slicing/re-encoding segments and merging touching ranges. Incomplete mode emits short outputs; it never allocates the missing incremental IDs. (rust/lance-table/src/rowids.rs:946-1052)
+
+This closes the local sequence trace. Contextual stream snippets show cursor choice and decoded-count validation, and a manifest snippet shows range-segment opt-in; full loading, asynchronous ownership, commit/conflict ordering and disk cleanup still require the pending files. All five complete acceptance questions remain FAIL. (rust/lance-table/src/utils/stream.rs:407-444; rust/lance-table/src/utils/stream.rs:648-680; rust/lance-table/src/transaction/manifest_build.rs:73-122)
+`);
+append('L4-crosscutting/build-and-test.md',`## Row-ID sequence test evidence
+
+The full sequence test module covers checked construction/order/duplicates, range concatenation, delete/mask encodings, valid borrowed slices and size hints, rechunk cardinality/value cases, all ReadBatchParams forms on valid inputs, selected InvalidInput bounds, overlapping bitmap set conversion, ordinary/dense cursor chunks/rewinds, and compact Ranges roundtrip. Its million-slot cursor case has correctness assertions but no elapsed-time assertion. (rust/lance-table/src/rowids.rs:1130-1730; rust/lance-table/src/rowids.rs:2119-2309)
+
+Mask tests include deterministic small-ID fixtures, fifty seeded generated cases and multiple-bitmap finite/broad selection. The brute-force oracle still shares GroupingIterator and segment iteration/length; seeds0 and1 produce the same initial state. Missing coverage includes high32 carry ends, empty Range0..0 set conversion, malformed masks, duplicate deletion requests, invalid RangeFrom/reversed ranges, nullable index validity, trailing empty segments after exact rechunk completion, Display formatting and cursor reuse with changed source. Tests were read only. (rust/lance-table/src/rowids.rs:1731-2117; rust/lance-table/src/rowids.rs:1902-1919; rust/lance-table/src/rowids.rs:1055-1127)
+`);
+append('L4-crosscutting/cookbook.md',`## Local extension seam: row-ID sequence operations
+
+Before changing representation, update every sequence dispatch: iteration/count/bounds, concatenation, delete/find_ids/mask, borrowed slice/get/select, cursor state/reset and density policy, ID-mask translation, set conversion, rechunk and ReadBatchParams adapter. Add independently expected output cases to the existing rowids.rs test module; do not rely solely on a shared grouping oracle. Coordinate segment and codec changes for all six representations. (rust/lance-table/src/rowids.rs:237-1127; rust/lance-table/src/rowids.rs:1130-2309; rust/lance-table/src/rowids/segment.rs:40-954; rust/lance-table/src/rowids/serde.rs:98-426)
+
+For a bounds/arithmetic fix, explicitly cover numeric ID versus present ordinal, high32 carry, empty ranges, zero chunks, reverse/oversized selections and duplicate requests. For a cursor optimization, cover forward, repeated and backward requests, segment transitions, EOF then rewind, and source replacement policy. Decide whether malformed input returns an error or panics before mutating; current methods vary. (rust/lance-table/src/rowids.rs:67-170; rust/lance-table/src/rowids.rs:340-535; rust/lance-table/src/rowids.rs:621-646; rust/lance-table/src/rowids.rs:959-1127)
+
+Complete integration still requires utils/stream.rs and transaction/manifest_build.rs analysis plus dataset compaction/update/merge-insert callers. The contextual snippets locate cursor dispatch and range-segment config, not a complete commit or performance qualification. (rust/lance-table/src/utils/stream.rs:407-444; rust/lance-table/src/utils/stream.rs:648-680; rust/lance-table/src/transaction/manifest_build.rs:73-122)
+`);
+append('L4-crosscutting/pitfalls.md',`## Sequence boundary hazards
+
+- is_empty checks segment count, so deleting every row can leave len0/is_empty false; mask-all removes empty segments. Equality also compares representation. (rust/lance-table/src/rowids.rs:51-52; rust/lance-table/src/rowids.rs:267-277; rust/lance-table/src/rowids.rs:340-396; rust/lance-table/src/rowids.rs:1229-1231)
+- Display writes its first up-to11 values without commas. Treat it as current diagnostic behavior, not a reliable sequence serialization. (rust/lance-table/src/rowids.rs:173-206)
+- Plain-range mask end reconstruction uses OR after low32+1; singleton ID8589934591 gives end4294967296 and underflows ordinal subtraction. Empty Range0..0 also reaches a dependency insert_range that includes0. These deductions are unexecuted and need independent regressions. (rust/lance-table/src/rowids.rs:621-646; rust/lance-table/src/rowids.rs:865-905; rust/lance-select/src/mask.rs:545-588; rust/lance-select/src/mask.rs:801-810)
+- Result-returning mask has no Err branch; select_row_ids does not fully validate reversed or excessive RangeFrom bounds, and reads index values without Arrow validity checks. (rust/lance-table/src/rowids.rs:367-396; rust/lance-table/src/rowids.rs:1055-1127)
+- Rechunking an entire plain range still materializes/reselects its values, and a leftover empty segment can fail total-cardinality-equivalent input. (rust/lance-table/src/rowids.rs:988-1052; rust/lance-table/src/rowids/segment.rs:378-387)
+`);
+const ledger=JSON.parse(read('MANIFEST.json')),batch=JSON.parse(read('analysis/iteration-034-rowid-sequence.json'));
+for(const e of ledger.files.filter(e=>e.status==='analyzed'&&(e.path==='protos/rowids.proto'||e.path.startsWith('rust/lance-table/src/rowids/')))){
+ const prior=JSON.parse(read(e.analysis_record)).files.find(f=>f.path===e.path),a=structuredClone(prior);
+ a.limits=a.limits.replace('Exact segment selection, complete sequence operations and released compatibility remain pending.','Exact segment selection and complete local sequence operations are covered at rust/lance-table/src/rowids/segment.rs:1-1624 and rust/lance-table/src/rowids.rs:1-2309; released compatibility remains pending.').replace('full sequence callers remain pending.','full local sequence behavior is covered at rust/lance-table/src/rowids.rs:1-2309; stream/dataset callers remain pending.').replace('complete public sequence contracts remain pending.','complete public sequence contracts are covered at rust/lance-table/src/rowids.rs:1-2309.').replace('Parent visibility and corruption helper were inspected narrowly but their files are not claimed analyzed.','Parent routing and corruption helper are now covered in the fully analyzed rowids.rs and serde.rs.').replace('full sequence/transaction integration remains pending.','local sequence behavior is covered at rust/lance-table/src/rowids.rs:1-2309; full transaction integration remains pending.').replace('full RowIdSequence cursor/source reset/opt-in and dataset/transaction consumers remain pending.','full local RowIdSequence cursor/reset behavior is covered at rust/lance-table/src/rowids.rs:54-170 and rust/lance-table/src/rowids.rs:538-592; its conversion has no opt-in gate, while full dataset/transaction consumers remain pending.').replace('full RowIdSequence and dataset integration remain pending.','local RowIdSequence is covered at rust/lance-table/src/rowids.rs:1-2309; dataset integration remains pending.').replace('Full RowIdSequence, dataset loaders, stream consumers and transaction call sites remain pending full analysis;','Local RowIdSequence is covered at rust/lance-table/src/rowids.rs:1-2309; dataset loaders, stream consumers and transaction call sites remain pending full analysis;');
+ if(a.limits!==prior.limits)batch.files.push(a);
+}
+write('analysis/iteration-034-rowid-sequence.json',JSON.stringify(batch,null,2)+'\n');
+const sym=JSON.parse(read('analysis/rust-symbols.json'));for(const s of sym.filter(s=>s.path==='rust/lance-table/src/rowids/segment.rs')){s.callers=s.callers.replace('lexical RowIdSequence::as_ranges consumer at rowids.rs332, full method pending.','reviewed RowIdSequence::use_range_segments at rowids.rs329-337.').replace('full RowIdSequence consumers pending.','local RowIdSequence consumers are reviewed at rowids.rs237-1127; dataset consumers pending.').replace('lexical rowids.rs state/reset/extension calls; full sequence lifecycle pending.','reviewed rowids.rs67-170 state/reset/extension calls; full stream lifecycle pending.');}write('analysis/rust-symbols.json',JSON.stringify(sym,null,2)+'\n');
+console.log({refreshed_l2:batch.files.length-1,new_l2:1,symbols_added:symbols.length,layers:'L0/L1/L3/L4'});

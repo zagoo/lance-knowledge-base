@@ -1,0 +1,136 @@
+{
+  "iteration": 2,
+  "files": [
+    {
+      "path": "protos/file2.proto",
+      "reviewed": true,
+      "role": "Public lance.file.v2 schema and inline specification for the minimal v2.X physical file envelope: byte buffers, column/page metadata, encoding locations, offset tables and footer. This base layer deliberately does not prescribe logical types or concrete encoding algorithms.",
+      "ranges": [
+        [
+          1,
+          10,
+          "SPDX comments, proto3 syntax and lance.file.v2 package precede Any and Empty imports. Empty is used as the explicit no-encoding marker; Any is imported but no field in this file uses it."
+        ],
+        [
+          11,
+          27,
+          "The minimal format describes 0..4Gi columns, 0..4Gi pages per column, and up to 2^64 items per page/column; page and column item counts may differ. These prose limits need comparison with actual integer representation and writer/reader checks before assuming the upper endpoint is inclusive. This envelope treats data as byte buffers with extensible metadata, leaving schema and logical types to higher layers."
+        ],
+        [
+          28,
+          39,
+          "Data buffers are written first and can be referenced by page encoding, column encoding (such as statistics or dictionaries), or a global buffer table for shared data/file metadata such as a schema. A global schema is a higher-layer convention, not a mandatory type system in this minimal schema."
+        ],
+        [
+          40,
+          57,
+          "Buffer count is independent of column/page counts. Writers may insert padding for alignment: 64-byte SIMD and 4096-byte direct IO alignment are examples. Asterisks in the diagram mark fields requiring sector alignment for direct IO, and readers must allow optional preceding padding. Footer integers are unsigned little-endian. These are format/documented IO layout expectations rather than proof a particular backend uses direct IO."
+        ],
+        [
+          58,
+          96,
+          "Physical layout is data buffers, individual column metadata blocks, column metadata offset table, global buffer offset table, then footer. Offset tables list each metadata/global-buffer position and size. Footer fields in order are A u64 (first column metadata offset), B u64 (column-metadata-offset-table offset), C u64 (global-buffer-offset-table offset), u32 global-buffer count, u32 column count, u16 major version, u16 minor version, and ASCII LANC. The fixed footer width inferred from these declared widths is 40 bytes (3*8+2*4+2*2+4); verify the implementation before treating this arithmetic as an observed reader constant. The diagram marks the first table position and each metadata/data buffer as alignment points, but not every footer member."
+        ],
+        [
+          97,
+          116,
+          "Page buffers need not be contiguous, though grouping is recommended for performance. Large pages mitigate seek/request overhead; the comment advises at least 8 MB and flushing when accumulated data is excessive, not a mandatory hard minimum. Concrete encodings are extensions. The ideal of adding plugins without recompilation is explicitly aspirational, not evidence of an implemented dynamic plugin registry."
+        ],
+        [
+          117,
+          137,
+          "DeferredEncoding has uint64 buffer_location=1 and buffer_length=2, locating encoded metadata elsewhere. Its rationale is deduplicating identical encodings: global buffers can share across columns, column metadata buffers across pages, or an unusual page-local location can defer loading a large encoding until the page is needed. Reference bounds/cycles are not validated by this message."
+        ],
+        [
+          138,
+          146,
+          "DirectEncoding stores bytes encoding=1 directly in metadata; the comment identifies this as the most common approach. It supplies no type URL or decoding algorithm by itself."
+        ],
+        [
+          147,
+          166,
+          "Encoding supplies information to decode a page or interpret column metadata (for example bit width, dictionaries, statistics). Its location oneof uses DeferredEncoding indirect=1, DirectEncoding direct=2, or google.protobuf.Empty none=3. Explicit none is a declared alternative distinct from an unset oneof; the file does not define how an absent arm is handled."
+        ],
+        [
+          167,
+          197,
+          "ColumnMetadata is stored near file end and can be read independently for projection. Nested Page has repeated uint64 buffer_offsets=1 and buffer_sizes=2 with equal lengths, possibly empty for constant encoding; uint64 length=3 is logical item count; Encoding encoding=4 describes page representation; uint64 priority=5 is, for tabular data, the first top-level row number. The comment says top-level rows should not split across pages. No scheduler or ordering implementation exists here."
+        ],
+        [
+          198,
+          217,
+          "ColumnMetadata.encoding=1 typically describes column metadata buffers; repeated Page pages=2 lists data pages; repeated uint64 buffer_offsets=3 and buffer_sizes=4 identify column metadata buffers with matching lengths, including zero-length lists. Page and column buffer vectors are different address spaces whose interpretation comes from their encodings."
+        ],
+        [
+          218,
+          223,
+          "The closing prose reiterates that this minimal file is only a building block and other protobufs provide useful extensions. The footer carries version integers but this file does not enumerate supported major/minor combinations or stable/unstable policies. Footer version integers are specified separately (protos/file2.proto:84-92)."
+        ]
+      ],
+      "limits": "The complete physical envelope is specified here, but exact supported versions, integer limits, corruption handling, padding enforcement, IO behavior, and encoding dispatch require Rust and encoding-schema evidence (protos/file2.proto:11-115; protos/file2.proto:167-223). The claimed dynamic plugin extensibility is a design wish, not verified runtime behavior (protos/file2.proto:109-114)."
+    },
+    {
+      "path": "protos/file.proto",
+      "reviewed": true,
+      "role": "Public lance.file schema for logical fields/schema/file descriptors and historical file/page/statistics metadata. Some field-level encoding metadata is explicitly v1-only; logical schema types must not all be dismissed as legacy solely because they share this file.",
+      "ranges": [
+        [
+          1,
+          15,
+          "License, proto3, and lance.file package precede FileDescriptor(schema=1,length uint64=2). Schema describes contents and length counts file rows. This message does not embed actual column buffers."
+        ],
+        [
+          16,
+          23,
+          "Schema has repeated lance.file.Field fields=1 including nested fields, and string-to-bytes metadata map=5. Its field list is not limited to top-level columns and its metadata values need not be UTF-8 strings."
+        ],
+        [
+          24,
+          40,
+          "Metadata reserves tag 4 because StatisticsMetadata previously used it and older readers had a bug. manifest_position uint64=1 uses zero to indicate externally stored manifest. batch_offsets repeated int32=2 is described as logical offsets of chunk groups, with a parenthetical about rows in each chunk; exact offset-versus-count conversion is an implementation question rather than a reason to reinterpret the declaration."
+        ],
+        [
+          41,
+          60,
+          "page_table_position uint64=3 points to a num_fields by num_batches by 2 matrix of signed int64 position/length pairs. Pages in the same column are stored contiguously in this table. Every file field, including struct fields with zero-length runs because they store no data, has a table run. The example accesses column 5, batch 4, selecting position slot 0 or length slot 1. This specification is distinct from v2's independent page metadata."
+        ],
+        [
+          61,
+          94,
+          "Nested StatisticsMetadata stores repeated Field schema=1, repeated int32 leaf-field IDs fields=2, and uint64 page_table_position=3. Statistics schema can be empty or cover only some fields. Each fields entry identifies a stats-schema field and corresponds to one statistics page-table column; the table is N by 2 because there is always one batch. Metadata.statistics uses tag 5, deliberately not the reserved historical tag 4. Historical reservation rationale is at protos/file.proto:25-29."
+        ],
+        [
+          95,
+          121,
+          "Encoding enum assigns NONE=0 invalid, PLAIN=1, VAR_BINARY=2, DICTIONARY=3, RLE=4. Dictionary stores signed int64 offset=1 and length=2 for dictionary values; offset is meaningful only with DICTIONARY and logical_type describes the values' type. These declarations do not prove all enum alternatives have active implementations."
+        ],
+        [
+          122,
+          140,
+          "Field.Type distinguishes PARENT=0, REPEATED=1, LEAF=2. Fields are Type type=1, fully qualified name string=2, signed id=3, and signed parent_id=4. ID assignment refers to DataFile.fields. The parent comment says not-set means top-level, but parent_id is a bare proto3 int32 without presence; the actual sentinel/default convention must come from conversion code. Do not assume Option semantics."
+        ],
+        [
+          141,
+          173,
+          "logical_type string=5 encodes parameterized Arrow logical type names. Parent is struct; repeated permits list, large_list, list.struct, large_list.struct (the latter pair also imply parenthood). Leaf names listed are null, bool, signed/unsigned 8/16/32/64 integers, halffloat/float/double, string/large_string, binary/large_binary, date32:day, date64:ms, decimal:128 or :256 with precision/scale, time/timestamp/duration with s/ms/us/ns units, and dict:{value_type}:{index_type}:false. nullable bool=6 is separate. This comment's list requires validation against parser code before being called exhaustive runtime support."
+        ],
+        [
+          174,
+          192,
+          "metadata string-to-bytes map=10 carries extension type names/parameters. unenforced_primary_key bool=12 marks membership; unenforced_primary_key_position uint32=13 uses positive one-based order or zero to fall back to schema field-ID ordering for a primary-key member. unenforced_clustering_key bool=14 is an ordinary declared field whose comment reserves it for future use; use unenforced_clustering_key_position uint32=15, where positive is one-based position and zero means not a clustering key. This semantic reservation is not a protobuf reserved tag statement."
+        ],
+        [
+          193,
+          216,
+          "Deprecated field encoding=7 is v1-only; v2 chooses variable encodings per page. Deprecated Dictionary dictionary=8 is v1-only; v2 selects dictionaries dynamically and stores them in data files. Deprecated extension_name string=9 is superseded by metadata key ARROW:extension:name. The declarations remain present for old readers; deprecation comments do not erase their wire tags."
+        ],
+        [
+          217,
+          223,
+          "Former string storage_class tag 11 and its name are explicitly reserved to retain old-manifest compatibility and prohibit reuse. This is a real protobuf reservation, unlike the still-declared clustering-key bool's future-use comment."
+        ]
+      ],
+      "limits": "V1-only encoding/dictionary fields are explicitly labeled (protos/file.proto:193-215); schema and file-descriptor usage still need consumer tracing. Parent-ID absence wording and batch-offset wording are unresolved converter questions (protos/file.proto:36-39; protos/file.proto:138-139). No executable API, panic, unsafe block, or concurrency behavior is implemented in this schema."
+    }
+  ]
+}

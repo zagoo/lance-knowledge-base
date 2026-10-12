@@ -1,0 +1,66 @@
+{
+  "iteration": 80,
+  "note": "Fresh contextual source reads support all sampled claims beyond their local excerpts and the backtrace coverage-note refresh. No repository execution.",
+  "files": [
+    {
+      "path": "rust/lance-table/src/transaction/row_version.rs",
+      "ranges": [
+        {
+          "start": 185,
+          "end": 242,
+          "text": "185 |         };\n186 |         if matches!(meta, RowDatasetVersionMeta::Column) {\n187 |             // The rewritten rows' original created-at versions live in a data\n188 |             // file, which this path cannot read. Defaulting them would silently\n189 |             // rewrite their lineage, so the caller has to have read them.\n190 |             let loaded = spilled\n191 |                 .get(&frag.id)\n192 |                 .and_then(|lineage| lineage.created_at.clone())\n193 |                 .ok_or_else(|| {\n194 |                     Error::not_supported(format!(\n195 |                         \"fragment {} stores its created-at versions outside the manifest \\\n196 |                          and they were not loaded ahead of the commit\",\n197 |                         frag.id\n198 |                     ))\n199 |                 })?;\n200 |             version_cache.insert(frag.id, loaded.as_ref().clone());\n201 |         } else if let Ok(seq) = meta.load_sequence() {\n202 |             version_cache.insert(frag.id, seq);\n203 |         }\n204 |     }\n205 | \n206 |     for fragment in new_fragments.iter_mut() {\n207 |         let row_ids = match (&fragment.row_id_meta, &fragment.created_at_version_meta) {\n208 |             // Writer-placed lineage (see `has_writer_placed_lineage`): the\n209 |             // writer read the rewritten rows and placed their created-at\n210 |             // versions itself. The last-updated-at version is this commit's,\n211 |             // which only the commit knows (a conflict retry moves it), so it\n212 |             // is stamped here whatever the writer left.\n213 |             (_, Some(RowDatasetVersionMeta::Column)) => {\n214 |                 fragment.last_updated_at_version_meta = build_version_meta(fragment, new_version);\n215 |                 continue;\n216 |             }\n217 |             (Some(RowIdMeta::Column), Some(created_at)) => {\n218 |                 // Unlike a spilled sequence, an inline one can be checked\n219 |                 // against the fragment here without IO.\n220 |                 let placed_rows = created_at\n221 |                     .load_sequence()\n222 |                     .map_err(|error| {\n223 |                         Error::invalid_input(format!(\n224 |                             \"fragment {} carries created-at version metadata that does not \\\n225 |                              decode: {error}\",\n226 |                             fragment.id\n227 |                         ))\n228 |                     })?\n229 |                     .len();\n230 |                 let physical_rows = fragment.physical_rows.unwrap_or(0) as u64;\n231 |                 if placed_rows != physical_rows {\n232 |                     return Err(Error::invalid_input(format!(\n233 |                         \"fragment {} carries {placed_rows} created-at versions for \\\n234 |                          {physical_rows} physical rows\",\n235 |                         fragment.id\n236 |                     )));\n237 |                 }\n238 |                 fragment.last_updated_at_version_meta = build_version_meta(fragment, new_version);\n239 |                 continue;\n240 |             }\n241 |             (Some(RowIdMeta::Column), None) => {\n242 |                 // Resolving the versions needs the row ids, which this"
+        }
+      ]
+    },
+    {
+      "path": "rust/lance-file/src/versions/v1/writer/statistics.rs",
+      "ranges": [
+        {
+          "start": 625,
+          "end": 661,
+          "text": "625 |             None\n626 |         } else {\n627 |             Some(Self { builders })\n628 |         }\n629 |     }\n630 | \n631 |     pub fn get_builder(&mut self, field_id: i32) -> Option<&mut StatisticsBuilder> {\n632 |         self.builders.get_mut(&field_id).map(|(_, b)| b)\n633 |     }\n634 | \n635 |     pub fn finish(&mut self) -> Result<RecordBatch> {\n636 |         let mut arrays: Vec<ArrayRef> = vec![];\n637 |         let mut fields: Vec<ArrowField> = vec![];\n638 | \n639 |         self.builders.iter_mut().for_each(|(_, (field, builder))| {\n640 |             let null_count = Arc::new(builder.null_count.finish());\n641 |             let min_value = Arc::new(builder.min_value.finish());\n642 |             let max_value = Arc::new(builder.max_value.finish());\n643 |             let struct_fields = vec![\n644 |                 ArrowField::new(\"null_count\", DataType::Int64, false),\n645 |                 // Bounds can be absent for empty pages regardless of the data field's\n646 |                 // nullability.\n647 |                 ArrowField::new(\"min_value\", field.data_type(), true),\n648 |                 ArrowField::new(\"max_value\", field.data_type(), true),\n649 |             ];\n650 | \n651 |             let stats = StructArray::new(\n652 |                 struct_fields.clone().into(),\n653 |                 vec![null_count.clone(), min_value, max_value],\n654 |                 null_count.nulls().cloned(),\n655 |             );\n656 |             let field = ArrowField::new_struct(field.id.to_string(), struct_fields, false);\n657 |             fields.push(field);\n658 |             arrays.push(Arc::new(stats));\n659 |         });\n660 | \n661 |         let schema = Arc::new(ArrowSchema::new(fields));"
+        }
+      ]
+    },
+    {
+      "path": "rust/lance-table/src/format/row_ids.rs",
+      "ranges": [
+        {
+          "start": 15,
+          "end": 60,
+          "text": "15 | pub use lance_core::{\n16 |     ROW_CREATED_AT_VERSION_FIELD_ID, ROW_ID_FIELD_ID, ROW_LAST_UPDATED_AT_VERSION_FIELD_ID,\n17 | };\n18 | \n19 | /// A reference to a part of a file, used by the fragment reuse index details.\n20 | #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, DeepSizeOf)]\n21 | pub struct ExternalFile {\n22 |     pub path: String,\n23 |     pub offset: u64,\n24 |     pub size: u64,\n25 | }\n26 | \n27 | /// A fragment's row id sequence, encoded inline in the manifest.\n28 | ///\n29 | /// Carries a memoized [`digest`](Self::digest) of the encoded bytes. The digest\n30 | /// identifies *which* sequence these bytes are, which is what the row id\n31 | /// sequence cache keys on: a fragment id alone does not identify a sequence,\n32 | /// because fragment ids are reused across dataset generations.\n33 | ///\n34 | /// The digest is memoized because computing it is proportional to the encoded\n35 | /// size. A run-encoded sequence is a handful of bytes per run, but a heavily\n36 | /// fragmented one is array-encoded at 8 bytes per row, and the cache is\n37 | /// consulted on every scan, count, prefilter and index load.\n38 | ///\n39 | /// Bytes and memo share one immutable allocation, so cloning shares both. That\n40 | /// is what makes the memo worth having: callers clone `Fragment` before loading\n41 | /// its sequence (see `count_from_mask`), and a memo held per clone would be\n42 | /// filled and dropped by each scan, rehashing the whole sequence every time.\n43 | /// Sharing also keeps a cloned fragment from duplicating the encoded bytes.\n44 | ///\n45 | /// The digest lives *with* the bytes rather than beside them so the two cannot\n46 | /// drift: several write paths replace a fragment's `row_id_meta` after the\n47 | /// fragment is built, and a digest that outlived its bytes would silently\n48 | /// resolve to another generation's sequence.\n49 | #[derive(Clone)]\n50 | pub struct InlineRowIds {\n51 |     inner: Arc<InlineRowIdsInner>,\n52 | }\n53 | \n54 | struct InlineRowIdsInner {\n55 |     /// `Bytes` rather than `Vec<u8>`: when the manifest is decoded from the\n56 |     /// fetched buffer this is a slice of that buffer, not a copy of it.\n57 |     data: Bytes,\n58 |     digest: OnceLock<[u8; 32]>,\n59 | }\n60 | "
+        }
+      ]
+    },
+    {
+      "path": "rust/lance-core/src/utils/aimd.rs",
+      "ranges": [
+        {
+          "start": 275,
+          "end": 310,
+          "text": "275 |         }\n276 | \n277 |         // Record this outcome\n278 |         match outcome {\n279 |             RequestOutcome::Success => state.success_count += 1,\n280 |             RequestOutcome::Throttled => state.throttle_count += 1,\n281 |         }\n282 | \n283 |         state.rate\n284 |     }\n285 | \n286 |     /// Get the current rate without recording an outcome.\n287 |     pub fn current_rate(&self) -> f64 {\n288 |         self.state.lock().unwrap().rate\n289 |     }\n290 | }\n291 | \n292 | #[cfg(test)]\n293 | mod tests {\n294 |     use super::*;\n295 |     use rstest::rstest;\n296 | \n297 |     #[rstest]\n298 |     #[case::zero_initial_rate(\n299 |         AimdConfig::default().with_initial_rate(0.0),\n300 |         \"initial_rate must be positive\"\n301 |     )]\n302 |     #[case::negative_min_rate(\n303 |         AimdConfig::default().with_min_rate(-1.0),\n304 |         \"min_rate must be positive\"\n305 |     )]\n306 |     #[case::negative_max_rate(\n307 |         AimdConfig::default().with_max_rate(-1.0),\n308 |         \"max_rate must be non-negative\"\n309 |     )]\n310 |     #[case::min_exceeds_max("
+        }
+      ]
+    },
+    {
+      "path": "rust/lance-file/src/versions/v2_2/mod.rs",
+      "ranges": [
+        {
+          "start": 33,
+          "end": 48,
+          "text": "33 | mod reader;\n34 | mod writer;\n35 | \n36 | pub(crate) use reader::{\n37 |     decode_column_metadata, finish_metadata, finish_metadata_index, validate_global_buffers,\n38 | };\n39 | pub use reader::{\n40 |     projection_from_column_names, projection_from_field_ids, projection_from_whole_schema,\n41 | };\n42 | \n43 | pub(crate) fn read_projection() -> Arc<dyn ReadProjection> {\n44 |     structural::read_projection(reader::decode_column)\n45 | }\n46 | pub use writer::Writer;\n47 | \n48 | /// Count physical columns represented by a field in a v2.2 footer."
+        }
+      ]
+    },
+    {
+      "path": "rust/lance-core/src/error.rs",
+      "ranges": [
+        {
+          "start": 11,
+          "end": 56,
+          "text": "11 | #[cfg(feature = \"backtrace\")]\n12 | mod backtrace_support {\n13 |     use std::backtrace::Backtrace;\n14 | \n15 |     use snafu::{AsBacktrace, GenerateImplicitData};\n16 | \n17 |     #[derive(Debug)]\n18 |     pub struct MaybeBacktrace(pub Option<Backtrace>);\n19 | \n20 |     impl GenerateImplicitData for MaybeBacktrace {\n21 |         fn generate() -> Self {\n22 |             Self(<Option<Backtrace>>::generate())\n23 |         }\n24 |     }\n25 | \n26 |     impl AsBacktrace for MaybeBacktrace {\n27 |         fn as_backtrace(&self) -> Option<&Backtrace> {\n28 |             self.0.as_ref()\n29 |         }\n30 |     }\n31 | }\n32 | \n33 | #[cfg(not(feature = \"backtrace\"))]\n34 | mod backtrace_support {\n35 |     use std::backtrace::Backtrace;\n36 | \n37 |     use snafu::{AsBacktrace, GenerateImplicitData};\n38 | \n39 |     #[derive(Debug)]\n40 |     pub struct MaybeBacktrace;\n41 | \n42 |     impl GenerateImplicitData for MaybeBacktrace {\n43 |         fn generate() -> Self {\n44 |             Self\n45 |         }\n46 |     }\n47 | \n48 |     impl AsBacktrace for MaybeBacktrace {\n49 |         fn as_backtrace(&self) -> Option<&Backtrace> {\n50 |             None\n51 |         }\n52 |     }\n53 | }\n54 | \n55 | use backtrace_support::MaybeBacktrace;\n56 | "
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,410 @@
+@@ -0,0 +1,409 @@
+    1 +// SPDX-License-Identifier: Apache-2.0
+    2 +// SPDX-FileCopyrightText: Copyright The Lance Authors
+    3 +// SPDX-FileCopyrightText: Copyright 2023 Datafuse Labs
+    4 +// Adapted from databendlabs/jsonb at commit fba895c5ebe77ce2539e187f9c652f51cbf195c3.
+    5 +
+    6 +use std::collections::VecDeque;
+    7 +
+    8 +use byteorder::BigEndian;
+    9 +use byteorder::WriteBytesExt;
+   10 +use serde::ser;
+   11 +use serde::ser::Serialize;
+   12 +use serde::ser::SerializeMap;
+   13 +use serde::ser::SerializeSeq;
+   14 +
+   15 +use super::constants::*;
+   16 +use super::jentry::JEntry;
+   17 +use crate::RawJsonb;
+   18 +use crate::extension::ExtensionValue;
+   19 +use crate::number::Number;
+   20 +use crate::value::Object;
+   21 +use crate::value::Value;
+   22 +
+   23 +impl Serialize for RawJsonb<'_> {
+   24 +    #[inline]
+   25 +    fn serialize<S>(&self, serializer: S) -> core::result::Result<S::Ok, S::Error>
+   26 +    where
+   27 +        S: serde::Serializer,
+   28 +    {
+   29 +        let mut index = 0;
+   30 +        let (header_type, header_len) = self
+   31 +            .read_header(index)
+   32 +            .map_err(|e| ser::Error::custom(format!("{e}")))?;
+   33 +        index += 4;
+   34 +
+   35 +        match header_type {
+   36 +            SCALAR_CONTAINER_TAG => {
+   37 +                let jentry = self
+   38 +                    .read_jentry(index)
+   39 +                    .map_err(|e| ser::Error::custom(format!("{e}")))?;
+   40 +                index += 4;
+   41 +
+   42 +                let payload_start = index;
+   43 +                let payload_end = index + jentry.length as usize;
+   44 +                match jentry.type_code {
+   45 +                    NULL_TAG => serializer.serialize_unit(),
+   46 +                    TRUE_TAG => serializer.serialize_bool(true),
+   47 +                    FALSE_TAG => serializer.serialize_bool(false),
+   48 +                    NUMBER_TAG => {
+   49 +                        let num = Number::decode(&self.data[payload_start..payload_end])
+   50 +                            .map_err(|e| ser::Error::custom(format!("{e}")))?;
+   51 +                        num.serialize(serializer)
+   52 +                    }
+   53 +                    STRING_TAG => {
+   54 +                        let s = unsafe {
+   55 +                            std::str::from_utf8_unchecked(&self.data[payload_start..payload_end])
+   56 +                        };
+   57 +                        serializer.serialize_str(s)
+   58 +                    }
+   59 +                    EXTENSION_TAG => {
+   60 +                        let val = ExtensionValue::decode(&self.data[payload_start..payload_end])
+   61 +                            .map_err(|e| ser::Error::custom(format!("{e}")))?;
+   62 +                        let s = format!("{}", val);
+   63 +                        serializer.serialize_str(&s)
+   64 +                    }
+   65 +                    CONTAINER_TAG => {
+   66 +                        // Scalar header can't have container jentry tag
+   67 +                        Err(ser::Error::custom("Invalid jsonb".to_string()))
+   68 +                    }
+   69 +                    _ => Err(ser::Error::custom("Invalid jsonb".to_string())),
+   70 +                }
+   71 +            }
+   72 +            ARRAY_CONTAINER_TAG => {
+   73 +                let mut serialize_seq = serializer.serialize_seq(Some(header_len))?;
+   74 +
+   75 +                let mut payload_start = index + 4 * header_len;
+   76 +                for _ in 0..header_len {
+   77 +                    let jentry = self
+   78 +                        .read_jentry(index)
+   79 +                        .map_err(|e| ser::Error::custom(format!("{e}")))?;
+   80 +                    index += 4;
+   81 +
+   82 +                    let payload_end = payload_start + jentry.length as usize;
+   83 +                    match jentry.type_code {
+   84 +                        NULL_TAG => serialize_seq.serialize_element(&())?,
+   85 +                        TRUE_TAG => serialize_seq.serialize_element(&true)?,
+   86 +                        FALSE_TAG => serialize_seq.serialize_element(&false)?,
+   87 +                        NUMBER_TAG => {
+   88 +                            let num = Number::decode(&self.data[payload_start..payload_end])
+   89 +                                .map_err(|e| ser::Error::custom(format!("{e}")))?;
+   90 +                            serialize_seq.serialize_element(&num)?;
+   91 +                        }
+   92 +                        STRING_TAG => {
+   93 +                            let s = unsafe {
+   94 +                                std::str::from_utf8_unchecked(
+   95 +                                    &self.data[payload_start..payload_end],
+   96 +                                )
+   97 +                            };
+   98 +                            serialize_seq.serialize_element(&s)?;
+   99 +                        }
+  100 +                        EXTENSION_TAG => {
+  101 +                            let val =
+  102 +                                ExtensionValue::decode(&self.data[payload_start..payload_end])
+  103 +                                    .map_err(|e| ser::Error::custom(format!("{e}")))?;
+  104 +                            let s = format!("{}", val);
+  105 +                            serialize_seq.serialize_element(&s)?;
+  106 +                        }
+  107 +                        CONTAINER_TAG => {
+  108 +                            let inner_raw_jsonb =
+  109 +                                RawJsonb::new(&self.data[payload_start..payload_end]);
+  110 +                            serialize_seq.serialize_element(&inner_raw_jsonb)?;
+  111 +                        }
+  112 +                        _ => {
+  113 +                            return Err(ser::Error::custom("Invalid jsonb".to_string()));
+  114 +                        }
+  115 +                    }
+  116 +                    payload_start = payload_end;
+  117 +                }
+  118 +                serialize_seq.end()
+  119 +            }
+  120 +            OBJECT_CONTAINER_TAG => {
+  121 +                let mut serialize_map = serializer.serialize_map(Some(header_len))?;
+  122 +
+  123 +                let mut keys = VecDeque::with_capacity(header_len);
+  124 +                let mut payload_start = index + 8 * header_len;
+  125 +                for _ in 0..header_len {
+  126 +                    let jentry = self
+  127 +                        .read_jentry(index)
+  128 +                        .map_err(|e| ser::Error::custom(format!("{e}")))?;
+  129 +                    index += 4;
+  130 +
+  131 +                    let payload_end = payload_start + jentry.length as usize;
+  132 +                    match jentry.type_code {
+  133 +                        STRING_TAG => {
+  134 +                            let s = unsafe {
+  135 +                                std::str::from_utf8_unchecked(
+  136 +                                    &self.data[payload_start..payload_end],
+  137 +                                )
+  138 +                            };
+  139 +                            keys.push_back(s);
+  140 +                        }
+  141 +                        _ => {
+  142 +                            return Err(ser::Error::custom("Invalid jsonb".to_string()));
+  143 +                        }
+  144 +                    }
+  145 +                    payload_start = payload_end;
+  146 +                }
+  147 +
+  148 +                for _ in 0..header_len {
+  149 +                    let jentry = self
+  150 +                        .read_jentry(index)
+  151 +                        .map_err(|e| ser::Error::custom(format!("{e}")))?;
+  152 +                    index += 4;
+  153 +
+  154 +                    let payload_end = payload_start + jentry.length as usize;
+  155 +                    let k = keys.pop_front().unwrap();
+  156 +                    match jentry.type_code {
+  157 +                        NULL_TAG => serialize_map.serialize_entry(&k, &())?,
+  158 +                        TRUE_TAG => serialize_map.serialize_entry(&k, &true)?,
+  159 +                        FALSE_TAG => serialize_map.serialize_entry(&k, &false)?,
+  160 +                        NUMBER_TAG => {
+  161 +                            let num = Number::decode(&self.data[payload_start..payload_end])
+  162 +                                .map_err(|e| ser::Error::custom(format!("{e}")))?;
+  163 +                            serialize_map.serialize_entry(&k, &num)?;
+  164 +                        }
+  165 +                        STRING_TAG => {
+  166 +                            let s = unsafe {
+  167 +                                std::str::from_utf8_unchecked(
+  168 +                                    &self.data[payload_start..payload_end],
+  169 +                                )
+  170 +                            };
+  171 +                            serialize_map.serialize_entry(&k, &s)?;
+  172 +                        }
+  173 +                        EXTENSION_TAG => {
+  174 +                            let val =
+  175 +                                ExtensionValue::decode(&self.data[payload_start..payload_end])
+  176 +                                    .map_err(|e| ser::Error::custom(format!("{e}")))?;
+  177 +                            let s = format!("{}", val);
+  178 +                            serialize_map.serialize_entry(&k, &s)?;
+  179 +                        }
+  180 +                        CONTAINER_TAG => {
+  181 +                            let inner_raw_jsonb =
+  182 +                                RawJsonb::new(&self.data[payload_start..payload_end]);
+  183 +                            serialize_map.serialize_entry(&k, &inner_raw_jsonb)?;
+  184 +                        }
+  185 +                        _ => {
+  186 +                            return Err(ser::Error::custom("Invalid jsonb".to_string()));
+  187 +                        }
+  188 +                    }
+  189 +                    payload_start = payload_end;
+  190 +                }
+  191 +                serialize_map.end()
+  192 +            }
+  193 +            _ => Err(ser::Error::custom("Invalid jsonb".to_string())),
+  194 +        }
+  195 +    }
+  196 +}
+  197 +
+  198 +/// `BaseEncoder` provides common buffer management functionality for `JSONB` encoding.
+  199 +/// It handles low-level operations like reserving space for JEntries, writing encoded
+  200 +/// JEntries back to the buffer, and encoding container headers.
+  201 +struct BaseEncoder<'a> {
+  202 +    buf: &'a mut Vec<u8>,
+  203 +}
+  204 +
+  205 +impl<'a> BaseEncoder<'a> {
+  206 +    /// Creates a new `BaseEncoder` with the given buffer.
+  207 +    fn new(buf: &'a mut Vec<u8>) -> Self {
+  208 +        Self { buf }
+  209 +    }
+  210 +
+  211 +    /// Reserves space in the buffer for JEntries that will be filled in later.
+  212 +    /// Returns the starting index where the JEntries will be placed.
+  213 +    fn reserve_jentries(&mut self, len: usize) -> usize {
+  214 +        let old_len = self.buf.len();
+  215 +        let new_len = old_len + len;
+  216 +        self.buf.resize(new_len, 0);
+  217 +        old_len
+  218 +    }
+  219 +
+  220 +    /// Writes an encoded `JEntry` to the buffer at the specified index.
+  221 +    /// Updates the index to point to the next `JEntry` position.
+  222 +    fn replace_jentry(&mut self, jentry: JEntry, jentry_index: &mut usize) {
+  223 +        let jentry_bytes = jentry.encoded().to_be_bytes();
+  224 +        for (i, b) in jentry_bytes.iter().enumerate() {
+  225 +            self.buf[*jentry_index + i] = *b;
+  226 +        }
+  227 +        *jentry_index += 4;
+  228 +    }
+  229 +
+  230 +    /// Encodes a scalar container header and reserves space for its `JEntry`.
+  231 +    /// Returns the total length of the scalar container and the index where its JEntry will be placed.
+  232 +    fn encode_scalar_header(&mut self) -> (usize, usize) {
+  233 +        let header = SCALAR_CONTAINER_TAG;
+  234 +        self.buf.write_u32::<BigEndian>(header).unwrap();
+  235 +
+  236 +        // Scalar Value only has one JEntry
+  237 +        let scalar_len = 4 + 4;
+  238 +        let jentry_index = self.reserve_jentries(4);
+  239 +        (scalar_len, jentry_index)
+  240 +    }
+  241 +
+  242 +    /// Encodes an array container header and reserves space for its JEntries.
+  243 +    /// Returns the total length of the array container and the index where its JEntries will be placed.
+  244 +    fn encode_array_header(&mut self, len: usize) -> (usize, usize) {
+  245 +        let header = ARRAY_CONTAINER_TAG | len as u32;
+  246 +        self.buf.write_u32::<BigEndian>(header).unwrap();
+  247 +
+  248 +        // `Array` has N `JEntries`
+  249 +        let array_len = 4 + len * 4;
+  250 +        let jentry_index = self.reserve_jentries(len * 4);
+  251 +
+  252 +        (array_len, jentry_index)
+  253 +    }
+  254 +
+  255 +    /// Encodes an object container header and reserves space for its JEntries.
+  256 +    /// Returns the total length of the object container and the index where its JEntries will be placed.
+  257 +    fn encode_object_header(&mut self, len: usize) -> (usize, usize) {
+  258 +        let header = OBJECT_CONTAINER_TAG | len as u32;
+  259 +        self.buf.write_u32::<BigEndian>(header).unwrap();
+  260 +
+  261 +        // `Object` has 2 * N `JEntries`
+  262 +        let object_len = 4 + len * 8;
+  263 +        let jentry_index = self.reserve_jentries(len * 8);
+  264 +
+  265 +        (object_len, jentry_index)
+  266 +    }
+  267 +}
+  268 +
+  269 +/// Encoder for serializing Value types to `JSONB` binary format.
+  270 +/// Uses `BaseEncoder` for common buffer management operations.
+  271 +pub struct Encoder<'a> {
+  272 +    base_encoder: BaseEncoder<'a>,
+  273 +}
+  274 +
+  275 +impl<'a> Encoder<'a> {
+  276 +    /// Creates a new `Encoder` with the given buffer.
+  277 +    pub(crate) fn new(buf: &'a mut Vec<u8>) -> Self {
+  278 +        let base_encoder = BaseEncoder::new(buf);
+  279 +        Self { base_encoder }
+  280 +    }
+  281 +
+  282 +    /// Encodes a `Value` into `JSONB` binary format.
+  283 +    /// Dispatches to the appropriate encoding method based on the value type.
+  284 +    pub(crate) fn encode(&mut self, value: &Value<'a>) {
+  285 +        match value {
+  286 +            Value::Array(array) => self.encode_array(array),
+  287 +            Value::Object(obj) => self.encode_object(obj),
+  288 +            _ => self.encode_scalar(value),
+  289 +        };
+  290 +    }
+  291 +
+  292 +    /// Encodes a scalar `Value` (null, bool, number, string, or extension types).
+  293 +    /// Returns the total length of the encoded scalar.
+  294 +    fn encode_scalar(&mut self, value: &Value<'a>) -> usize {
+  295 +        let (mut scalar_len, mut jentry_index) = self.base_encoder.encode_scalar_header();
+  296 +
+  297 +        let jentry = self.encode_value(value);
+  298 +        scalar_len += jentry.length as usize;
+  299 +        self.base_encoder.replace_jentry(jentry, &mut jentry_index);
+  300 +
+  301 +        scalar_len
+  302 +    }
+  303 +
+  304 +    /// Encodes an array of Values.
+  305 +    /// Returns the total length of the encoded array.
+  306 +    fn encode_array(&mut self, values: &[Value<'a>]) -> usize {
+  307 +        let (mut array_len, mut jentry_index) = self.base_encoder.encode_array_header(values.len());
+  308 +
+  309 +        // encode all values
+  310 +        for value in values.iter() {
+  311 +            let jentry = self.encode_value(value);
+  312 +            array_len += jentry.length as usize;
+  313 +            self.base_encoder.replace_jentry(jentry, &mut jentry_index);
+  314 +        }
+  315 +
+  316 +        array_len
+  317 +    }
+  318 +
+  319 +    /// Encodes an object of Values (map of string keys to Values).
+  320 +    /// Returns the total length of the encoded object.
+  321 +    fn encode_object(&mut self, obj: &Object<'a>) -> usize {
+  322 +        let (mut object_len, mut jentry_index) = self.base_encoder.encode_object_header(obj.len());
+  323 +
+  324 +        // encode all keys first
+  325 +        for key in obj.keys() {
+  326 +            let len = key.len();
+  327 +            object_len += len;
+  328 +            self.base_encoder.buf.extend_from_slice(key.as_bytes());
+  329 +            let jentry = JEntry::make_string_jentry(len);
+  330 +            self.base_encoder.replace_jentry(jentry, &mut jentry_index);
+  331 +        }
+  332 +
+  333 +        // encode all values
+  334 +        for value in obj.values() {
+  335 +            let jentry = self.encode_value(value);
+  336 +            object_len += jentry.length as usize;
+  337 +            self.base_encoder.replace_jentry(jentry, &mut jentry_index);
+  338 +        }
+  339 +
+  340 +        object_len
+  341 +    }
+  342 +
+  343 +    /// Encodes a single `Value` and returns its `JEntry`.
+  344 +    /// The `JEntry` contains metadata about the encoded value.
+  345 +    fn encode_value(&mut self, value: &Value<'a>) -> JEntry {
+  346 +        let old_off = self.base_encoder.buf.len();
+  347 +
+  348 +        match value {
+  349 +            Value::Null => JEntry::make_null_jentry(),
+  350 +            Value::Bool(v) => {
+  351 +                if *v {
+  352 +                    JEntry::make_true_jentry()
+  353 +                } else {
+  354 +                    JEntry::make_false_jentry()
+  355 +                }
+  356 +            }
+  357 +            Value::Number(v) => {
+  358 +                let _ = v.compact_encode(&mut self.base_encoder.buf).unwrap();
+  359 +                let len = self.base_encoder.buf.len() - old_off;
+  360 +                JEntry::make_number_jentry(len)
+  361 +            }
+  362 +            Value::String(s) => {
+  363 +                let len = s.len();
+  364 +                self.base_encoder
+  365 +                    .buf
+  366 +                    .extend_from_slice(s.as_ref().as_bytes());
+  367 +                JEntry::make_string_jentry(len)
+  368 +            }
+  369 +            Value::Binary(v) => {
+  370 +                let val = ExtensionValue::Binary(v);
+  371 +                let _ = val.compact_encode(&mut self.base_encoder.buf).unwrap();
+  372 +                let len = self.base_encoder.buf.len() - old_off;
+  373 +                JEntry::make_extension_jentry(len)
+  374 +            }
+  375 +            Value::Date(v) => {
+  376 +                let val = ExtensionValue::Date(v.clone());
+  377 +                let _ = val.compact_encode(&mut self.base_encoder.buf).unwrap();
+  378 +                let len = self.base_encoder.buf.len() - old_off;
+  379 +                JEntry::make_extension_jentry(len)
+  380 +            }
+  381 +            Value::Timestamp(v) => {
+  382 +                let val = ExtensionValue::Timestamp(v.clone());
+  383 +                let _ = val.compact_encode(&mut self.base_encoder.buf).unwrap();
+  384 +                let len = self.base_encoder.buf.len() - old_off;
+  385 +                JEntry::make_extension_jentry(len)
+  386 +            }
+  387 +            Value::TimestampTz(v) => {
+  388 +                let val = ExtensionValue::TimestampTz(v.clone());
+  389 +                let _ = val.compact_encode(&mut self.base_encoder.buf).unwrap();
+  390 +                let len = self.base_encoder.buf.len() - old_off;
+  391 +                JEntry::make_extension_jentry(len)
+  392 +            }
+  393 +            Value::Interval(v) => {
+  394 +                let val = ExtensionValue::Interval(v.clone());
+  395 +                let _ = val.compact_encode(&mut self.base_encoder.buf).unwrap();
+  396 +                let len = self.base_encoder.buf.len() - old_off;
+  397 +                JEntry::make_extension_jentry(len)
+  398 +            }
+  399 +            Value::Array(array) => {
+  400 +                let len = self.encode_array(array);
+  401 +                JEntry::make_container_jentry(len)
+  402 +            }
+  403 +            Value::Object(obj) => {
+  404 +                let len = self.encode_object(obj);
+  405 +                JEntry::make_container_jentry(len)
+  406 +            }
+  407 +        }
+  408 +    }
+  409 +}

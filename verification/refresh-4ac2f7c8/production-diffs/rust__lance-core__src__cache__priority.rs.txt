@@ -1,0 +1,118 @@
+@@ -0,0 +1,184 @@
+    1 +// SPDX-License-Identifier: Apache-2.0
+    2 +// SPDX-FileCopyrightText: Copyright The Lance Authors
+    3 +
+    4 +//! Strict priority admission for layered index planes, sharing the cache byte budget.
+    5 +
+    6 +use super::InternalCacheKey;
+    7 +use std::collections::{BTreeMap, HashMap};
+    8 +
+    9 +pub struct PriorityEntries<T> {
+   10 +    entries: HashMap<InternalCacheKey, (u8, u64, usize, T)>,
+   11 +    order: BTreeMap<(u8, u64), InternalCacheKey>,
+   12 +    sequence: u64,
+   13 +    bytes: u128,
+   14 +}
+   15 +
+   16 +impl<T> Default for PriorityEntries<T> {
+   17 +    fn default() -> Self {
+   18 +        Self {
+   19 +            entries: HashMap::new(),
+   20 +            order: BTreeMap::new(),
+   21 +            sequence: 0,
+   22 +            bytes: 0,
+   23 +        }
+   24 +    }
+   25 +}
+   26 +
+   27 +impl<T: Clone> PriorityEntries<T> {
+   28 +    pub fn is_empty(&self) -> bool {
+   29 +        self.entries.is_empty()
+   30 +    }
+   31 +
+   32 +    pub fn len(&self) -> usize {
+   33 +        self.entries.len()
+   34 +    }
+   35 +    pub fn bytes(&self) -> usize {
+   36 +        self.bytes as usize
+   37 +    }
+   38 +    pub fn get(&mut self, key: &InternalCacheKey) -> Option<T> {
+   39 +        let (priority, stamp, _, value) = self.entries.get_mut(key)?;
+   40 +        self.order.remove(&(*priority, *stamp));
+   41 +        self.sequence += 1;
+   42 +        *stamp = self.sequence;
+   43 +        self.order.insert((*priority, *stamp), *key);
+   44 +        Some(value.clone())
+   45 +    }
+   46 +    /// Look up an entry without refreshing its recency.
+   47 +    pub fn peek(&self, key: &InternalCacheKey) -> Option<&T> {
+   48 +        self.entries.get(key).map(|(_, _, _, value)| value)
+   49 +    }
+   50 +
+   51 +    /// Membership only; unlike [`get`](Self::get), recency is unchanged.
+   52 +    pub fn contains(&self, key: &InternalCacheKey) -> bool {
+   53 +        self.entries.contains_key(key)
+   54 +    }
+   55 +    pub fn remove(&mut self, key: &InternalCacheKey) -> Option<T> {
+   56 +        let (priority, stamp, bytes, value) = self.entries.remove(key)?;
+   57 +        self.order.remove(&(priority, stamp));
+   58 +        self.bytes -= bytes as u128;
+   59 +        Some(value)
+   60 +    }
+   61 +    pub fn insert(
+   62 +        &mut self,
+   63 +        key: InternalCacheKey,
+   64 +        value: T,
+   65 +        bytes: usize,
+   66 +        priority: u8,
+   67 +        capacity: usize,
+   68 +    ) -> Vec<T> {
+   69 +        let mut dropped = Vec::new();
+   70 +        if let Some(old) = self.remove(&key) {
+   71 +            dropped.push(old);
+   72 +        }
+   73 +        if bytes > capacity {
+   74 +            dropped.push(value);
+   75 +            return dropped;
+   76 +        }
+   77 +        self.sequence += 1;
+   78 +        self.entries
+   79 +            .insert(key, (priority, self.sequence, bytes, value));
+   80 +        self.order.insert((priority, self.sequence), key);
+   81 +        self.bytes += bytes as u128;
+   82 +        while self.bytes > capacity as u128 {
+   83 +            if let Some(key) = self.order.first_key_value().map(|(_, key)| *key)
+   84 +                && let Some(value) = self.remove(&key)
+   85 +            {
+   86 +                dropped.push(value);
+   87 +            }
+   88 +        }
+   89 +        dropped
+   90 +    }
+   91 +    pub fn clear(&mut self) -> Vec<T> {
+   92 +        self.order.clear();
+   93 +        self.bytes = 0;
+   94 +        self.entries
+   95 +            .drain()
+   96 +            .map(|(_, (_, _, _, value))| value)
+   97 +            .collect()
+   98 +    }
+   99 +    pub fn snapshot(&self) -> Vec<(InternalCacheKey, usize, T)> {
+  100 +        self.entries
+  101 +            .iter()
+  102 +            .map(|(key, (_, _, bytes, value))| (*key, *bytes, value.clone()))
+  103 +            .collect()
+  104 +    }
+  105 +    pub fn stats(&self) -> [(usize, usize); 3] {
+  106 +        let mut stats = [(0, 0); 3];
+  107 +        for (priority, _, bytes, _) in self.entries.values() {
+  108 +            if (1..=3).contains(priority) {
+  109 +                let s = &mut stats[(3 - priority) as usize];
+  110 +                s.0 += 1;
+  111 +                s.1 += bytes;
+  112 +            }
+  113 +        }
+  114 +        stats
+  115 +    }
+  116 +}
+  117 +

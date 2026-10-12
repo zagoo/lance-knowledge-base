@@ -1,0 +1,182 @@
+@@ -3,12 +3,13 @@
+    3  
+    4  //! Stable-partition mapping semantics, independent of dataset lineage traversal.
+    5  
+    6 -use super::row_map::RowMapReader;
+    6 +use super::row_map::{RowMapBlockCache, RowMapReader};
+    7  use crate::scalar::IndexStore;
+    8  use async_trait::async_trait;
+    9  use lance_core::deepsize::{Context, DeepSizeOf};
+   10  use lance_core::utils::address::RowAddress;
+   11  use lance_core::utils::fragment_reuse::MappingReader;
+   12 +use lance_core::utils::stable_partition::CountsMatrix;
+   13  use lance_core::{Error, Result};
+   14  use lance_table::format::pb::fragment_reuse_index_details::FragmentDigest;
+   15  use roaring::RoaringBitmap;
+
+@@ -26,6 +27,9 @@ pub struct StablePartitionMapping {
+   27      sources: HashMap<u32, (u64, u64)>,
+   28      destinations: Vec<FragmentDigest>,
+   29      total_rows: u64,
+   30 +    /// When present, the row-map reader routes its label reads through the
+   31 +    /// shared index cache in ~4 MiB chunks. `None` reads labels directly.
+   32 +    block_cache: Option<RowMapBlockCache>,
+   33  }
+   34  
+   35  impl std::fmt::Debug for StablePartitionMapping {
+
+@@ -40,10 +44,17 @@ impl std::fmt::Debug for StablePartitionMapping {
+   44  impl StablePartitionMapping {
+   45      /// Bind the file store to source scan order and destination label order.
+   46      /// The store resolves the dataset base; this reader does not interpret manifests.
+   43 -    pub fn try_new(
+   47 +    ///
+   48 +    /// `block_cache`, when supplied, routes the row map's label reads through the
+   49 +    /// shared index cache in ~4 MiB chunks. Pass `None` (see [`try_new`]) to read
+   50 +    /// labels directly, which is byte-identical to the pre-cache behavior.
+   51 +    ///
+   52 +    /// [`try_new`]: Self::try_new
+   53 +    pub fn try_new_with_cache(
+   54          store: Arc<dyn IndexStore>,
+   55          sources: Vec<FragmentDigest>,
+   56          destinations: Vec<FragmentDigest>,
+   57 +        block_cache: Option<RowMapBlockCache>,
+   58      ) -> Result<Self> {
+   59          let mut total_rows = 0_u64;
+   60          let mut offsets = HashMap::with_capacity(sources.len());
+
+@@ -84,8 +95,48 @@ impl StablePartitionMapping {
+   95              sources: offsets,
+   96              destinations,
+   97              total_rows,
+   98 +            block_cache,
+   99          })
+  100      }
+  101 +
+  102 +    /// Convenience constructor with no block cache: reads labels directly.
+  103 +    pub fn try_new(
+  104 +        store: Arc<dyn IndexStore>,
+  105 +        sources: Vec<FragmentDigest>,
+  106 +        destinations: Vec<FragmentDigest>,
+  107 +    ) -> Result<Self> {
+  108 +        Self::try_new_with_cache(store, sources, destinations, None)
+  109 +    }
+  110 +
+  111 +    /// Open (once) the row-map reader, validating its dimensions against the
+  112 +    /// transition digests. Reuses the cached reader on later calls; the reader
+  113 +    /// carries the block cache so its label reads are chunked when enabled.
+  114 +    async fn open_reader(&self) -> Result<&RowMapReader> {
+  115 +        self.reader
+  116 +            .get_or_try_init(|| async {
+  117 +                let reader = RowMapReader::open_with_cache(
+  118 +                    self.store.open_index_file(MAPPING_FILE).await?,
+  119 +                    self.block_cache.clone(),
+  120 +                )
+  121 +                .await?;
+  122 +                let counts = reader.counts();
+  123 +                if counts.total_rows() != self.total_rows
+  124 +                    || counts.num_destinations() as usize != self.destinations.len()
+  125 +                {
+  126 +                    return Err(corrupt("row-map dimensions differ from transition digests"));
+  127 +                }
+  128 +                for (label, destination) in self.destinations.iter().enumerate() {
+  129 +                    if u64::from(counts.total(label as u16)) != destination.physical_rows {
+  130 +                        return Err(corrupt(format!(
+  131 +                            "row-map total differs for destination {}",
+  132 +                            destination.id
+  133 +                        )));
+  134 +                    }
+  135 +                }
+  136 +                Ok(reader)
+  137 +            })
+  138 +            .await
+  139 +    }
+  140  }
+  141  
+  142  impl DeepSizeOf for StablePartitionMapping {
+
+@@ -131,37 +182,33 @@ impl MappingReader for StablePartitionMapping {
+  182          if requests.is_empty() {
+  183              return Ok(output);
+  184          }
+  134 -        let reader = self
+  135 -            .reader
+  136 -            .get_or_try_init(|| async {
+  137 -                let reader =
+  138 -                    RowMapReader::open(self.store.open_index_file(MAPPING_FILE).await?).await?;
+  139 -                let counts = reader.counts();
+  140 -                if counts.total_rows() != self.total_rows
+  141 -                    || counts.num_destinations() as usize != self.destinations.len()
+  142 -                {
+  143 -                    return Err(corrupt("row-map dimensions differ from transition digests"));
+  144 -                }
+  145 -                for (label, destination) in self.destinations.iter().enumerate() {
+  146 -                    if u64::from(counts.total(label as u16)) != destination.physical_rows {
+  147 -                        return Err(corrupt(format!(
+  148 -                            "row-map total differs for destination {}",
+  149 -                            destination.id
+  150 -                        )));
+  151 -                    }
+  152 -                }
+  153 -                Ok(reader)
+  154 -            })
+  155 -            .await?;
+  185 +        let reader = self.open_reader().await?;
+  186          requests.sort_unstable_by_key(|&(row, _)| row);
+  187          let mut remaining = requests.as_slice();
+  188 +        // Blocks are visited in row order, so consecutive blocks reuse the
+  189 +        // labels loaded for the first of them: one read per cache chunk, or
+  190 +        // without a chunk cache one read per run of adjacent blocks the
+  191 +        // request touches (bounded to a chunk's worth). A sparse request
+  192 +        // never reads a block it does not touch.
+  193 +        let mut held = None;
+  194 +        // The last block of the run of adjacent blocks the request is
+  195 +        // currently walking. It is discovered once, when a run starts, and
+  196 +        // reused for every block of the run, so the lookahead over a run of
+  197 +        // B blocks costs B steps in total rather than B*(B-1)/2.
+  198 +        let mut run_end: Option<usize> = None;
+  199          while let Some(&(first, _)) = remaining.first() {
+  200              let counts = reader.counts();
+  201              let block = counts.block_of(first);
+  202              let range = counts.block_range(block);
+  203              let end = remaining.partition_point(|&(row, _)| row < range.end);
+  204              let (batch, rest) = remaining.split_at(end);
+  164 -            let labels = reader.block_labels(block).await?;
+  205 +            let run_last = match run_end {
+  206 +                Some(last) if block <= last => last,
+  207 +                _ => *run_end.insert(contiguous_run_end(counts, block, rest)),
+  208 +            };
+  209 +            let labels = reader
+  210 +                .block_labels_reusing(block, run_last, &mut held)
+  211 +                .await?;
+  212              if labels.len() as u64 != range.end - range.start {
+  213                  return Err(corrupt(format!(
+  214                      "row-map block {block} has an unexpected label count"
+
+@@ -211,6 +258,28 @@ impl MappingReader for StablePartitionMapping {
+  258      }
+  259  }
+  260  
+  261 +/// The last block of the run of adjacent blocks that starts at `block` and
+  262 +/// continues through `ahead`, the sorted requests after `block`'s own: the
+  263 +/// run ends at the first block `ahead` skips. Each step advances past one
+  264 +/// whole block of requests, so a run of B blocks costs B - 1 steps plus at
+  265 +/// most one step to find the gap after it; the caller asks once per run.
+  266 +fn contiguous_run_end(counts: &CountsMatrix, block: usize, ahead: &[(u64, usize)]) -> usize {
+  267 +    let mut run_end = block;
+  268 +    let mut cursor = 0;
+  269 +    while cursor < ahead.len() {
+  272 +        let next = counts.block_of(ahead[cursor].0);
+  273 +        if next != run_end + 1 {
+  274 +            break;
+  275 +        }
+  276 +        run_end = next;
+  277 +        let next_range = counts.block_range(next);
+  278 +        cursor += ahead[cursor..].partition_point(|&(row, _)| row < next_range.end);
+  279 +    }
+  280 +    run_end
+  281 +}
+  282 +
+  283  fn corrupt(message: impl Into<String>) -> Error {
+  284      Error::corrupt_file_named(MAPPING_FILE, message)
+  285  }

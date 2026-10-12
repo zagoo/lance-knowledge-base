@@ -1,0 +1,68 @@
+@@ -12,8 +12,9 @@
+   12  
+   13  use crate::feature_flags::{
+   14      FLAG_COVERED_INDEX_METADATA, FLAG_FRAGMENT_REUSE_INDEX, FLAG_MANAGED_BLOBS,
+   15 -    FLAG_STABLE_ROW_IDS, apply_feature_flags, ensure_can_read_manifest, ensure_can_write_manifest,
+   16 -    inherit_sticky_feature_flags,
+   15 +    FLAG_NON_REUSABLE_FIELD_IDS, FLAG_STABLE_ROW_IDS, apply_feature_flags,
+   16 +    ensure_can_read_manifest, ensure_can_write_manifest, inherit_sticky_feature_flags,
+   17 +    validate_non_reusable_field_id_flags,
+   18  };
+   19  use crate::format::overlay::{OverlayCoverage, TOMBSTONE_FIELD_ID};
+   20  use crate::format::{
+
+@@ -189,6 +190,18 @@ impl Transaction {
+  190          manifest.max_fragment_id = manifest
+  191              .max_fragment_id
+  192              .max(current_manifest.max_fragment_id);
+  193 +        if current_manifest.uses_non_reusable_field_ids() {
+  194 +            // Before activation, different fields could share an ID across versions.
+  195 +            // Keeping today's high-water mark cannot prevent restoring such a collision.
+  196 +            let Some(restored_max_field_id) = manifest.max_allocated_field_id else {
+  197 +                return Err(Error::invalid_input(format!(
+  198 +                    "Cannot restore version {version}: non-reusable field IDs were activated after that version"
+  199 +                )));
+  200 +            };
+  201 +            manifest.max_allocated_field_id =
+  202 +                Some(restored_max_field_id.max(current_manifest.max_field_id()));
+  203 +            manifest.writer_feature_flags |= FLAG_NON_REUSABLE_FIELD_IDS;
+  204 +        }
+  205          // Row ids are a high-water mark like fragment ids: rewinding hands old ids to new rows.
+  206          manifest.next_row_id = manifest.next_row_id.max(current_manifest.next_row_id);
+  207          // Turning stable row ids off would revert `_rowid` to row addresses, whose
+
+@@ -1724,6 +1737,16 @@ impl Transaction {
+ 1737              )
+ 1738          };
+ 1739  
+ 1740 +        if config.activate_non_reusable_field_ids {
+ 1741 +            let already_active = current_manifest
+ 1742 +                .map(|manifest| manifest.uses_non_reusable_field_ids())
+ 1743 +                .unwrap_or(false);
+ 1744 +            if !already_active {
+ 1745 +                manifest.activate_non_reusable_field_ids();
+ 1746 +                manifest.writer_feature_flags |= FLAG_NON_REUSABLE_FIELD_IDS;
+ 1747 +            }
+ 1748 +        }
+ 1749 +
+ 1750          // Only newly published Blob data files activate the capability. Comparing
+ 1751          // physical files also covers column rewrites and overlays while leaving
+ 1752          // metadata-only changes and deletion vectors on old tables alone.
+
+@@ -1799,6 +1822,7 @@ impl Transaction {
+ 1822          manifest.set_timestamp(config.timestamp_nanos);
+ 1823  
+ 1824          manifest.update_max_fragment_id();
+ 1825 +        manifest.update_max_field_id();
+ 1826  
+ 1827          match &self.operation {
+ 1828              Operation::Overwrite {
+
+@@ -1996,6 +2020,7 @@ impl Transaction {
+ 2020              manifest.writer_feature_flags |= FLAG_FRAGMENT_REUSE_INDEX;
+ 2021          }
+ 2022  
+ 2023 +        validate_non_reusable_field_id_flags(&manifest)?;
+ 2024          Ok((manifest, final_indices))
+ 2025      }
+ 2026  

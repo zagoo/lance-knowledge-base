@@ -1,0 +1,119 @@
+[
+  {
+    "id": 1,
+    "path": "rust/lance-file/src/reader.rs",
+    "start": 1819,
+    "end": 1850,
+    "unit": "lines",
+    "read_at": "2026-10-04T03:56:34.785Z",
+    "evidence": "1819 |     pub(crate) async fn read_prepared_tasks(\n1820 |         &self,\n1821 |         params: ReadBatchParams,\n1822 |         batch_size: u32,\n1823 |         prepared: PreparedProjection,\n1824 |         read_len: u64,\n1825 |         filter: FilterExpression,\n1826 |     ) -> Result<Pin<Box<dyn Stream<Item = ReadBatchTask> + Send>>> {\n1827 |         let verify_bound = |params: &ReadBatchParams, bound: u64, inclusive: bool| {\n1828 |             if bound > read_len || (bound == read_len && inclusive) {\n1829 |                 Err(Error::invalid_input(format!(\n1830 |                     \"cannot read {params:?} from columns with {read_len} rows\"\n1831 |                 )))\n1832 |             } else {\n1833 |                 Ok(())\n1834 |             }\n1835 |         };\n1836 |         match &params {\n1837 |             ReadBatchParams::Indices(indices) => {\n1838 |                 for idx in indices {\n1839 |                     match idx {\n1840 |                         None => {\n1841 |                             return Err(Error::invalid_input(\"Null value in indices array\"));\n1842 |                         }\n1843 |                         Some(idx) => {\n1844 |                             verify_bound(&params, idx as u64, true)?;\n1845 |                         }\n1846 |                     }\n1847 |                 }\n1848 |                 let indices = indices.iter().map(|idx| idx.unwrap() as u64).collect();\n1849 |                 self.take_rows(indices, batch_size, prepared).await\n1850 |             }"
+  },
+  {
+    "id": 2,
+    "path": "rust/lance-table/src/transaction/validate.rs",
+    "start": 137,
+    "end": 151,
+    "unit": "lines",
+    "read_at": "2026-10-04T03:56:34.786Z",
+    "evidence": "137 | pub fn schema_fragments_modern_valid(_schema: &Schema, fragments: &[Fragment]) -> Result<()> {\n138 |     // validate that each data file at least contains one field.\n139 |     for fragment in fragments {\n140 |         for data_file in &fragment.files {\n141 |             if data_file.fields.iter().len() == 0 {\n142 |                 return Err(Error::invalid_input(format!(\n143 |                     \"Datafile {} does not contain any fields\",\n144 |                     data_file.path\n145 |                 )));\n146 |             }\n147 |         }\n148 |     }\n149 |     Ok(())\n150 | }\n151 | "
+  },
+  {
+    "id": 3,
+    "path": "rust/lance-file/src/writer_tests.rs",
+    "start": 1678,
+    "end": 1715,
+    "unit": "lines",
+    "read_at": "2026-10-04T03:56:34.786Z",
+    "evidence": "1678 |         // Read back metadata\n1679 |         let fs = FsFixture::default();\n1680 |         let file_scheduler = fs\n1681 |             .scheduler\n1682 |             .open_file(&path, &CachedFileSize::unknown())\n1683 |             .await\n1684 |             .unwrap();\n1685 |         let file_reader = FileReader::try_open(\n1686 |             file_scheduler,\n1687 |             None,\n1688 |             Arc::<DecoderPlugins>::default(),\n1689 |             &LanceCache::no_cache(),\n1690 |             FileReaderOptions::default(),\n1691 |         )\n1692 |         .await\n1693 |         .unwrap();\n1694 | \n1695 |         let column_metadatas = &file_reader.metadata().column_metadatas;\n1696 | \n1697 |         // The text column (index 1) should use zstd compression based on metadata\n1698 |         let text_encoding = describe_encoding(&column_metadatas[1].pages[0]);\n1699 |         // For string columns, we expect Binary encoding with zstd compression\n1700 |         assert!(\n1701 |             text_encoding.contains(\"Zstd\"),\n1702 |             \"text column should use zstd compression from field metadata, but got: {}\",\n1703 |             text_encoding\n1704 |         );\n1705 | \n1706 |         // The data column (index 2) should use no compression based on metadata\n1707 |         let data_encoding = describe_encoding(&column_metadatas[2].pages[0]);\n1708 |         // For Int32 columns with \"none\" compression, we expect Flat encoding without compression\n1709 |         assert!(\n1710 |             data_encoding.contains(\"Flat\") && data_encoding.contains(\"compression: None\"),\n1711 |             \"data column should use no compression from field metadata, but got: {}\",\n1712 |             data_encoding\n1713 |         );\n1714 |     }\n1715 | "
+  },
+  {
+    "id": 5,
+    "path": "rust/lance-core/src/cache/codec.rs",
+    "start": 209,
+    "end": 230,
+    "unit": "lines",
+    "read_at": "2026-10-04T03:56:34.786Z",
+    "evidence": "209 | pub trait CacheCodecImpl: Send + Sync {\n210 |     /// Stable identity for this entry type. **Must not change once shipped.**\n211 |     /// This is a deliberate author-assigned string, not `std::any::type_name`\n212 |     /// (which is not stable across compiler versions).\n213 |     const TYPE_ID: &'static str;\n214 | \n215 |     /// Body schema version this build writes. Bump when the body layout\n216 |     /// changes in a way protobuf field additions cannot express transparently\n217 |     /// (adding/removing/reordering sections, a raw-blob encoding change, etc.).\n218 |     const CURRENT_VERSION: u32;\n219 | \n220 |     /// Write the body: a header, then sections in a fixed order.\n221 |     fn serialize(&self, writer: &mut CacheEntryWriter<'_>) -> Result<()>;\n222 | \n223 |     /// Reconstruct from the body. Branch on\n224 |     /// [`reader.version()`](CacheEntryReader::version) for backward compat;\n225 |     /// sections are read in write order.\n226 |     fn deserialize(reader: &mut CacheEntryReader<'_>) -> Result<Self>\n227 |     where\n228 |         Self: Sized;\n229 | }\n230 | "
+  },
+  {
+    "id": 8,
+    "path": "rust/lance-table/src/utils/stream.rs",
+    "start": 642,
+    "end": 667,
+    "unit": "lines",
+    "read_at": "2026-10-04T03:56:49.138Z",
+    "evidence": "642 | \n643 | /// Given a stream of batch tasks this function will add a row ids column (if requested)\n644 | /// and also apply a deletions vector to the batch.\n645 | ///\n646 | /// This converts from BatchTaskStream to BatchFutStream because, if we are applying a\n647 | /// deletion vector, it is impossible to know how many output rows we will have.\n648 | pub fn wrap_with_row_id_and_delete(\n649 |     stream: ReadBatchTaskStream,\n650 |     fragment_id: u32,\n651 |     config: RowIdAndDeletesConfig,\n652 | ) -> ReadBatchFutStream {\n653 |     let (row_id_cursor, use_dense_row_id_expansion) = config\n654 |         .row_id_sequence\n655 |         .as_ref()\n656 |         .filter(|_| config.with_row_id)\n657 |         .map(|sequence| {\n658 |             let (cursor, use_dense_range_expansion) = sequence.cursor_with_dense_range_expansion();\n659 |             (Some(cursor), use_dense_range_expansion)\n660 |         })\n661 |         .unwrap_or((None, false));\n662 |     if use_dense_row_id_expansion {\n663 |         wrap_with_row_id_and_delete_impl::<true>(stream, fragment_id, config, row_id_cursor)\n664 |     } else {\n665 |         wrap_with_row_id_and_delete_impl::<false>(stream, fragment_id, config, row_id_cursor)\n666 |     }\n667 | }"
+  },
+  {
+    "id": 10,
+    "path": "rust/lance-file/src/concat.rs",
+    "start": 684,
+    "end": 713,
+    "unit": "lines",
+    "read_at": "2026-10-04T03:56:49.139Z",
+    "evidence": "684 | fn check_compatibility(\n685 |     target: &FileConcatTarget,\n686 |     inputs: &[PreparedInput<'_>],\n687 |     allow_blob_columns: bool,\n688 | ) -> Result<Option<FileConcatReason>> {\n689 |     if !allow_blob_columns\n690 |         && target\n691 |             .schema\n692 |             .fields_pre_order()\n693 |             .any(|field| field.is_blob())\n694 |     {\n695 |         return Ok(Some(FileConcatReason::BlobColumns));\n696 |     }\n697 | \n698 |     let Some(first) = inputs.first() else {\n699 |         return Err(Error::invalid_input(\n700 |             \"concat_files requires at least one complete input file\",\n701 |         ));\n702 |     };\n703 |     let baseline_columns = &first.metadata.column_infos;\n704 |     let expected_schema = if allow_blob_columns {\n705 |         descriptor_projection_schema(target.schema.as_ref())\n706 |     } else {\n707 |         target.schema.as_ref().clone()\n708 |     };\n709 |     let baseline_encodings = baseline_columns\n710 |         .iter()\n711 |         .map(|column| encoded_column_encoding(column))\n712 |         .collect::<Result<Vec<_>>>()?;\n713 | "
+  },
+  {
+    "id": 11,
+    "path": "rust/lance-table/src/system_index/frag_reuse/ledger.rs",
+    "start": 555,
+    "end": 587,
+    "unit": "lines",
+    "read_at": "2026-10-04T03:56:49.139Z",
+    "evidence": "555 |     fn message_field(tag: u32, payload: &[u8], output: &mut Vec<u8>) {\n556 |         prost::encoding::encode_key(tag, WireType::LengthDelimited, output);\n557 |         prost::encoding::encode_varint(payload.len() as u64, output);\n558 |         output.extend_from_slice(payload);\n559 |     }\n560 | \n561 |     fn ordered(\n562 |         sources: Vec<pb::FragmentDigest>,\n563 |         destinations: Vec<pb::FragmentDigest>,\n564 |         addresses: &[u64],\n565 |     ) -> pb::Transition {\n566 |         let bitmap: RoaringTreemap = addresses.iter().copied().collect();\n567 |         let mut changed_row_addrs = Vec::new();\n568 |         bitmap.serialize_into(&mut changed_row_addrs).unwrap();\n569 |         pb::Transition {\n570 |             sources,\n571 |             destinations,\n572 |             mapping: Some(transition::Mapping::OrderedCompaction(\n573 |                 pb::OrderedCompaction { changed_row_addrs },\n574 |             )),\n575 |         }\n576 |     }\n577 | \n578 |     fn address(fragment: u32, offset: u32) -> u64 {\n579 |         RowAddress::new_from_parts(fragment, offset).into()\n580 |     }\n581 | \n582 |     fn assert_corrupt(result: Result<FragReuseLedger>, message: &str) {\n583 |         let error = result.unwrap_err();\n584 |         assert!(matches!(error, Error::CorruptFile { .. }), \"{error}\");\n585 |         assert!(error.to_string().contains(message), \"{error}\");\n586 |     }\n587 | "
+  },
+  {
+    "id": 14,
+    "path": "rust/lance-table/benches/row_id_index.rs",
+    "start": 164,
+    "end": 204,
+    "unit": "lines",
+    "read_at": "2026-10-04T03:57:01.297Z",
+    "evidence": "164 |         let flat_data = sequences\n165 |             .iter()\n166 |             .map(|(frag_id, sequence)| {\n167 |                 let row_ids = sequence.iter().collect::<Vec<_>>();\n168 |                 let row_addresses = (0..sequence.len())\n169 |                     .map(|i| RowAddress::new_from_parts(*frag_id, i as u32))\n170 |                     .map(u64::from)\n171 |                     .collect::<Vec<_>>();\n172 |                 (row_ids, row_addresses)\n173 |             })\n174 |             .collect::<Vec<_>>();\n175 | \n176 |         // Size of flat data is just 16 bytes per row\n177 |         let size = flat_data\n178 |             .iter()\n179 |             .map(|(ids, _addresses)| ids.len() * 16)\n180 |             .sum::<usize>() as u64;\n181 |         let stats = SizeStats {\n182 |             structure: \"FlatData\".to_string(),\n183 |             percent_deletions,\n184 |             size,\n185 |         };\n186 |         stats_file.write_row(stats);\n187 | \n188 |         group.bench_with_input(\n189 |             BenchmarkId::new(\"BuildHashMap\", percent_deletions),\n190 |             &percent_deletions,\n191 |             |b, _| {\n192 |                 b.iter(|| {\n193 |                     let mut index = HashMap::new();\n194 |                     index.extend(flat_data.iter().flat_map(|(ids, addresses)| {\n195 |                         ids.iter().copied().zip(addresses.iter().copied())\n196 |                     }));\n197 |                 });\n198 |             },\n199 |         );\n200 |     }\n201 | \n202 |     group.finish();\n203 | }\n204 | "
+  },
+  {
+    "id": 15,
+    "path": "rust/lance-table/src/transaction/operation.rs",
+    "start": 399,
+    "end": 420,
+    "unit": "lines",
+    "read_at": "2026-10-04T03:57:01.298Z",
+    "evidence": "399 | impl Operation {\n400 |     pub fn name(&self) -> &str {\n401 |         match self {\n402 |             Self::Append { .. } => \"Append\",\n403 |             Self::Delete { .. } => \"Delete\",\n404 |             Self::Overwrite { .. } => \"Overwrite\",\n405 |             Self::CreateIndex { .. } => \"CreateIndex\",\n406 |             Self::Rewrite { .. } => \"Rewrite\",\n407 |             Self::Merge { .. } => \"Merge\",\n408 |             Self::ReserveFragments { .. } => \"ReserveFragments\",\n409 |             Self::Restore { .. } => \"Restore\",\n410 |             Self::Update { .. } => \"Update\",\n411 |             Self::Project { .. } => \"Project\",\n412 |             Self::UpdateConfig { .. } => \"UpdateConfig\",\n413 |             Self::DataReplacement { .. } => \"DataReplacement\",\n414 |             Self::DataOverlay { .. } => \"DataOverlay\",\n415 |             Self::UpdateMemWalState { .. } => \"UpdateMemWalState\",\n416 |             Self::Clone { .. } => \"Clone\",\n417 |             Self::UpdateBases { .. } => \"UpdateBases\",\n418 |         }\n419 |     }\n420 | }"
+  },
+  {
+    "id": 16,
+    "path": "rust/lance-table/src/io/commit.rs",
+    "start": 800,
+    "end": 834,
+    "unit": "lines",
+    "read_at": "2026-10-04T03:57:01.298Z",
+    "evidence": "800 |     // If the object store supports lexicographically ordered lists and\n801 |     // the naming scheme is V2, we can use an optimized list operation.\n802 |     if object_store.list_is_lexically_ordered {\n803 |         // We don't know the naming scheme until we see the first manifest.\n804 |         let mut peekable = underlying_stream.peekable();\n805 | \n806 |         futures::stream::once(async move {\n807 |             let naming_scheme = match Pin::new(&mut peekable).peek().await {\n808 |                 Some(Ok(m)) => m.naming_scheme,\n809 |                 // If we get an error or no manifests are found, we default\n810 |                 // to V2 naming scheme, since it doesn't matter.\n811 |                 Some(Err(_)) => ManifestNamingScheme::V2,\n812 |                 None => ManifestNamingScheme::V2,\n813 |             };\n814 | \n815 |             if naming_scheme == ManifestNamingScheme::V2 {\n816 |                 // If the first manifest is V2, we can use the optimized list operation.\n817 |                 Ok(Either::Left(peekable))\n818 |             } else {\n819 |                 sort_stream(peekable).await.map(Either::Right)\n820 |             }\n821 |         })\n822 |         .try_flatten()\n823 |         .boxed()\n824 |     } else {\n825 |         // If the object store does not support lexicographically ordered lists,\n826 |         // we need to sort the manifests in memory. Systems where this isn't\n827 |         // supported (local fs, S3 express) are typically fast enough\n828 |         // that this is not a problem.\n829 |         futures::stream::once(sort_stream(underlying_stream))\n830 |             .try_flatten()\n831 |             .boxed()\n832 |     }\n833 | }\n834 | "
+  },
+  {
+    "id": 17,
+    "path": "rust/lance-table/src/system_index/frag_reuse/ledger.rs",
+    "start": 430,
+    "end": 451,
+    "unit": "lines",
+    "read_at": "2026-10-04T03:57:01.298Z",
+    "evidence": "430 |         Some(transition::Mapping::StablePartition(partition)) => {\n431 |             Uuid::parse_str(&partition.map_id).map_err(|e| {\n432 |                 corrupt(format!(\n433 |                     \"invalid stable partition map_id {:?}: {e}\",\n434 |                     partition.map_id\n435 |                 ))\n436 |             })?;\n437 |             if partition.map_size_bytes == 0 {\n438 |                 return Err(corrupt(\"stable partition map_size_bytes must be positive\"));\n439 |             }\n440 |             Mapping::StablePartition(partition)\n441 |         }\n442 |         None => return Err(corrupt(\"transition has no mapping\")),\n443 |     };\n444 |     Ok(Transition {\n445 |         fingerprint,\n446 |         sources: value.sources,\n447 |         destinations: value.destinations,\n448 |         mapping,\n449 |     })\n450 | }\n451 | "
+  },
+  {
+    "id": 19,
+    "path": "rust/lance-table/src/rowids.rs",
+    "start": 865,
+    "end": 907,
+    "unit": "lines",
+    "read_at": "2026-10-04T03:57:09.067Z",
+    "evidence": "865 | impl From<&RowIdSequence> for RowAddrTreeMap {\n866 |     fn from(row_ids: &RowIdSequence) -> Self {\n867 |         let mut tree_map = Self::new();\n868 |         for segment in &row_ids.0 {\n869 |             let mut seg = Self::new();\n870 |             match segment {\n871 |                 U64Segment::Range(range) => {\n872 |                     seg.insert_range(range.clone());\n873 |                 }\n874 |                 U64Segment::RangeWithBitmap { range, bitmap } => {\n875 |                     seg.insert_range(range.clone());\n876 |                     for (i, val) in range.clone().enumerate() {\n877 |                         if !bitmap.get(i) {\n878 |                             seg.remove(val);\n879 |                         }\n880 |                     }\n881 |                 }\n882 |                 U64Segment::RangeWithHoles { range, holes } => {\n883 |                     seg.insert_range(range.clone());\n884 |                     for hole in holes.iter() {\n885 |                         seg.remove(hole);\n886 |                     }\n887 |                 }\n888 |                 U64Segment::Ranges { range, runs } => {\n889 |                     for present in runs.present_ranges() {\n890 |                         seg.insert_range(\n891 |                             (range.start + present.start as u64)\n892 |                                 ..(range.start + present.end as u64),\n893 |                         );\n894 |                     }\n895 |                 }\n896 |                 U64Segment::SortedArray(array) | U64Segment::Array(array) => {\n897 |                     for val in array.iter() {\n898 |                         seg.insert(val);\n899 |                     }\n900 |                 }\n901 |             }\n902 |             tree_map |= seg;\n903 |         }\n904 |         tree_map\n905 |     }\n906 | }\n907 | "
+  },
+  {
+    "id": 20,
+    "path": "rust/lance-table/src/rowids/index.rs",
+    "start": 1442,
+    "end": 1516,
+    "unit": "lines",
+    "read_at": "2026-10-04T03:57:09.067Z",
+    "evidence": "1442 |     #[test]\n1443 |     fn test_large_range_segments_with_deletions() {\n1444 |         let rows_per_fragment = 1_000u64;\n1445 |         let num_fragments = 10u32;\n1446 |         let mut offset = 0u64;\n1447 | \n1448 |         let fragment_indices: Vec<FragmentRowIdIndex> = (0..num_fragments)\n1449 |             .map(|frag_id| {\n1450 |                 let start = offset;\n1451 |                 offset += rows_per_fragment;\n1452 | \n1453 |                 // Delete every 3rd row (offsets 0, 3, 6, ...) within each fragment.\n1454 |                 let mut deleted = roaring::RoaringBitmap::new();\n1455 |                 for i in (0..rows_per_fragment as u32).step_by(3) {\n1456 |                     deleted.insert(i);\n1457 |                 }\n1458 | \n1459 |                 FragmentRowIdIndex {\n1460 |                     fragment_id: frag_id,\n1461 |                     row_id_sequence: Arc::new(RowIdSequence(vec![U64Segment::Range(\n1462 |                         start..start + rows_per_fragment,\n1463 |                     )])),\n1464 |                     deletion_vector: Arc::new(DeletionVector::Bitmap(deleted)),\n1465 |                 }\n1466 |             })\n1467 |             .collect();\n1468 | \n1469 |         let index = RowIdIndex::new(&fragment_indices).unwrap();\n1470 | \n1471 |         // Deleted rows (offset 0, 3, 6, ...) should not be found.\n1472 |         // Row ID 0 has offset 0 in fragment 0 -> deleted.\n1473 |         assert_eq!(index.get(0).unwrap(), None);\n1474 |         // Row ID 3 has offset 3 in fragment 0 -> deleted.\n1475 |         assert_eq!(index.get(3).unwrap(), None);\n1476 | \n1477 |         // Non-deleted rows should resolve correctly.\n1478 |         // Row ID 1 has offset 1 in fragment 0 -> address (frag=0, row=1).\n1479 |         assert_eq!(\n1480 |             index.get(1).unwrap(),\n1481 |             Some(RowAddress::new_from_parts(0, 1))\n1482 |         );\n1483 |         // Row ID 2 has offset 2 in fragment 0 -> address (frag=0, row=2).\n1484 |         assert_eq!(\n1485 |             index.get(2).unwrap(),\n1486 |             Some(RowAddress::new_from_parts(0, 2))\n1487 |         );\n1488 |         // Row ID 4 has offset 4 in fragment 0 -> address (frag=0, row=4).\n1489 |         assert_eq!(\n1490 |             index.get(4).unwrap(),\n1491 |             Some(RowAddress::new_from_parts(0, 4))\n1492 |         );\n1493 | \n1494 |         // Check second fragment: row IDs start at 1000.\n1495 |         // Row ID 1000 has offset 0 in fragment 1 -> deleted.\n1496 |         assert_eq!(index.get(rows_per_fragment).unwrap(), None);\n1497 |         // Row ID 1001 has offset 1 in fragment 1 -> address (frag=1, row=1).\n1498 |         assert_eq!(\n1499 |             index.get(rows_per_fragment + 1).unwrap(),\n1500 |             Some(RowAddress::new_from_parts(1, 1))\n1501 |         );\n1502 | \n1503 |         // Last fragment, last non-deleted row.\n1504 |         // Row ID 9999 has offset 999 in fragment 9 -> 999 % 3 == 0 -> deleted.\n1505 |         let last_row = num_fragments as u64 * rows_per_fragment - 1;\n1506 |         assert_eq!(index.get(last_row).unwrap(), None);\n1507 |         // Row ID 9998 has offset 998 -> 998 % 3 == 2 -> not deleted.\n1508 |         assert_eq!(\n1509 |             index.get(last_row - 1).unwrap(),\n1510 |             Some(RowAddress::new_from_parts(num_fragments - 1, 998))\n1511 |         );\n1512 | \n1513 |         // Out of range.\n1514 |         assert_eq!(index.get(last_row + 1).unwrap(), None);\n1515 |     }\n1516 | "
+  }
+]

@@ -1,0 +1,162 @@
+[
+  {
+    "id": 1,
+    "path": "rust/lance-file/src/reader.rs",
+    "start": 2141,
+    "end": 2157,
+    "read_at": "2026-10-03T23:53:04.607Z",
+    "evidence": "2141 |         &self,\n2142 |         params: ReadBatchParams,\n2143 |         batch_size: u32,\n2144 |         batch_readahead: u32,\n2145 |         filter: FilterExpression,\n2146 |     ) -> Result<Pin<Box<dyn RecordBatchStream>>> {\n2147 |         self.read_stream_projected(\n2148 |             params,\n2149 |             batch_size,\n2150 |             batch_readahead,\n2151 |             self.base_projection().clone(),\n2152 |             filter,\n2153 |         )\n2154 |         .await\n2155 |     }\n2156 | }\n2157 | "
+  },
+  {
+    "id": 2,
+    "path": "rust/lance-table/src/io/commit.rs",
+    "start": 2334,
+    "end": 2363,
+    "read_at": "2026-10-03T23:53:04.608Z",
+    "evidence": "2334 |     /// Cancelling a commit (as a commit timeout does) while the lock is held must\n2335 |     /// still release the lock; otherwise it leaks until the lease's TTL expires.\n2336 |     #[tokio::test]\n2337 |     async fn test_commit_lock_released_on_cancellation() {\n2338 |         use std::sync::atomic::Ordering;\n2339 |         use std::time::Duration;\n2340 | \n2341 |         let released = Arc::new(AtomicBool::new(false));\n2342 |         let lock = TrackingLock {\n2343 |             released: released.clone(),\n2344 |         };\n2345 | \n2346 |         let object_store = ObjectStore::memory();\n2347 |         let base_path = Path::from(\"test\");\n2348 |         let mut manifest = test_manifest();\n2349 | \n2350 |         // The commit will hang on the manifest writer while holding the lock.\n2351 |         // Cancel it the same way a commit timeout would: drop the future.\n2352 |         let commit_fut = lock.commit(\n2353 |             &mut manifest,\n2354 |             None,\n2355 |             &base_path,\n2356 |             &object_store,\n2357 |             hanging_manifest_writer,\n2358 |             ManifestNamingScheme::V2,\n2359 |             None,\n2360 |         );\n2361 |         let timed_out = tokio::time::timeout(Duration::from_millis(50), commit_fut).await;\n2362 |         assert!(timed_out.is_err(), \"commit should not have completed\");\n2363 | "
+  },
+  {
+    "id": 3,
+    "path": "rust/lance-table/src/transaction/operation.rs",
+    "start": 37,
+    "end": 50,
+    "read_at": "2026-10-03T23:53:04.608Z",
+    "evidence": "37 | /// An operation on a dataset.\n38 | #[derive(Debug, Clone, DeepSizeOf)]\n39 | pub enum Operation {\n40 |     /// Adding new fragments to the dataset. The fragments contained within\n41 |     /// haven't yet been assigned a final ID.\n42 |     Append { fragments: Vec<Fragment> },\n43 |     /// Updated fragments contain those that have been modified with new deletion\n44 |     /// files. The deleted fragment IDs are those that should be removed from\n45 |     /// the manifest.\n46 |     Delete {\n47 |         updated_fragments: Vec<Fragment>,\n48 |         deleted_fragment_ids: Vec<u64>,\n49 |         predicate: String,\n50 |     },"
+  },
+  {
+    "id": 4,
+    "path": "rust/lance-table/src/system_index/mem_wal.rs",
+    "start": 299,
+    "end": 328,
+    "read_at": "2026-10-03T23:53:04.608Z",
+    "evidence": "299 | \n300 | impl TryFrom<pb::ShardManifest> for ShardManifest {\n301 |     type Error = Error;\n302 | \n303 |     fn try_from(rm: pb::ShardManifest) -> lance_core::Result<Self> {\n304 |         let shard_id = rm\n305 |             .shard_id\n306 |             .as_ref()\n307 |             .map(Uuid::try_from)\n308 |             .ok_or_else(|| Error::invalid_input(\"Missing shard_id in ShardManifest\"))??;\n309 |         let shard_field_values = rm\n310 |             .shard_field_entries\n311 |             .into_iter()\n312 |             .map(|e| (e.field_id, e.value))\n313 |             .collect();\n314 |         Ok(Self {\n315 |             shard_id,\n316 |             version: rm.version,\n317 |             shard_spec_id: rm.shard_spec_id,\n318 |             shard_field_values,\n319 |             writer_epoch: rm.writer_epoch,\n320 |             replay_after_wal_entry_position: rm.replay_after_wal_entry_position,\n321 |             wal_entry_position_last_seen: rm.wal_entry_position_last_seen,\n322 |             current_generation: rm.current_generation,\n323 |             sstables: rm.sstables.into_iter().map(SsTable::from).collect(),\n324 |             status: ShardStatus::from_i32(rm.status),\n325 |         })\n326 |     }\n327 | }\n328 | "
+  },
+  {
+    "id": 5,
+    "path": "rust/lance-table/src/utils/stream.rs",
+    "start": 1082,
+    "end": 1121,
+    "read_at": "2026-10-03T23:53:04.609Z",
+    "evidence": "1082 |     #[tokio::test]\n1083 |     async fn test_stable_row_id_read_ahead_range_boundary_and_tail() {\n1084 |         let all_row_ids = (10_000..120_000)\n1085 |             .filter(|row_id| row_id % 11 != 0)\n1086 |             .collect::<Vec<u64>>();\n1087 |         let selection = 1_234..71_237;\n1088 |         let selected_len = selection.len();\n1089 |         let mut remaining = selected_len;\n1090 |         let tasks = std::iter::from_fn(move || {\n1091 |             if remaining == 0 {\n1092 |                 return None;\n1093 |             }\n1094 |             let num_rows = remaining.min(1_025);\n1095 |             remaining -= num_rows;\n1096 |             Some(ReadBatchTask {\n1097 |                 num_rows: num_rows as u32,\n1098 |                 task: std::future::ready(Ok(arrow_array::record_batch!((\n1099 |                     \"x\",\n1100 |                     Int32,\n1101 |                     vec![0; num_rows]\n1102 |                 ))\n1103 |                 .unwrap()))\n1104 |                 .boxed(),\n1105 |             })\n1106 |         });\n1107 |         let config = RowIdAndDeletesConfig {\n1108 |             params: ReadBatchParams::Range(selection.clone()),\n1109 |             with_row_id: true,\n1110 |             with_row_addr: false,\n1111 |             with_row_last_updated_at_version: false,\n1112 |             with_row_created_at_version: false,\n1113 |             deletion_vector: None,\n1114 |             row_id_sequence: Some(Arc::new(\n1115 |                 RowIdSequence::try_from_iter(all_row_ids.clone()).unwrap(),\n1116 |             )),\n1117 |             last_updated_at_sequence: None,\n1118 |             created_at_sequence: None,\n1119 |             make_deletions_null: false,\n1120 |             total_num_rows: all_row_ids.len() as u32,\n1121 |         };"
+  },
+  {
+    "id": 6,
+    "path": "rust/lance-file/src/versions/v2_3/writer.rs",
+    "start": 95,
+    "end": 110,
+    "read_at": "2026-10-03T23:56:35.703Z",
+    "evidence": "95 |     /// Spill page metadata to a sidecar file instead of retaining it in memory.\n96 |     pub fn with_page_metadata_spill(mut self, object_store: Arc<ObjectStore>, path: Path) -> Self {\n97 |         self.sink.with_page_metadata_spill(object_store, path);\n98 |         self\n99 |     }\n100 | \n101 |     /// Schedule batches to be written in iteration order.\n102 |     pub async fn write_batches(\n103 |         &mut self,\n104 |         batches: impl Iterator<Item = &RecordBatch>,\n105 |     ) -> Result<()> {\n106 |         for batch in batches {\n107 |             self.write_batch(batch).await?;\n108 |         }\n109 |         Ok(())\n110 |     }"
+  },
+  {
+    "id": 7,
+    "path": "protos/table.proto",
+    "start": 362,
+    "end": 390,
+    "read_at": "2026-10-03T23:56:35.704Z",
+    "evidence": "362 |   /* The fields whose values this index co-locates alongside its own data, so a\n363 |    * query projecting only those columns can be answered from the index without\n364 |    * a take against the base table.\n365 |    *\n366 |    * When the manifest has feature flag 1 << 13, this declaration is independent\n367 |    * of `fields` and has no positional relationship to it. A field may occur in\n368 |    * both lists when the index carries a value it is also keyed on. Consumers\n369 |    * must use the union of `fields` and `covering_fields` as the index dependency\n370 |    * set.\n371 |    *\n372 |    * Without feature flag 1 << 13, the legacy contract applies: the carried columns\n373 |    * form the trailing suffix of `fields` in emission order. A column the\n374 |    * index is both keyed on and carries appears twice, once as a key and once in\n375 |    * the carried suffix.\n376 |    *\n377 |    * Empty for an index that carries no extra columns, which is every index\n378 |    * written before this field existed.\n379 |    *\n380 |    * This declaration is not authoritative for what the segment can actually\n381 |    * serve. The segment's own storage schema is: a reader must confirm the\n382 |    * storage carries a column before answering a query from it, and fall back to\n383 |    * a take against the base table otherwise. A declaration naming columns the\n384 |    * storage does not hold is a legal state, not corruption -- a maintenance\n385 |    * operation that cannot carry the values through a rebuild is permitted to\n386 |    * withdraw the payload while leaving this declaration in place.\n387 |    */\n388 |   repeated int32 covering_fields = 11;\n389 | }\n390 | "
+  },
+  {
+    "id": 8,
+    "path": "rust/lance-table/src/rowids.rs",
+    "start": 741,
+    "end": 763,
+    "read_at": "2026-10-03T23:56:35.704Z",
+    "evidence": "741 |                     let mut ids = RowAddrTreeMap::from(range.clone());\n742 |                     let offset_start = offset;\n743 |                     offset += range.end - range.start;\n744 |                     for (i, val) in range.clone().enumerate() {\n745 |                         if !bitmap.get(i) && ids.remove(val) {\n746 |                             offset -= 1;\n747 |                         }\n748 |                     }\n749 |                     ids.mask(mask);\n750 |                     let mut bitmap_iter = bitmap.iter();\n751 |                     let mut bitmap_iter_pos = 0;\n752 |                     let mut holes_passed = 0;\n753 |                     ranges.extend(GroupingIterator::new(ids.into_addr_iter().map(|addr| {\n754 |                         let position_in_range = addr - range.start;\n755 |                         while bitmap_iter_pos < position_in_range {\n756 |                             if !bitmap_iter.next().unwrap() {\n757 |                                 holes_passed += 1;\n758 |                             }\n759 |                             bitmap_iter_pos += 1;\n760 |                         }\n761 |                         offset_start + position_in_range - holes_passed\n762 |                     })));\n763 |                 }"
+  },
+  {
+    "id": 9,
+    "path": "rust/lance-table/src/transaction/index_maintenance.rs",
+    "start": 793,
+    "end": 837,
+    "read_at": "2026-10-03T23:56:35.705Z",
+    "evidence": "793 | #[cfg(test)]\n794 | mod tests {\n795 |     use super::*;\n796 |     use crate::transaction::test_support::overlay_with_field;\n797 |     use uuid::Uuid;\n798 | \n799 |     #[test]\n800 |     fn test_ordered_rewrite_groups_split_and_mixed() {\n801 |         use crate::format::pb::fragment_reuse_index_details as pb_fri;\n802 |         let group = |old_ids: &[u64], new_ids: &[u64]| RewriteGroup {\n803 |             old_fragments: old_ids.iter().map(|&id| Fragment::new(id)).collect(),\n804 |             new_fragments: new_ids.iter().map(|&id| Fragment::new(id)).collect(),\n805 |         };\n806 |         let groups = vec![group(&[0, 1], &[10]), group(&[2], &[11])];\n807 | \n808 |         // No stable partition: every group takes part in bitmap maintenance.\n809 |         assert_eq!(\n810 |             Transaction::ordered_rewrite_groups(&groups, None)\n811 |                 .unwrap()\n812 |                 .len(),\n813 |             2\n814 |         );\n815 | \n816 |         // Group [0, 1] is reordered: only group [2] remains ordered.\n817 |         let digest = |id: u64| pb_fri::FragmentDigest {\n818 |             id,\n819 |             physical_rows: 4,\n820 |             num_deleted_rows: 0,\n821 |         };\n822 |         let reordered = crate::transaction::reordered_sources(&[pb_fri::Transition {\n823 |             sources: vec![digest(0), digest(1)],\n824 |             destinations: vec![digest(10), digest(10)],\n825 |             mapping: None,\n826 |         }])\n827 |         .unwrap();\n828 |         let ordered = Transaction::ordered_rewrite_groups(&groups, Some(&reordered)).unwrap();\n829 |         assert_eq!(ordered.len(), 1);\n830 |         assert_eq!(ordered[0].old_fragments[0].id, 2);\n831 | \n832 |         // A group straddling reordered and order-preserving sources is\n833 |         // rejected.\n834 |         let mixed = vec![group(&[1, 2], &[10])];\n835 |         assert!(Transaction::ordered_rewrite_groups(&mixed, Some(&reordered)).is_err());\n836 |     }\n837 | "
+  },
+  {
+    "id": 10,
+    "path": "rust/lance-core/src/deepsize.rs",
+    "start": 438,
+    "end": 467,
+    "read_at": "2026-10-03T23:56:35.705Z",
+    "evidence": "438 | \n439 |     #[test]\n440 |     fn test_derive_macro() {\n441 |         use lance_derive::DeepSizeOf;\n442 | \n443 |         #[derive(DeepSizeOf)]\n444 |         struct Outer {\n445 |             count: u64,\n446 |             label: String,\n447 |             inner: Inner,\n448 |         }\n449 | \n450 |         #[derive(DeepSizeOf)]\n451 |         struct Inner {\n452 |             values: Vec<u32>,\n453 |         }\n454 | \n455 |         let val = Outer {\n456 |             count: 7,\n457 |             label: String::from(\"hello\"),\n458 |             inner: Inner {\n459 |                 values: vec![1, 2, 3],\n460 |             },\n461 |         };\n462 | \n463 |         let size = val.deep_size_of();\n464 |         // Must be at least the stack size + heap allocations for label + values\n465 |         assert!(size >= std::mem::size_of::<Outer>() + 5 + 3 * std::mem::size_of::<u32>());\n466 |     }\n467 | }"
+  },
+  {
+    "id": 11,
+    "path": "rust/lance-table/src/io/commit/dynamodb.rs",
+    "start": 299,
+    "end": 344,
+    "read_at": "2026-10-03T23:56:46.104Z",
+    "evidence": "299 |     async fn get_manifest_location(\n300 |         &self,\n301 |         base_uri: &str,\n302 |         version: u64,\n303 |     ) -> Result<ManifestLocation> {\n304 |         let get_item_result = self\n305 |             .ddb_get()\n306 |             .key(base_uri!(), AttributeValue::S(base_uri.into()))\n307 |             .key(version!(), AttributeValue::N(version.to_string()))\n308 |             .send()\n309 |             .await\n310 |             .wrap_err()?;\n311 | \n312 |         let item = get_item_result.item.context(NotFoundSnafu {\n313 |             uri: format!(\n314 |                 \"dynamodb not found: base_uri: {}; version: {}\",\n315 |                 base_uri, version\n316 |             ),\n317 |         })?;\n318 | \n319 |         let path = item\n320 |             .get(path!())\n321 |             .ok_or_else(|| Error::not_found(format!(\"key {} is not present\", path!())))?\n322 |             .as_s()\n323 |             .map_err(|_| Error::invalid_input(format!(\"key {} is not a string\", path!())))?\n324 |             .as_str();\n325 |         let path = Path::from(path);\n326 | \n327 |         let size = parse_size_attribute(&item)?;\n328 | \n329 |         let naming_scheme = detect_naming_scheme_from_path(&path)?;\n330 | \n331 |         Ok(ManifestLocation {\n332 |             version,\n333 |             path,\n334 |             size,\n335 |             naming_scheme,\n336 |             // DynamoDB coordinates the logical version but does not own an\n337 |             // object generation. Older rows may still contain `e_tag`; ignore\n338 |             // it and let the commit handler obtain the current token from the\n339 |             // authoritative object store when it validates the final path.\n340 |             e_tag: None,\n341 |             identity: None,\n342 |         })\n343 |     }\n344 | "
+  },
+  {
+    "id": 12,
+    "path": "rust/lance-file/src/reader/structural.rs",
+    "start": 244,
+    "end": 260,
+    "read_at": "2026-10-03T23:56:46.104Z",
+    "evidence": "244 | /// Build the leaf-column projection selected by a v2.1+ exact reader.\n245 | pub fn projection_from_field_ids(\n246 |     schema: &Schema,\n247 |     field_id_to_column_index: &BTreeMap<u32, u32>,\n248 | ) -> ReaderProjection {\n249 |     let mut column_indices = Vec::new();\n250 |     append_field_ids(\n251 |         &schema.fields,\n252 |         field_id_to_column_index,\n253 |         &mut column_indices,\n254 |     );\n255 |     ReaderProjection {\n256 |         schema: Arc::new(schema.clone()),\n257 |         column_indices,\n258 |     }\n259 | }\n260 | "
+  },
+  {
+    "id": 13,
+    "path": "rust/lance-file/src/reader.rs",
+    "start": 3939,
+    "end": 3994,
+    "read_at": "2026-10-03T23:56:46.105Z",
+    "evidence": "3939 |     #[test_log::test(tokio::test)]\n3940 |     async fn test_compressing_buffer() {\n3941 |         let fs = FsFixture::default();\n3942 | \n3943 |         let written_file = create_some_file(&fs, ConcreteFileVersion::V2_0).await;\n3944 |         let file_scheduler = fs\n3945 |             .scheduler\n3946 |             .open_file(&fs.tmp_path, &CachedFileSize::unknown())\n3947 |             .await\n3948 |             .unwrap();\n3949 | \n3950 |         // We can specify the projection as part of the read operation via read_stream_projected\n3951 |         let file_reader = FileReader::try_open(\n3952 |             file_scheduler.clone(),\n3953 |             None,\n3954 |             Arc::<DecoderPlugins>::default(),\n3955 |             &test_cache(),\n3956 |             FileReaderOptions::default(),\n3957 |         )\n3958 |         .await\n3959 |         .unwrap();\n3960 | \n3961 |         let mut projection = written_file.schema.project(&[\"score\"]).unwrap();\n3962 |         for field in projection.fields.iter_mut() {\n3963 |             field\n3964 |                 .metadata\n3965 |                 .insert(\"lance:compression\".to_string(), \"zstd\".to_string());\n3966 |         }\n3967 |         let projection = ReaderProjection {\n3968 |             column_indices: projection.fields.iter().map(|f| f.id as u32).collect(),\n3969 |             schema: Arc::new(projection),\n3970 |         };\n3971 | \n3972 |         let batch_stream = file_reader\n3973 |             .read_stream_projected(\n3974 |                 lance_io::ReadBatchParams::RangeFull,\n3975 |                 1024,\n3976 |                 16,\n3977 |                 projection.clone(),\n3978 |                 FilterExpression::no_filter(),\n3979 |             )\n3980 |             .await\n3981 |             .unwrap();\n3982 | \n3983 |         let projection_arrow = Arc::new(ArrowSchema::from(projection.schema.as_ref()));\n3984 |         verify_expected(\n3985 |             &written_file.data,\n3986 |             batch_stream,\n3987 |             1024,\n3988 |             Some(Box::new(move |batch: &RecordBatch| {\n3989 |                 batch.project_by_schema(&projection_arrow).unwrap()\n3990 |             })),\n3991 |         )\n3992 |         .await;\n3993 |     }\n3994 | "
+  },
+  {
+    "id": 14,
+    "path": "protos/table.proto",
+    "start": 116,
+    "end": 139,
+    "read_at": "2026-10-03T23:56:46.105Z",
+    "evidence": "116 |   /* Feature flags for readers.\n117 |    *\n118 |    * A bitmap of flags that indicate which features are required to be able to\n119 |    * read the table. If a reader does not recognize a flag that is set, it\n120 |    * should not attempt to read the dataset.\n121 |    *\n122 |    * Known flags:\n123 |    * * 1 << 0: deletion files are present\n124 |    * * 1 << 1: row ids are stable and stored as part of the fragment metadata.\n125 |    * * 1 << 2: use v2 format (deprecated)\n126 |    * * 1 << 3: table config is present\n127 |    * * 1 << 4: dataset uses multiple base paths\n128 |    * * 1 << 5: transaction file writes are disabled\n129 |    * * 1 << 6: data overlay files are present (see DataOverlayFile). Readers that do\n130 |    *   not understand overlays must refuse the dataset, since ignoring an overlay\n131 |    *   would silently return stale base values.\n132 |    * * 1 << 7: some index declares covering columns. Without 1 << 13,\n133 |    *   the carried columns form the trailing suffix of IndexMetadata.fields in\n134 |    *   emission order (see IndexMetadata). Readers\n135 |    *   that do not understand covering columns must refuse the dataset, since\n136 |    *   selecting an index by membership of fields would answer a query on a\n137 |    *   merely-carried column with an index keyed on a different column. Writers\n138 |    *   must refuse it too: one that treats every entry of fields as keyed would\n139 |    *   maintain the index against the wrong dependency set."
+  },
+  {
+    "id": 15,
+    "path": "rust/lance-file/src/datatypes.rs",
+    "start": 291,
+    "end": 315,
+    "read_at": "2026-10-03T23:56:46.105Z",
+    "evidence": "291 | /// Convert a Schema to a list of protobuf Field.\n292 | impl From<&Schema> for Fields {\n293 |     fn from(schema: &Schema) -> Self {\n294 |         let mut protos = vec![];\n295 |         schema.fields.iter().for_each(|f| {\n296 |             protos.extend(Self::from(f).0);\n297 |         });\n298 |         Self(protos)\n299 |     }\n300 | }\n301 | \n302 | /// Convert a Schema to a list of protobuf Field and Metadata\n303 | impl From<&Schema> for FieldsWithMeta {\n304 |     fn from(schema: &Schema) -> Self {\n305 |         let fields = schema.into();\n306 |         let metadata = schema\n307 |             .metadata\n308 |             .clone()\n309 |             .into_iter()\n310 |             .map(|(key, value)| (key, value.into_bytes()))\n311 |             .collect();\n312 |         Self { fields, metadata }\n313 |     }\n314 | }\n315 | "
+  },
+  {
+    "id": 16,
+    "path": "rust/lance-table/src/system_index/frag_reuse/ledger.rs",
+    "start": 500,
+    "end": 517,
+    "read_at": "2026-10-03T23:56:54.642Z",
+    "evidence": "500 |         // Each transition is queued once, when its incoming count reaches zero.\n501 |         let transition = transitions[index]\n502 |             .take()\n503 |             .ok_or_else(|| corrupt(\"lineage visited a transition twice\"))?;\n504 |         ordered.push(transition);\n505 |         for &consumer in &outgoing[index] {\n506 |             incoming[consumer] -= 1;\n507 |             if incoming[consumer] == 0 {\n508 |                 ready.push_back(consumer);\n509 |             }\n510 |         }\n511 |     }\n512 |     if ordered.len() != transitions.len() {\n513 |         return Err(corrupt(\"fragment lineage contains a cycle\"));\n514 |     }\n515 |     Ok(ordered)\n516 | }\n517 | "
+  },
+  {
+    "id": 17,
+    "path": "rust/lance-table/src/rowids/segment.rs",
+    "start": 1281,
+    "end": 1295,
+    "read_at": "2026-10-03T23:56:54.643Z",
+    "evidence": "1281 |     #[test]\n1282 |     fn test_sorted_sequence_sizes_full_span_bitmap_cost() {\n1283 |         // Synthetic stats: full [0, u64::MAX] slot space; exercises `range_with_bitmap`\n1284 |         // cost path (always fits in `usize` on 64-bit targets).\n1285 |         let stats = super::SegmentStats {\n1286 |             min: 0,\n1287 |             max: u64::MAX,\n1288 |             count: 1,\n1289 |             sorted: true,\n1290 |         };\n1291 |         let sizes = U64Segment::sorted_sequence_sizes(&stats);\n1292 |         assert!(sizes[1] < sizes[0]);\n1293 |         assert!(sizes[1] < usize::MAX);\n1294 |     }\n1295 | "
+  },
+  {
+    "id": 18,
+    "path": "rust/lance-table/src/rowids/segment.rs",
+    "start": 770,
+    "end": 803,
+    "read_at": "2026-10-03T23:56:54.643Z",
+    "evidence": "770 | impl SegmentCursorState {\n771 |     /// Append a contiguous range of values while preserving the bitmap scan\n772 |     /// position for the next call.\n773 |     pub(crate) fn extend_range(\n774 |         &mut self,\n775 |         segment: &U64Segment,\n776 |         selection: Range<usize>,\n777 |         values: &mut Vec<u64>,\n778 |     ) {\n779 |         let U64Segment::RangeWithBitmap { range, bitmap } = segment else {\n780 |             match segment {\n781 |                 U64Segment::Range(range) => {\n782 |                     let segment_len = (range.end - range.start) as usize;\n783 |                     let end = selection.end.min(segment_len);\n784 |                     if selection.start < end {\n785 |                         values.extend(\n786 |                             (range.start + selection.start as u64)..(range.start + end as u64),\n787 |                         );\n788 |                     }\n789 |                 }\n790 |                 U64Segment::Ranges { range, runs } => {\n791 |                     // Positions are below the span, which fits u32.\n792 |                     let clamp = |position: usize| position.min(u32::MAX as usize) as u32;\n793 |                     runs.extend_values(\n794 |                         range.start,\n795 |                         clamp(selection.start)..clamp(selection.end),\n796 |                         values,\n797 |                     );\n798 |                 }\n799 |                 _ => values.extend(selection.filter_map(|index| segment.get(index))),\n800 |             }\n801 |             return;\n802 |         };\n803 | "
+  },
+  {
+    "id": 19,
+    "path": "rust/lance-file/src/versions/v1/encoding/dictionary.rs",
+    "start": 163,
+    "end": 176,
+    "read_at": "2026-10-03T23:56:54.643Z",
+    "evidence": "163 | impl DictionaryDecoder<'_> {\n164 |     pub async fn decode(&self) -> Result<ArrayRef> {\n165 |         self.decode_impl(..).await\n166 |     }\n167 | \n168 |     pub async fn take(&self, indices: &UInt32Array) -> Result<ArrayRef> {\n169 |         self.decode_impl(indices.clone()).await\n170 |     }\n171 | \n172 |     pub async fn get(&self, params: impl Into<ReadBatchParams>) -> Result<ArrayRef> {\n173 |         self.decode_impl(params).await\n174 |     }\n175 | }\n176 | "
+  },
+  {
+    "id": 20,
+    "path": "rust/lance-table/src/rowids/index.rs",
+    "start": 185,
+    "end": 244,
+    "read_at": "2026-10-03T23:56:54.644Z",
+    "evidence": "185 |     /// Address of `row_id`, from the fragment that holds it live. Descends the\n186 |     /// max-`end` tree, so a fragment out of reach of the id costs nothing.\n187 |     ///\n188 |     /// Visits every candidate rather than stopping at the first hit, and\n189 |     /// errors when a second fragment holds the id live.\n190 |     fn probe(&self, row_id: u64) -> Result<Option<RowAddress>> {\n191 |         let fragments = self.fragments.len();\n192 |         if fragments == 0 {\n193 |             return Ok(None);\n194 |         }\n195 |         // Only a fragment that starts at or below the id can hold it.\n196 |         let upper = self\n197 |             .fragments\n198 |             .partition_point(|entry| entry.start <= row_id);\n199 |         if upper == 0 {\n200 |             return Ok(None);\n201 |         }\n202 |         let mut found: Option<RowAddress> = None;\n203 |         // Depth-first, left to right, without a stack: `node` covers `width`\n204 |         // slots from `lo`. A pruned subtree or a visited leaf moves on to the\n205 |         // next subtree: up while `node` is a right child, then over to the\n206 |         // sibling.\n207 |         let (mut node, mut lo, mut width) = (1usize, 0usize, self.end_tree.len() / 2);\n208 |         loop {\n209 |             if lo >= upper {\n210 |                 // Every slot from here on starts above the id.\n211 |                 break;\n212 |             }\n213 |             if self.end_tree[node] >= row_id {\n214 |                 if width > 1 {\n215 |                     node *= 2;\n216 |                     width /= 2;\n217 |                     continue;\n218 |                 }\n219 |                 if lo < fragments\n220 |                     && let Some(candidate) = self.fragments[lo].resolve(row_id)\n221 |                 {\n222 |                     if found.is_some() {\n223 |                         return Err(Error::internal(format!(\n224 |                             \"row id index corrupt: stable row id {row_id} is \\\n225 |                              live in multiple fragments\",\n226 |                         )));\n227 |                     }\n228 |                     found = Some(candidate);\n229 |                 }\n230 |             }\n231 |             while node & 1 == 1 {\n232 |                 if node == 1 {\n233 |                     return Ok(found);\n234 |                 }\n235 |                 node /= 2;\n236 |                 lo -= width;\n237 |                 width *= 2;\n238 |             }\n239 |             node += 1;\n240 |             lo += width;\n241 |         }\n242 |         Ok(found)\n243 |     }\n244 | }"
+  }
+]

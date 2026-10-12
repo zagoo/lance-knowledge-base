@@ -1,0 +1,398 @@
+@@ -82,12 +82,13 @@ use lance_index::scalar::inverted::{
+   82  };
+   83  use lance_index::scalar::minhash_lsh::{MinHashLshIndexParams, MinHashQuery};
+   84  use lance_index::scalar::registry::VALUE_COLUMN_NAME;
+   85 -use lance_index::vector::{ApproxMode, DEFAULT_QUERY_PARALLELISM, DIST_COL, Query};
+   85 +use lance_index::vector::{ApproxMode, DEFAULT_QUERY_PARALLELISM, DIST_COL, ProbeParams, Query};
+   86  use lance_io::stream::RecordBatchStream;
+   87  use lance_linalg::distance::MetricType;
+   88  use lance_select::IndexExprResult;
+   89 -// Re-exported so callers of `Scanner::with_row_addr_prefilter` can name the mask
+   89 +// Re-exported so callers of `Scanner::with_row_id_prefilter` can name the mask
+   90  // type without depending on `lance-select` directly.
+   91 +pub use super::fragment_slice::FragmentSlice;
+   92  pub use lance_select::{RowAddrMask, RowAddrTreeMap};
+   93  use lance_table::format::{Fragment, IndexMetadata};
+   94  use prost::Message;
+
+@@ -1132,6 +1133,11 @@ pub struct Scanner {
+ 1133      /// mask size.
+ 1134      external_row_mask: Option<Arc<RowAddrMask>>,
+ 1135  
+ 1136 +    /// Optional allow-list keyed by physical `(fragment_id, row_offset)` addresses.
+ 1137 +    /// Unlike `external_row_mask`, this remains in the physical domain until
+ 1138 +    /// filtered-read planning intersects it with fragment scope and deletions.
+ 1139 +    physical_row_addr_prefilter: Option<Arc<RowAddrTreeMap>>,
+ 1140 +
+ 1141      /// Materialization style controls when columns are fetched
+ 1142      materialization_style: MaterializationStyle,
+ 1143  
+
+@@ -1179,6 +1185,7 @@ pub struct Scanner {
+ 1185      ordering: Option<Vec<ColumnOrdering>>,
+ 1186  
+ 1187      nearest: Option<Query>,
+ 1188 +    probe_params: ProbeParams,
+ 1189      nearest_query_count: usize,
+ 1190      /// True when the query shape represents a batch of single-vector queries
+ 1191      /// (list-like query on a fixed-size vector column, or multiple concatenated vectors).
+
+@@ -1658,6 +1665,7 @@ impl Scanner {
+ 1665              blob_handling: BlobHandling::default(),
+ 1666              prefilter: false,
+ 1667              external_row_mask: None,
+ 1668 +            physical_row_addr_prefilter: None,
+ 1669              materialization_style: MaterializationStyle::Heuristic,
+ 1670              filter: LanceFilter::default(),
+ 1671              full_text_query: None,
+
+@@ -1672,6 +1680,7 @@ impl Scanner {
+ 1680              offset: None,
+ 1681              ordering: None,
+ 1682              nearest: None,
+ 1683 +            probe_params: ProbeParams::default(),
+ 1684              nearest_query_count: 1,
+ 1685              is_batch_nearest: false,
+ 1686              use_stats: true,
+
+@@ -1911,17 +1920,78 @@ impl Scanner {
+ 1920      /// // Restrict the scan to rows whose _rowid is 0, 2, or 4.
+ 1921      /// let mask = RowAddrMask::from_allowed(RowAddrTreeMap::from_iter([0u64, 2, 4]));
+ 1922      /// let mut scanner = dataset.scan();
+ 1914 -    /// scanner.with_row_addr_prefilter(mask);
+ 1923 +    /// scanner.with_row_id_prefilter(mask);
+ 1924      /// let batch = scanner.try_into_batch().await?;
+ 1925      /// # let _ = batch;
+ 1926      /// # Ok(())
+ 1927      /// # }
+ 1928      /// ```
+ 1920 -    pub fn with_row_addr_prefilter(&mut self, mask: RowAddrMask) -> &mut Self {
+ 1929 +    pub fn with_row_id_prefilter(&mut self, mask: RowAddrMask) -> &mut Self {
+ 1930          self.external_row_mask = Some(Arc::new(mask));
+ 1931          self
+ 1932      }
+ 1933  
+ 1934 +    /// Deprecated name for [`Self::with_row_id_prefilter`].
+ 1935 +    ///
+ 1936 +    /// The mask remains in the dataset's `_rowid` domain, including stable logical IDs.
+ 1937 +    #[deprecated(
+ 1938 +        note = "Use with_row_id_prefilter for _rowid masks, or with_physical_row_addr_prefilter for _rowaddr selections"
+ 1939 +    )]
+ 1940 +    pub fn with_row_addr_prefilter(&mut self, mask: RowAddrMask) -> &mut Self {
+ 1941 +        self.with_row_id_prefilter(mask)
+ 1942 +    }
+ 1943 +
+ 1944 +    /// Restrict the scan to physical slices in this dataset snapshot.
+ 1945 +    ///
+ 1946 +    /// Overlapping slices have set semantics. Deleted rows do not compact offsets.
+ 1947 +    /// Empty slices are allowed, but their offsets must still be within the fragment.
+ 1948 +    /// Any explicit fragment scope is intersected with these slices, regardless of
+ 1949 +    /// setter order. Output follows scan order, not slice order. Replaces an existing
+ 1950 +    /// physical selection. V1 storage, ANN and FTS are rejected when planning the scan.
+ 1951 +    ///
+ 1952 +    /// ```
+ 1953 +    /// # use lance::{Dataset, Result};
+ 1954 +    /// # use lance::dataset::scanner::FragmentSlice;
+ 1955 +    /// # async fn example(dataset: &Dataset, fragment_id: u32) -> Result<()> {
+ 1956 +    /// let mut scan = dataset.scan();
+ 1957 +    /// scan.with_fragment_slices(&[FragmentSlice {
+ 1958 +    ///     fragment_id, row_offset: 0, row_count: 10,
+ 1959 +    /// }]).await?;
+ 1960 +    /// let batch = scan.try_into_batch().await?;
+ 1961 +    /// # Ok(())
+ 1962 +    /// # }
+ 1963 +    /// ```
+ 1964 +    pub async fn with_fragment_slices(&mut self, slices: &[FragmentSlice]) -> Result<&mut Self> {
+ 1965 +        let rows = super::fragment_slice::physical_rows_from_slices(&self.dataset, slices).await?;
+ 1966 +        Ok(self.with_physical_row_addr_prefilter(rows))
+ 1967 +    }
+ 1968 +
+ 1969 +    /// Restrict the scan to physical row addresses.
+ 1970 +    ///
+ 1971 +    /// ```
+ 1972 +    /// # use lance::{Dataset, Result};
+ 1973 +    /// # use lance::dataset::scanner::RowAddrTreeMap;
+ 1974 +    /// # async fn example(dataset: &Dataset, rows: RowAddrTreeMap) -> Result<()> {
+ 1975 +    /// let mut scan = dataset.scan();
+ 1976 +    /// scan.with_physical_row_addr_prefilter(rows);
+ 1977 +    /// let batch = scan.try_into_batch().await?;
+ 1978 +    /// # Ok(())
+ 1979 +    /// # }
+ 1980 +    /// ```
+ 1981 +    ///
+ 1982 +    /// This selection is always keyed by physical `(fragment_id, row_offset)`
+ 1983 +    /// addresses, including on datasets that use stable row ids. It is kept in
+ 1984 +    /// that domain until scan planning, where it is intersected with fragment
+ 1985 +    /// scope, deletion vectors, and any scalar-index result.
+ 1986 +    ///
+ 1987 +    /// This is independent from [`with_row_id_prefilter`](Self::with_row_id_prefilter),
+ 1988 +    /// whose mask is keyed in the dataset's `_rowid` domain. If both are set,
+ 1989 +    /// both restrictions apply.
+ 1990 +    pub fn with_physical_row_addr_prefilter(&mut self, rows: RowAddrTreeMap) -> &mut Self {
+ 1991 +        self.physical_row_addr_prefilter = Some(Arc::new(rows));
+ 1992 +        self
+ 1993 +    }
+ 1994 +
+ 1995      /// Set the callback to be called after the scan with summary statistics
+ 1996      pub fn scan_stats_callback(&mut self, callback: ExecutionStatsCallback) -> &mut Self {
+ 1997          self.scan_stats_callback = Some(callback);
+
+@@ -2344,6 +2414,7 @@ impl Scanner {
+ 2414              }
+ 2415          };
+ 2416  
+ 2417 +        self.probe_params = ProbeParams::default();
+ 2418          self.nearest = Some(Query {
+ 2419              column: column.to_string(),
+ 2420              key,
+
+@@ -2352,6 +2423,7 @@ impl Scanner {
+ 2423              upper_bound: None,
+ 2424              minimum_nprobes: 1,
+ 2425              maximum_nprobes: None,
+ 2426 +            search_effort: 0.5,
+ 2427              ef: None,
+ 2428              refine_factor: None,
+ 2429              metric_type: None,
+
+@@ -2385,28 +2457,67 @@ impl Scanner {
+ 2457  
+ 2458      /// Configures how many partitions are searched in the vector index.
+ 2459      ///
+ 2388 -    /// This sets both [`Self::minimum_nprobes`] and [`Self::maximum_nprobes`]
+ 2389 -    /// to the same value. With neither setter called, adaptive defaults apply.
+ 2460 +    /// Used only when [`Self::search_effort`] has not been set. Explicit minimum
+ 2461 +    /// and maximum probe bounds override the corresponding fixed-count bounds.
+ 2462 +    /// With none of these options set, adaptive defaults apply.
+ 2463      pub fn nprobes(&mut self, n: usize) -> &mut Self {
+ 2464          if let Some(q) = self.nearest.as_mut() {
+ 2392 -            q.minimum_nprobes = n;
+ 2393 -            q.maximum_nprobes = Some(n);
+ 2465 +            self.probe_params.nprobes = Some(n);
+ 2466 +            (q.minimum_nprobes, q.maximum_nprobes, q.search_effort) = self.probe_params.resolve();
+ 2467          } else {
+ 2468              log::warn!("nprobes is not set because nearest has not been called yet");
+ 2469          }
+ 2470          self
+ 2471      }
+ 2472  
+ 2473 +    /// Set the initial IVF search effort to a finite value in [0, 1].
+ 2474 +    ///
+ 2475 +    /// Unset effort resolves to 0.5 and preserves Auto probing. Smaller values reduce the
+ 2476 +    /// initial partition budget toward [`Self::minimum_nprobes`]; larger values
+ 2477 +    /// increase it toward all available partitions, subject to
+ 2478 +    /// [`Self::maximum_nprobes`]. At 0, at least one available partition is
+ 2479 +    /// searched. Later expansion to find enough candidates remains unchanged.
+ 2480 +    /// This is independent of refinement, HNSW ef and approximation mode, and
+ 2481 +    /// is not a recall guarantee. Setting any effort, including 0.5, ignores
+ 2482 +    /// [`Self::nprobes`] regardless of setter order. Explicit minimum and maximum
+ 2483 +    /// bounds remain effective. Call [`Self::nearest`] first.
+ 2484 +    ///
+ 2485 +    /// ```
+ 2486 +    /// # use arrow_array::Float32Array;
+ 2487 +    /// # use lance::{Dataset, Result};
+ 2488 +    /// # async fn example(dataset: &Dataset, vector: &Float32Array) -> Result<()> {
+ 2489 +    /// let mut scanner = dataset.scan();
+ 2490 +    /// scanner.nearest("vector", vector, 10)?.search_effort(0.75)?;
+ 2491 +    /// # Ok(())
+ 2492 +    /// # }
+ 2493 +    /// ```
+ 2494 +    pub fn search_effort(&mut self, effort: f64) -> Result<&mut Self> {
+ 2495 +        let query = self.nearest.as_mut().ok_or_else(|| {
+ 2496 +            Error::invalid_input("search_effort requires nearest to be called first")
+ 2497 +        })?;
+ 2498 +        let previous = self.probe_params;
+ 2499 +        self.probe_params.search_effort = Some(effort);
+ 2500 +        (
+ 2501 +            query.minimum_nprobes,
+ 2502 +            query.maximum_nprobes,
+ 2503 +            query.search_effort,
+ 2504 +        ) = self.probe_params.resolve();
+ 2505 +        if let Err(error) = query.validate_search_effort() {
+ 2506 +            self.probe_params = previous;
+ 2507 +            (
+ 2508 +                query.minimum_nprobes,
+ 2509 +                query.maximum_nprobes,
+ 2510 +                query.search_effort,
+ 2511 +            ) = previous.resolve();
+ 2512 +            return Err(error);
+ 2513 +        }
+ 2514 +        Ok(self)
+ 2515 +    }
+ 2516 +
+ 2517      /// Configures how many partitions are searched in the vector index.
+ 2518      #[deprecated(note = "Use nprobes instead")]
+ 2519      pub fn nprobs(&mut self, n: usize) -> &mut Self {
+ 2403 -        if let Some(q) = self.nearest.as_mut() {
+ 2404 -            q.minimum_nprobes = n;
+ 2405 -            q.maximum_nprobes = Some(n);
+ 2406 -        } else {
+ 2407 -            log::warn!("nprobes is not set because nearest has not been called yet");
+ 2408 -        }
+ 2409 -        self
+ 2520 +        self.nprobes(n)
+ 2521      }
+ 2522  
+ 2523      /// Configures the minimum number of partitions to search in the vector index.
+
+@@ -2418,7 +2529,8 @@ impl Scanner {
+ 2529      /// The default value is 1.
+ 2530      pub fn minimum_nprobes(&mut self, n: usize) -> &mut Self {
+ 2531          if let Some(q) = self.nearest.as_mut() {
+ 2421 -            q.minimum_nprobes = n;
+ 2532 +            self.probe_params.minimum_nprobes = Some(n);
+ 2533 +            (q.minimum_nprobes, q.maximum_nprobes, q.search_effort) = self.probe_params.resolve();
+ 2534          } else {
+ 2535              log::warn!("minimum_nprobes is not set because nearest has not been called yet");
+ 2536          }
+
+@@ -2427,18 +2539,16 @@ impl Scanner {
+ 2539  
+ 2540      /// Configures the maximum number of partitions to search in the vector index.
+ 2541      ///
+ 2430 -    /// These partitions will only be searched if we have not found `k` results after
+ 2431 -    /// searching the minimum number of partitions.  Setting this to None (the default)
+ 2432 -    /// will search all partitions if needed.
+ 2433 -    ///
+ 2434 -    /// This setting only takes effect when a prefilter is in place.  In that case we
+ 2435 -    /// can spend more effort to try and find results when the filter is highly selective.
+ 2436 -    ///
+ 2437 -    /// If there is no prefilter, or the results are not highly selective, this value will
+ 2438 -    /// have no effect.
+ 2542 +    /// This bounds both the initial budget and later probing per index segment,
+ 2543 +    /// without disabling Auto probing. An unset maximum (the default) allows all
+ 2544 +    /// available partitions.
+ 2545 +    /// With [`Self::search_effort`] set to 1, all partitions up to this limit are
+ 2546 +    /// included in the initial search. At lower efforts, additional partitions
+ 2547 +    /// may be searched if the initial budget does not find enough candidates.
+ 2548      pub fn maximum_nprobes(&mut self, n: usize) -> &mut Self {
+ 2549          if let Some(q) = self.nearest.as_mut() {
+ 2441 -            q.maximum_nprobes = Some(n);
+ 2550 +            self.probe_params.maximum_nprobes = Some(n);
+ 2551 +            (q.minimum_nprobes, q.maximum_nprobes, q.search_effort) = self.probe_params.resolve();
+ 2552          } else {
+ 2553              log::warn!("maximum_nprobes is not set because nearest has not been called yet");
+ 2554          }
+
+@@ -3237,6 +3347,12 @@ impl Scanner {
+ 3347      }
+ 3348  
+ 3349      fn validate_options(&self) -> Result<()> {
+ 3350 +        if let Some(query) = &self.nearest {
+ 3351 +            query.validate_search_effort()?;
+ 3352 +        }
+ 3353 +        if let Some(QueryFilter::Vector(query)) = &self.filter.query_filter {
+ 3354 +            query.validate_search_effort()?;
+ 3355 +        }
+ 3356          if self.batch_readahead == 0 {
+ 3357              return Err(Error::invalid_input_source(
+ 3358                  "batch_readahead must be greater than 0, got 0".into(),
+
+@@ -3293,6 +3409,25 @@ impl Scanner {
+ 3409              ));
+ 3410          }
+ 3411  
+ 3412 +        if self.physical_row_addr_prefilter.is_some() {
+ 3413 +            if self.nearest.is_some() || self.full_text_query.is_some() {
+ 3414 +                return Err(Error::not_supported(
+ 3415 +                    "with_physical_row_addr_prefilter is not supported for vector or full-text search",
+ 3416 +                ));
+ 3417 +            }
+ 3418 +            if self
+ 3419 +                .dataset
+ 3420 +                .manifest()
+ 3421 +                .data_storage_format
+ 3422 +                .lance_file_format()
+ 3423 +                == lance_file::version::ConcreteFileVersion::V1
+ 3424 +            {
+ 3425 +                return Err(Error::not_supported(
+ 3426 +                    "with_physical_row_addr_prefilter is not supported on legacy-storage datasets",
+ 3427 +                ));
+ 3428 +            }
+ 3429 +        }
+ 3430 +
+ 3431          Ok(())
+ 3432      }
+ 3433  
+
+@@ -3559,6 +3694,9 @@ impl Scanner {
+ 3694      ) -> Result<Arc<dyn ExecutionPlan>> {
+ 3695          log::trace!("creating scanner plan");
+ 3696          self.validate_options()?;
+ 3697 +        if let Some(rows) = &self.physical_row_addr_prefilter {
+ 3698 +            super::fragment_slice::validate_physical_rows(&self.dataset, rows).await?;
+ 3699 +        }
+ 3700  
+ 3701          let full_text_query = match &self.full_text_query {
+ 3702              Some(query) => Some(self.resolve_full_text_search_query(query).await?),
+
+@@ -3944,6 +4082,10 @@ impl Scanner {
+ 4082              .with_filter_plan(effective_filter)
+ 4083              .with_projection(projection);
+ 4084  
+ 4085 +        if let Some(rows) = &self.physical_row_addr_prefilter {
+ 4086 +            read_options = read_options.with_physical_row_addr_prefilter(rows.clone());
+ 4087 +        }
+ 4088 +
+ 4089          if let Some(fragments) = fragments {
+ 4090              read_options = read_options.with_fragments(fragments);
+ 4091          }
+
+@@ -4107,9 +4249,9 @@ impl Scanner {
+ 4249              .data_storage_format
+ 4250              .lance_file_format()
+ 4251              == lance_file::version::ConcreteFileVersion::V1;
+ 4110 -        if is_legacy && self.use_external_mask() {
+ 4252 +        if is_legacy && (self.use_external_mask() || self.physical_row_addr_prefilter.is_some()) {
+ 4253              return std::future::ready(Err(Error::not_supported(
+ 4112 -                "with_row_addr_prefilter is not supported for plain scans on \
+ 4254 +                "row prefilters are not supported for plain scans on \
+ 4255                   legacy-storage datasets",
+ 4256              )))
+ 4257              .boxed();
+
+@@ -4188,6 +4330,10 @@ impl Scanner {
+ 4330              filtered_read_options =
+ 4331                  filtered_read_options.with_fragments(Arc::new(fragment.clone()));
+ 4332          }
+ 4333 +        if let Some(rows) = &self.physical_row_addr_prefilter {
+ 4334 +            filtered_read_options =
+ 4335 +                filtered_read_options.with_physical_row_addr_prefilter(rows.clone());
+ 4336 +        }
+ 4337  
+ 4338          Ok(Arc::new(FilteredReadExec::try_new(
+ 4339              self.dataset.clone(),
+
+@@ -4247,7 +4393,10 @@ impl Scanner {
+ 4393          // limit/offset must not be pushed down as a pre-mask range (that would limit
+ 4394          // rows before masking). Leaving scan_range None keeps limit_pushed_down false
+ 4395          // so the limit is applied by a node above the masked source instead.
+ 4250 -        let scan_range_plan = if filter_plan.is_empty() && !self.use_external_mask() {
+ 4396 +        let scan_range_plan = if filter_plan.is_empty()
+ 4397 +            && !self.use_external_mask()
+ 4398 +            && self.physical_row_addr_prefilter.is_none()
+ 4399 +        {
+ 4400              log::trace!("pushing scan_range into filtered_read");
+ 4401              self.plan_scan_range(filter_plan).await?
+ 4402          } else {
+
+@@ -6744,7 +6893,7 @@ impl Scanner {
+ 6893              return Ok(false);
+ 6894          }
+ 6895          // The per-query path threads a caller-supplied external row-address mask
+ 6747 -        // (`with_row_addr_prefilter`) into each query's prefilter via
+ 6896 +        // (`with_row_id_prefilter`) into each query's prefilter via
+ 6897          // `with_external_mask`; the shared batch path builds one prefilter across
+ 6898          // the batch and does not carry that mask. Rather than silently returning
+ 6899          // masked-out rows, fall back to the per-query loop whenever a mask is set.
+
+@@ -7305,6 +7454,9 @@ impl Scanner {
+ 7454          if let Some(fragments) = self.fragments.as_ref() {
+ 7455              read_options = read_options.with_fragments(Arc::new(fragments.clone()));
+ 7456          }
+ 7457 +        if let Some(rows) = &self.physical_row_addr_prefilter {
+ 7458 +            read_options = read_options.with_physical_row_addr_prefilter(rows.clone());
+ 7459 +        }
+ 7460          Ok(Arc::new(FilteredReadExec::try_new(
+ 7461              self.dataset.clone(),
+ 7462              read_options,

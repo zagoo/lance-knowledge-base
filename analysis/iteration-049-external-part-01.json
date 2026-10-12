@@ -1,0 +1,132 @@
+[
+  [
+    1,
+    34,
+    "SPDX and module documentation introduce an external atomic put-if-not-exists coordinator. Imports connect async trait dispatch, streams, Arc, byte buffers, audit events, object-store metadata/errors, tracing, manifest body metadata, parent commit helpers and PredecessorIdentity. There is no local feature gate on this module; the concrete DynamoDB backend is separate."
+  ],
+  [
+    35,
+    103,
+    "Public async finalize_staged<S: ExternalManifestStore + ?Sized> accepts an already selected staging path, version, expected size, raw object store and naming scheme. It computes the canonical manifest path, calls copy_or_verify_final_manifest, then constructs a canonical ManifestLocation with Some(size), the observed ETag and identity None. It does not itself acquire or validate the external reservation. Correct use requires the caller to have selected these immutable staging bytes. After the canonical copy succeeds, finalize_staged updates the existing external record to the canonical path/size with ETag None. Any index-update error is warned and swallowed: return the committed canonical location and retain staging for a later helper. Thus external index compaction is subsequent repair work, not rollback authority over the durable canonical object. A failed earlier copy/HEAD still propagates before this branch. Once index publication succeeds, finalize_staged deletes staging. Success and object-store NotFound proceed to a DELETE audit; any other delete failure warns and returns the canonical location without the audit. Cleanup failure cannot overturn commit. This helper does not update the version hint and has no cancellation guard spanning these awaits."
+  ],
+  [
+    104,
+    116,
+    "Public Debug/Clone/PartialEq/Eq Reservation distinguishes Reserved { identity: String }, Taken and PredecessorChanged. The token identifies the new record incarnation; a taken target and a changed prerequisite are distinct outcomes. This enum validates neither token contents nor version relationships."
+  ],
+  [
+    117,
+    143,
+    "ExternalManifestStore documentation describes a coordinator and lookup index keyed by dataset URI/version, with object storage authoritative for generic manifest bytes. Generic protocol: write unique immutable staging bytes; atomically select one staging path; copy only the selected path to its deterministic canonical location; update the index and garbage-collect staging. Concurrent helpers may copy the same selected bytes. Losing writers must never materialize their own unselected bytes."
+  ],
+  [
+    144,
+    161,
+    "The trait documentation distinguishes physical object ETags from logical manifest/record identities: equivalent copies may change ETags, so the generic external protocol neither persists nor validates them. It assumes one dataset incarnation owns the physical prefix; arbitrary reuse needs separate incarnation protection. Its linked design image was not fetched. These generic canonical-path comments must be read separately from the later identity-bearing commit_after protocol, whose unique object is itself final."
+  ],
+  [
+    162,
+    215,
+    "Public async_trait ExternalManifestStore requires Debug + Send + Sync. Required get(base_uri, version) returns a path string. Default get_manifest_location calls get, parses Path with an InvalidInput conversion on failure, detects the naming scheme and returns the requested version with unknown size/ETag/identity. No HEAD, manifest decoding or filename/version consistency check occurs. Implementations that mint identities must override location production to preserve them. Required get_latest_version returns an optional (version, path) pair. Default get_latest_manifest_location maps that pair through path parsing and scheme detection and leaves size, ETag and identity None; None means no indexed version. It does not read object bytes or check existence. The default cannot manufacture identity metadata; the test identified store supplies an override. The canonical-path documentation does not describe every later override/conditioned-publication path."
+  ],
+  [
+    216,
+    285,
+    "Default async put takes a selected-version candidate plus staging metadata and raw object-store handle. It deliberately ignores its ETag argument, calls put_if_not_exists with ETag None, and returns immediately on reservation error. Successful reservation proceeds to the overridable finalize hook; put itself contains no staging cleanup or retry. Atomic single-winner selection is a contract of the external implementation, not an in-process mutex here. Default put awaits finalize with the same base/version/path/size/store/scheme. Public async finalize delegates to finalize_staged; its documentation permits stores such as namespace-backed implementations to override publication. These hooks are separate from ExternalManifestCommitHandler's private reader finalizer, which directly runs the generic copy/repair protocol. A custom writer-side finalize override must therefore coordinate the form of locations returned to readers."
+  ],
+  [
+    286,
+    369,
+    "supports_predecessor_condition defaults false; its contract requires supporting stores to populate ManifestLocation.identity. get_identity defaults Ok(None) and documents an immutable per-record incarnation token that is never reused. Support declaration alone does not enforce identity population, atomicity, retirement or listing behavior. Optional list_versions(base_uri, since) defaults Ok(None), selecting object-store fallback. A supported implementation returns all committed locations, optionally restricted to versions greater than since, carrying final paths and identities. This is required to discover predecessor-conditioned publications whose unique final filenames are invisible to ordinary manifest parsing; Some(empty) remains an authoritative empty history. Exact signatures are retained below. forget_version defaults to NotSupported and requires identity-conditional, idempotent removal when implemented; it differs from the parent CommitHandler default no-op. put_if_predecessor likewise defaults NotSupported and must atomically verify the supplied predecessor record identity and reserve the requested new version. This abstraction specifies a prerequisite record condition, not an enforced latest-version or adjacent-version check. Required put_if_not_exists and put_if_exists accept base URI, u64 version, path, u64 size and optional ETag; implementations receiving None must clear obsolete stored ETags. Generic workflow always supplies None. Optional delete defaults Ok(()) without action. Trait closure and spacing complete these extension boundaries; storage-specific atomic operations, schema and error mapping live in concrete implementations."
+  ],
+  [
+    370,
+    383,
+    "Crate-visible detect_naming_scheme_from_path requires a filename or returns CorruptFile. It tries normal scheme detection, then always supplies the staging-name heuristic. Consequently every present filename obtains a scheme even when malformed; this is classification, not robust manifest-name validation, despite the error wording. Parent staging detection checks the character at index 20 for a dot."
+  ],
+  [
+    384,
+    433,
+    "Private MAX_SERVER_SIDE_COPY_BYTES is exactly 5 * 1024^3 bytes (5 GiB); COPY_REWRITE_PART_SIZE is exactly 100 * 1024^2 bytes (100 MiB, called MB in comments). Documentation motivates bounded streaming for provider COPY limits and mentions future multipart server-side copy. These comments are repository rationale, not independently verified current cloud guarantees. Expected size controls dispatch. Private async copy_size_aware uses ordinary raw copy only when selected size is strictly below 5 GiB; equality already uses copy_via_read_rewrite. The comments' above-limit wording is less precise than this boundary. Below-limit COPY errors do not trigger a streaming fallback. The helper trusts the supplied size rather than HEADing the source and returns the underlying object-store result."
+  ],
+  [
+    434,
+    485,
+    "copy_or_verify_final_manifest awaits size-aware copy. On success it records CREATE, HEADs the canonical path, rejects a different size as CorruptFile with version/path/expected/actual context, and returns the current HEAD ETag. HEAD failure still returns an error even after bytes may have landed. There is no content hash, manifest decode or payload-version validation. On any object-store NotFound returned by the copy helper, copy_or_verify_final_manifest HEADs the canonical path: matching size returns its ETag, mismatching size is corruption and HEAD failure propagates. All other copy errors propagate without readback. Same-size recovery is safe only under the selected immutable object and prefix-incarnation assumptions; equality of size is not general proof of equal bytes. A NotFound could also originate inside streaming rewrite."
+  ],
+  [
+    486,
+    558,
+    "Private copy_via_read_rewrite opens the source GET stream before starting destination multipart upload, allocates a 100 MiB buffer and consumes stream chunks. A stream error attempts upload.abort, ignores abort failure and returns the original stream error. The function returns the object-store result type. Cancellation has no local Drop abort guard, so the explicit error branches do not cover all interrupted uploads. Each input chunk is sliced into the remaining part capacity and copied into the Vec. A full buffer is replaced with a fresh 100 MiB allocation, converted into Bytes and uploaded with a sequential awaited put_part; failure attempts abort and returns the original error. This bounds part buffers, not total memory: the current upstream chunk, in-flight payload and replacement allocation may coexist. Parts are not uploaded in parallel. A remaining nonempty buffer is uploaded as the short final part, with abort-on-error. Empty input proceeds to complete without a part. complete failure also attempts abort and preserves its original error; success returns Ok. No explicit total-byte comparison, checksum, part-count ceiling, abort-error reporting or cancellation cleanup is present; the caller's final HEAD checks only expected size."
+  ],
+  [
+    559,
+    622,
+    "Public Debug ExternalManifestCommitHandler stores a public Arc<dyn ExternalManifestStore>. Its private verify_finalized_manifest_location HEADs a generic canonical location. On success it destructures metadata, ignores the external record's old ETag and keeps version/path/scheme/identity while obtaining the physical object's current generation. Generic finalized verification rejects Some(expected_size) differing from HEAD size; None is filled from HEAD. Returned ETag always comes from that HEAD. If HEAD reports NotFound, it invokes default_resolve_version for the same version instead of repairing the external record; that fallback can lose recorded identity/size and can return an unchecked V1 or detached path. Other errors propagate. This is not the identity-bearing recorded_as_final fast path."
+  ],
+  [
+    623,
+    706,
+    "Private finalize_manifest computes the canonical path and independently performs copy_or_verify_final_manifest, producing identity None and the observed ETag. It does not call ExternalManifestStore::finalize, so reader helping uses this generic protocol even if a store overrides writer-side finalization. It next updates the existing external record with canonical path/size and ETag None. Reader finalization warns and returns canonical success when external publication fails, retaining staging for repair. After successful publication it best-effort deletes staging, accepts NotFound, audits DELETE on success/NotFound, and warns without failing for other delete errors. No version hint is written here. As in public finalize_staged, cancellation and post-copy HEAD errors have different outcomes from the swallowed later repair failures."
+  ],
+  [
+    707,
+    733,
+    "The async CommitHandler implementation's version_exists returns true for any successful external location lookup, including a staging reservation, without verifying an object. Only core NotFound triggers HEAD of the supplied naming scheme's canonical path; raw NotFound becomes false and other errors propagate. Thus existence means an indexed record or visible deterministic object, not necessarily completed canonical materialization."
+  ],
+  [
+    734,
+    803,
+    "resolve_latest_location first asks the external store for its latest location. Ok(None) uses current_manifest_path; an external error, including NotFound, propagates. An identity-bearing location immediately uses recorded_as_final. Otherwise an exact manifest extension uses generic finalized HEAD verification. Other filenames are treated as staging; no payload parsing occurs. Latest staging resolution uses recorded size when present, otherwise HEADs staging. Missing staging on this unknown-size path triggers a second get_manifest_location and returns that result directly, without another HEAD or finalization; other HEAD errors propagate. Known-size staging proceeds directly to private finalization, whose copy NotFound recovery can inspect canonical storage. The stored naming scheme is used, and identity is restored afterward (normally None because identified records took the earlier branch)."
+  ],
+  [
+    804,
+    893,
+    "resolve_version_location first asks the external index. On core NotFound it calls default_resolve_version and maps any failure of that resolver to a core NotFound for base@version. It then HEADs the fallback path. Success attempts an onboarding put_if_not_exists using actual size and ETag None; reservation failure merely warns. This is best-effort backfill, not a second arbitration step before serving existing object bytes. The onboarding success returns the requested version, fallback path, actual size/ETag, staging naming heuristic and identity None, even if the store minted an identity during insertion. Raw HEAD NotFound becomes a contextual core NotFound; other errors propagate. Other initial external errors propagate directly. The heuristic unwraps filename, relying on the fallback path constructor to provide one. For an indexed exact-version location, identity Some uses recorded_as_final; a manifest extension uses generic finalized verification. Otherwise it recomputes the staging naming heuristic (unlike latest lookup, which uses the recorded scheme), obtains size by HEAD only if absent, and finalizes using the requested version. This unknown-size staging HEAD has no latest-lookup refetch branch on NotFound. The location identity is assigned after finalization."
+  ],
+  [
+    894,
+    906,
+    "resolve_identity forwards get_identity for the requested base/version and wraps Some(token) as PredecessorIdentity with that requested version. It ignores its ObjectStore argument and does not test object existence or support flags. A missing token remains None; external errors propagate."
+  ],
+  [
+    907,
+    933,
+    "list_manifest_locations clones base/store handles into a deferred once/flattened async stream. Some(Vec) from external list_versions(base, None) is authoritative, optionally sorted descending by version, and emitted without HEAD, deduplication, detached filtering or identity validation. None selects parent object listing; errors propagate. Metadata is materialized as a Vec at the external boundary, not streamed incrementally."
+  ],
+  [
+    934,
+    962,
+    "list_manifest_locations_since requests external versions with Some(since). For Some(Vec), it additionally retains only version > since and sorts descending before streaming. None uses the parent's hint-aware fallback. An empty supplied Vec never falls back. The handler does not override the parent's detached-list method, so that method retains its physical-listing behavior."
+  ],
+  [
+    963,
+    1012,
+    "Ordinary commit derives a canonical path from manifest.version, makes a UUID staging path and awaits the injected ManifestWriter there, passing optional indices/transaction. Write errors propagate through CommitError conversion with no local staging cleanup. The canonical/staging names are computed before the writer may mutate the manifest; external submission reads its version after that await. Ordinary commit calls external_manifest_store.put with the staging size, writer ETag, raw store and scheme. Success writes a best-effort parent version hint and returns the store's location unchanged. Every error from put goes through lose_or_retain, which returns CommitConflict even for IO or ambiguous publication errors. There is no cancellation guard or retry loop inside this handler."
+  ],
+  [
+    1013,
+    1048,
+    "delete and forget_version forward to the external store (the latter with the required identity); supports_predecessor_condition forwards its support flag. These methods do not delete physical manifest objects themselves. Store-level default delete is a no-op and default forget is NotSupported. resolve_latest_identity performs two separate awaits: obtain latest (version, path), then fetch that version's identity. It returns None if either is absent and wraps the token otherwise. This is not an atomic latest-version/identity snapshot and does not probe or materialize the object; the later conditioned reservation must check the token."
+  ],
+  [
+    1049,
+    1122,
+    "commit_after constructs a unique staging-shaped path and writes the full manifest before invoking put_if_predecessor. It does not check supports_predecessor_condition first. Reservation receives the post-write manifest version, unique path, size and supplied predecessor. The handler itself enforces neither adjacency nor latest-head equality; atomic identity validation belongs to the store implementation. Reserved { identity } writes the version hint and returns the unique path as FINAL, with writer size/ETag and the minted identity. It performs no canonical COPY, finalize hook, path compaction or staging deletion. The durable object precedes the atomic reservation, which publishes it through the record. This identity protocol depends on authoritative external listings, since normal manifest-name detection excludes the unique suffix. PredecessorChanged best-effort deletes the refused unique object and returns OtherError(PrerequisiteFailed) with predecessor-version context. Taken and every Err, including a default NotSupported error, use lose_or_retain and become CommitConflict. Write failures earlier have no cleanup. The trait implementation ends without overriding the parent's definitive-NotFound or propagate-after-readback defaults."
+  ],
+  [
+    1123,
+    1150,
+    "Private lose_or_retain reads the record for the attempted version. A successful lookup at a different path is treated as a proven loser: best-effort delete its own staging object and return CommitConflict. Same path or any lookup failure warns with the original error and retains staging, but still returns CommitConflict. The comparison is path-only; a canonicalized path also differs from the original staging path. This helper does not expose an unknown-outcome error variant."
+  ],
+  [
+    1151,
+    1162,
+    "Private recorded_as_final trusts an identity-bearing record. If size is absent it HEADs only to fill size; it neither refreshes ETag nor compares a known size. If size is already Some, it performs no object IO at all. It preserves the record's path/scheme/identity/ETag and never copies to a canonical path. Therefore generic canonical verification guarantees must not be attributed to this branch."
+  ],
+  [
+    1163,
+    1177,
+    "Private delete_staging awaits raw delete. Success audits DELETE; NotFound is silently accepted without an audit; other errors warn with why/path/error. It returns no Result and has no cancellation guard. This audit-on-NotFound behavior differs from the two generic finalization routines, which do audit accepted NotFound cleanup."
+  ]
+]

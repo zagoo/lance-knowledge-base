@@ -1,0 +1,194 @@
+{
+  "seed": "0x011953c2",
+  "claims": [
+    {
+      "id": "W06",
+      "claim": "Version dispatch separates hidden lineage fields first, applies preserve-or-reassign for new datasets, then forwards the policy into schema preparation. Hidden lineage fields are reattached after normal schema handling.",
+      "citations": [
+        "rust/lance/src/dataset/versions/mod.rs:137-180"
+      ],
+      "source_evidence": [
+        {
+          "citation": "rust/lance/src/dataset/versions/mod.rs:137-180",
+          "production_source": "137: pub async fn write_fragments(\n138:     version: ConcreteFileVersion,\n139:     dataset: Option<&Dataset>,\n140:     object_store: Arc<ObjectStore>,\n141:     base_dir: &Path,\n142:     normalized_schema: Schema,\n143:     data: SendableRecordBatchStream,\n144:     params: WriteParams,\n145:     target_bases_info: Option<Vec<TargetBaseInfo>>,\n146:     file_row_counts: Option<Vec<usize>>,\n147:     preassigned_data_file_name: Option<Arc<String>>,\n148:     keep_field_ids: bool,\n149: ) -> Result<(Vec<Fragment>, Schema)> {\n150:     // A writer that spills row lineage into the fragment's own data file\n151:     // carries the hidden columns in its stream. They are not dataset fields:\n152:     // set them aside before the schema is checked against the dataset's and\n153:     // put them back on the schema that is written. This has to come before\n154:     // the blob promotion, which gives every negative field id a new one.\n155:     let (mut normalized_schema, lineage_fields) = split_row_lineage_fields(normalized_schema)?;\n156:     if dataset.is_none() {\n157:         if keep_field_ids {\n158:             normalized_schema.try_set_field_id(None)?;\n159:         } else {\n160:             // Input Arrow IDs must not seed allocation for a new dataset's blob children.\n161:             normalized_schema.try_reassign_field_ids(None)?;\n162:         }\n163:     }\n164:     let normalized_schema = match version {\n165:         ConcreteFileVersion::V2_2 | ConcreteFileVersion::V2_3 => {\n166:             write::promote_legacy_blob_schema(&normalized_schema)?\n167:         }\n168:         _ => normalized_schema,\n169:     };\n170:     let version_name = format!(\"{version:?}\");\n171:     let mut schema = write::prepare_write_schema(\n172:         dataset,\n173:         normalized_schema,\n174:         &params,\n175:         schema_compare_options(version),\n176:         keep_field_ids,\n177:     )?;\n178:     schema.fields.extend(lineage_fields);\n179:     match version {\n180:         ConcreteFileVersion::V1 | ConcreteFileVersion::V2_0 | ConcreteFileVersion::V2_1 => {"
+        }
+      ],
+      "pass": true,
+      "review": "Confirmed against production source branches and interface declarations; no remaining mismatch."
+    },
+    {
+      "id": "W04",
+      "claim": "Ordinary write_fragments_internal_with_file_row_counts calls the common writer with keep_field_ids=false. The dedicated write_fragments_internal_to_file helper was removed; use the common implementation.",
+      "citations": [
+        "rust/lance/src/dataset/write.rs:1760-1822"
+      ],
+      "source_evidence": [
+        {
+          "citation": "rust/lance/src/dataset/write.rs:1760-1822",
+          "production_source": "1760: pub(crate) async fn write_fragments_internal_with_file_row_counts(\n1761:     storage_version: ConcreteFileVersion,\n1762:     dataset: Option<&Dataset>,\n1763:     object_store: Arc<ObjectStore>,\n1764:     base_dir: &Path,\n1765:     schema: Schema,\n1766:     data: SendableRecordBatchStream,\n1767:     params: WriteParams,\n1768:     target_bases_info: Option<Vec<TargetBaseInfo>>,\n1769:     file_row_counts: Option<Vec<usize>>,\n1770: ) -> Result<(Vec<Fragment>, Schema)> {\n1771:     write_fragments_internal_impl(\n1772:         storage_version,\n1773:         dataset,\n1774:         object_store,\n1775:         base_dir,\n1776:         schema,\n1777:         data,\n1778:         params,\n1779:         target_bases_info,\n1780:         file_row_counts,\n1781:         None,\n1782:         false,\n1783:     )\n1784:     .await\n1785: }\n1786: \n1787: #[allow(clippy::too_many_arguments)]\n1788: pub(crate) async fn write_fragments_internal_impl(\n1789:     storage_version: ConcreteFileVersion,\n1790:     dataset: Option<&Dataset>,\n1791:     object_store: Arc<ObjectStore>,\n1792:     base_dir: &Path,\n1793:     schema: Schema,\n1794:     data: SendableRecordBatchStream,\n1795:     params: WriteParams,\n1796:     target_bases_info: Option<Vec<TargetBaseInfo>>,\n1797:     file_row_counts: Option<Vec<usize>>,\n1798:     preassigned_data_file_name: Option<Arc<String>>,\n1799:     keep_field_ids: bool,\n1800: ) -> Result<(Vec<Fragment>, Schema)> {\n1801:     let mut params = params;\n1802: \n1803:     // Make sure the max rows per group is not larger than the max rows per file\n1804:     params.max_rows_per_group = std::cmp::min(params.max_rows_per_group, params.max_rows_per_file);\n1805:     validate_external_blob_write_params(&params)?;\n1806:     let normalized_schema = prepared_to_logical_blob_schema(&schema)?;\n1807: \n1808:     versions::write_fragments(\n1809:         storage_version,\n1810:         dataset,\n1811:         object_store,\n1812:         base_dir,\n1813:         normalized_schema,\n1814:         data,\n1815:         params,\n1816:         target_bases_info,\n1817:         file_row_counts,\n1818:         preassigned_data_file_name,\n1819:         keep_field_ids,\n1820:     )\n1821:     .await\n1822: }"
+        }
+      ],
+      "pass": true,
+      "review": "Confirmed against production source branches and interface declarations; no remaining mismatch."
+    },
+    {
+      "id": "N01",
+      "claim": "DirectoryNamespace insert_into_table returns transaction_id=None, num_inserted_rows from the input IPC row count, and the version of the dataset returned by the write. The count is input rows, not the final total table size.",
+      "citations": [
+        "rust/lance-namespace-impls/src/dir.rs:5149-5188"
+      ],
+      "source_evidence": [
+        {
+          "citation": "rust/lance-namespace-impls/src/dir.rs:5149-5188",
+          "production_source": "5149:     async fn insert_into_table(\n5150:         &self,\n5151:         request: InsertIntoTableRequest,\n5152:         request_data: Bytes,\n5153:     ) -> Result<InsertIntoTableResponse> {\n5154:         self.record_op(\"insert_into_table\");\n5155:         let table_uri = self.resolve_table_location(&request.id).await?;\n5156:         let (reader, num_rows) =\n5157:             Self::ipc_reader_from_request_data(&request_data, \"insert_into_table\")?;\n5158: \n5159:         let mode = match request.mode.as_deref() {\n5160:             Some(m) if m.eq_ignore_ascii_case(\"overwrite\") => WriteMode::Overwrite,\n5161:             Some(m) if m.eq_ignore_ascii_case(\"append\") => WriteMode::Append,\n5162:             None => WriteMode::Append,\n5163:             Some(m) => {\n5164:                 return Err(lance_namespace::error::NamespaceError::InvalidInput {\n5165:                     message: format!(\n5166:                         \"Unsupported write mode '{}'. Supported modes are: 'append', 'overwrite'\",\n5167:                         m\n5168:                     ),\n5169:                 }\n5170:                 .into());\n5171:             }\n5172:         };\n5173: \n5174:         let dataset = if !self.table_uri_has_actual_manifests(&table_uri).await? {\n5175:             self.write_reader_to_table(&table_uri, reader, WriteMode::Create, None)\n5176:                 .await?\n5177:         } else {\n5178:             self.write_reader_to_table(&table_uri, reader, mode, None)\n5179:                 .await?\n5180:         };\n5181: \n5182:         Ok(InsertIntoTableResponse {\n5183:             transaction_id: None,\n5184:             num_inserted_rows: Some(num_rows as i64),\n5185:             version: Some(dataset.version().version as i64),\n5186:             ..Default::default()\n5187:         })\n5188:     }"
+        }
+      ],
+      "pass": true,
+      "review": "Confirmed against production source branches and interface declarations; no remaining mismatch."
+    },
+    {
+      "id": "F02",
+      "claim": "Correction to the October 11 E06 wording: spilled row lineage is not a released stable feature. Unchanged implementation names bit 11 UNSTABLE_SPILLED_ROW_LINEAGE, sets both reader/writer bits for spilled lineage and admits the capability only in debug builds or when LANCE_ENABLE_UNSTABLE_SPILLED_ROW_LINEAGE is present. The deleted proto comment never established a runtime stable gate.",
+      "citations": [
+        "rust/lance-table/src/feature_flags.rs:68-81,214-221,262-267"
+      ],
+      "source_evidence": [
+        {
+          "citation": "rust/lance-table/src/feature_flags.rs:68-81,214-221,262-267",
+          "production_source": "68: /// rather than inline in the manifest (`RowIdMeta::Column`,\n69: /// `RowDatasetVersionMeta::Column`).\n70: ///\n71: /// A reader without this bit sees an unset `row_id_sequence` oneof and would\n72: /// take the fragment to have no row ids at all, on a table whose manifest says\n73: /// every fragment has them; a writer without it would carry the fragment\n74: /// forward and drop the sequence. Both must refuse the table.\n75: ///\n76: /// Every earlier build has its unknown boundary at or below this bit, so each\n77: /// already refuses such a dataset without a change of its own. Spilled row\n78: /// lineage is not yet a released feature: this build understands the bit only\n79: /// in debug builds or when [`ENABLE_UNSTABLE_SPILLED_ROW_LINEAGE_ENV`] is set,\n80: /// mirroring [`FLAG_UNSTABLE_DATA_OVERLAY_FILES`].\n81: pub const FLAG_UNSTABLE_SPILLED_ROW_LINEAGE: u64 = 1 << 11;\n214:     let has_spilled_row_lineage = manifest\n215:         .fragments\n216:         .iter()\n217:         .any(|frag| frag.has_spilled_row_lineage());\n218:     if has_spilled_row_lineage {\n219:         manifest.reader_feature_flags |= FLAG_UNSTABLE_SPILLED_ROW_LINEAGE;\n220:         manifest.writer_feature_flags |= FLAG_UNSTABLE_SPILLED_ROW_LINEAGE;\n221:     }\n262: /// Whether this build understands row lineage sequences spilled to data file\n263: /// columns: always in debug builds, and in release builds only when\n264: /// [`ENABLE_UNSTABLE_SPILLED_ROW_LINEAGE_ENV`] is set, like data overlay files.\n265: pub fn spilled_row_lineage_enabled() -> bool {\n266:     cfg!(debug_assertions) || std::env::var_os(ENABLE_UNSTABLE_SPILLED_ROW_LINEAGE_ENV).is_some()\n267: }"
+        }
+      ],
+      "pass": true,
+      "review": "Confirmed against production source branches and interface declarations; no remaining mismatch."
+    },
+    {
+      "id": "N03",
+      "claim": "Python DirectoryNamespace and RestNamespace declare the optional count/version response fields and deserialize the inner response with InsertIntoTableResponse.from_dict. The default Rust trait method remains NotSupported; a doc comment does not implement the operation for every backend.",
+      "citations": [
+        "python/python/lance/namespace.py:552-573,1151-1172",
+        "rust/lance-namespace/src/namespace.rs:179-187"
+      ],
+      "source_evidence": [
+        {
+          "citation": "python/python/lance/namespace.py:552-573,1151-1172",
+          "production_source": "552:     def insert_into_table(\n553:         self, request: InsertIntoTableRequest, request_data: bytes\n554:     ) -> InsertIntoTableResponse:\n555:         \"\"\"Insert data into a table.\n556: \n557:         Parameters\n558:         ----------\n559:         request : InsertIntoTableRequest\n560:             Request with table id and write mode (append/overwrite)\n561:         request_data : bytes\n562:             Arrow IPC stream containing the data to insert\n563: \n564:         Returns\n565:         -------\n566:         InsertIntoTableResponse\n567:             Response with optional transaction_id, num_inserted_rows, and version\n568:         \"\"\"\n569:         response_dict = self._inner.insert_into_table(\n570:             request.model_dump(), request_data\n571:         )\n572:         return InsertIntoTableResponse.from_dict(response_dict)\n573: \n1151:     def insert_into_table(\n1152:         self, request: InsertIntoTableRequest, request_data: bytes\n1153:     ) -> InsertIntoTableResponse:\n1154:         \"\"\"Insert data into a table.\n1155: \n1156:         Parameters\n1157:         ----------\n1158:         request : InsertIntoTableRequest\n1159:             Request with table id and write mode (append/overwrite)\n1160:         request_data : bytes\n1161:             Arrow IPC stream containing the data to insert\n1162: \n1163:         Returns\n1164:         -------\n1165:         InsertIntoTableResponse\n1166:             Response with optional transaction_id, num_inserted_rows, and version\n1167:         \"\"\"\n1168:         response_dict = self._inner.insert_into_table(\n1169:             request.model_dump(), request_data\n1170:         )\n1171:         return InsertIntoTableResponse.from_dict(response_dict)\n1172: "
+        },
+        {
+          "citation": "rust/lance-namespace/src/namespace.rs:179-187",
+          "production_source": "179:     /// Insert data into a table, returning the inserted row count and commit version.\n180:     async fn insert_into_table(\n181:         &self,\n182:         _request: InsertIntoTableRequest,\n183:         _request_data: Bytes,\n184:     ) -> Result<InsertIntoTableResponse> {\n185:         Err(Error::not_supported(\"insert_into_table not implemented\"))\n186:     }\n187: "
+        }
+      ],
+      "pass": true,
+      "review": "Confirmed against production source branches and interface declarations; no remaining mismatch."
+    },
+    {
+      "id": "W01",
+      "claim": "InsertBuilder defaults keep_field_ids to false. Its crate-private with_table_field_ids opt-in preserves assigned table IDs when creating a MemWAL generation, rather than making arbitrary public Arrow IDs authoritative.",
+      "citations": [
+        "rust/lance/src/dataset/write/insert.rs:54-91"
+      ],
+      "source_evidence": [
+        {
+          "citation": "rust/lance/src/dataset/write/insert.rs:54-91",
+          "production_source": "54:     params: Option<&'a WriteParams>,\n55:     write_progress: Option<WriteProgressFn>,\n56:     preassigned_data_file_name: Option<Arc<String>>,\n57:     keep_field_ids: bool,\n58: }\n59: \n60: impl<'a> InsertBuilder<'a> {\n61:     pub fn new(dest: impl Into<WriteDestination<'a>>) -> Self {\n62:         Self {\n63:             dest: dest.into(),\n64:             params: None,\n65:             write_progress: None,\n66:             preassigned_data_file_name: None,\n67:             keep_field_ids: false,\n68:         }\n69:     }\n70: \n71:     pub fn with_params(mut self, params: &'a WriteParams) -> Self {\n72:         self.params = Some(params);\n73:         self\n74:     }\n75: \n76:     pub(crate) fn with_preassigned_data_file_name(\n77:         mut self,\n78:         preassigned_data_file_name: impl Into<String>,\n79:     ) -> Self {\n80:         self.preassigned_data_file_name = Some(Arc::new(preassigned_data_file_name.into()));\n81:         self\n82:     }\n83: \n84:     /// Keep the field ids the input schema carries when creating a dataset,\n85:     /// instead of numbering its fields afresh.\n86:     ///\n87:     /// For a MemWAL generation, whose columns must keep the base table's ids.\n88:     pub(crate) fn with_table_field_ids(mut self) -> Self {\n89:         self.keep_field_ids = true;\n90:         self\n91:     }"
+        }
+      ],
+      "pass": true,
+      "review": "Confirmed against production source branches and interface declarations; no remaining mismatch."
+    },
+    {
+      "id": "W09",
+      "claim": "MemTableFlusher explicitly enables with_table_field_ids so generation reads and merge-to-base can resolve columns by base-table ID across renames and drops. It retains optional preassigned file naming.",
+      "citations": [
+        "rust/lance/src/dataset/mem_wal/memtable/flush.rs:469-480"
+      ],
+      "source_evidence": [
+        {
+          "citation": "rust/lance/src/dataset/mem_wal/memtable/flush.rs:469-480",
+          "production_source": "469:         // The generation's columns keep the base table's field ids: reads and\n470:         // the merge into base resolve them by id, across renames and drops.\n471:         let mut builder = InsertBuilder::new(uri.as_str())\n472:             .with_params(&write_params)\n473:             .with_table_field_ids();\n474:         if let Some(preassigned_data_file_name) = preassigned_data_file_name {\n475:             builder = builder.with_preassigned_data_file_name(preassigned_data_file_name);\n476:         }\n477:         builder.execute_stream(reader).await?;\n478: \n479:         Ok((total_rows, deleted))\n480:     }"
+        }
+      ],
+      "pass": true,
+      "review": "Confirmed against production source branches and interface declarations; no remaining mismatch."
+    },
+    {
+      "id": "W08",
+      "claim": "do_commit_new_dataset normally canonicalizes non-reusable IDs. With the preservation policy and an Overwrite, it instead validates the carried schema and primary key; operation validation still runs afterwards. This does not bypass existing-dataset conflict/retry canonicalization.",
+      "citations": [
+        "rust/lance/src/io/commit.rs:427-450,788-805"
+      ],
+      "source_evidence": [
+        {
+          "citation": "rust/lance/src/io/commit.rs:427-450,788-805",
+          "production_source": "427: async fn do_commit_new_dataset(\n428:     object_store: &ObjectStore,\n429:     source_store: Option<&ObjectStore>,\n430:     commit_handler: &Arc<dyn CommitHandler>,\n431:     base_path: &Path,\n432:     uri: &str,\n433:     transaction: &Transaction,\n434:     write_config: &ManifestWriteConfig,\n435:     manifest_naming_scheme: ManifestNamingScheme,\n436:     metadata_cache: &DSMetadataCache,\n437:     session: Arc<Session>,\n438:     keep_field_ids: bool,\n439: ) -> Result<(Manifest, ManifestLocation)> {\n440:     let mut transaction = transaction.clone();\n441:     if !keep_field_ids {\n442:         canonicalize_non_reusable_field_ids(None, &mut transaction.operation, None)?;\n443:     } else if let Operation::Overwrite { schema, .. } = &transaction.operation {\n444:         // Canonicalization would have checked the schema it renumbered.\n445:         schema.validate()?;\n446:         schema.verify_primary_key()?;\n447:     }\n448:     let transaction = &transaction;\n449:     validate_operation(None, &transaction.operation)?;\n450:     let pb_transaction = pb::Transaction::try_from(transaction)?;\n788:     manifest_naming_scheme: ManifestNamingScheme,\n789:     metadata_cache: &crate::session::caches::DSMetadataCache,\n790:     session: Arc<Session>,\n791:     keep_field_ids: bool,\n792: ) -> Result<(Manifest, ManifestLocation)> {\n793:     do_commit_new_dataset(\n794:         object_store,\n795:         source_store,\n796:         commit_handler,\n797:         base_path,\n798:         uri,\n799:         transaction,\n800:         write_config,\n801:         manifest_naming_scheme,\n802:         metadata_cache,\n803:         session,\n804:         keep_field_ids,\n805:     )"
+        }
+      ],
+      "pass": true,
+      "review": "Confirmed against production source branches and interface declarations; no remaining mismatch."
+    },
+    {
+      "id": "W03",
+      "claim": "A preassigned data-file name cannot be combined with target bases; this validation remains before writing. Both paths now use write_fragments_internal_impl, forwarding the optional name and keep-field-IDs flag.",
+      "citations": [
+        "rust/lance/src/dataset/write/insert.rs:245-263"
+      ],
+      "source_evidence": [
+        {
+          "citation": "rust/lance/src/dataset/write/insert.rs:245-263",
+          "production_source": "245:         if self.preassigned_data_file_name.is_some() && target_base_info.is_some() {\n246:             return Err(Error::invalid_input(\n247:                 \"a fixed data file name cannot be combined with target bases\",\n248:             ));\n249:         }\n250:         let (written_fragments, written_schema) = Box::pin(write_fragments_internal_impl(\n251:             context.storage_version,\n252:             context.dest.dataset(),\n253:             context.object_store.clone(),\n254:             &context.base_path,\n255:             schema.clone(),\n256:             stream,\n257:             context.params.clone(),\n258:             target_base_info,\n259:             None,\n260:             self.preassigned_data_file_name.clone(),\n261:             self.keep_field_ids,\n262:         ))\n263:         .await?;"
+        }
+      ],
+      "pass": true,
+      "review": "Confirmed against production source branches and interface declarations; no remaining mismatch."
+    },
+    {
+      "id": "W05",
+      "claim": "For a new dataset, prepare_write_schema preserves assigned IDs and fills missing IDs only when keep_field_ids is true; otherwise it reassigns IDs. Existing append/create schema matching still projects through the dataset schema.",
+      "citations": [
+        "rust/lance/src/dataset/write.rs:1833-1880"
+      ],
+      "source_evidence": [
+        {
+          "citation": "rust/lance/src/dataset/write.rs:1833-1880",
+          "production_source": "1833: pub(super) fn prepare_write_schema(\n1834:     dataset: Option<&Dataset>,\n1835:     normalized_converted_schema: Schema,\n1836:     params: &WriteParams,\n1837:     mut schema_compare_options: lance_core::datatypes::SchemaCompareOptions,\n1838:     keep_field_ids: bool,\n1839: ) -> Result<Schema> {\n1840:     let schema = if dataset.is_none() {\n1841:         let mut schema = normalized_converted_schema;\n1842:         if keep_field_ids {\n1843:             schema.try_set_field_id(None)?;\n1844:         } else {\n1845:             schema.try_reassign_field_ids(None)?;\n1846:         }\n1847:         schema\n1848:     } else if let Some(dataset) = dataset\n1849:         && matches!(params.mode, WriteMode::Append | WriteMode::Create)\n1850:     {\n1851:         schema_compare_options.compare_nullability = NullabilityComparison::Ignore;\n1852:         schema_compare_options.allow_missing_if_nullable = true;\n1853:         schema_compare_options.ignore_field_order = true;\n1854:         validate_blob_threshold_metadata_for_append(\n1855:             &normalized_converted_schema,\n1856:             dataset.schema(),\n1857:         )?;\n1858:         if normalized_converted_schema\n1859:             .check_compatible(dataset.schema(), &schema_compare_options)\n1860:             .is_ok()\n1861:         {\n1862:             return dataset.schema().project_by_schema(\n1863:                 &normalized_converted_schema,\n1864:                 OnMissing::Error,\n1865:                 OnTypeMismatch::Error,\n1866:             );\n1867:         }\n1868:         let comparison_schema = promote_legacy_blob_schema(&normalized_converted_schema)?;\n1869:         let dataset_schema = promote_legacy_blob_schema(dataset.schema())?;\n1870:         comparison_schema.check_compatible(&dataset_schema, &schema_compare_options)?;\n1871:         let mut projected = dataset_schema.project_by_schema(\n1872:             &comparison_schema,\n1873:             OnMissing::Error,\n1874:             OnTypeMismatch::Error,\n1875:         )?;\n1876:         // Inputs for 2.2+ were already promoted before schema preparation.\n1877:         // Remaining byte inputs retain the legacy physical layout and the table's field IDs.\n1878:         fn restore_legacy_blob_inputs(\n1879:             field: &mut lance_core::datatypes::Field,\n1880:             input: &lance_core::datatypes::Field,"
+        }
+      ],
+      "pass": true,
+      "review": "Confirmed against production source branches and interface declarations; no remaining mismatch."
+    },
+    {
+      "id": "N02",
+      "claim": "Namespace insertion accepts case-insensitive append/overwrite, defaults to append, rejects other modes and uses Create when the table has no actual manifests. Write errors propagate before constructing the response.",
+      "citations": [
+        "rust/lance-namespace-impls/src/dir.rs:5159-5187"
+      ],
+      "source_evidence": [
+        {
+          "citation": "rust/lance-namespace-impls/src/dir.rs:5159-5187",
+          "production_source": "5159:         let mode = match request.mode.as_deref() {\n5160:             Some(m) if m.eq_ignore_ascii_case(\"overwrite\") => WriteMode::Overwrite,\n5161:             Some(m) if m.eq_ignore_ascii_case(\"append\") => WriteMode::Append,\n5162:             None => WriteMode::Append,\n5163:             Some(m) => {\n5164:                 return Err(lance_namespace::error::NamespaceError::InvalidInput {\n5165:                     message: format!(\n5166:                         \"Unsupported write mode '{}'. Supported modes are: 'append', 'overwrite'\",\n5167:                         m\n5168:                     ),\n5169:                 }\n5170:                 .into());\n5171:             }\n5172:         };\n5173: \n5174:         let dataset = if !self.table_uri_has_actual_manifests(&table_uri).await? {\n5175:             self.write_reader_to_table(&table_uri, reader, WriteMode::Create, None)\n5176:                 .await?\n5177:         } else {\n5178:             self.write_reader_to_table(&table_uri, reader, mode, None)\n5179:                 .await?\n5180:         };\n5181: \n5182:         Ok(InsertIntoTableResponse {\n5183:             transaction_id: None,\n5184:             num_inserted_rows: Some(num_rows as i64),\n5185:             version: Some(dataset.version().version as i64),\n5186:             ..Default::default()\n5187:         })"
+        }
+      ],
+      "pass": true,
+      "review": "Confirmed against production source branches and interface declarations; no remaining mismatch."
+    },
+    {
+      "id": "W07",
+      "claim": "CommitBuilder defaults keep_field_ids=false and exposes the override only within the crate. The new-dataset commit receives this flag.",
+      "citations": [
+        "rust/lance/src/dataset/write/commit.rs:57-89,303-308,498-519"
+      ],
+      "source_evidence": [
+        {
+          "citation": "rust/lance/src/dataset/write/commit.rs:57-89,303-308,498-519",
+          "production_source": "57:     activate_non_reusable_field_ids: bool,\n58:     /// Set only by `Dataset::deep_clone`, after it has copied the source files.\n59:     deep_clone_files_copied: bool,\n60:     keep_field_ids: bool,\n61: }\n62: \n63: /// Default timeout applied to [`CommitBuilder::execute`] when none is set.\n64: pub const DEFAULT_COMMIT_TIMEOUT: Duration = Duration::from_secs(1800);\n65: \n66: impl<'a> CommitBuilder<'a> {\n67:     pub fn new(dest: impl Into<WriteDestination<'a>>) -> Self {\n68:         Self {\n69:             dest: dest.into(),\n70:             use_stable_row_ids: None,\n71:             enable_v2_manifest_paths: true,\n72:             storage_format: None,\n73:             commit_handler: None,\n74:             store_params: None,\n75:             object_store: None,\n76:             source_store: None,\n77:             session: None,\n78:             detached: false,\n79:             commit_config: Default::default(),\n80:             retry_timeout: default_commit_retry_timeout(),\n81:             affected_rows: None,\n82:             transaction_properties: None,\n83:             timeout: Some(DEFAULT_COMMIT_TIMEOUT),\n84:             migration_next_row_id: None,\n85:             activate_non_reusable_field_ids: false,\n86:             deep_clone_files_copied: false,\n87:             keep_field_ids: false,\n88:         }\n89:     }\n303:     /// Create the dataset with the field ids its schema already carries; see\n304:     /// [`InsertBuilder::with_table_field_ids`](super::InsertBuilder::with_table_field_ids).\n305:     pub(crate) fn with_table_field_ids(mut self) -> Self {\n306:         self.keep_field_ids = true;\n307:         self\n308:     }\n498:                 .await?\n499:             }\n500:         } else if self.detached {\n501:             // I think we may eventually want this, and we can probably handle it, but leaving a TODO for now\n502:             return Err(Error::not_supported_source(\n503:                 \"detached commits cannot currently be used to create new datasets\".into(),\n504:             ));\n505:         } else {\n506:             commit_new_dataset(\n507:                 object_store.as_ref(),\n508:                 source_store.as_deref(),\n509:                 &commit_handler,\n510:                 &base_path,\n511:                 &dest.uri(),\n512:                 &transaction,\n513:                 &manifest_config,\n514:                 manifest_naming_scheme,\n515:                 metadata_cache.as_ref(),\n516:                 session.clone(),\n517:                 self.keep_field_ids,\n518:             )\n519:             .await?"
+        }
+      ],
+      "pass": true,
+      "review": "Confirmed against production source branches and interface declarations; no remaining mismatch."
+    }
+  ],
+  "repairs": [
+    "Prior E06 incorrectly labeled spilled lineage stable; corrected to actual unstable bit-11 implementation gate."
+  ],
+  "pass": true
+}

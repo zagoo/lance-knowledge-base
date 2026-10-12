@@ -1,0 +1,87 @@
+@@ -330,6 +330,14 @@ where
+  330      ))
+  331  }
+  332  
+  333 +fn kmeans_has_converged(previous_loss: f64, loss: f64, tolerance: f64) -> bool {
+  334 +    if loss == 0.0 {
+  335 +        previous_loss == 0.0
+  336 +    } else {
+  337 +        (previous_loss - loss).abs() < tolerance * loss.abs()
+  338 +    }
+  339 +}
+  340 +
+  341  pub trait KMeansAlgo<T: Num> {
+  342      /// Recompute the membership of each vector.
+  343      ///
+
+@@ -361,7 +369,7 @@ pub trait KMeansAlgo<T: Num> {
+  369          );
+  370  
+  371          let k = centroids.len() / dimension;
+  364 -        let mut cluster_radius = vec![0.0; k];
+  372 +        let mut cluster_radius = vec![f32::NEG_INFINITY; k];
+  373          let mut losses = vec![0.0; k];
+  374          for (cluster_id, dist) in membership.iter().zip(dists.iter()) {
+  375              if let (Some(cluster_id), Some(dist)) = (cluster_id, dist) {
+
+@@ -370,6 +378,11 @@ pub trait KMeansAlgo<T: Num> {
+  378                  losses[cluster_id] += *dist as f64;
+  379              }
+  380          }
+  381 +        cluster_radius.iter_mut().for_each(|radius| {
+  382 +            if *radius == f32::NEG_INFINITY {
+  383 +                *radius = 0.0;
+  384 +            }
+  385 +        });
+  386  
+  387          (membership, cluster_radius, losses)
+  388      }
+
+@@ -926,7 +939,7 @@ impl KMeans {
+  939      ) -> arrow::error::Result<KMeansMembershipAndLoss> {
+  940          let (membership, distances) = self.compute_membership_and_distances(data)?;
+  941          let k = self.centroids.len() / self.dimension;
+  929 -        let mut cluster_radius: Vec<f32> = vec![0.0_f32; k];
+  942 +        let mut cluster_radius = vec![f32::NEG_INFINITY; k];
+  943          let mut losses = vec![0.0; k];
+  944          for (cluster_id, dist) in membership.iter().zip(distances.iter()) {
+  945              if let (Some(cluster_id), Some(dist)) = (cluster_id, dist) {
+
+@@ -935,6 +948,11 @@ impl KMeans {
+  948                  losses[cluster_id] += *dist as f64;
+  949              }
+  950          }
+  951 +        cluster_radius.iter_mut().for_each(|radius| {
+  952 +            if *radius == f32::NEG_INFINITY {
+  953 +                *radius = 0.0;
+  954 +            }
+  955 +        });
+  956          Ok((membership, cluster_radius, losses))
+  957      }
+  958  
+
+@@ -1128,15 +1146,17 @@ impl KMeans {
+ 1146                      params.distance_type,
+ 1147                      last_loss,
+ 1148                  );
+ 1131 -                if (loss - last_loss).abs() < params.tolerance * last_loss {
+ 1149 +                // Keep `last_loss` as the scale reference to preserve the legacy
+ 1150 +                // convergence threshold.
+ 1151 +                if kmeans_has_converged(loss, last_loss, params.tolerance) {
+ 1152 +                    let relative_loss_diff = if last_loss == 0.0 {
+ 1153 +                        if loss == 0.0 { 0.0 } else { f64::INFINITY }
+ 1154 +                    } else {
+ 1155 +                        (loss - last_loss).abs() / last_loss.abs()
+ 1156 +                    };
+ 1157                      info!(
+ 1158                          "KMeans training: converged at iteration {} / {}, redo={}, loss={}, last_loss={}, loss_diff={}",
+ 1134 -                        i,
+ 1135 -                        params.max_iters,
+ 1136 -                        redo,
+ 1137 -                        loss,
+ 1138 -                        last_loss,
+ 1139 -                        (loss - last_loss).abs() / last_loss
+ 1159 +                        i, params.max_iters, redo, loss, last_loss, relative_loss_diff
+ 1160                      );
+ 1161                      break;
+ 1162                  }

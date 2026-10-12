@@ -1,0 +1,727 @@
+{
+  "iteration": 63,
+  "files": [
+    {
+      "path": "rust/lance-file/src/reader.rs",
+      "module": "L1-modules/rust-lance-file-shared-reader.md",
+      "reviewed": true,
+      "role": "Shared current-format file reader, raw metadata and index loading, projection-scoped metadata acquisition, decode scheduling and local test oracles. Exact-version modules own grammar acceptance and projection semantics; this module coordinates their selected behavior.",
+      "limits": "All4804 physical lines were read in complete bounded outputs during ANALYZE58. Tests inspected, not executed. This file contains no unsafe blocks, but includes fallible unwrap/expect, unchecked slicing/casts/arithmetic and logging-only empty-vector indexing documented per range. IO and byte decoder lifecycles are delegated to still-pending implementations. Type/comment promises, actual code and actual test oracles are distinguished; no runtime success, performance guarantee or full compatibility qualification is claimed.",
+      "ranges": [
+        [
+          1,
+          54,
+          "SPDX and imports connect Arrow record readers/schema, asynchronous streams, little-endian byte readers, protobuf Message, cache identity/deep sizing, core schema, encoding scheduler/decoder APIs and EncodedBatch, object path, FileScheduler and batch streams. The crate-private structural submodule provides shared structural projection behavior. Imports are dependencies, not runtime registrations."
+        ],
+        [
+          55,
+          68,
+          "Public DEFAULT_READ_CHUNK_SIZE is exactly8*1024*1024 bytes. Public Debug/DeepSizeOf BufferDescriptor holds position:u64 and size:u64. The preceding comment says global buffers only hold schema and positions are for debugging; later retained user-buffer handling and public read_global_buffer make that comment stale."
+        ],
+        [
+          69,
+          101,
+          "Private BufferDescriptor::checked_range first checked_adds position+size, then rejects position>file_len and end>file_len as invalid_input_source with index/value context. position==file_len and size0 are allowed. Returns a half-open range. It does not require nonzero size, alignment, ordering, nonoverlap or placement outside metadata."
+        ],
+        [
+          102,
+          119,
+          "Public Debug FileStatistics owns Vec<ColumnStatistics>; each public ColumnStatistics exposes num_pages:usize and size_bytes:u64. Its size documentation says compressed data and metadata bytes, but statistics_from_column_metadata actually sums only page.buffer_sizes (rust/lance-file/src/reader.rs:659-685)."
+        ],
+        [
+          120,
+          161,
+          "Public Debug CachedFileMetadata retains Arc core schema, original protobuf columns, Vec<Arc<ColumnInfo>>, declared row count, global descriptors, four byte-accounting counters, literal major/minor and exact version, actual object-store size, and BTreeMap<u32,Bytes> of retained user globals. Retained buffers exclude index0, are copied from the original tail window to release its backing allocation, and omit globals outside that window. TODO Caching is stale relative to callers using LanceCache; this type itself does not load or validate data. Counter comments are not exact formulas: raw full loader computes schema-to-end footer bytes and metadata-through-CMO bytes."
+        ],
+        [
+          162,
+          177,
+          "Public CachedFileMetadata::file_size returns actual file_size_bytes. Private column_metadata_deep_size sums each protobuf encoded_len()*4 plus size_of_val(the slice), an approximate decoded allocation proxy using length, not Vec capacity. Arithmetic is ordinary unchecked multiplication/addition/sum."
+        ],
+        [
+          178,
+          209,
+          "CachedFileMetadata DeepSizeOf combines schema child size, each descriptor child size, approximate protobuf metadata, column_infos Vec children and retained-map children. Descriptor iteration does not account for the file_buffers Vec allocation itself; scalar-only descriptors have no heap children. Protobuf4x is a heuristic, not a measured allocation. Shared Arc accounting is delegated to DeepSizeOf/context; this method does not reconcile accounting with physical file size."
+        ],
+        [
+          210,
+          238,
+          "Public Debug/DeepSizeOf FileMetadataIndex has crate-private Arc schema, row count, descriptors, Arc slice of(position,length) CMO entries, physical column count, exact version, actual size and retained user globals. It excludes decoded per-column metadata. Public file_size and num_columns are direct accessors; construction/validation occurs elsewhere."
+        ],
+        [
+          239,
+          251,
+          "Private CachedColumnMetadata pairs original protobuf ColumnMetadata with Arc normalized ColumnInfo. Custom deep sizing calls the same4x wire-size proxy on a one-element slice and adds ColumnInfo children; the estimate includes one inline protobuf size even though the wrapper owns that field inline."
+        ],
+        [
+          252,
+          277,
+          "Private Clone/Debug ColumnMetadataCacheKey stores physical u32 column index. CacheKey ValueType=CachedColumnMetadata; diagnostic key is owned column_metadata/N, type_name ColumnMetadata, typed schema(lance.file.column-metadata-key,1), binary key is write_u32(index). File identity must come from the surrounding cache namespace; this key contains no path/version."
+        ],
+        [
+          278,
+          350,
+          "Public CachedFileMetadata::version returns exact version. Public Clone/Debug ReaderProjection owns Arc<Schema> plus Vec<u32> physical column indices. Documentation allows different in-memory representations if decoders support them, not arbitrary guaranteed casts; schema names are documented arbitrary. V2_0 DFS includes structural nodes while V2_1 docs use leaf columns. Example mapping is V2_0[1,3,4,6,7,8] versus V2_1[0,2,4,5]; fixed-size-list/dictionary and child rules remain exact-version strategy concerns. No validation happens in this struct declaration."
+        ],
+        [
+          351,
+          362,
+          "prefers_indexed_metadata first checks projection shape through provider helper then requires saturating(column_indices.len()*4)<total_columns: strict less than25%, not <=25%. It does not select/check file version; docs require caller to choose an indexed-capable format first."
+        ],
+        [
+          363,
+          390,
+          "Public Clone/Debug FileReaderOptions contains DecoderConfig, read_chunk_size:u64 and optional approximate batch_size_bytes. Default decoder config,8MiB chunk and None byte target. Docs describe row and byte batch limits as independent upper bounds and Dataset/scanner configuration paths, whose implementations remain pending. No nonzero validation occurs in Default or field construction."
+        ],
+        [
+          391,
+          425,
+          "Crate-private PreparedProjection owns selected normalized infos and decoder projection. FileMetadataProvider is Full(Arc<CachedFileMetadata>) or Indexed(Arc<FileMetadataIndex>). Async Debug+Send+Sync ReadProjection is the exact-version seam: validate_indexed, read_length, and async prepare(provider,projection,io,cache)->(PreparedProjection,u64). Shared reader invokes this strategy rather than applying accepted grammar itself."
+        ],
+        [
+          426,
+          455,
+          "Crate-private Clone/Debug DecodeEngine shares scheduler, metadata provider, selected ReadProjection, decoder plugins and cache via Arcs, while owning base projection/options. Public ProjectedFileReader wraps private engine, fixes a projection boundary and avoids synchronous full-metadata APIs. Public FileReader keeps crate-private engine plus full metadata Arc. Clone shares metadata/scheduler/cache but clones owned projection/options."
+        ],
+        [
+          456,
+          469,
+          "Crate-private tasks_to_record_batch_stream converts core schema to Arrow, discards each ReadBatchTask wrapper except its future, polls via ordered buffered(batch_readahead as usize), and wraps in RecordBatchStreamAdapter. No nonzero readahead validation, unordered execution, retry, filtering or row-count check is added here; task futures determine errors and output."
+        ],
+        [
+          470,
+          510,
+          "Crate-private RawFileMetadataOpen separates Legacy literal versions from Current exact-version plus raw metadata. RawFileMetadata retains schema/raw protobufs/counters/footer/size/retained globals before exact-version normalization. Footer declares three u64 offsets, two u32 counts and two u16 versions; FOOTER_LEN=40 includes trailing4 magic bytes. Comments/allow(dead_code) claim no metadata projection and unused offset fields, although indexed loading below uses these fields."
+        ],
+        [
+          511,
+          533,
+          "indexed_projection_column_count recursively rejects any blob or packed struct with None, counts any childless field as1, and checked-adds child counts for ordinary nested structures. Structural parents are transparent; overflow also yields None. It reasons over core child shape without validating file version or proving every datatype decoder supports that shape."
+        ],
+        [
+          534,
+          562,
+          "normalized_column_num_rows sums page row counts with checked u64 addition. For Structural SparseLayout it uses the first layer's num_slots for Validity/List/FixedSizeList, falling back to page.num_rows when absent; other encodings/layouts use page.num_rows. It does not compare multiple columns despite the broad preceding comment. Overflow is invalid_input_source. This normalized top-level slot accounting differs from public column_num_rows raw page.length."
+        ],
+        [
+          563,
+          578,
+          "verify_uniform_lengths returns0 for no fields, otherwise requires all lengths equal the first. On mismatch formats every name=length joined with comma and returns InvalidInput explaining separate column/equal-length-group reads. It does not accept a shorter common prefix or compare against file-level declared row count."
+        ],
+        [
+          579,
+          609,
+          "FileReader internal base_projection borrows engine projection; full_projection clones the entire metadata column-info vector with supplied projection, without validating it. Internal async read_prepared_tasks delegates unchanged to engine. Public with_scheduler replaces scheduler through engine clone while retaining the same metadata Arc; it does not reopen or verify scheduler refers to the same file."
+        ],
+        [
+          610,
+          639,
+          "with_io_stats asks scheduler for a scoped replacement, using with_scheduler when supported or ordinary clone when None. Metadata is shared and no reopen occurs here. num_rows delegates to engine file-level metadata; column_num_rows documentation promises single physical-column page-sum and reports unequal columns separately. Scoped stats support/actual IO accounting depend on the IO implementation."
+        ],
+        [
+          640,
+          658,
+          "column_num_rows checked-gets the raw protobuf column, returning InvalidInput with requested index and count if absent, then ordinary-sums page.length. It has no checked overflow and does not apply normalized sparse structural slot semantics. metadata returns the full Arc by reference."
+        ],
+        [
+          659,
+          690,
+          "statistics_from_column_metadata allocates one ColumnStatistics per physical column: page count and nested sums of all page.buffer_sizes. It excludes column-level buffers, serialized protobuf metadata, padding, globals and footer, despite the size field's data-and-metadata comment. Public file_statistics computes afresh; public read_global_buffer delegates to engine."
+        ],
+        [
+          691,
+          700,
+          "read_tail awaits object size, chooses begin=max(size-reader.block_size,0) with a conditional, and submits that range at priority0. Returns Bytes plus actual size. A zero block size is not rejected here; any short/empty response is handled by later footer decoding. Object size is cast to u64."
+        ],
+        [
+          701,
+          717,
+          "read_range_from_tail_or_scheduler computes tail_end with ordinary addition; if requested bounds lie inside the tail, returns a zero-copy Bytes slice, otherwise submits the complete requested range at priority0. It does not fill only the missing prefix/suffix or explicitly reject reversed ranges; callers must supply valid coordinates."
+        ],
+        [
+          718,
+          739,
+          "retained_global_buffers_from_tail checked-adds tail end, enumerates GBOs skipping schema index0, validates each complete file range, and copies only fully contained user buffers into a BTreeMap keyed by index as u32. Partial overlaps are omitted; zero-size buffers may be retained. Copying avoids retaining the original tail allocation; no follow-up IO is made."
+        ],
+        [
+          740,
+          777,
+          "decode_footer requires at least40 bytes, reads the last40 using little-endian u64 offsets/u32 counts/u16 versions, and compares final4 bytes with MAGIC. Short input and bad magic return InvalidInput; bad-magic message prints expected MAGIC rather than actual bytes. It does not validate offset ordering/counts/alignment or dispatch version; the comment describing a returned descriptor position is stale because it returns Footer."
+        ],
+        [
+          778,
+          794,
+          "current_file_version delegates literal footer-number parsing, rejects V1 as VersionConflict retaining major/minor, accepts exact V2_0/V2_1/V2_2/V2_3. A TODO about loading only needed column metadata precedes the eager full-metadata helper; indexed loading already exists separately."
+        ],
+        [
+          795,
+          824,
+          "read_all_column_metadata treats the final16*num_columns bytes of its region as CMO, errors if region is shorter, decodes checked CMO entries, subtracts column_meta_start and slices each protobuf byte range for decode. It collects all metadata. Normalization casts/addition/slicing rely on previously validated offsets and consistent footer-region ordering; the helper itself does not prove its Bytes origin agrees with footer offsets."
+        ],
+        [
+          825,
+          862,
+          "decode_cmo_table requires exact16*num_columns length, allocates capacity for all columns, reads LE(position,length) per entry, checked-adds end, and requires position>=column_meta_start and end<=column_meta_offsets_start. Zero lengths, overlapping/unsorted entries are accepted. col_idx*16 is performed in u32 before casting; huge malformed counts can overflow. No independent footer ordering or file-size validation occurs here."
+        ],
+        [
+          863,
+          892,
+          "optimistic_tail_read checked-subtracts start_pos from file_len (invalid-input source on beyond-end), casts needed size to usize, slices an already-large-enough suffix or reads only missing prefix at priority0. It allocates/copies prefix plus old data into BytesMut then freezes. Assumes data is the true file suffix; no returned-byte-count check, narrow-target checked cast or allocation limit is added."
+        ],
+        [
+          893,
+          920,
+          "do_decode_gbo_table allocates footer-declared count and cursor-decodes repeated LE(position,size) pairs; short reads propagate, trailing bytes are ignored, descriptors are not checked here. validate_gbo_table first invokes exact-version global validation then checked_range on every descriptor. It does not enforce ordering/nonoverlap beyond version helper behavior."
+        ],
+        [
+          921,
+          941,
+          "decode_gbo_table expands the original tail back to footer.global_buff_offsets_start, decodes declared entries and validates them. The comment expects the table to fit a single tail but code supports another IO. Expansion result is local and not substituted for the original tail retained later."
+        ],
+        [
+          942,
+          953,
+          "decode_schema protobuf-decodes FileDescriptor, unwraps optional schema (panic if missing), retains descriptor.length, converts FieldsWithMeta through core Schema TryFrom and returns both. No comparison between declared rows and column pages or validation of schema presence before unwrap."
+        ],
+        [
+          954,
+          991,
+          "read_raw_metadata_for_dispatch reads tail/size/footer and parses exact version. V1 returns only literal legacy tags before any GBO/schema read. Current path reads/validates GBO; empty table is Internal error requiring schema. Uses first descriptor as schema; num_footer_bytes=file_len-schema_start via checked subtraction. Extends original tail to schema_start, slices schema_size bytes and decodes descriptor. GBO checked ranges ensure schema end is within file, but layout ordering remains assumed."
+        ],
+        [
+          992,
+          1029,
+          "Full loader slices metadata from column_meta_start-schema_start to global_buff_offsets_start-schema_start using unchecked subtractions, decodes all columns, sums descriptor sizes, sets num_data_bytes=column_meta_start-sum(global sizes), num_column_metadata_bytes=GBOstart-CMOdataStart, and retains user globals only from the original tail window. Thus num_footer_bytes counts everything from schema to EOF, and column metadata bytes include CMO; counters overlap and are not additive disjoint sections. Padding can enter data bytes. Invalid ordering/overlapping inflated GBO sizes can cause underflow/slice panic rather than a structured corruption error; no such execution is claimed. Returns raw schema/protobufs/counters/footer for exact-version decoder, preserving actual object size."
+        ],
+        [
+          1030,
+          1092,
+          "Raw indexed open reads tail/footer, rejects legacy via current_file_version, decodes/validates GBO and requires schema descriptor even with caller-supplied schema. Some(schema,rows) is trusted unchanged; None fetches only schema range from tail or scheduler and decodes it. Fetches exact CMOstart..GBOstart range, decodes entries, retains user globals from original tail, and returns FileMetadataIndex. It does not load/normalize column protobufs or compare known schema/row count against stored descriptor. Footer-region ordering is still assumed."
+        ],
+        [
+          1093,
+          1116,
+          "Crate-private raw metadata-index wrappers select None versus caller-supplied Arc schema/u64 rows. Known-schema path avoids a dedicated schema fetch/decode, but the initial tail may still contain its bytes; GBO still validates schema descriptor. Public finish_metadata_index dispatch is added by separate public wrappers."
+        ],
+        [
+          1117,
+          1145,
+          "validate_projection rejects empty root schema, duplicate physical indices via BTreeSet, and indices>=column_infos.len() cast to u32. It does not verify schema/indices cardinality, types, field IDs, ordering, whole nested structure or base-projection subset. A nonempty schema with empty indices is not rejected here."
+        ],
+        [
+          1146,
+          1165,
+          "collect_columns_from_projection ignores its projection argument and clones the full column-info Vec. Its long comment discusses encoding-dependent column selection as future design; actual behavior performs no selection and is used by blocking reads."
+        ],
+        [
+          1166,
+          1210,
+          "do_read_range logs requested range/batch/file rows/columns, builds SchedulerDecoderConfig from provided cache/plugins/IO/decoder options and optional byte target, wraps one range in RequestedRows::Ranges and awaits schedule_and_decode with supplied physical indices/schema/filter. num_rows affects logging only. No bound/order/nonzero validation or explicit spawned task appears here."
+        ],
+        [
+          1211,
+          1254,
+          "do_take_rows wraps the owned u64 vector as RequestedRows::Indices and forwards all decoder settings/filter to schedule_and_decode. Debug logging indexes first/last indices with no emptiness guard, so evaluating that enabled log on empty input can panic. No sorting/deduplication or local validation."
+        ],
+        [
+          1255,
+          1300,
+          "do_read_ranges computes ordinary sum(end-start) for all ranges before logging, then forwards RequestedRows::Ranges and filter. Reversed ranges may underflow in this local computation; debug-enabled logging indexes first/last on an empty vector. Overlap/order/zero-length ranges are not normalized here."
+        ],
+        [
+          1301,
+          1338,
+          "take_rows_blocking clones all file column infos, builds config from engine cache/plugins/scheduler/options, and invokes schedule_and_decode_blocking with supplied indices/schema/filter. Debug-enabled logging requires nonempty indices but no guard is present. Decoder blocking runtime/lifetime mechanics are delegated."
+        ],
+        [
+          1339,
+          1378,
+          "read_ranges_blocking similarly uses all column infos and forwards ranges/filter to blocking scheduler. It ordinary-sums range lengths unconditionally and indexes first/last only inside debug logging. No local sorting, reversed-range rejection, overlap check or empty-list special case."
+        ],
+        [
+          1379,
+          1418,
+          "read_range_blocking uses all column infos, file-level rows for logging, one RequestedRows range, and engine config, then calls schedule_and_decode_blocking. It does not use normalized read_len except through the already-normalized input range."
+        ],
+        [
+          1419,
+          1447,
+          "read_prepared_blocking consumes prepared.decoder_projection but does not pass prepared.column_infos onward; private blocking helpers recollect full infos. Bounds closure rejects bound>read_len or equality when inclusive. Indices reject nulls then require each index<read_len and convert to Vec<u64>; empty indices pass this validation. Caller filter is preserved in the blocking take path."
+        ],
+        [
+          1448,
+          1483,
+          "Blocking Range/Ranges only check end<=read_len; starts and start<=end are not validated. RangeFrom requires start<read_len, rejecting start==EOF even for an empty suffix; RangeTo permits end==read_len, and RangeFull yields0..read_len including empty. Ranges are copied without reordering. All calls retain filter; no local batch_size validation."
+        ],
+        [
+          1484,
+          1531,
+          "FileReader::schema delegates to engine/provider and returns complete stored schema, not base projection. Provider version/num_rows/schema/file_buffers/retained_globals/file_size match Full versus Indexed and return stored fields; no IO or validation."
+        ],
+        [
+          1532,
+          1556,
+          "Provider file_statistics returns Some computed full statistics for Full and None for Indexed, without loading missing metadata. projection_matches_indexed_metadata rejects empty roots, checked-sums ordinary recursive physical-column counts and requires exact equality with supplied indices length; count overflow/blob/packed produces false. It does not itself validate indices, types or version."
+        ],
+        [
+          1557,
+          1584,
+          "validate_indexed_projection_structure mirrors full validation: nonempty root schema, unique indices and each<metadata_index.num_columns. It does not compare offset-table actual length, shape or base-projection subset; exact-version validate_indexed adds shape/version policy."
+        ],
+        [
+          1585,
+          1596,
+          "indexed_projection_error returns NotSupported describing V2.1+ ordinary structural shape with no blob/packed fields and matching physical count, including actual version/root count/index count. It constructs a diagnostic only, not a capability check."
+        ],
+        [
+          1597,
+          1619,
+          "column_metadata_range checked-gets CMO entry by index, reports declared num_columns on absence, checked-adds end with contextual InvalidInput, and returns range. It assumes index was constructed with file/metadata-region bounds checked earlier; it performs no IO or file-size check."
+        ],
+        [
+          1620,
+          1642,
+          "load_indexed_column_infos allocates result Options in projection order and checks cache sequentially per physical index. Hits reuse cached normalized Arc without revalidating version/schema/range; misses compute CMO ranges and remember result position. No single-flight insertion or cache namespace is created here; caller must supply correct file-scoped cache."
+        ],
+        [
+          1643,
+          1679,
+          "Sort missing metadata by byte start, submit all ranges in one EncodingsIo request priority0, zip returned bytes to missing entries, protobuf-decode then invoke exact-version callback, cache each raw+normalized pair and fill original result slot. Output remains projection order. Too few results become Internal missing-column errors after partial cache inserts; extra responses are ignored by zip. No returned-byte-length validation or transaction rollback; concurrent callers can duplicate loads. Full IO coalescing is delegated, not proven by one submit call."
+        ],
+        [
+          1680,
+          1712,
+          "DecodeEngine::try_new is currently infallible Ok field assembly despite Result name; it does not validate options, projections or scheduler/metadata identity. with_scheduler clones every other field, sharing cache/provider/strategies/plugins but replacing IO without verifying same underlying file."
+        ],
+        [
+          1713,
+          1752,
+          "Engine num_rows/schema return provider file-level values. read_global_buffer checked-gets descriptor first, then returns cloned retained bytes if present. Otherwise submits one checked full-file range at priority0 and returns first Bytes; no result is Internal, extra results ignored, short result length unchecked. Fallback bytes are not inserted into cache or retained map, so repeated off-tail reads may repeat IO. Index0 is allowed through this API despite comments saying schema is never fetched."
+        ],
+        [
+          1753,
+          1775,
+          "Engine read_range moves prepared infos/projection into the shared async range helper, clones IO/cache/plugins/config, forwards caller filter and byte target. File-level num_rows is supplied only for logging; projection-specific length has already been enforced upstream."
+        ],
+        [
+          1776,
+          1796,
+          "Engine take_rows invokes do_take_rows with FilterExpression::no_filter() unconditionally. Unlike blocking take, caller filter is not accepted by this helper, so async Indices reads discard the filter passed to read_prepared_tasks. This is observed source behavior, not an executed discrepancy test."
+        ],
+        [
+          1797,
+          1818,
+          "Engine read_ranges forwards prepared infos/projection, requested ranges, caller filter and settings into async helper. No sorting/merging or validation beyond upstream bounds is added."
+        ],
+        [
+          1819,
+          1850,
+          "Async read_prepared_tasks uses the same bound closure as blocking: inclusive bound must be<read_len, exclusive <=read_len. Indices nulls are InvalidInput, then values are cast to owned u64 and sent to take_rows, losing caller filter through that helper. Empty input passes the explicit validation; debug-logging and decoder behavior determine later handling."
+        ],
+        [
+          1851,
+          1887,
+          "Async Range/Ranges validate only ends, RangeFrom requires start<read_len, RangeTo permits end==read_len, and RangeFull selects0..read_len. Start/end order, start bounds for closed ranges, overlap and sorting are not checked locally. Each range variant preserves caller filter and awaits its helper; no batch-size/readahead validation here."
+        ],
+        [
+          1888,
+          1941,
+          "ProjectedFileReader borrows base projection, delegates prepared async tasks, replaces scheduler via cloned engine, returns provider file-level row count/schema, optional full-only statistics, cfg(test) optional indexed metadata reference, and async global buffer delegation. Its schema accessor does not project to base fields. No public blocking or scoped-IO-stats method occurs in this impl."
+        ],
+        [
+          1942,
+          1975,
+          "FileReader cfg(test) scheduler clones engine IO. Public try_open awaits internal dispatcher and turns a Legacy result into VersionConflict with literal major/minor; Current yields reader. The FileScheduler is consumed."
+        ],
+        [
+          1976,
+          2013,
+          "try_open_for_dispatch always reads raw metadata, immediately returns legacy marker when applicable, otherwise calls exact versions::finish_metadata and wraps result in Arc. Captures scheduler path and wraps scheduler in LanceEncodingsIo with configured read_chunk_size, then calls with-file-metadata factory. It does not consult a full-metadata cache before reading; outer callers may do so."
+        ],
+        [
+          2014,
+          2050,
+          "FileReader::try_open_with_file_metadata rejects exactV1, obtains version-selected ReadProjection, builds whole-schema default projection or validates only an explicit projection, prefixes supplied cache by path string, then assembles Full engine with same metadata Arc. Injected EncodingsIo is not rewrapped/configured for read_chunk_size. No consistency check between path/IO/metadata, literal footer versus exact version, or supplied cache parent/store identity. Default empty projection is not validated at construction."
+        ],
+        [
+          2051,
+          2085,
+          "Public read_all_metadata dispatches raw current metadata through exact finish_metadata and rejects legacy. read_metadata_index and with_schema call raw index loaders then versions::finish_metadata_index; supplied schema/rows retain trust boundary. version returns stored metadata version. These functions do not insert the full/index result into a cache themselves."
+        ],
+        [
+          2086,
+          2110,
+          "FileReader::prepare delegates requested projection/provider/IO/cache to selected strategy. Public read_tasks uses optional projection or base default, awaits prepare to obtain normalized length, then dispatches read_prepared_tasks. Base projection is a default here, with no subset validation at this entrypoint."
+        ],
+        [
+          2111,
+          2140,
+          "read_stream_projected captures requested schema, obtains async tasks and wraps them with ordered buffering. Blocking counterpart uses optional/base projection, full validator, clones all infos, synchronously computes strategy.read_length and passes to blocking dispatcher. Uniform-length failures therefore surface before constructing blocking reader; async stream creation also awaits prepare but later task failures remain streamed."
+        ],
+        [
+          2141,
+          2157,
+          "FileReader::read_stream simply calls projected stream with cloned base projection and caller params/row batch/readahead/filter. No additional validation or decode work occurs in the wrapper."
+        ],
+        [
+          2158,
+          2185,
+          "ProjectedFileReader::try_open requires Some base projection before IO, reads metadata index, wraps scheduler with read_chunk_size, then calls indexed factory. This direct factory does not use prefers_indexed_metadata threshold or fall back to full metadata for unsupported shape/version."
+        ],
+        [
+          2186,
+          2220,
+          "Indexed factory first rejectsV1 with hardcoded legacy tags0,2, then requires explicit projection, selects version strategy and calls validate_indexed. Prefixes supplied cache by path and assembles Indexed engine. It does not load requested column protobufs yet, despite construction-time loading implications in type docs; loading happens in prepare. Injected scheduler is not chunk-configured here."
+        ],
+        [
+          2221,
+          2258,
+          "Projected full-metadata factory rejectsV1 with stored literal tags, selects strategy, defaults to whole schema when projectionNone, validates only explicit projection, prefixes cache by path and assembles Full engine. Unlike indexed factory it allows None; no selectivity or indexed-shape gate is applied."
+        ],
+        [
+          2259,
+          2285,
+          "Projected version delegates provider. read_tasks chooses optional requested projection or base default, passes only that projection/provider/IO/cache to strategy.prepare, then dispatches. No comparison to stored base_projection is performed here, and prepare is not given that base; this contradicts the type comment promising all later reads stay within base projection. Full enforcement through unrelated wrapper callers must not be inferred."
+        ],
+        [
+          2286,
+          2334,
+          "Public describe_encoding returns diagnostic text: indirect pos/size, direct decoded Any, explicit NoEncodingDescription, MISSING STYLE or MISSING. Invalid outer Any panics via expect; recognized /lance.encodings.ArrayEncoding and /lance.encodings21.PageLayout bodies pretty-Debug on success or Unsupported(decode_err=...) on failure; other type URLs return Unrecognized. Direct bytes clone; no IO, exact-version gate or generic guarantee that malformed metadata is safe to display."
+        ],
+        [
+          2335,
+          2374,
+          "Public EncodedBatchReaderExt declares mini-Lance(external core schema) and self-described constructors. Mini implementation decodes footer/current version, derives whole-schema projection, directly slices column-metadata/CMO region, normalizes through exact-version decoder, and retains entire input Bytes as data. num_rows is ordinary sum of first normalized column page.num_rows or0, not uniform-length/structural slot normalization. No GBO/schema validation or full file range guard before slice; malformed offsets can panic."
+        ],
+        [
+          2375,
+          2400,
+          "Self-described EncodedBatch constructor decodes footer/version, directly slices from GBO offset, decodes and validates descriptors, requires nonempty GBO, checked-ranges schema and decodes it. Discards FileDescriptor declared row count and derives projection from decoded schema. Out-of-range GBO start can panic before descriptor checks; missing optional schema can still unwrap-panic in decode_schema."
+        ],
+        [
+          2401,
+          2423,
+          "Self-described constructor directly slices metadata region, decodes all columns/version-specific infos and builds EncodedBatch retaining all input bytes, derived column indices and Arc schema. Row count again sums first physical normalized column page.num_rows or0, ignoring descriptor length and uniformity. No IO or data decoding occurs in either constructor."
+        ],
+        [
+          2424,
+          2440,
+          "cfg(test) private module begins; imports collections/Pin/Arc, Arrow dictionary/list/primitive arrays/readers, null/offset/scalar buffers, schema types and Bytes for local fixtures and assertions."
+        ],
+        [
+          2441,
+          2467,
+          "Remaining test imports provide async collection, blob metadata, batch projection/take extension, datagen, sparse-format constants, encoder/decoder utilities, cached file size, Tokio channel, fixture writer/cache and writer alignment. Inline imports later repeat some types; no source tests were run."
+        ],
+        [
+          2468,
+          2475,
+          "footer_version test helper reads two LEu16 values starting8 bytes before input end with unchecked subtraction/indexing. It does not verify40-byte footer, magic or accepted version; callers pass full payload or last8 bytes."
+        ],
+        [
+          2476,
+          2525,
+          "V2_3 sparse roundtrip fixture explicitly marks nullable Int32 and nullable List<Int32> roots sparse. Six primitive values[10,null,30,40,null,60]; list offsets[0,2,2,2,3,3,5], items[1,null,3,4,5], parent validity[true,false,true,true,true,true], exercising null parent, empty lists and null item. Writes one batch with default options."
+        ],
+        [
+          2526,
+          2602,
+          "Open sparse file, require exactly2 normalized columns and every existing page Structural SparseLayout (all could be vacuous for an empty page list, though subsequent full values constrain it). Full scan equals original one batch,1..5 equals slice(1,4), indices[0,3,5] equals Arrow take. All use no_filter,batch1024,readahead1; no blocking, indexed-metadata, filter or IO-count oracle."
+        ],
+        [
+          2603,
+          2657,
+          "V2_2 dictionary roundtrip builds all128 nonnegative Int8 keys0..127 and distinct strings value-N, nullable field but no actual nulls. Writes and reads one batch, asserting complete RecordBatch equality. It covers full positive Int8 dictionary capacity, not negative indices or all256 byte patterns."
+        ],
+        [
+          2658,
+          2677,
+          "create_some_file builds random Float64 score, nullable-child struct location{x,y:Float64}, List<Utf8> categories and Binary; adds LargeBinary only forV2_0. Generates100 batches of1000 rows and delegates fixture writer. Retains WrittenFile input data via helper; random generator defaults/encoding details are not inferred here."
+        ],
+        [
+          2678,
+          2693,
+          "create_wide_direct_file makes num_columns step-Int32 roots cN,100 batches*1000 rows, alwaysV2_1 default writer. Materialized input retention and test cost scale with width; no timing qualification."
+        ],
+        [
+          2694,
+          2714,
+          "create_wide_fixed_size_list_file makes cN fixed-size lists of4 nullable Float32 items, applies0.1 random null rate,4 batches*64 rows, V2_1. Item nullability and generator-produced parent nulls are distinct; no deterministic assertion of exact null count here."
+        ],
+        [
+          2715,
+          2745,
+          "create_wide_structural_file emits each group as nullable random struct{x,y:Int32} and List<Int32>, both with0.5 random nulls,4 batches*64 rows,V2_1. Transformer is boxed Fn(&RecordBatch)->RecordBatch for expected projection; no Send/Sync bound."
+        ],
+        [
+          2746,
+          2795,
+          "verify_expected sums original rows into u32, optionally transforms each expected batch, unwraps a first expected batch, then requires each actual batch length=min(remaining,read_size). Compares full RecordBatch slices across differing input/output batch boundaries, advancing/slicing both and decrementing remaining; finally asserts0. Assumes nonempty expected input and transforms preserve row counts; empty expected batches or totals exceeding u32 are not guarded. It enforces exact batching plus values/schema, not just total rows."
+        ],
+        [
+          2796,
+          2807,
+          "collect_read_tasks maps futures, ordered-buffers given readahead, eagerly collects complete Vec<RecordBatch> and unwraps errors. No byte/IO/timing assertion or readahead validation."
+        ],
+        [
+          2808,
+          2873,
+          "read_file_with_mutated_bytes writes a fresh resolved-version file, eagerly copies all bytes, finds every window matching nonempty pattern and requires exactlyone, patches at relative offset by unchecked slice then overwrites same object. Opens default reader with unwrap, so open failure panics instead of returning test Result; only read_stream creation/collection errors propagate. Reads RangeFull1024/readahead16/no_filter. Pattern matching/patch bounds and actual default validation setting are fixture assumptions."
+        ],
+        [
+          2874,
+          2936,
+          "Excess mini-block-count regression writes2048 UInt64 valuesV2_1, XORs file byte0 with0xf7, reopens successfully, then accepts either stream-creation or collection failure. Requires CorruptFile and message exceeding items_in_page. It does not pin failure timing or prove all malformed layouts are rejected."
+        ],
+        [
+          2937,
+          2992,
+          "Variable-width corruption matrixV2_1/V2_2/V2_3 writes Arrow dictionary Int32 keys repeating0..2 for300rows, values alpha/beta/gamma. Finds LEi32 suffix[5,9,14], patches tail at+8 to100000, requires CorruptFile containing out of bounds. Comments explain leading0 variation and default validate_on_decode disabled; oracle is actual error variant/message, not a dynamic flag assertion."
+        ],
+        [
+          2993,
+          3050,
+          "Storage-dictionary corruption matrixsame3versions uses plain Utf8 repeated300rows, metadata dict-size-ratio0.99 and dict-values-compression none. Patches offset9 at+4 in[5,9,14] to2, requires CorruptFile containing decreases. Comment attributes protection to DataBlockBuilder append boundary; this test only observes externally returned error, with no stage instrumentation."
+        ],
+        [
+          3051,
+          3100,
+          "Plain-string mini-block corruption matrixsame3versions uses3 strings alpha/beta/gamma. Finds chunk-relative LEi32 offsets[16,21,25,30] and patches+12 to100000. Requires CorruptFile/out of bounds. Unique byte-pattern helper fails loudly if encoding layout changes; no V2_0 case."
+        ],
+        [
+          3101,
+          3163,
+          "V2_0 full roundtrip uses100000-row mixed fixture, independently reads last8 footer bytes and asserts(0,3), determine_file_versionV2_0, then opens for read sizes32/1024/1048576. Asserts cached literal(0,3), foo=bar metadata, and exact content/batch sizing via verify_expected. No historical fixture or V2_1+ version matrix here."
+        ],
+        [
+          3164,
+          3195,
+          "EncodedBatch roundtrip matrix contains onlyV2_0; TODO saysV2_1 currently fails, not runtime evidence in this analysis. Uses10000rows Int32x and16-byte UTF8y, V2_0 strategy,4096cache/32MiBpage/keep_original=true/64alignment. Encodes once before two serialization modes."
+        ],
+        [
+          3196,
+          3233,
+          "Self-described and mini encodings both assert footer(2,0), reconstruct EncodedBatch, decode with no_filter/default plugins/false flag/Array layout/None, and require full equality to input. Mini passes external schema. Distinguishes embedded identity from ordinaryV2_0 file(0,3); no nested, corruption or mismatched external schema cases."
+        ],
+        [
+          3234,
+          3287,
+          "Projection matrixV2_0/V2_1/V2_2 uses mixed fixture, field-ID BTreeMap and empty projection. Literal requested column lists: score;location;categories;score.x;score+categories;score+location;location+categories;score.y+location+categories. For each runs field-ID and name projection construction; primitive score dotted suffix requests are literal test inputs, not corrected to location."
+        ],
+        [
+          3288,
+          3325,
+          "For each projection method, build projection using exact metadata version and either projected schema+ID mapping or whole schema+names; read projected full stream with batch1024/readahead16 and verify against Arrow project_by_schema transformed originals. Full output values and batching are asserted."
+        ],
+        [
+          3326,
+          3372,
+          "Reopen with same base projection, read via default read_stream and compare to transformed originals. Requesting empty projection must return some error from stream creation; no variant/message asserted. This tests base-as-default, not later projection subset enforcement."
+        ],
+        [
+          3373,
+          3408,
+          "Explicit empty base at open and duplicate physical indices[0,0] with two-field Int32 schema must error. Only is_err asserted; no out-of-range, shape/cardinality mismatch, type mismatch or base-widening case here."
+        ],
+        [
+          3409,
+          3472,
+          "V2_1 lazy direct projection c10 from16-column100000-row fixture compared against eager projected full scan; row batch127/readahead16. Complete Vec<RecordBatch> equality establishes same batching/schema/values as current eager baseline, not independent original-input correctness or lower IO."
+        ],
+        [
+          3473,
+          3515,
+          "Lazy metadata subset test writes512direct columns, selectsc0, opens indexed reader, sums selected/all CMO lengths and requires total metadata>8*object-store block_size. Open IO occurs before counter reset and is excluded from later measurements. Requested single-column length is diagnostic, not exact IO target."
+        ],
+        [
+          3516,
+          3561,
+          "After reset, Range0..0 triggers metadata preparation and yields no batches; requires bytes read<half total column metadata, not exactly selected bytes or one request. Repeating same empty range after another reset requires0read_iops/0bytes, proving warm metadata reuse for this fixture. Does not cover concurrent loading, eviction, failed partial loads or changed-file identity."
+        ],
+        [
+          3562,
+          3617,
+          "assert_lazy_projection_matches_eager_and_reads_metadata_subset opens an eager reader with full metadata, then reads the supplied column projection over RangeFull in127-row batches. It next opens a fresh-cache indexed reader for the same supplied projection. Computes all/selected CMO bytes and requires total>8*selected. Open cost is excluded from the subsequent measured zero-row read by resetting incremental IO statistics after both opens (rust/lance-file/src/reader.rs:3618-3649). Full metadata loading does not mean the baseline data read selects all file columns."
+        ],
+        [
+          3618,
+          3651,
+          "Shared lazy helper resets stats, collects empty Range0..0, asserts no batches and read_bytes<total/2, then full lazy scan and exact Vec equality to eager baseline. Returns actual output for caller null checks. It does not assert a second zero-IO metadata hit, exact request count, input equality or byte limit."
+        ],
+        [
+          3652,
+          3670,
+          "Fixed-size-list lazy test writes512V2_1 roots and projectsc17,c509. Requires selectivity helper true for512, then invokes shared metadata-subset and eager-equality oracle. It does not explicitly assert any nulls occurred."
+        ],
+        [
+          3671,
+          3702,
+          "V2_0 score projection prefers_indexed_metadata(100) must returntrue, yet ProjectedFileReader indexed open must fail NotSupported. This explicitly separates shape/selectivity from version capability; no message assertion."
+        ],
+        [
+          3703,
+          3747,
+          "Nested lazyV2_1 fixture128groups projects s97.y,l4,s3 in that order. Requires root names[ s97,l4,s3 ], selected children1/2,4physical indices and at leastone descending adjacent pair to exercise reorder. Selectivity is called with128*4 although fixture physical leaves are two perstruct plusone perlist; this is a supplied threshold input, not an assertion of true file column count. Shared helper checks IO/eager equality; final assertion requires at leastone projected top-level array with null_count>0."
+        ],
+        [
+          3748,
+          3775,
+          "CMO bounds unit matrix supplies(position90,length5) before100 and(190,20) beyond200 against one-entry16byte table, requires InvalidInput. No error-message, overflow, zero length, reversed footer, table-size mismatch or overlap cases here."
+        ],
+        [
+          3776,
+          3832,
+          "Opaque projection matrix sets either BLOB_META_KEY or lance-encoding:packed=true on root of ordinary location.x projection. Before mutation one child and selective shape true; opening withNone must InvalidInput. After mutation selectivity false and indexed open NotSupported. Synthetic projection metadata tests shape rejection, not a blob/packed file roundtrip; error messages unchecked."
+        ],
+        [
+          3833,
+          3889,
+          "Unequal indexedV2_1 fixture independently writes a=[1..5] andc=[100], then closure open_indexed builds requested name projection using shared scheduler/cache. Comment places length validation in DecodeEngine, while exact-version ReadProjection prepares/computes lengths; shared engine applies row bounds."
+        ],
+        [
+          3890,
+          3938,
+          "Opening indexed[a,c] succeeds; read_tasks RangeFull must fail before yielding its task stream and message containa=5,c=1 (variant not checked). Opening indexed[c] then full reading must produce exactly[Some100]. Proves compacted info alignment and projection-specific length; no common-prefix range, filter, base widening orV2_2/V2_3 test."
+        ],
+        [
+          3939,
+          3994,
+          "test_compressing_buffer writes defaultV2_0 first, then annotates only requested score projection with lance:compression=zstd and uses field IDs as column indices. Full stream verified against projected originals with1024batch. Because metadata is added after writing and no size/encoding check exists, this does not prove stored Zstd compression or compression savings."
+        ],
+        [
+          3995,
+          4031,
+          "test_read_all onV2_0 mixed fixture sets row batch equal total100000, collects all and requires exactlyone batch of total rows. No content/schema comparison in this test."
+        ],
+        [
+          4032,
+          4073,
+          "Page-read coalescing fixtureV2_1 writes10batches*10000step-Int32 rows with64KiB data cache. Comment calls40000raw bytes40KiB (approximation); metadata assertion requires>4pages, establishing multiple pages without exact flush/pagecount."
+        ],
+        [
+          4074,
+          4103,
+          "Local read_all closure full-scans100000rowbatch/readahead16. First full read warms page metadata, then counters reset; second scan must total100000rows and exactly1read_iop. Warm local fixture oracle excludes open/first-read costs, does not assert values, bytes read, cold IO or every backend."
+        ],
+        [
+          4104,
+          4139,
+          "Take-coalescing matrixV2_0/V2_1 writes16step-Int32 roots of256rows each. Comment assumes adjacent1KiB pages and4KiB local block behavior; actual layout is not directly asserted. Opens with full metadata/default settings."
+        ],
+        [
+          4140,
+          4172,
+          "take closure reads one index withbatch1/readahead1/no_filter. Warm take(3), reset IO, take(200) must useexactly1read_iop and first batch16columns each firstvalue200. Does not explicitly assert total batch/rowcount or cold-read IO; no filters tested."
+        ],
+        [
+          4173,
+          4224,
+          "Blocking take matrixV2_0/V2_1/V2_2 uses mixed fixture and base score projection; spawn_blocking consumes reader, collectsindices[0,1,2,3,4] with huge rowbatch. Asserts one batch,5rows,1column only; no value, filter or scheduler-thread count assertion."
+        ],
+        [
+          4225,
+          4264,
+          "Multi-thread TokioV2_0 drop test obtains full stream withbatchtotal/10, drops FileReader, successfully reads one nonempty batch, then drops active stream. Establishes retained stream usability and non-panicking synchronous drops in test; does not wait for background termination, count cancelled IO, or prove resources fully reclaimed."
+        ],
+        [
+          4265,
+          4318,
+          "drop_while_scheduling is aV2_0 white-box regression: builds DecodeBatchScheduler directly from whole projection, allinfos, empty auxiliary vector,totalrows,plugins,readerIO,testcache,no_filter/defaultconfig. Comment explains background scheduling cannot be gated through public stream."
+        ],
+        [
+          4319,
+          4334,
+          "White-box cancellation creates unboundedchannel, drops receiver before direct schedule_range(0..total,filter,tx,IO). Oracle is return without panic; no assert, await of background completion, thread join, leak or IO cancellation counter."
+        ],
+        [
+          4335,
+          4386,
+          "Empty-rangeV2_0 test requires Range0..0 yield0batches and Ranges[0..1,2..2] yield1batch. Does not assert that batch contents/rows or empty range-vector behavior, EOF RangeFrom, reversed ranges, indices emptiness/nulls."
+        ],
+        [
+          4387,
+          4408,
+          "write_file_with_global_buffer builds explicitV2_1 schema foo nullableInt32, adds user bytes before any data, requires returned index1 and finishes. File has no row writes; buffer0 is reserved schema."
+        ],
+        [
+          4409,
+          4450,
+          "Test-only Copy/Clone/Debug enums select Full/Indexed metadata path and Unaligned/PastEof/Overflowing corruption. Six rstest cases cross both paths with expected message substrings not aligned/outside file/overflows."
+        ],
+        [
+          4451,
+          4475,
+          "Invalid-GBO test writes hello global, reads all bytes and decodes footer, then corrupts the FIRST GBO descriptor (schema index0), not user buffer1. Unaligned=(1,0), pastEOF=nextalignmentboundary withsize0, overflow=largest alignedu64 plusone alignment. Overwrites file; arithmetic here is test fixture construction."
+        ],
+        [
+          4476,
+          4498,
+          "Each full/indexed metadata read must fail InvalidInput with case message. expect_err text says before metadata IO, but test has no IOcounter/timing assertion and both paths necessarily read tail/GBO first. It proves structured descriptor error before successful metadata return, not zero metadata requests."
+        ],
+        [
+          4499,
+          4549,
+          "Global-read matrixV2_1 uses hello fitting originaltail or2*block_size bytes7 outsidewindow. Opens full reader, requires index0not retained and index1retention exactlymatchescase, resets counters, reads1 and requires full byte equality plus0or1read_iops. No byte-count, repeated fallback caching, indexed-reader or schema-buffer-read oracle."
+        ],
+        [
+          4550,
+          4579,
+          "OrdinaryV2_1 mixed file without user globals must expose exactlyone descriptor and empty retained map. It does not call read_global_buffer(0) or test public API rejects schema; implementation allows it."
+        ],
+        [
+          4580,
+          4628,
+          "Deep-size regression matrixall4V2versions opens mixed fixture and requires metadata.deep_size_of()>1024. Comments motivate eviction/memory growth, but no cache population/eviction or allocation profiler is exercised. Bound only detects suspiciously small estimates."
+        ],
+        [
+          4629,
+          4643,
+          "Also require nonempty protobuf columns and deep_size>num_columns*50. This is one fixture perversion, not a comparison of increasing widths and not proof of accurate scaling or4x multiplier."
+        ],
+        [
+          4644,
+          4675,
+          "V2_1 hello-global fixture read index2 with exactly2descriptors must fail InvalidInput and rendered message contain character2. No stronger fullmessage/index-versuscount distinction or huge index test."
+        ],
+        [
+          4676,
+          4716,
+          "Synthetic struct-length matrix choosesV2_0orV2_1 helper. Two nullableInt32 children: structuralindices[0,1] lengths[5,5]/[5,3],V2_0indices[0,1,2] lengths[5,5,5]/[5,5,3]. Equalreturns5;unequalmessagecontainsdiffering lengths andb. Direct projection-length walk, no file decode or errorvariant assertion. Local run closure constructs schema; struct_ty closure builds childtype."
+        ],
+        [
+          4717,
+          4738,
+          "V2_0 unloadedblob unit marksLargeBinary BLOB=true, callsunloaded_mut, projectionphysicalindex0 and syntheticlength3. Versionhelper mustreturn3, treating blob asopaque rather than descending unloaded representation. No blob IO/value decoding."
+        ],
+        [
+          4739,
+          4765,
+          "Local validate closure selectsV2_0/V2_1 synthetichelper. List<Int32> requiresV2_0[listrows5,itemcount17] return5 andstructural[5]return5, proving child-cardinality boundary notequal-row enforcement."
+        ],
+        [
+          4766,
+          4795,
+          "List<Struct<a,b>> requiresV2_0indices[0,1,2,3] lengths[6,6,29,29] return6 without comparing children to rootrows. Structuraltwoleaflengths[29,29]return29; this syntheticcase does not reconstructactual rootlistrowcount6 from encoded data. Comments/fixture semantics should not be generalized beyond these input lengths."
+        ],
+        [
+          4796,
+          4804,
+          "EmptyStruct usesonecolumn andlength9 forbothV2_0 andV2_1, bothreturn9. Closes unitfunction andprivatecfgtestmodule. No unsafe blocks occur in this file; fallible-library unwrap/expect and unchecked slice/arithmetic concerns are documented above."
+        ]
+      ]
+    }
+  ],
+  "changes": [
+    {
+      "path": "rust/lance-file/src/reader.rs",
+      "start": 3562,
+      "end": 3617,
+      "claim_id": 15,
+      "kind": "projection versus metadata scope clarification",
+      "before": "assert_lazy_projection_matches_eager_and_reads_metadata_subset opens eager baseline full projection with127-row batches, then fresh-cache indexed reader. Computes all/selected CMO bytes and requires total>8*selected. Open cost is not part of the subsequent measured zero-row read.",
+      "after": "assert_lazy_projection_matches_eager_and_reads_metadata_subset opens an eager reader with full metadata, then reads the supplied column projection over RangeFull in127-row batches. It next opens a fresh-cache indexed reader for the same supplied projection. Computes all/selected CMO bytes and requires total>8*selected. Open cost is excluded from the subsequent measured zero-row read by resetting incremental IO statistics after both opens (rust/lance-file/src/reader.rs:3618-3649). Full metadata loading does not mean the baseline data read selects all file columns.",
+      "reason": "The eager open loads full metadata, but read_stream_projected explicitly receives the supplied projection; the old wording conflated these scopes."
+    }
+  ],
+  "derived_symbol_descriptions_synchronized": 1
+}

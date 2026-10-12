@@ -1,0 +1,162 @@
+[
+  {
+    "id": 1,
+    "path": "protos/fragment_metadata.proto",
+    "start": 54,
+    "end": 73,
+    "read_at": "2026-10-03T20:11:17.350Z",
+    "evidence": "54 |   oneof last_updated_at_version_sequence {\n55 |     // Current Lance writers store last-updated versions inline regardless of encoded size.\n56 |     bytes inline_last_updated_at_versions = 7;\n57 |     /* The versions are a hidden column of one of this fragment's `files`: the\n58 |      * entry whose `fields` carries the reserved id -5. Gated like\n59 |      * `column_row_ids`.\n60 |      */\n61 |     RowLineageColumn column_last_updated_at_versions = 13;\n62 |   } // last_updated_at_version_sequence\n63 | \n64 |   oneof created_at_version_sequence {\n65 |     // Current Lance writers store created-at versions inline regardless of encoded size.\n66 |     bytes inline_created_at_versions = 9;\n67 |     /* The versions are a hidden column of one of this fragment's `files`: the\n68 |      * entry whose `fields` carries the reserved id -4. Gated like\n69 |      * `column_row_ids`.\n70 |      */\n71 |     RowLineageColumn column_created_at_versions = 14;\n72 |   } // created_at_version_sequence\n73 | "
+  },
+  {
+    "id": 2,
+    "path": "rust/lance-file/src/versions/v2_1/reader.rs",
+    "start": 225,
+    "end": 242,
+    "read_at": "2026-10-03T20:11:17.351Z",
+    "evidence": "225 |     Ok(CachedFileMetadata {\n226 |         file_schema: raw.file_schema,\n227 |         column_metadatas: raw.column_metadatas,\n228 |         column_infos,\n229 |         num_rows: raw.num_rows,\n230 |         file_buffers: raw.file_buffers,\n231 |         num_data_bytes: raw.num_data_bytes,\n232 |         num_column_metadata_bytes: raw.num_column_metadata_bytes,\n233 |         num_global_buffer_bytes: raw.num_global_buffer_bytes,\n234 |         num_footer_bytes: raw.num_footer_bytes,\n235 |         major_version: raw.footer.major_version,\n236 |         minor_version: raw.footer.minor_version,\n237 |         version: ConcreteFileVersion::V2_1,\n238 |         file_size_bytes: raw.file_size_bytes,\n239 |         retained_global_buffers: raw.retained_global_buffers,\n240 |     })\n241 | }\n242 | "
+  },
+  {
+    "id": 3,
+    "path": "rust/lance-table/src/transaction/operation.rs",
+    "start": 221,
+    "end": 248,
+    "read_at": "2026-10-03T20:11:17.351Z",
+    "evidence": "221 |     /// Update SSTable compaction progress in the MemWAL index.\n222 |     ///\n223 |     /// This is used during merge-insert to atomically record which\n224 |     /// SSTables have been compacted into the base table.\n225 |     UpdateMemWalState {\n226 |         compacted_sstables: Vec<CompactedSsTable>,\n227 |     },\n228 | \n229 |     /// Clone a dataset.\n230 |     ///\n231 |     /// Only a shallow clone can be committed through `CommitBuilder`. A deep\n232 |     /// clone (`is_shallow = false`) must copy the source files first, so\n233 |     /// committing one returns an invalid input error; use\n234 |     /// `Dataset::deep_clone` instead.\n235 |     Clone {\n236 |         is_shallow: bool,\n237 |         ref_name: Option<String>,\n238 |         ref_version: u64,\n239 |         ref_path: String,\n240 |         branch_name: Option<String>,\n241 |     },\n242 | \n243 |     // Update base paths in the dataset (currently only supports adding new bases).\n244 |     UpdateBases {\n245 |         /// The new base paths to add to the manifest.\n246 |         new_bases: Vec<BasePath>,\n247 |     },\n248 | }"
+  },
+  {
+    "id": 4,
+    "path": "rust/lance-table/src/system_index/frag_reuse.rs",
+    "start": 634,
+    "end": 669,
+    "read_at": "2026-10-03T20:11:17.351Z",
+    "evidence": "634 |         let fri = CompactFragReuseIndex::try_new(Uuid::new_v4(), details).unwrap();\n635 | \n636 |         // Surviving rows follow both versions in oldest-to-newest order.\n637 |         assert_eq!(fri.remap_row_id(addr(1, 0)), Some(addr(20, 0)));\n638 |         assert_eq!(fri.remap_row_id(addr(1, 3)), Some(addr(20, 1)));\n639 |         // Deletes can happen in either the first or a later version.\n640 |         assert_eq!(fri.remap_row_id(addr(1, 1)), None);\n641 |         assert_eq!(fri.remap_row_id(addr(1, 2)), None);\n642 |         assert_eq!(fri.remap_row_id(addr(3, 0)), None);\n643 |         // Uncovered fragments and out-of-range offsets retain the existing\n644 |         // missing-map pass-through semantics.\n645 |         assert_eq!(fri.remap_row_id(addr(2, 0)), Some(addr(2, 0)));\n646 |         assert_eq!(fri.remap_row_id(addr(1, 4)), Some(addr(1, 4)));\n647 | \n648 |         let mut batch = vec![\n649 |             Some(addr(1, 0)),\n650 |             Some(addr(1, 1)),\n651 |             Some(addr(1, 2)),\n652 |             Some(addr(1, 3)),\n653 |             Some(addr(2, 0)),\n654 |             None,\n655 |         ];\n656 |         fri.remap_row_ids_in_place(&mut batch);\n657 |         assert_eq!(\n658 |             batch,\n659 |             vec![\n660 |                 Some(addr(20, 0)),\n661 |                 None,\n662 |                 None,\n663 |                 Some(addr(20, 1)),\n664 |                 Some(addr(2, 0)),\n665 |                 None,\n666 |             ]\n667 |         );\n668 |     }\n669 | "
+  },
+  {
+    "id": 5,
+    "path": "rust/lance-core/src/datatypes/schema.rs",
+    "start": 417,
+    "end": 468,
+    "read_at": "2026-10-03T20:11:17.351Z",
+    "evidence": "417 |     /// Get all field paths in the schema as a list of strings.\n418 |     ///\n419 |     /// This returns all field paths in the schema, including nested fields.\n420 |     /// For example, if there's a struct field \"user\" with a field \"name\",\n421 |     /// this will return \"user.name\" as one of the paths.\n422 |     pub fn field_paths(&self) -> Vec<String> {\n423 |         let mut paths = Vec::new();\n424 |         for field in self.fields_pre_order() {\n425 |             let ancestry = self.field_ancestry_by_id(field.id);\n426 |             if let Some(ancestry) = ancestry {\n427 |                 let path = ancestry\n428 |                     .iter()\n429 |                     .map(|f| f.name.as_str())\n430 |                     .collect::<Vec<_>>()\n431 |                     .join(\".\");\n432 |                 paths.push(path);\n433 |             }\n434 |         }\n435 |         paths\n436 |     }\n437 | \n438 |     /// Returns a new schema that only contains the fields in `column_ids`.\n439 |     ///\n440 |     /// This projection can filter out both top-level and nested fields\n441 |     ///\n442 |     /// If `include_all_children` is true, then if a parent field id is passed,\n443 |     /// then all children of that field will be included in the projection\n444 |     /// regardless of whether their ids were passed. If this is false, then\n445 |     /// only the child fields with the passed ids will be included.\n446 |     pub fn project_by_ids(&self, column_ids: &[i32], include_all_children: bool) -> Self {\n447 |         let filtered_fields = self\n448 |             .fields\n449 |             .iter()\n450 |             .filter_map(|f| f.project_by_ids(column_ids, include_all_children))\n451 |             .collect();\n452 |         Self {\n453 |             fields: filtered_fields,\n454 |             metadata: self.metadata.clone(),\n455 |         }\n456 |     }\n457 | \n458 |     fn apply_projection(&self, projection: &Projection) -> Self {\n459 |         let filtered_fields = self\n460 |             .fields\n461 |             .iter()\n462 |             .filter_map(|f| f.apply_projection(projection))\n463 |             .collect();\n464 |         Self {\n465 |             fields: filtered_fields,\n466 |             metadata: self.metadata.clone(),\n467 |         }\n468 |     }"
+  },
+  {
+    "id": 6,
+    "path": "rust/lance-file/src/writer.rs",
+    "start": 117,
+    "end": 140,
+    "read_at": "2026-10-03T20:11:27.465Z",
+    "evidence": "117 | impl From<versions::v2_0::Writer> for FileWriter {\n118 |     fn from(writer: versions::v2_0::Writer) -> Self {\n119 |         Self::V2_0(Box::new(writer))\n120 |     }\n121 | }\n122 | \n123 | impl From<versions::v2_1::Writer> for FileWriter {\n124 |     fn from(writer: versions::v2_1::Writer) -> Self {\n125 |         Self::V2_1(Box::new(writer))\n126 |     }\n127 | }\n128 | \n129 | impl From<versions::v2_2::Writer> for FileWriter {\n130 |     fn from(writer: versions::v2_2::Writer) -> Self {\n131 |         Self::V2_2(Box::new(writer))\n132 |     }\n133 | }\n134 | \n135 | impl From<versions::v2_3::Writer> for FileWriter {\n136 |     fn from(writer: versions::v2_3::Writer) -> Self {\n137 |         Self::V2_3(Box::new(writer))\n138 |     }\n139 | }\n140 | "
+  },
+  {
+    "id": 7,
+    "path": "rust/lance-table/src/rowids/segment.rs",
+    "start": 1243,
+    "end": 1280,
+    "read_at": "2026-10-03T20:11:27.466Z",
+    "evidence": "1243 |     #[test]\n1244 |     fn test_u128_byte_cost_to_usize() {\n1245 |         assert_eq!(super::u128_byte_cost_to_usize(0), 0);\n1246 |         assert_eq!(super::u128_byte_cost_to_usize(42), 42);\n1247 |         assert_eq!(\n1248 |             super::u128_byte_cost_to_usize(usize::MAX as u128),\n1249 |             usize::MAX\n1250 |         );\n1251 |         assert_eq!(super::u128_byte_cost_to_usize(u128::MAX), usize::MAX);\n1252 |     }\n1253 | \n1254 |     #[test]\n1255 |     fn test_sorted_sequence_sizes_sparse_span_saturates_range_with_holes_cost() {\n1256 |         let stats = super::SegmentStats {\n1257 |             min: 0,\n1258 |             max: i64::MAX as u64,\n1259 |             count: 5,\n1260 |             sorted: true,\n1261 |         };\n1262 |         let sizes = U64Segment::sorted_sequence_sizes(&stats);\n1263 |         assert_eq!(sizes[0], usize::MAX);\n1264 |         assert!(sizes[2] < sizes[0]);\n1265 |     }\n1266 | \n1267 |     #[test]\n1268 |     fn test_sorted_sequence_sizes_sorted_array_cost_saturates() {\n1269 |         // Nearly full [0, u64::MAX] with one hole: count = u64::MAX, n_holes = 1.\n1270 |         // SortedArray cost 24 + 2 * u64::MAX does not fit in usize on 64-bit.\n1271 |         let stats = super::SegmentStats {\n1272 |             min: 0,\n1273 |             max: u64::MAX,\n1274 |             count: u64::MAX,\n1275 |             sorted: true,\n1276 |         };\n1277 |         let sizes = U64Segment::sorted_sequence_sizes(&stats);\n1278 |         assert_eq!(sizes[2], usize::MAX);\n1279 |     }\n1280 | "
+  },
+  {
+    "id": 8,
+    "path": "rust/lance-core/src/cache/mod.rs",
+    "start": 1193,
+    "end": 1203,
+    "read_at": "2026-10-03T20:11:27.466Z",
+    "evidence": "1193 |     #[tokio::test]\n1194 |     async fn moka_weight_includes_the_fixed_physical_key() {\n1195 |         let value = Arc::new(vec![0_u32; 3]);\n1196 |         let expected = cache_entry_size(value.as_ref())\n1197 |             .checked_add(std::mem::size_of::<InternalCacheKey>())\n1198 |             .unwrap();\n1199 |         let cache = LanceCache::with_capacity(expected * 2);\n1200 |         cache.insert_with_key(&TestKey::new(1), value).await;\n1201 |         assert_eq!(cache.size_bytes().await, expected);\n1202 |     }\n1203 | "
+  },
+  {
+    "id": 9,
+    "path": "rust/lance-core/src/utils/bloomfilter/sbbf.rs",
+    "start": 193,
+    "end": 213,
+    "read_at": "2026-10-03T20:11:27.467Z",
+    "evidence": "193 |     // 750 iterations are sufficient to cause the sum to converge in all of the tests. In\n194 |     // other words, setting the iterations higher than 750 will give the same result as\n195 |     // leaving it at 750.\n196 |     const ITERS: i32 = 750;\n197 |     // We start with the highest value of i, since the values we're adding to result are\n198 |     // mostly smaller at high i, and this increases accuracy to sum from the smallest\n199 |     // values up.\n200 |     for i in (0..ITERS).rev() {\n201 |         // The PMF of the Poisson distribution is lam^i * exp(-lam) / i!. In logspace, using\n202 |         // lgamma for the log of the factorial function:\n203 |         let logp = i as f64 * loglam - lam - lgamma((i + 1).into());\n204 |         // The f_inner part of the equation in the paper is the probability of a single\n205 |         // collision in the bucket. Since there are kBucketWords non-overlapping lanes in each\n206 |         // bucket, the log of this probability is:\n207 |         let logfinner = BUCKET_WORDS * (1.0 - (1.0 - 1.0 / WORD_BITS).powi(i)).ln();\n208 |         // Here we are forced out of log-space calculations\n209 |         result += (logp + logfinner).exp();\n210 |     }\n211 |     result.min(1.0)\n212 | }\n213 | "
+  },
+  {
+    "id": 10,
+    "path": "rust/lance-table/src/system_index/frag_reuse.rs",
+    "start": 125,
+    "end": 154,
+    "read_at": "2026-10-03T20:11:27.467Z",
+    "evidence": "125 | #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, DeepSizeOf)]\n126 | pub struct FragReuseVersion {\n127 |     pub dataset_version: u64,\n128 |     pub groups: Vec<FragReuseGroup>,\n129 | }\n130 | \n131 | impl From<&FragReuseVersion> for pb::fragment_reuse_index_details::Version {\n132 |     fn from(version: &FragReuseVersion) -> Self {\n133 |         Self {\n134 |             dataset_version: version.dataset_version,\n135 |             groups: version.groups.iter().map(|g| g.into()).collect(),\n136 |         }\n137 |     }\n138 | }\n139 | \n140 | impl TryFrom<pb::fragment_reuse_index_details::Version> for FragReuseVersion {\n141 |     type Error = Error;\n142 | \n143 |     fn try_from(version: pb::fragment_reuse_index_details::Version) -> Result<Self> {\n144 |         Ok(Self {\n145 |             dataset_version: version.dataset_version,\n146 |             groups: version\n147 |                 .groups\n148 |                 .into_iter()\n149 |                 .map(FragReuseGroup::try_from)\n150 |                 .collect::<Result<_>>()?,\n151 |         })\n152 |     }\n153 | }\n154 | "
+  },
+  {
+    "id": 11,
+    "path": "rust/lance-core/src/utils/row_addr_remap.rs",
+    "start": 1041,
+    "end": 1061,
+    "read_at": "2026-10-03T20:11:34.082Z",
+    "evidence": "1041 |     #[test]\n1042 |     fn test_direct_partial_map_is_not_fully_deleted() {\n1043 |         let remap = RowAddrRemap::direct(HashMap::from([(addr(5, 1), None)]));\n1044 | \n1045 |         assert_eq!(remap.get(addr(5, 0)), None);\n1046 |         assert_eq!(remap.fully_deleted_fragments(), None);\n1047 |     }\n1048 | \n1049 |     #[test]\n1050 |     fn test_chained_partial_direct_maps_are_not_fully_deleted() {\n1051 |         let remap = RowAddrRemap::chained([\n1052 |             RowAddrRemap::direct(HashMap::from([(addr(5, 1), None)])),\n1053 |             RowAddrRemap::direct(HashMap::from([(addr(6, 1), None)])),\n1054 |         ]);\n1055 | \n1056 |         assert!(matches!(remap, RowAddrRemap::Compact(_)));\n1057 |         assert_eq!(remap.get(addr(5, 0)), None);\n1058 |         assert_eq!(remap.get(addr(6, 0)), None);\n1059 |         assert_eq!(remap.fully_deleted_fragments(), None);\n1060 |     }\n1061 | "
+  },
+  {
+    "id": 12,
+    "path": "rust/lance-file/src/datatypes.rs",
+    "start": 247,
+    "end": 272,
+    "read_at": "2026-10-03T20:11:34.083Z",
+    "evidence": "247 | pub struct FieldsWithMeta {\n248 |     pub fields: Fields,\n249 |     pub metadata: HashMap<String, Vec<u8>>,\n250 | }\n251 | \n252 | /// Reconstruct a schema from flat protobuf fields and schema metadata.\n253 | ///\n254 | /// # Examples\n255 | ///\n256 | /// ```\n257 | /// use std::collections::HashMap;\n258 | ///\n259 | /// use lance_core::datatypes::Schema;\n260 | /// use lance_file::datatypes::{Fields, FieldsWithMeta};\n261 | ///\n262 | /// let fields = FieldsWithMeta {\n263 | ///     fields: Fields(Vec::new()),\n264 | ///     metadata: HashMap::from([(\"owner\".to_owned(), b\"lance\".to_vec())]),\n265 | /// };\n266 | /// let schema = Schema::try_from(fields)?;\n267 | /// assert_eq!(schema.metadata[\"owner\"], \"lance\");\n268 | /// # Ok::<(), lance_core::Error>(())\n269 | /// ```\n270 | impl TryFrom<FieldsWithMeta> for Schema {\n271 |     type Error = Error;\n272 | "
+  },
+  {
+    "id": 13,
+    "path": "rust/lance-core/src/deepsize.rs",
+    "start": 200,
+    "end": 212,
+    "read_at": "2026-10-03T20:11:34.083Z",
+    "evidence": "200 | \n201 | impl<K: DeepSizeOf, V: DeepSizeOf, S> DeepSizeOf for HashMap<K, V, S> {\n202 |     fn deep_size_of_children(&self, context: &mut Context) -> usize {\n203 |         // Each bucket holds a key-value pair plus hash metadata (~1 byte control per bucket).\n204 |         // Robin hood / Swiss table capacity is always a power of 2.\n205 |         let capacity_bytes = self.capacity() * (size_of::<K>() + size_of::<V>() + 1);\n206 |         let children: usize = self\n207 |             .iter()\n208 |             .map(|(k, v)| k.deep_size_of_children(context) + v.deep_size_of_children(context))\n209 |             .sum();\n210 |         capacity_bytes + children\n211 |     }\n212 | }"
+  },
+  {
+    "id": 14,
+    "path": "rust/lance-table/src/transaction/manifest_build.rs",
+    "start": 4540,
+    "end": 4579,
+    "read_at": "2026-10-03T20:11:34.084Z",
+    "evidence": "4540 |     #[test]\n4541 |     fn test_data_replacement_preserves_overlay_newer_than_snapshot() {\n4542 |         // An overlay committed after this transaction read its snapshot holds\n4543 |         // the newer value; the conflict resolver rebases the two precisely\n4544 |         // because the overlay wins. Tombstoning it would discard a committed\n4545 |         // write, so only overlays the transaction could have seen are superseded.\n4546 |         let mut fragment = Fragment::new(0);\n4547 |         // One wider file, so the replacement takes the tombstone-and-append path.\n4548 |         fragment.files = vec![DataFile::new(\n4549 |             \"wide.lance\",\n4550 |             vec![4, 5],\n4551 |             vec![0, 1],\n4552 |             ConcreteFileVersion::V2_0,\n4553 |             None,\n4554 |             None,\n4555 |         )];\n4556 |         fragment.overlays = vec![DataOverlayFile {\n4557 |             data_file: DataFile::new(\n4558 |                 \"newer.lance\",\n4559 |                 vec![5],\n4560 |                 vec![0],\n4561 |                 ConcreteFileVersion::V2_0,\n4562 |                 None,\n4563 |                 None,\n4564 |             ),\n4565 |             coverage: OverlayCoverage::dense(roaring::RoaringBitmap::from_iter([0u32])),\n4566 |             committed_version: 7,\n4567 |         }];\n4568 | \n4569 |         // Staged against version 6, i.e. before the overlay landed.\n4570 |         let fragment = replace_field_5(fragment, 7, 6).unwrap();\n4571 |         assert!(fragment.files.iter().any(|f| f.path == \"v-new.lance\"));\n4572 |         assert_eq!(\n4573 |             fragment.overlays.len(),\n4574 |             1,\n4575 |             \"overlay committed after the snapshot must survive\"\n4576 |         );\n4577 |         assert_eq!(fragment.overlays[0].data_file.fields.as_ref(), &[5]);\n4578 |     }\n4579 | "
+  },
+  {
+    "id": 15,
+    "path": "rust/lance-file/src/versions/v2_3/mod.rs",
+    "start": 70,
+    "end": 91,
+    "read_at": "2026-10-03T20:11:34.084Z",
+    "evidence": "70 | #[derive(Debug)]\n71 | struct FieldStrategy {\n72 |     primitive: PrimitiveFieldEncoding,\n73 | }\n74 | \n75 | impl FieldEncodingStrategy for FieldStrategy {\n76 |     fn create_field_encoder(\n77 |         &self,\n78 |         field: &Field,\n79 |         column_index: &mut ColumnIndexSequence,\n80 |         context: &FieldEncodingContext<'_>,\n81 |     ) -> Result<Box<dyn FieldEncoder>> {\n82 |         if let Some(encoder) =\n83 |             try_create_binary_blob(&self.primitive, field, column_index, context)?\n84 |         {\n85 |             return Ok(encoder);\n86 |         }\n87 |         if let Some(encoder) =\n88 |             try_create_structural_blob(&self.primitive, field, column_index, context)?\n89 |         {\n90 |             return Ok(encoder);\n91 |         }"
+  },
+  {
+    "id": 16,
+    "path": "rust/lance-table/src/system_index/frag_reuse.rs",
+    "start": 50,
+    "end": 87,
+    "read_at": "2026-10-03T20:11:42.665Z",
+    "evidence": "50 | impl From<&FragDigest> for pb::fragment_reuse_index_details::FragmentDigest {\n51 |     fn from(digest: &FragDigest) -> Self {\n52 |         Self {\n53 |             id: digest.id,\n54 |             physical_rows: digest.physical_rows as u64,\n55 |             num_deleted_rows: digest.num_deleted_rows as u64,\n56 |         }\n57 |     }\n58 | }\n59 | \n60 | impl From<&Fragment> for FragDigest {\n61 |     fn from(fragment: &Fragment) -> Self {\n62 |         Self {\n63 |             id: fragment.id,\n64 |             physical_rows: fragment\n65 |                 .physical_rows\n66 |                 .expect(\"Fragment doesn't have physical rows recorded\"),\n67 |             num_deleted_rows: fragment\n68 |                 .deletion_file\n69 |                 .as_ref()\n70 |                 .and_then(|d| d.num_deleted_rows)\n71 |                 .unwrap_or(0),\n72 |         }\n73 |     }\n74 | }\n75 | \n76 | impl TryFrom<pb::fragment_reuse_index_details::FragmentDigest> for FragDigest {\n77 |     type Error = Error;\n78 | \n79 |     fn try_from(digest: pb::fragment_reuse_index_details::FragmentDigest) -> Result<Self> {\n80 |         Ok(Self {\n81 |             id: digest.id,\n82 |             physical_rows: digest.physical_rows as usize,\n83 |             num_deleted_rows: digest.num_deleted_rows as usize,\n84 |         })\n85 |     }\n86 | }\n87 | "
+  },
+  {
+    "id": 17,
+    "path": "rust/lance-core/src/utils/tempfile.rs",
+    "start": 197,
+    "end": 213,
+    "read_at": "2026-10-03T20:11:42.665Z",
+    "evidence": "197 | \n198 | /// A temporary file\n199 | ///\n200 | /// This is a wrapper around [`tempfile::NamedTempFile`].  The file will normally be cleaned\n201 | /// up when the object is dropped.\n202 | ///\n203 | /// Note: this function may create an empty file when the object is created.  If you are checking\n204 | /// that the path does not exist, you should use [`TempStdPath`] instead.\n205 | pub struct TempFile {\n206 |     temppath: NamedTempFile,\n207 | }\n208 | \n209 | impl TempFile {\n210 |     fn new() -> Self {\n211 |         let temppath = tempfile::NamedTempFile::new().unwrap();\n212 |         Self { temppath }\n213 |     }"
+  },
+  {
+    "id": 18,
+    "path": "rust/lance-table/src/format/key_existence.rs",
+    "start": 311,
+    "end": 344,
+    "read_at": "2026-10-03T20:11:42.665Z",
+    "evidence": "311 | fn extract_key_value(array: &dyn Array, row_idx: usize) -> Option<KeyValue> {\n312 |     let v = match array.data_type() {\n313 |         DataType::Utf8 => {\n314 |             let arr = array.as_any().downcast_ref::<StringArray>()?;\n315 |             KeyValue::String(arr.value(row_idx).to_string())\n316 |         }\n317 |         DataType::LargeUtf8 => {\n318 |             let arr = array.as_any().downcast_ref::<LargeStringArray>()?;\n319 |             KeyValue::String(arr.value(row_idx).to_string())\n320 |         }\n321 |         DataType::UInt64 => {\n322 |             let arr = array.as_primitive::<arrow_array::types::UInt64Type>();\n323 |             KeyValue::UInt64(arr.value(row_idx))\n324 |         }\n325 |         DataType::Int64 => {\n326 |             let arr = array.as_primitive::<arrow_array::types::Int64Type>();\n327 |             KeyValue::Int64(arr.value(row_idx))\n328 |         }\n329 |         DataType::UInt32 => {\n330 |             let arr = array.as_primitive::<arrow_array::types::UInt32Type>();\n331 |             KeyValue::UInt64(arr.value(row_idx) as u64)\n332 |         }\n333 |         DataType::Int32 => {\n334 |             let arr = array.as_primitive::<arrow_array::types::Int32Type>();\n335 |             KeyValue::Int64(arr.value(row_idx) as i64)\n336 |         }\n337 |         DataType::Binary => {\n338 |             let arr = array.as_any().downcast_ref::<BinaryArray>()?;\n339 |             KeyValue::Binary(arr.value(row_idx).to_vec())\n340 |         }\n341 |         DataType::LargeBinary => {\n342 |             let arr = array.as_any().downcast_ref::<LargeBinaryArray>()?;\n343 |             KeyValue::Binary(arr.value(row_idx).to_vec())\n344 |         }"
+  },
+  {
+    "id": 19,
+    "path": "rust/lance-core/src/utils/address.rs",
+    "start": 41,
+    "end": 58,
+    "read_at": "2026-10-03T20:11:42.665Z",
+    "evidence": "41 |     /// Returns the address for the first row of a fragment.\n42 |     pub fn first_row(fragment_id: u32) -> Self {\n43 |         Self::new_from_parts(fragment_id, 0)\n44 |     }\n45 | \n46 |     /// Returns the range of u64 addresses for a given fragment.\n47 |     ///\n48 |     /// ```\n49 |     /// use lance_core::utils::address::RowAddress;\n50 |     ///\n51 |     /// let range = RowAddress::address_range(2);\n52 |     /// assert_eq!(range.start, 2 * RowAddress::FRAGMENT_SIZE);\n53 |     /// assert_eq!(range.end, 3 * RowAddress::FRAGMENT_SIZE);\n54 |     /// ```\n55 |     pub fn address_range(fragment_id: u32) -> Range<u64> {\n56 |         u64::from(Self::first_row(fragment_id))..u64::from(Self::first_row(fragment_id + 1))\n57 |     }\n58 | "
+  },
+  {
+    "id": 20,
+    "path": "rust/lance-core/src/deepsize.rs",
+    "start": 77,
+    "end": 88,
+    "read_at": "2026-10-03T20:11:42.665Z",
+    "evidence": "77 | \n78 | impl DeepSizeOf for str {\n79 |     fn deep_size_of_children(&self, _context: &mut Context) -> usize {\n80 |         0\n81 |     }\n82 | }\n83 | \n84 | impl DeepSizeOf for String {\n85 |     fn deep_size_of_children(&self, _context: &mut Context) -> usize {\n86 |         self.capacity()\n87 |     }\n88 | }"
+  }
+]

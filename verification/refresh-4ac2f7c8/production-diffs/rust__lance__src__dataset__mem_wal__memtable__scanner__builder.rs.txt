@@ -1,0 +1,604 @@
+@@ -7,7 +7,6 @@ use std::sync::Arc;
+    7  
+    8  use arrow_array::{Array, RecordBatch};
+    9  use arrow_schema::{DataType, Field, SchemaRef};
+   10 -use datafusion::common::ScalarValue;
+   10  use datafusion::physical_plan::limit::GlobalLimitExec;
+   11  use datafusion::physical_plan::{ExecutionPlan, SendableRecordBatchStream};
+   12  use datafusion::prelude::{Expr, SessionContext};
+
+@@ -15,7 +14,6 @@ use datafusion_physical_expr::PhysicalExprRef;
+   14  use futures::TryStreamExt;
+   15  use lance_core::datatypes::{Schema as LanceSchema, parse_field_path};
+   16  use lance_core::{Error, ROW_ID, Result};
+   18 -use lance_datafusion::expr::safe_coerce_scalar;
+   17  use lance_datafusion::planner::Planner;
+   18  use lance_index::scalar::FullTextSearchQuery;
+   19  use lance_index::scalar::inverted::query::{FtsQuery as IndexFtsQuery, Operator};
+
+@@ -23,11 +21,15 @@ use lance_index::scalar::inverted::{DOC_INDEX_FIELD, DocumentGranularity};
+   21  use lance_linalg::distance::DistanceType;
+   22  
+   23  use super::exec::{
+   26 -    BTreeIndexExec, FtsIndexExec, MemTableBruteForceVectorExec, MemTableDedupScanExec,
+   27 -    MemTableScanExec, SCORE_COLUMN, VectorIndexExec,
+   24 +    FtsIndexExec, MemTableBruteForceVectorExec, MemTableDedupScanExec, MemTableScanExec,
+   25 +    SCORE_COLUMN, ScalarMemIndexExec, VectorIndexExec,
+   26  };
+   29 -use crate::dataset::mem_wal::index::{FtsQueryExpr, MemTableVisibility};
+   27 +use crate::dataset::mem_wal::index::{FtsQueryExpr, IndexedFilter, MemTableVisibility};
+   28  use crate::dataset::mem_wal::scanner::{exec::validate_pk_types, parse_filter_expr};
+   29 +
+   30 +use crate::dataset::mem_wal::index::{
+   31 +    FtsMemQuery, MemQuery, SearchOptions, VectorMemQuery, plan_filter,
+   32 +};
+   33  use crate::dataset::mem_wal::write::{BatchStore, IndexStore};
+   34  
+   35  /// Vector search query parameters.
+
+@@ -57,6 +59,33 @@ pub struct VectorQuery {
+   59      pub distance_upper_bound: Option<f32>,
+   60  }
+   61  
+   62 +impl VectorQuery {
+   63 +    /// The question a vector index is asked, exactly as it will be searched.
+   64 +    pub(crate) fn mem_query(&self) -> Result<VectorMemQuery> {
+   65 +        use arrow_array::cast::AsArray;
+   66 +
+   67 +        let vector = match self.query_vector.as_fixed_size_list_opt() {
+   68 +            Some(vectors) => vectors.clone(),
+   69 +            None => {
+   70 +                let values = self.query_vector.clone();
+   71 +                let dim = values.len() as i32;
+   72 +                let item = Arc::new(Field::new("item", values.data_type().clone(), true));
+   73 +                arrow_array::FixedSizeListArray::try_new(item, dim, values, None).map_err(|e| {
+   74 +                    Error::invalid_input(format!(
+   75 +                        "the query vector does not form a vector of dimension {dim}: {e}"
+   76 +                    ))
+   77 +                })?
+   78 +            }
+   79 +        };
+   80 +        Ok(VectorMemQuery {
+   81 +            vector,
+   82 +            k: self.k,
+   83 +            ef: self.ef,
+   84 +            distance_type: self.distance_type,
+   85 +        })
+   86 +    }
+   87 +}
+   88 +
+   89  /// Full-text search query parameters.
+   90  ///
+   91  /// The query itself is an [`FtsQueryExpr`] — the same tree the in-memory
+
+@@ -90,6 +119,35 @@ pub struct FtsQuery {
+  119  pub const DEFAULT_WAND_FACTOR: f32 = 1.0;
+  120  
+  121  impl FtsQuery {
+  122 +    /// What each index this search reaches is asked: the whole tree for a
+  123 +    /// search over one column, each leaf for a tree spanning several. Search
+  124 +    /// options are left at their defaults; they must not decide the answer.
+  125 +    pub(crate) fn index_questions(&self) -> Vec<(&str, FtsMemQuery)> {
+  126 +        let ask = |expr: &FtsQueryExpr| FtsMemQuery {
+  127 +            expr: expr.clone(),
+  128 +            options: SearchOptions::new(),
+  129 +            granularity: self.document_granularity,
+  130 +        };
+  131 +        match self.columns().as_slice() {
+  132 +            [column] => vec![(column, ask(&self.expr))],
+  133 +            _ => self
+  134 +                .expr
+  135 +                .bound_leaves()
+  136 +                .into_iter()
+  137 +                .map(|(column, leaf)| (column, ask(leaf)))
+  138 +                .collect(),
+  139 +        }
+  140 +    }
+  141 +
+  142 +    /// Whether every index this search reaches is there and answers its part.
+  143 +    pub(crate) fn is_answered_by(&self, indexes: &IndexStore) -> bool {
+  144 +        let questions = self.index_questions();
+  145 +        !questions.is_empty()
+  146 +            && questions
+  147 +                .iter()
+  148 +                .all(|(column, question)| indexes.index_answering(column, question).is_some())
+  149 +    }
+  150 +
+  151      /// Wrap an already-built query tree, binding every unbound leaf to
+  152      /// `column`. Leaves that already name a column keep it.
+  153      pub fn new(column: impl Into<String>, expr: FtsQueryExpr) -> Self {
+
+@@ -252,7 +310,7 @@ fn resolve_memtable_document_granularity(
+  310      indexes: Option<&IndexStore>,
+  311  ) -> Result<DocumentGranularity> {
+  312      let available = indexes
+  255 -        .map(|indexes| indexes.fts_document_granularities_by_column(column))
+  313 +        .map(|indexes| indexes.fts_granularities_on(column))
+  314          .unwrap_or_default();
+  315      match requested {
+  316          Some(requested) if available.is_empty() || available.contains(&requested) => Ok(requested),
+
+@@ -269,7 +327,10 @@ fn resolve_memtable_document_granularity(
+  327      }
+  328  }
+  329  
+  272 -fn local_fts_query(query: FullTextSearchQuery, indexes: Option<&IndexStore>) -> Result<FtsQuery> {
+  330 +pub fn local_fts_query(
+  331 +    query: FullTextSearchQuery,
+  332 +    indexes: Option<&IndexStore>,
+  333 +) -> Result<FtsQuery> {
+  334      let wand_factor = query.wand_factor.unwrap_or(DEFAULT_WAND_FACTOR);
+  335      let limit = query
+  336          .limit
+
+@@ -450,35 +511,6 @@ fn to_local_expr(query: &IndexFtsQuery) -> Result<FtsQueryExpr> {
+  511      })
+  512  }
+  513  
+  453 -/// Scalar predicate for BTree index queries.
+  454 -#[derive(Debug, Clone)]
+  455 -pub enum ScalarPredicate {
+  456 -    /// Exact match: column = value.
+  457 -    Eq { column: String, value: ScalarValue },
+  458 -    /// Range query: column in [lower, upper).
+  459 -    Range {
+  460 -        column: String,
+  461 -        lower: Option<ScalarValue>,
+  462 -        upper: Option<ScalarValue>,
+  463 -    },
+  464 -    /// IN query: column in (values...).
+  465 -    In {
+  466 -        column: String,
+  467 -        values: Vec<ScalarValue>,
+  468 -    },
+  469 -}
+  470 -
+  471 -impl ScalarPredicate {
+  472 -    /// Get the column name for this predicate.
+  473 -    pub fn column(&self) -> &str {
+  474 -        match self {
+  475 -            Self::Eq { column, .. } => column,
+  476 -            Self::Range { column, .. } => column,
+  477 -            Self::In { column, .. } => column,
+  478 -        }
+  479 -    }
+  480 -}
+  481 -
+  514  /// Scanner builder for querying MemTable data.
+  515  ///
+  516  /// Provides a builder pattern similar to Lance's Scanner interface
+
+@@ -530,6 +562,9 @@ pub struct MemTableScanner {
+  562      /// each PK only, so an in-memtable update whose current version fails the
+  563      /// predicate is excluded rather than leaking a stale older match.
+  564      pk_columns: Option<Vec<String>>,
+  565 +    /// Whether [`Self::create_dedup_plan`] may answer a filter from the filter
+  566 +    /// indexes. Off reads every visible row.
+  567 +    memtable_filter_indexes: bool,
+  568  }
+  569  
+  570  impl MemTableScanner {
+
+@@ -570,9 +605,19 @@ impl MemTableScanner {
+  605              with_row_id: false,
+  606              with_row_address: false,
+  607              pk_columns: None,
+  608 +            memtable_filter_indexes: false,
+  609          }
+  610      }
+  611  
+  612 +    /// Let [`Self::create_dedup_plan`] answer a filter from the filter indexes,
+  613 +    /// keeping a match only when it is its key's newest visible version. Past
+  614 +    /// the match budget, or without a primary-key index, every visible row is
+  615 +    /// read.
+  616 +    pub fn with_memtable_filter_indexes(&mut self, enabled: bool) -> &mut Self {
+  617 +        self.memtable_filter_indexes = enabled;
+  618 +        self
+  619 +    }
+  620 +
+  621      /// Provide the primary-key columns. When set, a filtered vector/FTS search
+  622      /// evaluates the predicate against the newest version of each PK only,
+  623      /// preventing a stale older match from leaking past an in-memtable update
+
+@@ -1019,8 +1064,7 @@ impl MemTableScanner {
+ 1064      /// they select — a projected `meta.a` yields `meta: Struct<a>`.
+ 1065      ///
+ 1066      /// An unresolvable column is an error here, matching
+ 1022 -    /// [`Self::compute_projection_indices`]; both used to disagree, one
+ 1023 -    /// silently dropping what the other rejected.
+ 1067 +    /// [`Self::compute_projection_indices`].
+ 1068      fn projected_data_fields(&self) -> Result<Vec<Field>> {
+ 1069          let Some(ref projection) = self.projection else {
+ 1070              return Ok(self
+
+@@ -1053,12 +1097,18 @@ impl MemTableScanner {
+ 1097              return self.plan_fts_search(fts_query).await;
+ 1098          }
+ 1099  
+ 1056 -        // Check if we can use a BTree index for the filter
+ 1100 +        // Split the filter into index searches and whatever is left.
+ 1101          if self.use_index
+ 1058 -            && let Some(predicate) = self.extract_btree_predicate()
+ 1059 -            && self.has_btree_index(predicate.column())
+ 1102 +            && let Some(filter) = &self.filter
+ 1103          {
+ 1061 -            return self.plan_btree_query(&predicate).await;
+ 1104 +            // Plan from the optimized expression the full scan evaluates; one
+ 1105 +            // the optimizer rejects is reported by `plan_full_scan`.
+ 1106 +            let planner = Planner::new(self.schema.clone());
+ 1107 +            if let Ok(optimized) = planner.optimize_expr(filter.clone())
+ 1108 +                && let Some(indexed) = plan_filter(&optimized, self.indexes.filter_catalog())?
+ 1109 +            {
+ 1110 +                return self.plan_index_query(indexed).await;
+ 1111 +            }
+ 1112          }
+ 1113  
+ 1114          // Fall back to full scan
+
+@@ -1109,10 +1159,11 @@ impl MemTableScanner {
+ 1159  
+ 1160      /// Plan a newest-per-PK active-arm scan via `MemTableDedupScanExec` —
+ 1161      /// dedup runs before the predicate so a PK whose newest version fails the
+ 1112 -    /// filter cannot leak an older version that passes. Unlike
+ 1113 -    /// `plan_full_scan`, this never takes the BTree skip (dedup needs
+ 1114 -    /// every version) and never pushes a limit (the LSM caps results above
+ 1115 -    /// the cross-source merge).
+ 1162 +    /// filter cannot leak an older version that passes. With
+ 1163 +    /// [`Self::with_memtable_filter_indexes`] on, a filter the indexes answer
+ 1164 +    /// within the match budget is read from their matches instead, each kept
+ 1165 +    /// only if it is its key's newest visible version. It never pushes a limit (the LSM caps
+ 1166 +    /// results above the cross-source merge).
+ 1167      pub async fn create_dedup_plan(&self, pk_columns: &[String]) -> Result<Arc<dyn ExecutionPlan>> {
+ 1168          validate_pk_types(&self.schema, pk_columns)?;
+ 1169  
+
+@@ -1143,60 +1194,68 @@ impl MemTableScanner {
+ 1194              (None, None)
+ 1195          };
+ 1196  
+ 1146 -        Ok(Arc::new(MemTableDedupScanExec::new(
+ 1197 +        let dedup_scan: Arc<dyn ExecutionPlan> = Arc::new(MemTableDedupScanExec::new(
+ 1198              self.batch_store.clone(),
+ 1199              self.readable_count,
+ 1149 -            projection_indices,
+ 1200 +            projection_indices.clone(),
+ 1201              self.output_schema()?,
+ 1151 -            pk_indices,
+ 1202 +            pk_indices.clone(),
+ 1203              self.with_row_id,
+ 1204              self.with_row_address,
+ 1205 +            filter_predicate.clone(),
+ 1206 +            filter_expr.clone(),
+ 1207 +        ));
+ 1208 +
+ 1209 +        // The newest-version check needs the primary-key index.
+ 1210 +        let (true, Some(filter), true) = (
+ 1211 +            self.memtable_filter_indexes,
+ 1212 +            filter_expr.as_ref(),
+ 1213 +            self.indexes.has_pk_index(),
+ 1214 +        ) else {
+ 1215 +            return Ok(dedup_scan);
+ 1216 +        };
+ 1217 +        let Some(indexed) = plan_filter(filter, self.indexes.filter_catalog())? else {
+ 1218 +            return Ok(dedup_scan);
+ 1219 +        };
+ 1220 +        let index_exec = ScalarMemIndexExec::new(
+ 1221 +            self.batch_store.clone(),
+ 1222 +            self.indexes.clone(),
+ 1223 +            indexed.searches,
+ 1224              filter_predicate,
+ 1155 -            filter_expr,
+ 1156 -        )))
+ 1225 +            indexed.is_whole_filter,
+ 1226 +            self.readable_count,
+ 1227 +            projection_indices,
+ 1228 +            self.output_schema()?,
+ 1229 +            self.with_row_id,
+ 1230 +            self.with_row_address,
+ 1231 +        )
+ 1232 +        .with_newest_check(pk_indices, dedup_scan);
+ 1233 +        Ok(Arc::new(index_exec))
+ 1234      }
+ 1235  
+ 1159 -    /// Plan a BTree index query.
+ 1236 +    /// Plan a filter answered from the memtable's indexes.
+ 1237      ///
+ 1161 -    /// Uses the effective visibility (min of max_readable and max_indexed) to ensure
+ 1162 -    /// queries only see indexed data. Falls back to full scan if no index exists.
+ 1163 -    async fn plan_btree_query(
+ 1164 -        &self,
+ 1165 -        predicate: &ScalarPredicate,
+ 1166 -    ) -> Result<Arc<dyn ExecutionPlan>> {
+ 1167 -        if !self.has_btree_index(predicate.column()) {
+ 1168 -            return self.plan_full_scan().await;
+ 1169 -        }
+ 1170 -
+ 1171 -        let max_readable = self.readable_count;
+ 1238 +    /// When an index narrows or declines, or part of the filter has no index,
+ 1239 +    /// the rows read are checked against the whole filter.
+ 1240 +    async fn plan_index_query(&self, indexed: IndexedFilter) -> Result<Arc<dyn ExecutionPlan>> {
+ 1241          let projection_indices = self.compute_projection_indices()?;
+ 1173 -
+ 1174 -        let index_exec = BTreeIndexExec::new(
+ 1242 +        let index_exec = ScalarMemIndexExec::new(
+ 1243              self.batch_store.clone(),
+ 1244              self.indexes.clone(),
+ 1177 -            predicate.clone(),
+ 1178 -            max_readable,
+ 1245 +            indexed.searches,
+ 1246 +            self.filter_predicate()?,
+ 1247 +            indexed.is_whole_filter,
+ 1248 +            self.readable_count,
+ 1249              projection_indices,
+ 1250              self.output_schema()?,
+ 1251              self.with_row_id,
+ 1252              self.with_row_address,
+ 1183 -        )?;
+ 1253 +        );
+ 1254          self.apply_post_index_ops(Arc::new(index_exec)).await
+ 1255      }
+ 1256  
+ 1187 -    /// Plan a vector similarity search.
+ 1188 -    ///
+ 1189 -    /// Always emits a plan whose output schema includes `_distance`: dispatches
+ 1190 -    /// to [`VectorIndexExec`] when an HNSW exists for the column, otherwise to
+ 1191 -    /// [`MemTableBruteForceVectorExec`]. The brute-force arm exists because the
+ 1192 -    /// active memtable is the LSM's unindexed-rows path — when the HNSW config
+ 1193 -    /// hasn't reached this writer yet (cold-start, or rows written between an
+ 1194 -    /// index commit and the next memtable rotation), KNN must still produce
+ 1195 -    /// correct, distance-bearing results so the LSM-level merge stays sound.
+ 1257      /// Compile the optional logical `filter` into a physical predicate against
+ 1197 -    /// the memtable schema. Shared by the vector and FTS search arms; mirrors the
+ 1198 -    /// compilation in [`Self::plan_full_scan`] (`optimize_expr` before
+ 1199 -    /// `create_physical_expr` for literal type coercion).
+ 1258 +    /// the memtable schema, the way [`Self::plan_full_scan`] does.
+ 1259      fn filter_predicate(&self) -> Result<Option<PhysicalExprRef>> {
+ 1260          let Some(ref filter) = self.filter else {
+ 1261              return Ok(None);
+
+@@ -1206,6 +1265,15 @@ impl MemTableScanner {
+ 1265          Ok(Some(planner.create_physical_expr(&optimized)?))
+ 1266      }
+ 1267  
+ 1268 +    /// Plan a vector similarity search.
+ 1269 +    ///
+ 1270 +    /// Always emits a plan whose output schema includes `_distance`: dispatches
+ 1271 +    /// to [`VectorIndexExec`] when an index answers the search, otherwise to
+ 1272 +    /// [`MemTableBruteForceVectorExec`]. The brute-force arm exists because the
+ 1273 +    /// active memtable is the LSM's unindexed-rows path — when the HNSW config
+ 1274 +    /// hasn't reached this writer yet (cold-start, or rows written between an
+ 1275 +    /// index commit and the next memtable rotation), KNN must still produce
+ 1276 +    /// correct, distance-bearing results so the LSM-level merge stays sound.
+ 1277      async fn plan_vector_search(&self, query: &VectorQuery) -> Result<Arc<dyn ExecutionPlan>> {
+ 1278          let max_readable = self.readable_count;
+ 1279          let projection_indices = self.compute_projection_indices()?;
+
+@@ -1238,7 +1306,7 @@ impl MemTableScanner {
+ 1306              && filter_predicate.is_none()
+ 1307              && hnsw_safe_with_pk
+ 1308              && hnsw_safe_with_bounds
+ 1241 -            && self.has_vector_index(&query.column, query.distance_type)
+ 1309 +            && self.has_index_for(&query.column, &query.mem_query()?)
+ 1310          {
+ 1311              Arc::new(VectorIndexExec::new(
+ 1312                  self.batch_store.clone(),
+
+@@ -1271,13 +1339,8 @@ impl MemTableScanner {
+ 1339      /// Uses the effective visibility (min of max_readable and max_indexed) to ensure
+ 1340      /// queries only see indexed data.
+ 1341      async fn plan_fts_search(&self, query: &FtsQuery) -> Result<Arc<dyn ExecutionPlan>> {
+ 1274 -        // Every queried column needs an index: a cross-column predicate is one
+ 1275 -        // predicate, so a missing arm is a missing answer, not a smaller one.
+ 1276 -        if !query
+ 1277 -            .columns()
+ 1278 -            .into_iter()
+ 1279 -            .all(|column| self.has_fts_index(column, query.document_granularity))
+ 1280 -        {
+ 1342 +        // A column without an answering index leaves the search unanswered.
+ 1343 +        if !query.is_answered_by(&self.indexes) {
+ 1344              return self.empty_fts_plan(query.document_granularity);
+ 1345          }
+ 1346  
+
+@@ -1370,217 +1433,246 @@ impl MemTableScanner {
+ 1433          Ok(Some(indices))
+ 1434      }
+ 1435  
+ 1373 -    /// Collect `col = lit OR col IN (lit, ..) OR ..` over one column into its
+ 1374 -    /// values, or return false and leave the caller to fall back to a full scan.
+ 1375 -    fn collect_or_equalities(
+ 1376 -        &self,
+ 1377 -        expr: &Expr,
+ 1378 -        column: &mut Option<String>,
+ 1379 -        values: &mut Vec<ScalarValue>,
+ 1380 -    ) -> bool {
+ 1381 -        let mut same_column = |name: &str| match column {
+ 1382 -            Some(existing) => existing == name,
+ 1383 -            None => {
+ 1384 -                *column = Some(name.to_string());
+ 1385 -                true
+ 1386 -            }
+ 1387 -        };
+ 1388 -        // The exec answers `In` by concatenating a lookup per value, so a value
+ 1389 -        // listed twice would emit its rows twice. Two disjuncts can easily name
+ 1390 -        // the same value: the signed-zero rewrite turns both sides of
+ 1391 -        // `x = -0.0 OR x = 0.0` into the same two-element list.
+ 1392 -        fn push_once(values: &mut Vec<ScalarValue>, value: ScalarValue) {
+ 1393 -            if !values.contains(&value) {
+ 1394 -                values.push(value);
+ 1395 -            }
+ 1396 -        }
+ 1397 -        match expr {
+ 1398 -            Expr::BinaryExpr(binary) if binary.op == datafusion::logical_expr::Operator::Or => {
+ 1399 -                self.collect_or_equalities(&binary.left, column, values)
+ 1400 -                    && self.collect_or_equalities(&binary.right, column, values)
+ 1401 -            }
+ 1402 -            Expr::BinaryExpr(binary) if binary.op == datafusion::logical_expr::Operator::Eq => {
+ 1403 -                let (Expr::Column(col), Expr::Literal(lit, _)) =
+ 1404 -                    (binary.left.as_ref(), binary.right.as_ref())
+ 1405 -                else {
+ 1406 -                    return false;
+ 1407 -                };
+ 1408 -                let Some(value) = self.coerce_literal_to_column(&col.name, lit) else {
+ 1409 -                    return false;
+ 1410 -                };
+ 1411 -                if !same_column(&col.name) {
+ 1412 -                    return false;
+ 1413 -                }
+ 1414 -                push_once(values, value);
+ 1415 -                true
+ 1416 -            }
+ 1417 -            Expr::InList(in_list) if !in_list.negated => {
+ 1418 -                let Expr::Column(col) = in_list.expr.as_ref() else {
+ 1419 -                    return false;
+ 1420 -                };
+ 1421 -                if !same_column(&col.name) {
+ 1422 -                    return false;
+ 1423 -                }
+ 1424 -                for item in &in_list.list {
+ 1425 -                    let Expr::Literal(lit, _) = item else {
+ 1426 -                        return false;
+ 1427 -                    };
+ 1428 -                    // A NULL among the values makes `IN` return NULL rather than
+ 1429 -                    // false, which a key lookup does not reproduce; fall back.
+ 1430 -                    if lit.is_null() {
+ 1431 -                        return false;
+ 1432 -                    }
+ 1433 -                    let Some(value) = self.coerce_literal_to_column(&col.name, lit) else {
+ 1434 -                        return false;
+ 1435 -                    };
+ 1436 -                    push_once(values, value);
+ 1437 -                }
+ 1438 -                true
+ 1439 -            }
+ 1440 -            _ => false,
+ 1441 -        }
+ 1436 +    /// Whether some index on `column` can answer `query`.
+ 1437 +    fn has_index_for(&self, column: &str, query: &dyn MemQuery) -> bool {
+ 1438 +        self.indexes.index_answering(column, query).is_some()
+ 1439      }
+ 1440 +}
+ 1441  
+ 1444 -    /// Extract a BTree-compatible predicate from the filter.
+ 1445 -    ///
+ 1446 -    /// This method also coerces literal values to match the column's data type
+ 1447 -    /// (e.g., Int64 literal -> Int32 when the column is Int32).
+ 1448 -    fn extract_btree_predicate(&self) -> Option<ScalarPredicate> {
+ 1449 -        // `filter()` stores the parsed expression without running `optimize_expr`,
+ 1450 -        // so run it here to pick the plan from the same expression the full scan
+ 1451 -        // would evaluate. Coercion has to happen before the signed-zero rewrite
+ 1452 -        // inside it, otherwise `value = 0` keeps its integer literal and gets a
+ 1453 -        // bit-exact lookup while the scan beside it answers per IEEE 754. An
+ 1454 -        // expression `optimize_expr` rejects is reported by `plan_full_scan`,
+ 1455 -        // which runs the same pass, so there is nothing to report here.
+ 1456 -        let planner = Planner::new(self.schema.clone());
+ 1457 -        let filter = planner
+ 1458 -            .optimize_expr(self.filter.clone()?)
+ 1459 -            .inspect_err(|error| {
+ 1460 -                log::debug!("memtable index fast path skipped: {error}");
+ 1461 -            })
+ 1462 -            .ok()?;
+ 1463 -
+ 1464 -        // Simple pattern matching for common predicates
+ 1465 -        match &filter {
+ 1466 -            // `simplify` turns an `IN` list of three or fewer values back into an
+ 1467 -            // OR chain of equalities, and the signed-zero rewrite then turns any
+ 1468 -            // zero among them into a two-element list of its own, so the fast path
+ 1469 -            // has to accept the chain to keep covering `IN`.
+ 1470 -            Expr::BinaryExpr(binary) if binary.op == datafusion::logical_expr::Operator::Or => {
+ 1471 -                let mut column = None;
+ 1472 -                let mut values = Vec::new();
+ 1473 -                if self.collect_or_equalities(&filter, &mut column, &mut values) {
+ 1474 -                    debug_assert!(column.is_some(), "a true return always names the column");
+ 1475 -                    return column.map(|column| ScalarPredicate::In { column, values });
+ 1478 -            Expr::BinaryExpr(binary) => {
+ 1479 -                if let (Expr::Column(col), Expr::Literal(lit, _)) =
+ 1480 -                    (binary.left.as_ref(), binary.right.as_ref())
+ 1481 -                {
+ 1482 -                    // Coerce literal to match column type
+ 1483 -                    let coerced_lit = self.coerce_literal_to_column(&col.name, lit)?;
+ 1484 -
+ 1485 -                    match binary.op {
+ 1486 -                        datafusion::logical_expr::Operator::Eq => {
+ 1487 -                            return Some(ScalarPredicate::Eq {
+ 1488 -                                column: col.name.clone(),
+ 1489 -                                value: coerced_lit,
+ 1490 -                            });
+ 1491 -                        }
+ 1492 -                        datafusion::logical_expr::Operator::Lt => {
+ 1493 -                            return Some(ScalarPredicate::Range {
+ 1494 -                                column: col.name.clone(),
+ 1495 -                                lower: None,
+ 1496 -                                upper: Some(coerced_lit),
+ 1497 -                            });
+ 1499 -                        datafusion::logical_expr::Operator::GtEq => {
+ 1500 -                            return Some(ScalarPredicate::Range {
+ 1501 -                                column: col.name.clone(),
+ 1502 -                                lower: Some(coerced_lit),
+ 1503 -                                upper: None,
+ 1504 -                            });
+ 1505 -                        }
+ 1506 -                        _ => {}
+ 1507 -                    }
+ 1508 -                }
+ 1509 -            }
+ 1510 -            Expr::InList(in_list) if !in_list.negated => {
+ 1511 -                if let Expr::Column(col) = in_list.expr.as_ref() {
+ 1512 -                    let values: Vec<ScalarValue> = in_list
+ 1513 -                        .list
+ 1514 -                        .iter()
+ 1515 -                        .filter_map(|e| {
+ 1516 -                            if let Expr::Literal(lit, _) = e {
+ 1517 -                                // Coerce each literal to match column type
+ 1518 -                                self.coerce_literal_to_column(&col.name, lit)
+ 1519 -                            } else {
+ 1520 -                                None
+ 1521 -                            }
+ 1522 -                        })
+ 1523 -                        .collect();
+ 1524 -
+ 1525 -                    if values.len() == in_list.list.len() {
+ 1526 -                        return Some(ScalarPredicate::In {
+ 1527 -                            column: col.name.clone(),
+ 1528 -                            values,
+ 1529 -                        });
+ 1533 -            _ => {}
+ 1535 -
+ 1536 -        None
+ 1539 -    /// Coerce a literal value to match the column's data type.
+ 1540 -    fn coerce_literal_to_column(&self, column: &str, lit: &ScalarValue) -> Option<ScalarValue> {
+ 1541 -        let field = self.schema.field_with_name(column).ok()?;
+ 1542 -        let target_type = field.data_type();
+ 1544 -        // If types already match, return as-is
+ 1545 -        if &lit.data_type() == target_type {
+ 1546 -            return Some(lit.clone());
+ 1548 -
+ 1549 -        // Use safe_coerce_scalar to convert the value
+ 1550 -        safe_coerce_scalar(lit, target_type)
+ 1551 -    }
+ 1552 -
+ 1553 -    /// Check if a BTree index exists for a column.
+ 1554 -    fn has_btree_index(&self, column: &str) -> bool {
+ 1555 -        self.indexes.get_btree_by_column(column).is_some()
+ 1558 -    /// Check if a vector index exists for a column.
+ 1559 -    /// Whether an HNSW index on `column` can answer a query in `distance_type`.
+ 1560 -    ///
+ 1561 -    /// The graph's metric is baked into its structure, so a query asking for a
+ 1562 -    /// different one has to brute-force instead — the same fallback
+ 1563 -    /// `Scanner::vector_search` applies when a requested metric disagrees with
+ 1564 -    /// a base index. `None` means "use the index's metric", which always
+ 1565 -    /// matches.
+ 1566 -    fn has_vector_index(&self, column: &str, distance_type: Option<DistanceType>) -> bool {
+ 1567 -        self.indexes
+ 1568 -            .get_hnsw_by_column(column)
+ 1569 -            .is_some_and(|hnsw| distance_type.is_none_or(|dt| dt == hnsw.distance_type()))
+ 1570 -    }
+ 1571 -
+ 1572 -    /// Check if an FTS index exists for a column.
+ 1573 -    fn has_fts_index(&self, column: &str, document_granularity: DocumentGranularity) -> bool {
+ 1574 -        self.indexes
+ 1575 -            .get_fts_by_column_and_granularity(column, document_granularity)
+ 1576 -            .is_some()
+ 1577 -    }
+ 1578 -}
+ 1579 -

@@ -1,0 +1,27 @@
+@@ -63,6 +63,7 @@ async fn validate_nullable_segment_for_merge(
+   63  pub(in crate::index) async fn merge_segments(
+   64      dataset: &Dataset,
+   65      segments: Vec<IndexMetadata>,
+   66 +    staged: Option<&crate::index::frag_reuse::StagedRemappingPlans>,
+   67  ) -> Result<IndexMetadata> {
+   68      if segments.is_empty() {
+   69          return Err(Error::index("No segment metadata was provided".to_string()));
+
+@@ -109,8 +110,15 @@ pub(in crate::index) async fn merge_segments(
+  110      let mut source_indices = Vec::with_capacity(segments.len());
+  111      for segment in &segments {
+  112          validate_nullable_segment_for_merge(dataset, field_id, segment).await?;
+  112 -        let scalar_index =
+  113 -            super::open_scalar_index(dataset, &field_path, segment, &NoOpMetricsCollector).await?;
+  113 +        let scalar_index = super::open_scalar_index_with_plan(
+  114 +            dataset,
+  115 +            &field_path,
+  116 +            segment,
+  117 +            staged.and_then(|plans| plans.get(&segment.uuid)),
+  118 +            crate::index::frag_reuse::OpenPurpose::Maintenance,
+  119 +            &NoOpMetricsCollector,
+  120 +        )
+  121 +        .await?;
+  122          let label_list_index = scalar_index
+  123              .as_any()
+  124              .downcast_ref::<LabelListIndex>()

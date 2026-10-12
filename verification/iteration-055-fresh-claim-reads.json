@@ -1,0 +1,162 @@
+[
+  {
+    "id": 1,
+    "path": "rust/lance-table/src/format/manifest.rs",
+    "start": 635,
+    "end": 669,
+    "read_at": "2026-10-03T19:19:45.003Z",
+    "evidence": "635 | #[derive(Debug, Clone, PartialEq)]\n636 | pub struct BasePath {\n637 |     pub id: u32,\n638 |     pub name: Option<String>,\n639 |     pub is_dataset_root: bool,\n640 |     /// The full URI string (e.g., \"s3://bucket/path\")\n641 |     pub path: String,\n642 | }\n643 | \n644 | impl BasePath {\n645 |     /// Create a new BasePath\n646 |     ///\n647 |     /// # Arguments\n648 |     ///\n649 |     /// * `id` - Unique identifier for this base path\n650 |     /// * `path` - Full URI string (e.g., \"s3://bucket/path\", \"/local/path\")\n651 |     /// * `name` - Optional human-readable name for this base\n652 |     /// * `is_dataset_root` - Whether this is the dataset root or a data-only base\n653 |     pub fn new(id: u32, path: String, name: Option<String>, is_dataset_root: bool) -> Self {\n654 |         Self {\n655 |             id,\n656 |             name,\n657 |             is_dataset_root,\n658 |             path,\n659 |         }\n660 |     }\n661 | \n662 |     /// Extract the object store path from this BasePath's URI.\n663 |     ///\n664 |     /// This is a synchronous operation that parses the URI without initializing an object store.\n665 |     pub fn extract_path(&self, registry: Arc<ObjectStoreRegistry>) -> Result<Path> {\n666 |         ObjectStore::extract_path_from_uri(registry, &self.path)\n667 |     }\n668 | }\n669 | "
+  },
+  {
+    "id": 2,
+    "path": "rust/lance-table/src/format/manifest.rs",
+    "start": 786,
+    "end": 816,
+    "read_at": "2026-10-03T19:19:45.003Z",
+    "evidence": "786 | impl WriterVersion {\n787 |     /// Split a version string into clean version (major.minor.patch), prerelease, and build metadata.\n788 |     ///\n789 |     /// Returns None if the input is not a valid semver string.\n790 |     ///\n791 |     /// For example:\n792 |     /// - \"2.0.0-rc.1\" -> Some((\"2.0.0\", Some(\"rc.1\"), None))\n793 |     /// - \"2.0.0-rc.1+build.123\" -> Some((\"2.0.0\", Some(\"rc.1\"), Some(\"build.123\")))\n794 |     /// - \"2.0.0+build.123\" -> Some((\"2.0.0\", None, Some(\"build.123\")))\n795 |     /// - \"not-a-version\" -> None\n796 |     fn split_version(full_version: &str) -> Option<(String, Option<String>, Option<String>)> {\n797 |         let mut parsed = semver::Version::parse(full_version).ok()?;\n798 | \n799 |         let prerelease = if parsed.pre.is_empty() {\n800 |             None\n801 |         } else {\n802 |             Some(parsed.pre.to_string())\n803 |         };\n804 | \n805 |         let build_metadata = if parsed.build.is_empty() {\n806 |             None\n807 |         } else {\n808 |             Some(parsed.build.to_string())\n809 |         };\n810 | \n811 |         // Remove prerelease and build metadata to get clean version\n812 |         parsed.pre = semver::Prerelease::EMPTY;\n813 |         parsed.build = semver::BuildMetadata::EMPTY;\n814 |         Some((parsed.to_string(), prerelease, build_metadata))\n815 |     }\n816 | "
+  },
+  {
+    "id": 3,
+    "path": "rust/lance-table/src/system_index/frag_reuse/lineage.rs",
+    "start": 45,
+    "end": 79,
+    "read_at": "2026-10-03T19:19:45.003Z",
+    "evidence": "45 |     /// The lineage of the tagged entry among `indices`, or `None` on a table\n46 |     /// without one. The history is `ledger` when the caller supplied it (the\n47 |     /// commit path decodes it once per attempt), else decoded from the\n48 |     /// entry's inline details. An undecodable history is an error, and so is\n49 |     /// an external one nobody read: a commit must not guess at the lineage.\n50 |     pub fn from_indices_with_ledger(\n51 |         indices: &[IndexMetadata],\n52 |         ledger: Option<Arc<FragReuseLedger>>,\n53 |     ) -> Result<Option<Self>> {\n54 |         let Some(entry) = indices.iter().find(|index| is_tagged(index)) else {\n55 |             return Ok(None);\n56 |         };\n57 |         let ledger = match ledger {\n58 |             Some(ledger) => ledger,\n59 |             None => {\n60 |                 let details = entry.index_details.as_ref().ok_or_else(|| {\n61 |                     Error::invalid_input(\n62 |                         \"the tagged fragment reuse entry carries no details; its history \\\n63 |                          cannot be read\",\n64 |                     )\n65 |                 })?;\n66 |                 FragReuseLedger::decode_inline(entry.index_version, details)?\n67 |                     .map(Arc::new)\n68 |                     .ok_or_else(|| {\n69 |                         Error::invalid_input(\n70 |                             \"the tagged fragment reuse history is stored externally and was \\\n71 |                              not supplied to the manifest build; commit through the dataset \\\n72 |                              so the history is decoded first\",\n73 |                         )\n74 |                     })?\n75 |             }\n76 |         };\n77 |         Ok(Some(Self::new(entry, Some(ledger))))\n78 |     }\n79 | "
+  },
+  {
+    "id": 4,
+    "path": "rust/lance-core/src/utils/bloomfilter/sbbf.rs",
+    "start": 508,
+    "end": 527,
+    "read_at": "2026-10-03T19:19:45.004Z",
+    "evidence": "508 |     #[test]\n509 |     fn test_sbbf_insert_and_check() {\n510 |         let mut sbbf = Sbbf::with_log2_num_bytes(10);\n511 |         for i in 0..1_000 {\n512 |             sbbf.insert(&i);\n513 |             assert!(sbbf.check(&i));\n514 |         }\n515 |     }\n516 | \n517 |     #[test]\n518 |     fn test_sbbf_builder() {\n519 |         let sbbf = SbbfBuilder::new()\n520 |             .expected_items(1000)\n521 |             .false_positive_probability(0.01)\n522 |             .build()\n523 |             .unwrap();\n524 | \n525 |         assert!(sbbf.num_blocks() > 0);\n526 |     }\n527 | "
+  },
+  {
+    "id": 5,
+    "path": "rust/lance-table/src/rowids.rs",
+    "start": 840,
+    "end": 864,
+    "read_at": "2026-10-03T19:19:45.004Z",
+    "evidence": "840 | /// Offsets of sorted `ids` (all within `range`) via incremental bitmap\n841 | /// prefix counts, grouped into ranges. Every id is visited once; the bitmap\n842 | /// slice between consecutive ids is popcounted exactly once overall.\n843 | fn bitmap_selected_offsets(\n844 |     ids: impl Iterator<Item = u64>,\n845 |     range: &Range<u64>,\n846 |     bitmap: &bitmap::Bitmap,\n847 |     offset_start: u64,\n848 | ) -> Vec<Range<u64>> {\n849 |     let mut previous_position = 0;\n850 |     let mut live_before = 0;\n851 |     let selected_offsets = ids.filter_map(|row_id| {\n852 |         let position = (row_id - range.start) as usize;\n853 |         if !bitmap.get(position) {\n854 |             return None;\n855 |         }\n856 |         live_before += bitmap\n857 |             .slice(previous_position, position - previous_position)\n858 |             .count_ones();\n859 |         previous_position = position;\n860 |         Some(offset_start + live_before as u64)\n861 |     });\n862 |     GroupingIterator::new(selected_offsets).collect()\n863 | }\n864 | "
+  },
+  {
+    "id": 6,
+    "path": "rust/lance-table/src/transaction/row_version.rs",
+    "start": 1025,
+    "end": 1049,
+    "read_at": "2026-10-03T19:20:02.779Z",
+    "evidence": "1025 |         // New fragment has row 10 (UPDATE branch) and row 999 (INSERT branch)\n1026 |         let new_seq = RowIdSequence::from([10u64, 999].as_slice());\n1027 |         let new_fragment = Fragment {\n1028 |             id: 10,\n1029 |             files: vec![],\n1030 |             overlays: vec![],\n1031 |             deletion_file: None,\n1032 |             row_id_meta: Some(RowIdMeta::Inline(write_row_ids(&new_seq).into())),\n1033 |             physical_rows: Some(2),\n1034 |             created_at_version_meta: None,\n1035 |             last_updated_at_version_meta: None,\n1036 |         };\n1037 | \n1038 |         // update_txn uses read_version 4 → new_version is 5\n1039 |         let manifest = make_stable_row_id_manifest(vec![existing_fragment]);\n1040 |         let (result, _) = update_txn(vec![new_fragment])\n1041 |             .build_manifest(Some(&manifest), vec![], \"txn\", &default_build_config())\n1042 |             .unwrap();\n1043 | \n1044 |         // Row 10 (UPDATE branch): created_at copied from source (version 5).\n1045 |         // Row 999 (INSERT branch): created_at == new_version (5).\n1046 |         assert_eq!(created_at_versions(&result, 10), vec![5, 5]);\n1047 |         assert_eq!(last_updated_at_versions(&result, 10), vec![5, 5]);\n1048 |     }\n1049 | "
+  },
+  {
+    "id": 7,
+    "path": "rust/lance-table/src/transaction/manifest_build.rs",
+    "start": 1844,
+    "end": 1871,
+    "read_at": "2026-10-03T19:20:02.781Z",
+    "evidence": "1844 |                 let clustering_key_after: Vec<i32> = manifest\n1845 |                     .schema\n1846 |                     .unenforced_clustering_key()\n1847 |                     .iter()\n1848 |                     .map(|field| field.id)\n1849 |                     .collect();\n1850 |                 if !clustering_key_before.is_empty() {\n1851 |                     // The clustering key is already set: reject any change to\n1852 |                     // it, and any write that touches the reserved key.\n1853 |                     if writes_clustering_key || clustering_key_after != clustering_key_before {\n1854 |                         return Err(Error::invalid_input(\n1855 |                             \"the unenforced clustering key is a reserved key and cannot be changed once set\",\n1856 |                         ));\n1857 |                     }\n1858 |                 } else if writes_clustering_key && clustering_key_after.is_empty() {\n1859 |                     // The reserved clustering key was written but did not\n1860 |                     // install a valid clustering key (e.g. a non-numeric\n1861 |                     // position value).\n1862 |                     return Err(Error::invalid_input(\n1863 |                         \"the unenforced clustering key is a reserved key and cannot be set to an invalid value\",\n1864 |                     ));\n1865 |                 }\n1866 |             }\n1867 |             _ => {}\n1868 |         }\n1869 | \n1870 |         apply_range_segments(&mut manifest, current_manifest)?;\n1871 | "
+  },
+  {
+    "id": 8,
+    "path": "rust/lance-file/src/datatypes.rs",
+    "start": 316,
+    "end": 334,
+    "read_at": "2026-10-03T19:20:02.781Z",
+    "evidence": "316 | impl From<&pb::Dictionary> for Dictionary {\n317 |     fn from(proto: &pb::Dictionary) -> Self {\n318 |         Self {\n319 |             offset: proto.offset as usize,\n320 |             length: proto.length as usize,\n321 |             values: None,\n322 |         }\n323 |     }\n324 | }\n325 | \n326 | impl From<&Dictionary> for pb::Dictionary {\n327 |     fn from(d: &Dictionary) -> Self {\n328 |         Self {\n329 |             offset: d.offset as i64,\n330 |             length: d.length as i64,\n331 |         }\n332 |     }\n333 | }\n334 | "
+  },
+  {
+    "id": 9,
+    "path": "rust/lance-table/src/rowids.rs",
+    "start": 621,
+    "end": 646,
+    "read_at": "2026-10-03T19:20:02.781Z",
+    "evidence": "621 |             match segment {\n622 |                 U64Segment::Range(range) => {\n623 |                     let mut ids = RowAddrTreeMap::from(range.clone());\n624 |                     ids.mask(mask);\n625 |                     // Range-aware path: walk the bitmap's runs directly via\n626 |                     // iter_runs so the per-row cost collapses to per-run cost.\n627 |                     let mut cur: Option<Range<u64>> = None;\n628 |                     for (fragment, run) in ids.iter_runs() {\n629 |                         let frag = u64::from(fragment);\n630 |                         let run_start = (frag << 32) | u64::from(*run.start());\n631 |                         let run_end_excl = (frag << 32) | (u64::from(*run.end()) + 1);\n632 |                         let start = run_start - range.start + offset;\n633 |                         let end = run_end_excl - range.start + offset;\n634 |                         match cur.as_mut() {\n635 |                             Some(c) if c.end == start => c.end = end,\n636 |                             Some(c) => {\n637 |                                 ranges.push(std::mem::replace(c, start..end));\n638 |                             }\n639 |                             None => cur = Some(start..end),\n640 |                         }\n641 |                     }\n642 |                     if let Some(c) = cur {\n643 |                         ranges.push(c);\n644 |                     }\n645 |                     offset += range.end - range.start;\n646 |                 }"
+  },
+  {
+    "id": 10,
+    "path": "rust/lance-core/src/cache/mod.rs",
+    "start": 404,
+    "end": 419,
+    "read_at": "2026-10-03T19:20:02.781Z",
+    "evidence": "404 |     pub async fn get_or_insert_with_key<K, F, Fut>(\n405 |         &self,\n406 |         cache_key: K,\n407 |         loader: F,\n408 |     ) -> Result<Arc<K::ValueType>>\n409 |     where\n410 |         K: CacheKey,\n411 |         K::ValueType: DeepSizeOf + Send + Sync + 'static,\n412 |         F: FnOnce() -> Fut + Send,\n413 |         Fut: Future<Output = Result<K::ValueType>> + Send,\n414 |     {\n415 |         self.get_or_insert_with_key_hit(cache_key, loader)\n416 |             .await\n417 |             .map(|(value, _)| value)\n418 |     }\n419 | "
+  },
+  {
+    "id": 11,
+    "path": "rust/lance-table/src/transaction/conflicts.rs",
+    "start": 171,
+    "end": 180,
+    "read_at": "2026-10-03T19:20:23.286Z",
+    "evidence": "171 |             (\n172 |                 Self::Project {\n173 |                     schema: a,\n174 |                     preserves_nullability: a_preserves,\n175 |                 },\n176 |                 Self::Project {\n177 |                     schema: b,\n178 |                     preserves_nullability: b_preserves,\n179 |                 },\n180 |             ) => a == b && a_preserves == b_preserves,"
+  },
+  {
+    "id": 12,
+    "path": "rust/lance-file/src/versions/v2_0/mod.rs",
+    "start": 68,
+    "end": 83,
+    "read_at": "2026-10-03T19:20:23.286Z",
+    "evidence": "68 | fn append_physical_fields(\n69 |     fields: &[Field],\n70 |     field_ids: &mut Vec<i32>,\n71 |     column_indices: &mut Vec<i32>,\n72 |     next_column: &mut i32,\n73 | ) {\n74 |     for field in fields {\n75 |         field_ids.push(field.id);\n76 |         column_indices.push(*next_column);\n77 |         *next_column += 1;\n78 |         if !field.is_blob() && !field.is_packed_struct() {\n79 |             append_physical_fields(&field.children, field_ids, column_indices, next_column);\n80 |         }\n81 |     }\n82 | }\n83 | "
+  },
+  {
+    "id": 13,
+    "path": "rust/lance-core/src/utils/stable_partition.rs",
+    "start": 484,
+    "end": 510,
+    "read_at": "2026-10-03T19:20:23.287Z",
+    "evidence": "484 | #[cfg(test)]\n485 | mod tests {\n486 |     use super::*;\n487 |     use rand::rngs::StdRng;\n488 |     use rand::{Rng, SeedableRng};\n489 | \n490 |     /// ~1/8 deleted rows, labels uniform over `m`.\n491 |     fn random_labels(rng: &mut StdRng, rows: usize, m: u32) -> Vec<Option<u16>> {\n492 |         (0..rows)\n493 |             .map(|_| {\n494 |                 if rng.random_ratio(1, 8) {\n495 |                     None\n496 |                 } else {\n497 |                     Some(rng.random_range(0..m) as u16)\n498 |                 }\n499 |             })\n500 |             .collect()\n501 |     }\n502 | \n503 |     fn build(labels: &[Option<u16>], m: u32, block_rows: u32) -> CountsMatrix {\n504 |         let mut builder = CountsMatrixBuilder::try_new(m, block_rows).unwrap();\n505 |         for &label in labels {\n506 |             builder.push(label).unwrap();\n507 |         }\n508 |         builder.finish()\n509 |     }\n510 | "
+  },
+  {
+    "id": 14,
+    "path": "rust/lance-table/src/format/fragment.rs",
+    "start": 312,
+    "end": 338,
+    "read_at": "2026-10-03T19:20:23.287Z",
+    "evidence": "312 | /// Interns repeated data so that fragments with identical content share a\n313 | /// single heap allocation via `Arc`.\n314 | ///\n315 | /// At 20M fragments the deduplication typically saves multiple GB of heap\n316 | /// because every fragment in a homogeneous table carries the same field list,\n317 | /// and post-compaction fragments share identical version metadata bytes.\n318 | ///\n319 | /// Uses a `Vec`-based linear scan when the cache is small (<=16 entries)\n320 | /// and upgrades to `HashMap` for larger caches. In the common homogeneous\n321 | /// case (1-3 unique values), linear scan avoids per-fragment hashing overhead.\n322 | #[derive(Default)]\n323 | pub struct DataFileFieldInterner {\n324 |     fields: InternCache<i32>,\n325 |     column_indices: InternCache<i32>,\n326 |     inline_bytes: InternCache<u8>,\n327 | }\n328 | \n329 | /// A cache that uses linear scan for small sizes and HashMap for large.\n330 | /// The threshold is chosen so that scan + compare is cheaper than hash for\n331 | /// typical payload sizes (20-200 bytes).\n332 | enum InternCache<T: Eq + std::hash::Hash + Clone> {\n333 |     Small(Vec<Arc<[T]>>),\n334 |     Large(HashMap<Arc<[T]>, ()>),\n335 | }\n336 | \n337 | const INTERN_CACHE_UPGRADE_THRESHOLD: usize = 16;\n338 | "
+  },
+  {
+    "id": 15,
+    "path": "rust/lance-file/src/versions/v2_3/writer.rs",
+    "start": 125,
+    "end": 134,
+    "read_at": "2026-10-03T19:20:23.287Z",
+    "evidence": "125 |     /// Append a buffer whose page or column metadata is supplied externally.\n126 |     pub async fn write_external_buffer(&mut self, bytes: &[u8]) -> Result<(u64, u64)> {\n127 |         self.sink.write_external_buffer(bytes).await\n128 |     }\n129 | \n130 |     /// Add an entry to the schema metadata written in the file descriptor.\n131 |     pub fn add_schema_metadata(&mut self, key: impl Into<String>, value: impl Into<String>) {\n132 |         self.encoding.add_schema_metadata(key, value);\n133 |     }\n134 | "
+  },
+  {
+    "id": 16,
+    "path": "rust/lance-core/src/utils/row_addr_remap.rs",
+    "start": 861,
+    "end": 876,
+    "read_at": "2026-10-03T19:20:23.287Z",
+    "evidence": "861 | \n862 |     #[test]\n863 |     fn test_sparse_ranked_offsets() {\n864 |         let offsets = RankedOffsets::try_new(\n865 |             RoaringBitmap::from_iter([1u32, 63, 511, 9_999]),\n866 |             Some(10_000),\n867 |         )\n868 |         .unwrap();\n869 |         assert!(matches!(offsets, RankedOffsets::Sparse(_)));\n870 |         assert_eq!(offsets.rank_if_present(0), None);\n871 |         assert_eq!(offsets.rank_if_present(1), Some(0));\n872 |         assert_eq!(offsets.rank_if_present(63), Some(1));\n873 |         assert_eq!(offsets.rank_if_present(511), Some(2));\n874 |         assert_eq!(offsets.rank_if_present(9_999), Some(3));\n875 |     }\n876 | "
+  },
+  {
+    "id": 17,
+    "path": "rust/lance-core/src/datatypes/schema.rs",
+    "start": 2444,
+    "end": 2544,
+    "read_at": "2026-10-03T19:20:38.624Z",
+    "evidence": "2444 |     #[test]\n2445 |     fn test_merge_arrow_schema() {\n2446 |         let arrow_schema = ArrowSchema::new(vec![\n2447 |             ArrowField::new(\"a\", DataType::Int32, false),\n2448 |             ArrowField::new(\n2449 |                 \"b\",\n2450 |                 DataType::Struct(ArrowFields::from(vec![\n2451 |                     ArrowField::new(\"f1\", DataType::Utf8, true),\n2452 |                     ArrowField::new(\"f2\", DataType::Boolean, false),\n2453 |                     ArrowField::new(\"f3\", DataType::Float32, false),\n2454 |                 ])),\n2455 |                 true,\n2456 |             ),\n2457 |             ArrowField::new(\"c\", DataType::Float64, false),\n2458 |         ]);\n2459 |         let schema = Schema::try_from(&arrow_schema).unwrap();\n2460 | \n2461 |         assert_eq!(schema.max_field_id(), Some(5));\n2462 | \n2463 |         let to_merged_arrow_schema = ArrowSchema::new(vec![\n2464 |             ArrowField::new(\"d\", DataType::Int32, false),\n2465 |             ArrowField::new(\"e\", DataType::Binary, false),\n2466 |         ]);\n2467 |         let mut merged = schema.merge(&to_merged_arrow_schema).unwrap();\n2468 |         merged.set_field_id(None);\n2469 |         assert_eq!(merged.max_field_id(), Some(7));\n2470 | \n2471 |         let field = merged.field(\"d\").unwrap();\n2472 |         assert_eq!(field.id, 6);\n2473 |         let field = merged.field(\"e\").unwrap();\n2474 |         assert_eq!(field.id, 7);\n2475 |     }\n2476 | \n2477 |     #[test]\n2478 |     fn test_merge_nested_field() {\n2479 |         let arrow_schema1 = ArrowSchema::new(vec![ArrowField::new(\n2480 |             \"b\",\n2481 |             DataType::Struct(ArrowFields::from(vec![\n2482 |                 ArrowField::new(\n2483 |                     \"f1\",\n2484 |                     DataType::Struct(ArrowFields::from(vec![ArrowField::new(\n2485 |                         \"f11\",\n2486 |                         DataType::Utf8,\n2487 |                         true,\n2488 |                     )])),\n2489 |                     true,\n2490 |                 ),\n2491 |                 ArrowField::new(\"f2\", DataType::Float32, false),\n2492 |             ])),\n2493 |             true,\n2494 |         )]);\n2495 |         let schema1 = Schema::try_from(&arrow_schema1).unwrap();\n2496 | \n2497 |         let arrow_schema2 = ArrowSchema::new(vec![ArrowField::new(\n2498 |             \"b\",\n2499 |             DataType::Struct(ArrowFields::from(vec![\n2500 |                 ArrowField::new(\n2501 |                     \"f1\",\n2502 |                     DataType::Struct(ArrowFields::from(vec![ArrowField::new(\n2503 |                         \"f22\",\n2504 |                         DataType::Utf8,\n2505 |                         true,\n2506 |                     )])),\n2507 |                     true,\n2508 |                 ),\n2509 |                 ArrowField::new(\"f3\", DataType::Float32, false),\n2510 |             ])),\n2511 |             true,\n2512 |         )]);\n2513 |         let schema2 = Schema::try_from(&arrow_schema2).unwrap();\n2514 | \n2515 |         let expected_arrow_schema = ArrowSchema::new(vec![ArrowField::new(\n2516 |             \"b\",\n2517 |             DataType::Struct(ArrowFields::from(vec![\n2518 |                 ArrowField::new(\n2519 |                     \"f1\",\n2520 |                     DataType::Struct(ArrowFields::from(vec![\n2521 |                         ArrowField::new(\"f11\", DataType::Utf8, true),\n2522 |                         ArrowField::new(\"f22\", DataType::Utf8, true),\n2523 |                     ])),\n2524 |                     true,\n2525 |                 ),\n2526 |                 ArrowField::new(\"f2\", DataType::Float32, false),\n2527 |                 ArrowField::new(\"f3\", DataType::Float32, false),\n2528 |             ])),\n2529 |             true,\n2530 |         )]);\n2531 |         let mut expected_schema = Schema::try_from(&expected_arrow_schema).unwrap();\n2532 |         expected_schema.fields[0]\n2533 |             .child_mut(\"f1\")\n2534 |             .unwrap()\n2535 |             .child_mut(\"f22\")\n2536 |             .unwrap()\n2537 |             .id = 4;\n2538 |         expected_schema.fields[0].child_mut(\"f2\").unwrap().id = 3;\n2539 | \n2540 |         let mut result = schema1.merge(&schema2).unwrap();\n2541 |         result.set_field_id(None);\n2542 |         assert_eq!(result, expected_schema);\n2543 |     }\n2544 | "
+  },
+  {
+    "id": 18,
+    "path": "rust/lance-table/src/utils/stream.rs",
+    "start": 829,
+    "end": 848,
+    "read_at": "2026-10-03T19:20:38.625Z",
+    "evidence": "829 |             batch_task\n830 |                 .task\n831 |                 .map(move |batch| {\n832 |                     apply_row_id_and_deletes_with_system_columns(\n833 |                         batch?,\n834 |                         this_offset,\n835 |                         fragment_id,\n836 |                         config.as_ref(),\n837 |                         PrecomputedSystemColumns {\n838 |                             row_ids,\n839 |                             last_updated_versions,\n840 |                             created_versions,\n841 |                         },\n842 |                         output_schema_cache.as_deref(),\n843 |                     )\n844 |                 })\n845 |                 .boxed()\n846 |         })\n847 |         .boxed()\n848 | }"
+  },
+  {
+    "id": 19,
+    "path": "rust/lance-table/src/transaction/manifest_build.rs",
+    "start": 3359,
+    "end": 3418,
+    "read_at": "2026-10-03T19:20:38.698Z",
+    "evidence": "3359 |     #[test]\n3360 |     fn test_remove_tombstoned_data_files() {\n3361 |         // Create a fragment with mixed data files: some normal, some fully tombstoned\n3362 |         let mut fragment = Fragment::new(1);\n3363 | \n3364 |         // Add a normal data file with valid field IDs\n3365 |         fragment.files.push(DataFile {\n3366 |             path: \"normal.lance\".to_string(),\n3367 |             fields: Arc::from([1, 2, 3]),\n3368 |             column_indices: Arc::from([]),\n3369 |             file_major_version: 2,\n3370 |             file_minor_version: 0,\n3371 |             file_size_bytes: CachedFileSize::new(1000),\n3372 |             base_id: None,\n3373 |         });\n3374 | \n3375 |         // Add a data file with all fields tombstoned\n3376 |         fragment.files.push(DataFile {\n3377 |             path: \"all_tombstoned.lance\".to_string(),\n3378 |             fields: Arc::from([-2, -2, -2]),\n3379 |             column_indices: Arc::from([]),\n3380 |             file_major_version: 2,\n3381 |             file_minor_version: 0,\n3382 |             file_size_bytes: CachedFileSize::new(500),\n3383 |             base_id: None,\n3384 |         });\n3385 | \n3386 |         // Add a data file with mixed tombstoned and valid fields\n3387 |         fragment.files.push(DataFile {\n3388 |             path: \"mixed.lance\".to_string(),\n3389 |             fields: Arc::from([4, -2, 5]),\n3390 |             column_indices: Arc::from([]),\n3391 |             file_major_version: 2,\n3392 |             file_minor_version: 0,\n3393 |             file_size_bytes: CachedFileSize::new(750),\n3394 |             base_id: None,\n3395 |         });\n3396 | \n3397 |         // Add another fully tombstoned file\n3398 |         fragment.files.push(DataFile {\n3399 |             path: \"another_tombstoned.lance\".to_string(),\n3400 |             fields: Arc::from([-2_i32]),\n3401 |             column_indices: Arc::from([]),\n3402 |             file_major_version: 2,\n3403 |             file_minor_version: 0,\n3404 |             file_size_bytes: CachedFileSize::new(250),\n3405 |             base_id: None,\n3406 |         });\n3407 | \n3408 |         let mut fragments = vec![fragment];\n3409 | \n3410 |         // Apply the cleanup\n3411 |         Transaction::remove_tombstoned_data_files(&mut fragments);\n3412 | \n3413 |         // Should have removed the two fully tombstoned files\n3414 |         assert_eq!(fragments[0].files.len(), 2);\n3415 |         assert_eq!(fragments[0].files[0].path, \"normal.lance\");\n3416 |         assert_eq!(fragments[0].files[1].path, \"mixed.lance\");\n3417 |     }\n3418 | "
+  },
+  {
+    "id": 20,
+    "path": "protos/file2.proto",
+    "start": 138,
+    "end": 146,
+    "read_at": "2026-10-03T19:20:38.699Z",
+    "evidence": "138 | // The encoding is placed directly in the metadata section\n139 | message DirectEncoding {\n140 |     /* The bytes that make up the encoding embedded directly in the metadata\n141 |      *\n142 |      * This is the most common approach.\n143 |      */\n144 |     bytes encoding = 1;\n145 | }\n146 | "
+  }
+]

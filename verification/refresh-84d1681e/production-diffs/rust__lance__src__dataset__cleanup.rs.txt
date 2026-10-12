@@ -1,0 +1,635 @@
+@@ -52,6 +52,7 @@ use lance_core::{
+   52  };
+   53  use lance_io::object_store::ObjectStore;
+   54  use lance_table::{
+   55 +    feature_flags::{ensure_can_read_manifest, ensure_can_write_manifest},
+   56      format::{IndexMetadata, Manifest},
+   57      io::{
+   58          commit::ManifestLocation,
+
+@@ -75,9 +76,14 @@ use tracing::{Span, debug, info, instrument, warn};
+   76  #[derive(Clone, Debug, Default)]
+   77  struct ReferencedFiles {
+   78      data_paths: HashSet<Path>,
+   79 +    managed_blob_paths: HashSet<Path>,
+   80      delete_paths: HashSet<Path>,
+   81      tx_paths: HashSet<Path>,
+   82      index_uuids: HashSet<String>,
+   83 +    /// Stable-partition row-map ids (`_fri/<map_id>/`) referenced by tagged
+   84 +    /// fragment-reuse-index entries. Resolved from
+   85 +    /// [`CleanupInspection::frag_reuse_entries`] before deletion decisions.
+   86 +    frag_reuse_map_ids: HashSet<String>,
+   87  }
+   88  
+   89  #[derive(Clone, Debug, Default, PartialEq, Eq)]
+
+@@ -327,6 +333,18 @@ struct CleanupInspection {
+  333      verified_files: ReferencedFiles,
+  334      /// Track tagged old versions in case we want to raise a `CleanupError`.
+  335      tagged_old_versions: HashSet<u64>,
+  336 +    /// Tagged fragment-reuse-index entries seen across manifests, deduped by
+  337 +    /// entry uuid so each is decoded at most once; the flag records whether
+  338 +    /// some retained (working-set) manifest carries the entry.
+  339 +    frag_reuse_entries: HashMap<uuid::Uuid, (IndexMetadata, bool)>,
+  340 +    /// Tagged FRI entry uuids per manifest version, so a branch rescue that
+  341 +    /// retains a parent manifest can flip its entries into the working set
+  342 +    /// (their row maps become referenced instead of merely verified).
+  343 +    frag_reuse_entry_versions: HashMap<u64, Vec<uuid::Uuid>>,
+  344 +    /// Set when a branch manifest's FRI history could not be interpreted:
+  345 +    /// `_fri/` garbage collection is skipped for the run rather than risking
+  346 +    /// row maps the branch references invisibly.
+  347 +    skip_frag_reuse_gc: bool,
+  348      /// The earliest timestamp of all retained manifests.
+  349      earliest_retained_manifest_time: Option<DateTime<Utc>>,
+  350      /// The latest timestamp of all manifests that will be removed.
+
+@@ -567,6 +585,8 @@ impl<'a> CleanupTask<'a> {
+  585          let manifest_and_indexes = async {
+  586              let manifest =
+  587                  read_manifest(&self.dataset.object_store, &location.path, location.size).await?;
+  588 +            ensure_can_read_manifest(&manifest)?;
+  589 +            ensure_can_write_manifest(&manifest)?;
+  590              let indexes =
+  591                  read_manifest_indexes(&self.dataset.object_store, &location, &manifest).await?;
+  592              Ok::<_, Error>((manifest, indexes))
+
+@@ -601,7 +621,33 @@ impl<'a> CleanupTask<'a> {
+  621          let is_latest = self.read_version <= manifest.version;
+  622          let is_tagged = tagged_versions.contains(&manifest.version);
+  623          let in_working_set = is_latest || !self.policy.should_clean(&manifest) || is_tagged;
+  624 +        let managed_paths = if manifest.has_managed_blobs() {
+  625 +            let snapshot = self
+  626 +                .dataset
+  627 +                .checkout_version((manifest.branch.as_deref(), Some(manifest.version)))
+  628 +                .await?;
+  629 +            match super::blob::managed_paths(&snapshot, self.dataset).await {
+  630 +                Ok(paths) => paths,
+  631 +                // A concurrent cleanup may already have removed expired data
+  632 +                // files. Losing deletion proof is safe; losing retained references
+  633 +                // is not. Other failures still stop cleanup before any deletion.
+  634 +                Err(error) if !in_working_set && error.is_not_found() => HashSet::new(),
+  635 +                Err(error) => return Err(error),
+  636 +            }
+  637 +        } else {
+  638 +            HashSet::new()
+  639 +        };
+  640          let mut inspection = inspection.lock().unwrap();
+  641 +        let references = if in_working_set {
+  642 +            &mut inspection.referenced_files
+  643 +        } else {
+  644 +            &mut inspection.verified_files
+  645 +        };
+  646 +        references.managed_blob_paths.extend(
+  647 +            managed_paths
+  648 +                .into_iter()
+  649 +                .map(|path| remove_prefix(&path, &self.dataset.base)),
+  650 +        );
+  651  
+  652          // Track tagged old versions in case we want to return a `CleanupError` later.
+  653          // Only track tagged when it is old.
+
+@@ -679,6 +725,26 @@ impl<'a> CleanupTask<'a> {
+  725              let uuid_str = index.uuid.to_string();
+  726              referenced_files.index_uuids.insert(uuid_str);
+  727          }
+  728 +
+  729 +        // Tagged FRI entries are recorded for row-map reference resolution
+  730 +        // (their content is decoded later, once per unique entry). A v0 entry
+  731 +        // cannot reference row maps, so v0-only datasets record nothing.
+  732 +        for index in indexes {
+  733 +            if index.name == lance_index::frag_reuse::FRAG_REUSE_INDEX_NAME
+  734 +                && index.index_version != 0
+  735 +            {
+  736 +                let entry = inspection
+  737 +                    .frag_reuse_entries
+  738 +                    .entry(index.uuid)
+  739 +                    .or_insert_with(|| (index.clone(), false));
+  740 +                entry.1 |= in_working_set;
+  741 +                inspection
+  742 +                    .frag_reuse_entry_versions
+  743 +                    .entry(manifest.version)
+  744 +                    .or_default()
+  745 +                    .push(index.uuid);
+  746 +            }
+  747 +        }
+  748          Ok(())
+  749      }
+  750  
+
+@@ -694,10 +760,74 @@ impl<'a> CleanupTask<'a> {
+  760              deletion_files_removed = tracing::field::Empty
+  761          )
+  762      )]
+  763 +    /// Resolve the row-map ids referenced by the recorded tagged FRI entries
+  764 +    /// into the inspection's referenced (retained manifests) and verified
+  765 +    /// (expiring manifests) sets. Returns false when some entry cannot be
+  766 +    /// interpreted, in which case `_fri/` garbage collection is skipped for
+  767 +    /// this run: an uninterpretable entry may reference maps invisibly.
+  768 +    async fn resolve_frag_reuse_map_ids(&self, inspection: &mut CleanupInspection) -> bool {
+  769 +        let entries = std::mem::take(&mut inspection.frag_reuse_entries);
+  770 +        for (uuid, (entry, in_working_set)) in entries.iter() {
+  771 +            let map_ids = async {
+  772 +                let content =
+  773 +                    crate::index::frag_reuse::load_raw_frag_reuse_content(self.dataset, entry)
+  774 +                        .await?;
+  775 +                let ledger = crate::index::frag_reuse::decode_frag_reuse_ledger_from_content(
+  776 +                    entry.index_version,
+  777 +                    &content,
+  778 +                )
+  779 +                .await?;
+  780 +                if ledger.has_unsupported_transitions() {
+  781 +                    return Err(Error::not_supported(
+  782 +                        "the tagged FRI history carries transitions this client cannot interpret",
+  783 +                    ));
+  784 +                }
+  785 +                Ok::<Vec<String>, Error>(
+  786 +                    ledger
+  787 +                        .transitions()
+  788 +                        .iter()
+  789 +                        .filter_map(|transition| {
+  790 +                            match transition.mapping() {
+  791 +                            lance_table::system_index::frag_reuse::ledger::Mapping::StablePartition(
+  792 +                                partition,
+  793 +                            ) => Some(partition.map_id.clone()),
+  794 +                            _ => None,
+  795 +                        }
+  796 +                        })
+  797 +                        .collect(),
+  798 +                )
+  799 +            }
+  800 +            .await;
+  801 +            match map_ids {
+  802 +                Ok(map_ids) => {
+  803 +                    let target = if *in_working_set {
+  804 +                        &mut inspection.referenced_files
+  805 +                    } else {
+  806 +                        &mut inspection.verified_files
+  807 +                    };
+  808 +                    target.frag_reuse_map_ids.extend(map_ids);
+  809 +                }
+  810 +                Err(error) => {
+  811 +                    warn!(
+  812 +                        entry_uuid = %uuid,
+  813 +                        error = %error,
+  814 +                        "Cannot resolve the row-map references of a fragment reuse index \
+  815 +                         entry; skipping _fri garbage collection for this run"
+  816 +                    );
+  817 +                    return false;
+  818 +                }
+  819 +            }
+  820 +        }
+  821 +        true
+  822 +    }
+  823 +
+  824      async fn delete_unreferenced_files(
+  825          &self,
+  699 -        inspection: CleanupInspection,
+  826 +        mut inspection: CleanupInspection,
+  827      ) -> Result<CleanupRunResult> {
+  828 +        let collect_frag_reuse_maps = !inspection.skip_frag_reuse_gc
+  829 +            && self.resolve_frag_reuse_map_ids(&mut inspection).await;
+  830 +        let inspection = inspection;
+  831          let cleanup_result = Mutex::new(CleanupRunResult::default());
+  832          let deletes_files = self.action.deletes_files();
+  833          let removes_empty_dirs = matches!(
+
+@@ -720,7 +850,6 @@ impl<'a> CleanupTask<'a> {
+  850          let verification_threshold = utc_now()
+  851              - TimeDelta::try_days(UNVERIFIED_THRESHOLD_DAYS).expect("TimeDelta::try_days");
+  852  
+  723 -        let is_not_found_err = |e: &Error| matches!(e, Error::NotFound { .. });
+  853          // Build stream for a managed subtree
+  854          let build_listing_stream = |dir: Path, unmodified_since| {
+  855              let inspection_ref = &inspection;
+
+@@ -730,7 +859,7 @@ impl<'a> CleanupTask<'a> {
+  859                  .map_ok(|obj| stream::once(future::ready(Ok(obj))).boxed())
+  860                  .or_else(|e| {
+  861                      // If the directory doesn't exist then we can just return an empty stream.
+  733 -                    if is_not_found_err(&e) {
+  862 +                    if e.is_not_found() {
+  863                          future::ready(Ok(stream::empty::<Result<ObjectMeta>>().boxed()))
+  864                      } else {
+  865                          future::ready(Err(e))
+
+@@ -766,10 +895,14 @@ impl<'a> CleanupTask<'a> {
+  895          } else {
+  896              unmodified_since.map(|cutoff| cutoff.max(verification_threshold))
+  897          };
+  769 -        let streams = vec![
+  898 +        let mut streams = vec![
+  899              build_listing_stream(self.dataset.versions_dir(), unmodified_since),
+  900              build_listing_stream(self.dataset.transactions_dir(), unmodified_since),
+  901              build_listing_stream(self.dataset.data_dir(), data_unmodified_since),
+  902 +            build_listing_stream(
+  903 +                self.dataset.base.clone().join("_blobs"),
+  904 +                data_unmodified_since,
+  905 +            ),
+  906              // Index UUIDs from manifests being removed are proof that their files are
+  907              // safe to delete. Scan every index artifact while that proof is available;
+  908              // a retained-manifest cutoff can otherwise skip newer artifacts and lose
+
+@@ -777,6 +910,16 @@ impl<'a> CleanupTask<'a> {
+  910              build_listing_stream(self.dataset.indices_dir(), None),
+  911              build_listing_stream(self.dataset.deletions_dir(), unmodified_since),
+  912          ];
+  913 +        if collect_frag_reuse_maps {
+  914 +            // Stable-partition row maps, referenced by map id from tagged FRI
+  915 +            // entries. Like `_indices/`, scanned without a cutoff: references
+  916 +            // from manifests removed by this pass are proof of deletability.
+  917 +            // A dataset without a `_fri/` directory yields an empty stream.
+  918 +            streams.push(build_listing_stream(
+  919 +                self.dataset.base.clone().join("_fri"),
+  920 +                None,
+  921 +            ));
+  922 +        }
+  923          let unreferenced_files = stream::iter(streams).flatten().boxed();
+  924  
+  925          let old_manifests = inspection.old_manifests.clone();
+
+@@ -861,7 +1004,7 @@ impl<'a> CleanupTask<'a> {
+ 1004                          // Cleanup lists first and deletes after, so a concurrent
+ 1005                          // writer or a second cleanup can remove a path in between.
+ 1006                          // Already gone is the outcome we wanted.
+  864 -                        Err(error) if is_not_found_err(&error) => Ok(()),
+ 1007 +                        Err(error) if error.is_not_found() => Ok(()),
+ 1008                          Err(error) => Err(error),
+ 1009                      };
+ 1010                      Ok::<_, Error>((file, outcome))
+
+@@ -997,6 +1140,39 @@ impl<'a> CleanupTask<'a> {
+ 1140                  ));
+ 1141              }
+ 1142          }
+ 1143 +        if relative_path.as_ref().starts_with("_fri") {
+ 1144 +            // Row maps are referenced by map id (`_fri/<map_id>/...`) from
+ 1145 +            // tagged FRI entries, resolved in `resolve_frag_reuse_map_ids`.
+ 1146 +            // The same lifecycle as `_indices/`: kept while some retained
+ 1147 +            // manifest references the map; deletable immediately when only
+ 1148 +            // expiring manifests reference it; an unreferenced map (a failed
+ 1149 +            // commit's orphan, or one released by an already-expired history)
+ 1150 +            // ages past the unverified-retention threshold first, which also
+ 1151 +            // protects a just-written map whose commit has not landed yet.
+ 1152 +            if let Some(map_id) = relative_path.parts().nth(1) {
+ 1153 +                if inspection
+ 1154 +                    .referenced_files
+ 1155 +                    .frag_reuse_map_ids
+ 1156 +                    .contains(map_id.as_ref())
+ 1157 +                {
+ 1158 +                    return Ok(None);
+ 1159 +                } else if !maybe_in_progress {
+ 1160 +                    return Ok(cleanup_file(path, CleanupFileKind::Index, true, size_bytes));
+ 1161 +                } else if inspection
+ 1162 +                    .verified_files
+ 1163 +                    .frag_reuse_map_ids
+ 1164 +                    .contains(map_id.as_ref())
+ 1165 +                {
+ 1166 +                    return Ok(cleanup_file(
+ 1167 +                        path,
+ 1168 +                        CleanupFileKind::Index,
+ 1169 +                        false,
+ 1170 +                        size_bytes,
+ 1171 +                    ));
+ 1172 +                }
+ 1173 +            }
+ 1174 +            return Ok(None);
+ 1175 +        }
+ 1176          if relative_path.as_ref().starts_with("_indices") {
+ 1177              // Indices are referenced by UUID so we need to examine the UUID
+ 1178              // portion of the path.
+
+@@ -1051,6 +1227,33 @@ impl<'a> CleanupTask<'a> {
+ 1227                  }
+ 1228              }
+ 1229              Some("blob") => {
+ 1230 +                if inspection
+ 1231 +                    .referenced_files
+ 1232 +                    .managed_blob_paths
+ 1233 +                    .contains(&relative_path)
+ 1234 +                {
+ 1235 +                    return Ok(None);
+ 1236 +                }
+ 1237 +                if relative_path
+ 1238 +                    .parts()
+ 1239 +                    .next()
+ 1240 +                    .is_some_and(|part| part.as_ref() == "_blobs")
+ 1241 +                {
+ 1242 +                    let verified = inspection
+ 1243 +                        .verified_files
+ 1244 +                        .managed_blob_paths
+ 1245 +                        .contains(&relative_path);
+ 1246 +                    return if verified || !maybe_in_progress {
+ 1247 +                        Ok(cleanup_file(
+ 1248 +                            path,
+ 1249 +                            CleanupFileKind::Data,
+ 1250 +                            !verified,
+ 1251 +                            size_bytes,
+ 1252 +                        ))
+ 1253 +                    } else {
+ 1254 +                        Ok(None)
+ 1255 +                    };
+ 1256 +                }
+ 1257                  // Blob v2 sidecar files are keyed by the data file stem:
+ 1258                  //   data/{data_file_key}/{obfuscated_blob_id:032b}.blob
+ 1259                  //
+
+@@ -1111,6 +1314,10 @@ impl<'a> CleanupTask<'a> {
+ 1314                      .verified_files
+ 1315                      .data_paths
+ 1316                      .contains(&parent_data_path)
+ 1317 +                    || inspection
+ 1318 +                        .verified_files
+ 1319 +                        .managed_blob_paths
+ 1320 +                        .contains(&relative_path)
+ 1321                  {
+ 1322                      Ok(cleanup_file(path, CleanupFileKind::Data, false, size_bytes))
+ 1323                  } else {
+
+@@ -1200,26 +1407,38 @@ impl<'a> CleanupTask<'a> {
+ 1407                  let referenced_branches = &referenced_branches;
+ 1408  
+ 1409                  async move {
+ 1203 -                    let manifest_location = dataset
+ 1204 -                        .commit_handler
+ 1205 -                        .resolve_version_location(
+ 1206 -                            &dataset.base,
+ 1207 -                            *referenced_version,
+ 1208 -                            &dataset.object_store.inner,
+ 1209 -                        )
+ 1210 -                        .await?;
+ 1410 +                    let manifest = async {
+ 1411 +                        let manifest_location = dataset
+ 1412 +                            .commit_handler
+ 1413 +                            .resolve_version_location(
+ 1414 +                                &dataset.base,
+ 1415 +                                *referenced_version,
+ 1416 +                                &dataset.object_store.inner,
+ 1417 +                            )
+ 1418 +                            .await?;
+ 1419  
+ 1212 -                    let manifest = read_manifest(
+ 1213 -                        &dataset.object_store,
+ 1214 -                        &manifest_location.path,
+ 1215 -                        manifest_location.size,
+ 1216 -                    )
+ 1420 +                        read_manifest(
+ 1421 +                            &dataset.object_store,
+ 1422 +                            &manifest_location.path,
+ 1423 +                            manifest_location.size,
+ 1424 +                        )
+ 1425 +                        .await
+ 1426 +                    }
+ 1427                      .await;
+ 1218 -
+ 1219 -                    if let Ok(manifest) = manifest
+ 1220 -                        && policy.should_clean(&manifest)
+ 1221 -                    {
+ 1222 -                        referenced_branches.insert(branch_name.clone());
+ 1428 +                    match manifest {
+ 1429 +                        Ok(manifest) => {
+ 1430 +                            ensure_can_read_manifest(&manifest)?;
+ 1431 +                            ensure_can_write_manifest(&manifest)?;
+ 1432 +                            if policy.should_clean(&manifest) {
+ 1433 +                                referenced_branches.insert(branch_name.clone());
+ 1434 +                            }
+ 1435 +                        }
+ 1436 +                        Err(error) if error.is_not_found() => {
+ 1437 +                            // The source may be gone while descendants still use its files.
+ 1438 +                            // Scan their manifests before deleting any parent data.
+ 1439 +                            referenced_branches.insert(branch_name.clone());
+ 1440 +                        }
+ 1441 +                        Err(error) => return Err(error),
+ 1442                      }
+ 1443                      Ok::<(), Error>(())
+ 1444                  }
+
+@@ -1312,6 +1531,7 @@ impl<'a> CleanupTask<'a> {
+ 1531                  })
+ 1532                  .try_for_each_concurrent(self.dataset.object_store.io_parallelism(), |location| {
+ 1533                      self.process_branch_referenced_manifests(
+ 1534 +                        &branch_location.path,
+ 1535                          location,
+ 1536                          *root_version_number,
+ 1537                          &inspection,
+
+@@ -1322,18 +1542,169 @@ impl<'a> CleanupTask<'a> {
+ 1542          Ok(inspection.into_inner().unwrap())
+ 1543      }
+ 1544  
+ 1545 +    /// The `_fri/<map_id>/` row maps a branch manifest's tagged FRI entry
+ 1546 +    /// resolves into THIS dataset's base: stable-partition mappings whose
+ 1547 +    /// `base_id` names the parent (a branch clone's relocated entry keeps
+ 1548 +    /// reading the parent's row maps in place). The entry's own details are
+ 1549 +    /// read base-aware, exactly as a reader on the branch would.
+ 1550 +    async fn branch_frag_reuse_parent_map_ids(
+ 1551 +        &self,
+ 1552 +        branch_root: &Path,
+ 1553 +        manifest: &Manifest,
+ 1554 +        entry: &IndexMetadata,
+ 1555 +    ) -> Result<Vec<String>> {
+ 1556 +        use lance_table::system_index::frag_reuse::ledger::Mapping;
+ 1557 +
+ 1558 +        let details = entry
+ 1559 +            .index_details
+ 1560 +            .as_ref()
+ 1561 +            .filter(|details| details.type_url.ends_with("FragmentReuseIndexDetails"))
+ 1562 +            .ok_or_else(|| Error::index("Index details is not for the fragment reuse index"))?;
+ 1563 +        let content =
+ 1564 +            crate::index::frag_reuse::extract_raw_frag_reuse_content(details, |file| async move {
+ 1565 +                let end = file
+ 1566 +                    .offset
+ 1567 +                    .checked_add(file.size)
+ 1568 +                    .and_then(|n| usize::try_from(n).ok())
+ 1569 +                    .ok_or_else(|| {
+ 1570 +                        Error::corrupt_file_named("FRI details", "external FRI range overflow")
+ 1571 +                    })?;
+ 1572 +                let (store, indices_dir) = match entry.base_id {
+ 1573 +                    None => (None, branch_root.clone().join(crate::dataset::INDICES_DIR)),
+ 1574 +                    Some(id) => {
+ 1575 +                        let base_path = manifest.base_paths.get(&id).ok_or_else(|| {
+ 1576 +                            Error::invalid_input(format!(
+ 1577 +                                "base_path id {} not found for index {}",
+ 1578 +                                id, entry.uuid
+ 1579 +                            ))
+ 1580 +                        })?;
+ 1581 +                        let path = base_path.extract_path(self.dataset.session.store_registry())?;
+ 1582 +                        let dir = if base_path.is_dataset_root {
+ 1583 +                            path.join(crate::dataset::INDICES_DIR)
+ 1584 +                        } else {
+ 1585 +                            path
+ 1586 +                        };
+ 1587 +                        let store = if base_path.path == self.dataset.uri {
+ 1588 +                            None
+ 1589 +                        } else {
+ 1590 +                            // Foreign bases are opened with default store
+ 1591 +                            // params; per-base credentials are not plumbed
+ 1592 +                            // through cleanup (see
+ 1593 +                            // <https://github.com/lance-format/lance/issues/6093>).
+ 1594 +                            Some(
+ 1595 +                                lance_io::object_store::ObjectStore::from_uri_and_params(
+ 1596 +                                    self.dataset.session.store_registry(),
+ 1597 +                                    &base_path.path,
+ 1598 +                                    &Default::default(),
+ 1599 +                                )
+ 1600 +                                .await?
+ 1601 +                                .0,
+ 1602 +                            )
+ 1603 +                        };
+ 1604 +                        (store, dir)
+ 1605 +                    }
+ 1606 +                };
+ 1607 +                let path = indices_dir
+ 1608 +                    .join(entry.uuid.to_string())
+ 1609 +                    .join(file.path.as_str());
+ 1610 +                let store = store.as_deref().unwrap_or(&self.dataset.object_store);
+ 1611 +                store
+ 1612 +                    .open(&path)
+ 1613 +                    .await?
+ 1614 +                    .get_range(file.offset as usize..end)
+ 1615 +                    .await
+ 1616 +                    .map_err(Error::from)
+ 1617 +            })
+ 1618 +            .await?;
+ 1619 +        let ledger = crate::index::frag_reuse::decode_frag_reuse_ledger_from_content(
+ 1620 +            entry.index_version,
+ 1621 +            &content,
+ 1622 +        )
+ 1623 +        .await?;
+ 1624 +        if ledger.has_unsupported_transitions() {
+ 1625 +            return Err(Error::not_supported(
+ 1626 +                "the branch's tagged FRI history carries transitions this client cannot interpret",
+ 1627 +            ));
+ 1628 +        }
+ 1629 +        Ok(ledger
+ 1630 +            .transitions()
+ 1631 +            .iter()
+ 1632 +            .filter_map(|transition| match transition.mapping() {
+ 1633 +                Mapping::StablePartition(partition) => partition
+ 1634 +                    .base_id
+ 1635 +                    .and_then(|id| manifest.base_paths.get(&id))
+ 1636 +                    .filter(|base_path| base_path.path == self.dataset.uri)
+ 1637 +                    .map(|_| partition.map_id.clone()),
+ 1638 +                _ => None,
+ 1639 +            })
+ 1640 +            .collect())
+ 1641 +    }
+ 1642 +
+ 1643      async fn process_branch_referenced_manifests(
+ 1644          &self,
+ 1645 +        branch_root: &Path,
+ 1646          location: ManifestLocation,
+ 1647          referenced_version: u64,
+ 1648          inspection: &Mutex<CleanupInspection>,
+ 1649      ) -> Result<()> {
+ 1650          let manifest =
+ 1651              read_manifest(&self.dataset.object_store, &location.path, location.size).await?;
+ 1652 +        ensure_can_read_manifest(&manifest)?;
+ 1653 +        ensure_can_write_manifest(&manifest)?;
+ 1654 +        let managed_paths = if manifest.has_managed_blobs() {
+ 1655 +            let snapshot = self
+ 1656 +                .dataset
+ 1657 +                .checkout_version((manifest.branch.as_deref(), Some(manifest.version)))
+ 1658 +                .await?;
+ 1659 +            super::blob::managed_paths(&snapshot, self.dataset).await?
+ 1660 +        } else {
+ 1661 +            HashSet::new()
+ 1662 +        };
+ 1663          let indexes =
+ 1664              read_manifest_indexes(&self.dataset.object_store, &location, &manifest).await?;
+ 1665 +
+ 1666 +        // Resolve tagged FRI references into the parent before taking the
+ 1667 +        // lock (content reads are async). A history this client cannot
+ 1668 +        // interpret disables `_fri/` GC for the whole run: it may reference
+ 1669 +        // parent row maps invisibly.
+ 1670 +        let mut branch_parent_map_ids: Vec<String> = Vec::new();
+ 1671 +        let mut fri_unresolvable = false;
+ 1672 +        for index in indexes.iter() {
+ 1673 +            if index.name == lance_index::frag_reuse::FRAG_REUSE_INDEX_NAME
+ 1674 +                && index.index_version != 0
+ 1675 +            {
+ 1676 +                match self
+ 1677 +                    .branch_frag_reuse_parent_map_ids(branch_root, &manifest, index)
+ 1678 +                    .await
+ 1679 +                {
+ 1680 +                    Ok(map_ids) => branch_parent_map_ids.extend(map_ids),
+ 1681 +                    Err(error) => {
+ 1682 +                        warn!(
+ 1683 +                            entry_uuid = %index.uuid,
+ 1684 +                            error = %error,
+ 1685 +                            "Cannot resolve the row-map references of a branch's fragment \
+ 1686 +                             reuse index entry; skipping _fri garbage collection for this run"
+ 1687 +                        );
+ 1688 +                        fri_unresolvable = true;
+ 1689 +                    }
+ 1690 +                }
+ 1691 +            }
+ 1692 +        }
+ 1693 +
+ 1694          let mut inspection = inspection.lock().unwrap();
+ 1695          let mut is_referenced = false;
+ 1696 +        for path in managed_paths {
+ 1697 +            let relative = remove_prefix(&path, &self.dataset.base);
+ 1698 +            inspection
+ 1699 +                .verified_files
+ 1700 +                .managed_blob_paths
+ 1701 +                .remove(&relative);
+ 1702 +            inspection
+ 1703 +                .referenced_files
+ 1704 +                .managed_blob_paths
+ 1705 +                .insert(relative);
+ 1706 +            is_referenced = true;
+ 1707 +        }
+ 1708  
+ 1709          for fragment in manifest.fragments.iter() {
+ 1710              for file in fragment.referenced_lance_files() {
+
+@@ -1396,12 +1767,39 @@ impl<'a> CleanupTask<'a> {
+ 1767                  }
+ 1768              }
+ 1769          }
+ 1770 +        if fri_unresolvable {
+ 1771 +            inspection.skip_frag_reuse_gc = true;
+ 1772 +        }
+ 1773 +        // The branch's relocated FRI entry keeps translating through row
+ 1774 +        // maps that live in the parent's `_fri/`; those maps are part of the
+ 1775 +        // working set for as long as the branch's history references them.
+ 1776 +        for map_id in branch_parent_map_ids {
+ 1777 +            inspection.verified_files.frag_reuse_map_ids.remove(&map_id);
+ 1778 +            inspection
+ 1779 +                .referenced_files
+ 1780 +                .frag_reuse_map_ids
+ 1781 +                .insert(map_id);
+ 1782 +            is_referenced = true;
+ 1783 +        }
+ 1784          if is_referenced {
+ 1785              inspection
+ 1786                  .old_manifests
+ 1787                  .retain(|_path, expired| expired.version != referenced_version);
+ 1788              // Kept on disk, so its record stays too.
+ 1789              inspection.retired_records.remove(&referenced_version);
+ 1790 +            // The rescued parent manifest's own FRI entries join the working
+ 1791 +            // set with it: their row maps become referenced, not merely
+ 1792 +            // verified, when `resolve_frag_reuse_map_ids` decodes them.
+ 1793 +            if let Some(uuids) = inspection
+ 1794 +                .frag_reuse_entry_versions
+ 1795 +                .get(&referenced_version)
+ 1796 +            {
+ 1797 +                for uuid in uuids.clone() {
+ 1798 +                    if let Some(entry) = inspection.frag_reuse_entries.get_mut(&uuid) {
+ 1799 +                        entry.1 = true;
+ 1800 +                    }
+ 1801 +                }
+ 1802 +            }
+ 1803          }
+ 1804  
+ 1805          Ok(())
+
+@@ -1426,7 +1824,7 @@ async fn expired_manifest_size(
+ 1824          Some(size_bytes) => Ok(size_bytes),
+ 1825          None => match object_store.size(path).await {
+ 1826              Ok(size_bytes) => Ok(size_bytes),
+ 1429 -            Err(Error::NotFound { .. }) => Ok(0),
+ 1827 +            Err(error) if error.is_not_found() => Ok(0),
+ 1828              Err(error) => Err(error),
+ 1829          },
+ 1830      }

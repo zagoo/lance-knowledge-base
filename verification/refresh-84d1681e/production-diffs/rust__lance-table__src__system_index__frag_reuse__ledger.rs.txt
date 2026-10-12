@@ -1,0 +1,112 @@
+@@ -60,6 +60,7 @@ pub struct Transition {
+   60      sources: Vec<pb::FragmentDigest>,
+   61      destinations: Vec<pb::FragmentDigest>,
+   62      mapping: Mapping,
+   63 +    legacy_dataset_version: Option<u64>,
+   64  }
+   65  
+   66  impl Transition {
+
+@@ -83,6 +84,14 @@ impl Transition {
+   84      pub fn mapping(&self) -> &Mapping {
+   85          &self.mapping
+   86      }
+   87 +
+   88 +    /// Some for a transition lifted from a v0 `Version` (wire field 1): that
+   89 +    /// version's `dataset_version`, the stamp the v0 `data_predates_version`
+   90 +    /// rule compares a segment against. None for a tagged transition, whose
+   91 +    /// provenance is never swapped.
+   92 +    pub fn legacy_dataset_version(&self) -> Option<u64> {
+   93 +        self.legacy_dataset_version
+   94 +    }
+   95  }
+   96  
+   97  /// Supported transitions in fragment-lineage order, independent of serialization order.
+
+@@ -182,15 +191,18 @@ impl FragReuseLedger {
+  191                      let version = pb::Version::decode(require_message(tag, payload)?)
+  192                          .map_err(|e| corrupt(e.to_string()))?;
+  193                      for group in version.groups {
+  185 -                        transitions.push(decode_transition(pb::Transition {
+  186 -                            sources: group.old_fragments,
+  187 -                            destinations: group.new_fragments,
+  188 -                            mapping: Some(transition::Mapping::OrderedCompaction(
+  189 -                                pb::OrderedCompaction {
+  190 -                                    changed_row_addrs: group.changed_row_addrs,
+  191 -                                },
+  192 -                            )),
+  193 -                        })?);
+  194 +                        transitions.push(decode_transition(
+  195 +                            pb::Transition {
+  196 +                                sources: group.old_fragments,
+  197 +                                destinations: group.new_fragments,
+  198 +                                mapping: Some(transition::Mapping::OrderedCompaction(
+  199 +                                    pb::OrderedCompaction {
+  200 +                                        changed_row_addrs: group.changed_row_addrs,
+  201 +                                    },
+  202 +                                )),
+  203 +                            },
+  204 +                            Some(version.dataset_version),
+  205 +                        )?);
+  206                      }
+  207                  }
+  208                  2 => {
+
+@@ -226,9 +238,19 @@ impl FragReuseLedger {
+  238                      }
+  239                      let decoded =
+  240                          pb::Transition::decode(raw).map_err(|e| corrupt(e.to_string()))?;
+  229 -                    transitions.push(decode_transition(decoded)?);
+  241 +                    transitions.push(decode_transition(decoded, None)?);
+  242 +                }
+  243 +                _ => {
+  244 +                    // An unknown envelope record does not participate in
+  245 +                    // address resolution here, but it may carry lineage or
+  246 +                    // row-map references this build cannot see, so the ledger
+  247 +                    // is not fully interpretable: maintenance (trim, remap,
+  248 +                    // row-map collection) and writers extending the history
+  249 +                    // must refuse, exactly as they do for a transition with
+  250 +                    // an unknown mapping. Reads are unaffected (the reader
+  251 +                    // only logs this flag).
+  252 +                    has_unsupported_transitions = true;
+  253                  }
+  231 -                _ => {} // Unknown envelope fields do not participate in address resolution.
+  254              }
+  255          }
+  256          let transitions = order_lineage(transitions)?;
+
+@@ -260,8 +282,10 @@ impl FragReuseLedger {
+  282          })
+  283      }
+  284  
+  263 -    /// Whether decoding omitted transitions this implementation cannot interpret.
+  264 -    /// Such a ledger is insufficient for maintenance; carrying the original
+  285 +    /// Whether decoding omitted content this implementation cannot interpret:
+  286 +    /// a transition with unknown fields or an unknown mapping, or an unknown
+  287 +    /// envelope-level record. Such a ledger is insufficient for maintenance
+  288 +    /// (and for writers extending the history); carrying the original
+  289      /// serialized details forward without interpreting them is still possible.
+  290      pub fn has_unsupported_transitions(&self) -> bool {
+  291          self.has_unsupported_transitions
+
+@@ -383,7 +407,10 @@ fn validate_digests(digests: &[pb::FragmentDigest], is_destination: bool) -> Res
+  407      Ok(live_rows)
+  408  }
+  409  
+  386 -fn decode_transition(value: pb::Transition) -> Result<Transition> {
+  410 +fn decode_transition(
+  411 +    value: pb::Transition,
+  412 +    legacy_dataset_version: Option<u64>,
+  413 +) -> Result<Transition> {
+  414      if value.sources.is_empty() {
+  415          return Err(corrupt("transition has no source fragments"));
+  416      }
+
+@@ -446,6 +473,7 @@ fn decode_transition(value: pb::Transition) -> Result<Transition> {
+  473          sources: value.sources,
+  474          destinations: value.destinations,
+  475          mapping,
+  476 +        legacy_dataset_version,
+  477      })
+  478  }
+  479  

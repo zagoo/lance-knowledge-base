@@ -1,0 +1,62 @@
+@@ -6,6 +6,8 @@
+    6  //! prewarming, and the rebuilds that update, remap or merge segments.
+    7  
+    8  use super::*;
+    9 +use crate::scalar::RowAddrTranslatorRef;
+   10 +use lance_core::utils::row_addr_remap::RowAddrRemap;
+   11  
+   12  use std::collections::VecDeque;
+   13  
+
+@@ -1230,6 +1232,26 @@ impl Index for MinHashLshIndex {
+ 1232      }
+ 1233  }
+ 1234  
+ 1235 +impl MinHashLshIndex {
+ 1236 +    /// The one remap implementation: the legacy `remap` (an in-memory
+ 1237 +    /// mapping, borrowed as a synchronous translator) and `remap_streaming`
+ 1238 +    /// both come here, so neither copies a map nor delegates to the other.
+ 1239 +    async fn remap_with(
+ 1240 +        &self,
+ 1241 +        mapping: RowAddrTranslatorRef<'_>,
+ 1242 +        dest_store: &dyn IndexStore,
+ 1243 +    ) -> Result<CreatedIndex> {
+ 1244 +        let files = MinHashLshIndexBuilder::try_new(self.params.clone())?
+ 1245 +            .rebuild_from(
+ 1246 +                vec![self.signature_source(RowIdTransform::Remap(mapping))],
+ 1247 +                None,
+ 1248 +                dest_store,
+ 1249 +            )
+ 1250 +            .await?;
+ 1251 +        self.created_index(files)
+ 1252 +    }
+ 1253 +}
+ 1254 +
+ 1255  #[async_trait]
+ 1256  impl ScalarIndex for MinHashLshIndex {
+ 1257      async fn search(
+
+@@ -1251,14 +1273,15 @@ impl ScalarIndex for MinHashLshIndex {
+ 1273          mapping: &RowAddrRemap,
+ 1274          dest_store: &dyn IndexStore,
+ 1275      ) -> Result<CreatedIndex> {
+ 1254 -        let files = MinHashLshIndexBuilder::try_new(self.params.clone())?
+ 1255 -            .rebuild_from(
+ 1256 -                vec![self.signature_source(RowIdTransform::Remap(mapping))],
+ 1257 -                None,
+ 1258 -                dest_store,
+ 1259 -            )
+ 1260 -            .await?;
+ 1261 -        self.created_index(files)
+ 1276 +        self.remap_with(mapping.into(), dest_store).await
+ 1277 +    }
+ 1278 +
+ 1279 +    async fn remap_streaming(
+ 1280 +        &self,
+ 1281 +        translator: &RowAddrTranslator,
+ 1282 +        dest_store: &dyn IndexStore,
+ 1283 +    ) -> Result<CreatedIndex> {
+ 1284 +        self.remap_with(translator.as_ref(), dest_store).await
+ 1285      }
+ 1286  
+ 1287      async fn update(

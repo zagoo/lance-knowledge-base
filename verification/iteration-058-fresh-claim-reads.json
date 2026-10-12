@@ -1,0 +1,162 @@
+[
+  {
+    "id": 1,
+    "path": "rust/lance-file/test_data/exact_versions/datagen.rs",
+    "start": 37,
+    "end": 53,
+    "read_at": "2026-10-03T20:44:48.470Z",
+    "evidence": "37 | fn compatibility_fixture_batch() -> RecordBatch {\n38 |     let row_count = 4097;\n39 |     let ids = Arc::new(Int32Array::from_iter_values(0..row_count)) as ArrayRef;\n40 |     let names = Arc::new(StringArray::from_iter((0..row_count).map(|index| {\n41 |         (index % 7 != 0).then(|| format!(\"value-{index:04}-deterministic-fixture\"))\n42 |     }))) as ArrayRef;\n43 |     let items = Arc::new(ListArray::from_iter_primitive::<Int32Type, _, _>(\n44 |         (0..row_count).map(|index| {\n45 |             (index % 11 != 0).then(|| {\n46 |                 vec![\n47 |                     Some(index),\n48 |                     (index % 5 != 0).then_some(index * 2),\n49 |                     Some(index * 3),\n50 |                 ]\n51 |             })\n52 |         }),\n53 |     )) as ArrayRef;"
+  },
+  {
+    "id": 2,
+    "path": "rust/lance-table/src/transaction/proto.rs",
+    "start": 814,
+    "end": 841,
+    "read_at": "2026-10-03T20:44:48.471Z",
+    "evidence": "814 |     #[test]\n815 |     fn test_rewrite_frag_reuse_update_stays_in_memory() {\n816 |         // The fragment reuse update never enters the transaction file:\n817 |         // other writers' conflict decisions only need the fragment sets in\n818 |         // `groups`.\n819 |         let entry = crate::transaction::test_support::sample_index_metadata(\n820 |             crate::system_index::frag_reuse::FRAG_REUSE_INDEX_NAME,\n821 |         );\n822 |         let transaction = Transaction::new(\n823 |             1,\n824 |             Operation::Rewrite {\n825 |                 groups: vec![],\n826 |                 rewritten_indices: vec![],\n827 |                 frag_reuse_index: Some(entry),\n828 |             },\n829 |             None,\n830 |         );\n831 |         let decoded = Transaction::try_from(pb::Transaction::from(&transaction)).unwrap();\n832 |         match decoded.operation {\n833 |             Operation::Rewrite {\n834 |                 frag_reuse_index, ..\n835 |             } => {\n836 |                 assert!(frag_reuse_index.is_none());\n837 |             }\n838 |             other => panic!(\"expected Rewrite, got {other:?}\"),\n839 |         }\n840 |     }\n841 | "
+  },
+  {
+    "id": 3,
+    "path": "rust/lance-table/src/io/commit/dynamodb.rs",
+    "start": 162,
+    "end": 183,
+    "read_at": "2026-10-03T20:44:48.471Z",
+    "evidence": "162 | impl DynamoDBExternalManifestStore {\n163 |     pub async fn new_external_store(\n164 |         client: Arc<Client>,\n165 |         table_name: &str,\n166 |         committer_name: &str,\n167 |     ) -> Result<Arc<dyn ExternalManifestStore>> {\n168 |         static SANITY_CHECK_CACHE: LazyLock<RwLock<HashSet<String>>> =\n169 |             LazyLock::new(|| RwLock::new(HashSet::new()));\n170 | \n171 |         let store = Arc::new(Self {\n172 |             client: client.clone(),\n173 |             table_name: table_name.to_string(),\n174 |             committer_name: committer_name.to_string(),\n175 |         });\n176 | \n177 |         // already checked this table before, skip\n178 |         // this is to avoid checking the table schema every time\n179 |         // because it's expensive to call DescribeTable\n180 |         if SANITY_CHECK_CACHE.read().await.contains(table_name) {\n181 |             return Ok(store);\n182 |         }\n183 | "
+  },
+  {
+    "id": 4,
+    "path": "rust/lance-table/src/feature_flags.rs",
+    "start": 23,
+    "end": 32,
+    "read_at": "2026-10-03T20:44:48.471Z",
+    "evidence": "23 | /// Fragments contain data overlay files, which supply new values for a subset of\n24 | /// cells without rewriting base data files. A reader that does not understand\n25 | /// overlays must refuse the dataset, since ignoring an overlay would silently\n26 | /// return stale base values.\n27 | ///\n28 | /// Data overlay files are not yet a released feature: in release builds this flag\n29 | /// is treated as unknown (so a release reader/writer refuses an overlay dataset)\n30 | /// unless [`ENABLE_UNSTABLE_DATA_OVERLAY_FILES_ENV`] is set, which lets benchmarks opt in.\n31 | /// Debug builds always understand it so tests exercise the path.\n32 | pub const FLAG_UNSTABLE_DATA_OVERLAY_FILES: u64 = 1 << 6;"
+  },
+  {
+    "id": 5,
+    "path": "rust/lance-table/src/rowids.rs",
+    "start": 1666,
+    "end": 1697,
+    "read_at": "2026-10-03T20:44:57.785Z",
+    "evidence": "1666 |     #[test]\n1667 |     fn test_selection_over_a_large_bitmap_segment() {\n1668 |         // A restart-per-index scan of this segment takes tens of seconds, so a\n1669 |         // regression to that shows up as a test that no longer finishes quickly.\n1670 |         const ROWS: usize = 1_000_000;\n1671 |         let mut bitmap = Bitmap::new_full(ROWS);\n1672 |         for hole in (0..ROWS).step_by(17) {\n1673 |             bitmap.clear(hole);\n1674 |         }\n1675 |         let sequence = RowIdSequence(vec![\n1676 |             U64Segment::Range(0..8),\n1677 |             U64Segment::RangeWithBitmap {\n1678 |                 range: 1_000..(1_000 + ROWS as u64),\n1679 |                 bitmap,\n1680 |             },\n1681 |         ]);\n1682 |         let live: Vec<u64> = sequence.iter().collect();\n1683 | \n1684 |         let all = sequence.select(0..live.len()).collect::<Vec<_>>();\n1685 |         assert_eq!(all, live);\n1686 | \n1687 |         // Byte-boundary and tail indices, read through one cursor.\n1688 |         let mut picks: Vec<usize> = [0, 7, 8, 9, 15, 16, 63, 64, 65]\n1689 |             .into_iter()\n1690 |             .chain((0..live.len()).step_by(9973))\n1691 |             .chain([live.len() - 1, live.len()])\n1692 |             .collect();\n1693 |         picks.sort_unstable();\n1694 |         let got = sequence.select(picks.iter().copied()).collect::<Vec<_>>();\n1695 |         let want: Vec<u64> = picks.iter().filter_map(|&i| live.get(i).copied()).collect();\n1696 |         assert_eq!(got, want);\n1697 | "
+  },
+  {
+    "id": 6,
+    "path": "rust/lance-table/src/io/commit.rs",
+    "start": 91,
+    "end": 113,
+    "read_at": "2026-10-03T20:44:57.786Z",
+    "evidence": "91 | \n92 | impl ManifestNamingScheme {\n93 |     pub fn manifest_path(&self, base: &Path, version: u64) -> Path {\n94 |         if is_detached_version(version) {\n95 |             // Detached versions should never show up first in a list operation which\n96 |             // means it needs to come lexicographically after all attached manifest\n97 |             // files and so we add the prefix `d`.  There is no need to invert the\n98 |             // version number since detached versions are not part of the version\n99 |             base.clone().join(VERSIONS_DIR).join(format!(\n100 |                 \"{DETACHED_VERSION_PREFIX}{version}.{MANIFEST_EXTENSION}\"\n101 |             ))\n102 |         } else {\n103 |             let directory = base.clone().join(VERSIONS_DIR);\n104 |             match self {\n105 |                 Self::V1 => directory.join(format!(\"{version}.{MANIFEST_EXTENSION}\")),\n106 |                 Self::V2 => {\n107 |                     let inverted_version = u64::MAX - version;\n108 |                     directory.join(format!(\"{inverted_version:020}.{MANIFEST_EXTENSION}\"))\n109 |                 }\n110 |             }\n111 |         }\n112 |     }\n113 | "
+  },
+  {
+    "id": 7,
+    "path": "rust/lance-core/src/cache/codec.rs",
+    "start": 76,
+    "end": 103,
+    "read_at": "2026-10-03T20:44:57.786Z",
+    "evidence": "76 | /// Parsed envelope borrowed from the input bytes.\n77 | struct ParsedEnvelope<'a> {\n78 |     type_id: &'a str,\n79 |     type_version: u32,\n80 |     /// Offset of the first body byte within the input.\n81 |     body_offset: usize,\n82 | }\n83 | \n84 | /// Parse and validate the envelope at the start of `data`.\n85 | ///\n86 | /// Returns `None` for anything that is not a well-formed envelope this build\n87 | /// understands (wrong/absent magic, unknown `envelope_version`, truncation,\n88 | /// non-utf8 `type_id`). Callers translate `None` into [`CacheDecode::Miss`].\n89 | fn parse_envelope(data: &Bytes) -> Option<ParsedEnvelope<'_>> {\n90 |     let bytes = data.as_ref();\n91 |     let mut off = 0usize;\n92 | \n93 |     let magic = bytes.get(off..off + 4)?;\n94 |     if magic != MAGIC {\n95 |         return None;\n96 |     }\n97 |     off += 4;\n98 | \n99 |     if *bytes.get(off)? != ENVELOPE_VERSION {\n100 |         return None;\n101 |     }\n102 |     off += 1;\n103 | "
+  },
+  {
+    "id": 8,
+    "path": "rust/lance-table/src/transaction/manifest_build.rs",
+    "start": 3695,
+    "end": 3743,
+    "read_at": "2026-10-03T20:44:57.787Z",
+    "evidence": "3695 |     #[test]\n3696 |     fn test_proto_round_trip_field_10() {\n3697 |         let off_map = HashMap::from([\n3698 |             (1u64, RoaringBitmap::from_iter([1u32, 3, 5])),\n3699 |             (2u64, RoaringBitmap::from_iter([0u32, 2, 4, 6])),\n3700 |         ]);\n3701 |         let tx = Transaction::new(\n3702 |             1,\n3703 |             Operation::Update {\n3704 |                 removed_fragment_ids: vec![],\n3705 |                 updated_fragments: vec![],\n3706 |                 new_fragments: vec![],\n3707 |                 fields_modified: vec![],\n3708 |                 compacted_sstables: vec![],\n3709 |                 fields_for_preserving_frag_bitmap: vec![],\n3710 |                 update_mode: Some(UpdateMode::RewriteColumns),\n3711 |                 inserted_rows_filter: None,\n3712 |                 updated_fragment_offsets: Some(UpdatedFragmentOffsets(off_map.clone())),\n3713 |             },\n3714 |             None,\n3715 |         );\n3716 | \n3717 |         let pb_tx: pb::Transaction = pb::Transaction::from(&tx);\n3718 | \n3719 |         // Field 9 must be empty; field 10 must be populated.\n3720 |         if let Some(pb::transaction::Operation::Update(ref update)) = pb_tx.operation {\n3721 |             assert!(\n3722 |                 update.updated_fragment_offsets.is_empty(),\n3723 |                 \"field 9 should be empty\"\n3724 |             );\n3725 |             assert_eq!(update.updated_fragment_offset_bitmaps.len(), 2);\n3726 |         } else {\n3727 |             panic!(\"expected Update operation\");\n3728 |         }\n3729 | \n3730 |         let tx2 = Transaction::try_from(pb_tx).unwrap();\n3731 |         if let Operation::Update {\n3732 |             updated_fragment_offsets: Some(UpdatedFragmentOffsets(m)),\n3733 |             ..\n3734 |         } = &tx2.operation\n3735 |         {\n3736 |             assert_eq!(m.len(), 2);\n3737 |             assert_eq!(*m.get(&1).unwrap(), off_map[&1]);\n3738 |             assert_eq!(*m.get(&2).unwrap(), off_map[&2]);\n3739 |         } else {\n3740 |             panic!(\"expected Update with offsets\");\n3741 |         }\n3742 |     }\n3743 | "
+  },
+  {
+    "id": 9,
+    "path": "rust/lance-core/src/utils/row_addr_remap.rs",
+    "start": 585,
+    "end": 605,
+    "read_at": "2026-10-03T20:44:57.787Z",
+    "evidence": "585 |     fn new_with_layout(groups: impl IntoIterator<Item = GroupInputWithLayout>) -> Result<Self> {\n586 |         let mut frags = IntMap::default();\n587 |         let mut group_remaps = Vec::new();\n588 |         for input in groups {\n589 |             let gi = group_remaps.len();\n590 |             let (group_remap, group_frags) = GroupRemap::new_with_layout(input, gi)?;\n591 |             for (frag_id, frag) in group_frags {\n592 |                 if frags.insert(frag_id, frag).is_some() {\n593 |                     return Err(Error::invalid_input(format!(\n594 |                         \"old fragment {frag_id} appears in more than one rewrite group, including group {gi}\"\n595 |                     )));\n596 |                 }\n597 |             }\n598 |             group_remaps.push(group_remap);\n599 |         }\n600 |         Ok(Self {\n601 |             groups: group_remaps,\n602 |             frags,\n603 |         })\n604 |     }\n605 | "
+  },
+  {
+    "id": 10,
+    "path": "rust/lance-file/src/compatibility_tests.rs",
+    "start": 53,
+    "end": 71,
+    "read_at": "2026-10-03T20:45:14.655Z",
+    "evidence": "53 |     let mut categories = StringDictionaryBuilder::<Int8Type>::new();\n54 |     for index in 0..row_count {\n55 |         if index % 13 == 0 {\n56 |             categories.append_null();\n57 |         } else {\n58 |             categories\n59 |                 .append(match index % 3 {\n60 |                     0 => \"red\",\n61 |                     1 => \"green\",\n62 |                     _ => \"blue\",\n63 |                 })\n64 |                 .unwrap();\n65 |         }\n66 |     }\n67 |     let categories = Arc::new(categories.finish()) as ArrayRef;\n68 |     let blobs = Arc::new(LargeBinaryArray::from_iter_values(\n69 |         (0..row_count).map(|index| format!(\"blob-{index:04}-deterministic-payload\").into_bytes()),\n70 |     )) as ArrayRef;\n71 | "
+  },
+  {
+    "id": 11,
+    "path": "rust/lance-file/src/versions/v2_2/writer.rs",
+    "start": 59,
+    "end": 77,
+    "read_at": "2026-10-03T20:45:14.655Z",
+    "evidence": "59 | \n60 |     /// Create a v2.2 writer whose schema is inferred from the first batch.\n61 |     pub fn new_lazy(object_writer: Box<dyn ObjectWriter>, options: FileWriterOptions) -> Self {\n62 |         Self::new_lazy_with_compression(object_writer, options, Default::default())\n63 |     }\n64 | \n65 |     /// Create a lazy v2.2 writer with explicit compression tuning.\n66 |     pub fn new_lazy_with_compression(\n67 |         object_writer: Box<dyn ObjectWriter>,\n68 |         options: FileWriterOptions,\n69 |         compression: CompressionParams,\n70 |     ) -> Self {\n71 |         Self {\n72 |             sink: StructuralFileSink::new(object_writer),\n73 |             encoding: EncodingPipeline::new(options),\n74 |             compression,\n75 |         }\n76 |     }\n77 | "
+  },
+  {
+    "id": 12,
+    "path": "rust/lance-table/src/transaction/validate.rs",
+    "start": 391,
+    "end": 417,
+    "read_at": "2026-10-03T20:45:14.655Z",
+    "evidence": "391 | fn shared_field_binding_changes(prior: &Field, new: &Field) -> Option<String> {\n392 |     let mut changes = Vec::with_capacity(4);\n393 |     if prior.logical_type != new.logical_type {\n394 |         changes.push(format!(\n395 |             \"logical type {} -> {}\",\n396 |             prior.logical_type, new.logical_type\n397 |         ));\n398 |     }\n399 |     if prior.nullable != new.nullable {\n400 |         changes.push(format!(\"nullable {} -> {}\", prior.nullable, new.nullable));\n401 |     }\n402 |     if prior.encoding != new.encoding {\n403 |         changes.push(format!(\n404 |             \"storage encoding {:?} -> {:?}\",\n405 |             prior.encoding, new.encoding\n406 |         ));\n407 |     }\n408 |     if prior.dictionary != new.dictionary {\n409 |         changes.push(\"dictionary\".to_string());\n410 |     }\n411 |     if changes.is_empty() {\n412 |         None\n413 |     } else {\n414 |         Some(changes.join(\", \"))\n415 |     }\n416 | }\n417 | "
+  },
+  {
+    "id": 13,
+    "path": "rust/lance-table/src/transaction/validate.rs",
+    "start": 257,
+    "end": 279,
+    "read_at": "2026-10-03T20:45:14.655Z",
+    "evidence": "257 | /// Validate that a Merge schema preserves the dataset's field id bindings.\n258 | ///\n259 | /// Readers resolve columns by field id (name -> schema id -> DataFile::fields\n260 | /// position), so renumbered ids silently rebind live columns to other columns'\n261 | /// bytes. Shared ids must keep their field path. Their logical type,\n262 | /// nullability, storage encoding, and dictionary may change only when every\n263 | /// existing base or overlay file carrying the id is replaced and every\n264 | /// proposed fragment materializes the id in a base data file. New ids must\n265 | /// exceed the manifest's max so a dropped field's id is never reused. An\n266 | /// existing path may move to a fresh id only when every proposed fragment\n267 | /// materializes that id in a base data file (the `alter_columns` cast path).\n268 | /// Omitting a field (dropping it) and updating field metadata remain legal.\n269 | fn merge_schema_valid(\n270 |     manifest: &Manifest,\n271 |     new_schema: &Schema,\n272 |     fragments: &[Fragment],\n273 | ) -> Result<()> {\n274 |     let prior_schema = &manifest.schema;\n275 |     let new_fragment_map: HashMap<u64, &Fragment> = fragments\n276 |         .iter()\n277 |         .map(|fragment| (fragment.id, fragment))\n278 |         .collect();\n279 | "
+  },
+  {
+    "id": 14,
+    "path": "rust/lance-table/src/transaction/row_version.rs",
+    "start": 186,
+    "end": 205,
+    "read_at": "2026-10-03T20:45:14.656Z",
+    "evidence": "186 |         if matches!(meta, RowDatasetVersionMeta::Column) {\n187 |             // The rewritten rows' original created-at versions live in a data\n188 |             // file, which this path cannot read. Defaulting them would silently\n189 |             // rewrite their lineage, so the caller has to have read them.\n190 |             let loaded = spilled\n191 |                 .get(&frag.id)\n192 |                 .and_then(|lineage| lineage.created_at.clone())\n193 |                 .ok_or_else(|| {\n194 |                     Error::not_supported(format!(\n195 |                         \"fragment {} stores its created-at versions outside the manifest \\\n196 |                          and they were not loaded ahead of the commit\",\n197 |                         frag.id\n198 |                     ))\n199 |                 })?;\n200 |             version_cache.insert(frag.id, loaded.as_ref().clone());\n201 |         } else if let Ok(seq) = meta.load_sequence() {\n202 |             version_cache.insert(frag.id, seq);\n203 |         }\n204 |     }\n205 | "
+  },
+  {
+    "id": 15,
+    "path": "rust/lance-core/src/utils/bloomfilter/sbbf.rs",
+    "start": 271,
+    "end": 289,
+    "read_at": "2026-10-03T20:45:21.578Z",
+    "evidence": "271 |     /// Create a new empty SBBF with the given number of bytes\n272 |     /// The actual size will be adjusted to the next power of two within bounds\n273 |     pub fn with_log2_num_bytes(log2_num_bytes: u8) -> Self {\n274 |         let num_bytes =\n275 |             1_usize << log2_num_bytes.clamp(BITSET_LOG2_MIN_BYTES, BITSET_LOG2_MAX_BYTES);\n276 |         let bitset = vec![0_u8; num_bytes];\n277 |         // unwrap is safe because we know the size is valid\n278 |         Self::new(&bitset).unwrap()\n279 |     }\n280 | \n281 |     /// Create a new SBBF with given number of distinct values and false positive probability\n282 |     pub fn with_ndv_fpp(ndv: u64, fpp: f64) -> Result<Self> {\n283 |         if !(0.0..1.0).contains(&fpp) {\n284 |             return Err(SbbfError::InvalidFpp { fpp });\n285 |         }\n286 |         let log2_num_bytes = min_log2_bytes(ndv, fpp);\n287 |         Ok(Self::with_log2_num_bytes(log2_num_bytes))\n288 |     }\n289 | "
+  },
+  {
+    "id": 16,
+    "path": "rust/lance-table/src/transaction/validate.rs",
+    "start": 724,
+    "end": 755,
+    "read_at": "2026-10-03T20:45:21.578Z",
+    "evidence": "724 |         // New fragments in STABLE format omit struct parent field (id=2),\n725 |         // only including leaf fields: id=0, name=1, city=3, country=4\n726 |         let stable_fragment = Fragment {\n727 |             id: 0,\n728 |             files: vec![DataFile::new(\n729 |                 \"data.lance\",\n730 |                 vec![0, 1, 3, 4], // no field 2 (struct parent)\n731 |                 vec![0, 1, 2, 3],\n732 |                 ConcreteFileVersion::V1,\n733 |                 None,\n734 |                 None,\n735 |             )],\n736 |             physical_rows: Some(10),\n737 |             overlays: vec![],\n738 |             deletion_file: None,\n739 |             row_id_meta: None,\n740 |             last_updated_at_version_meta: None,\n741 |             created_at_version_meta: None,\n742 |         };\n743 | \n744 |         let operation = Operation::Overwrite {\n745 |             fragments: vec![stable_fragment],\n746 |             schema,\n747 |             config_upsert_values: None,\n748 |             initial_bases: None,\n749 |         };\n750 | \n751 |         // This should succeed — the old manifest's LEGACY format should not\n752 |         // cause strict validation of the new STABLE fragments.\n753 |         validate_operation(Some(&legacy_manifest), &operation).unwrap();\n754 |     }\n755 | }"
+  },
+  {
+    "id": 17,
+    "path": "rust/lance-table/src/format/manifest.rs",
+    "start": 678,
+    "end": 724,
+    "read_at": "2026-10-03T20:45:21.579Z",
+    "evidence": "678 | #[derive(Debug, Clone, PartialEq, DeepSizeOf)]\n679 | pub struct WriterVersion {\n680 |     pub library: String,\n681 |     pub version: String,\n682 |     pub prerelease: Option<String>,\n683 |     pub build_metadata: Option<String>,\n684 | }\n685 | \n686 | #[derive(Debug, Clone, PartialEq, DeepSizeOf)]\n687 | pub struct DataStorageFormat {\n688 |     pub file_format: String,\n689 |     pub version: ConcreteFileVersion,\n690 | }\n691 | \n692 | const LANCE_FORMAT_NAME: &str = \"lance\";\n693 | \n694 | impl DataStorageFormat {\n695 |     pub fn new(version: ConcreteFileVersion) -> Self {\n696 |         Self {\n697 |             file_format: LANCE_FORMAT_NAME.to_string(),\n698 |             version,\n699 |         }\n700 |     }\n701 | \n702 |     /// Return the exact file format version persisted by this manifest.\n703 |     pub fn lance_file_format(&self) -> ConcreteFileVersion {\n704 |         self.version\n705 |     }\n706 | }\n707 | \n708 | impl Default for DataStorageFormat {\n709 |     fn default() -> Self {\n710 |         Self::new(stable_file_version())\n711 |     }\n712 | }\n713 | \n714 | impl TryFrom<pb::manifest::DataStorageFormat> for DataStorageFormat {\n715 |     type Error = Error;\n716 | \n717 |     fn try_from(pb: pb::manifest::DataStorageFormat) -> Result<Self> {\n718 |         Ok(Self {\n719 |             file_format: pb.file_format,\n720 |             version: ConcreteFileVersion::from_manifest_string(&pb.version)?,\n721 |         })\n722 |     }\n723 | }\n724 | "
+  },
+  {
+    "id": 18,
+    "path": "rust/lance-table/src/rowids/version.rs",
+    "start": 849,
+    "end": 864,
+    "read_at": "2026-10-03T20:45:21.579Z",
+    "evidence": "849 | #[cfg(test)]\n850 | mod tests {\n851 |     use super::*;\n852 | \n853 |     #[test]\n854 |     fn column_meta_json_is_an_empty_object_under_the_arm_name() {\n855 |         let json = serde_json::to_string(&RowDatasetVersionMeta::Column).unwrap();\n856 |         assert_eq!(json, r#\"{\"column\":{}}\"#);\n857 |         let parsed: RowDatasetVersionMeta = serde_json::from_str(&json).unwrap();\n858 |         assert_eq!(parsed, RowDatasetVersionMeta::Column);\n859 |         let inline = RowDatasetVersionMeta::Inline(Arc::from(vec![1u8, 2, 3]));\n860 |         let parsed: RowDatasetVersionMeta =\n861 |             serde_json::from_str(&serde_json::to_string(&inline).unwrap()).unwrap();\n862 |         assert_eq!(parsed, inline);\n863 |     }\n864 | "
+  },
+  {
+    "id": 19,
+    "path": "rust/lance-core/src/utils/futures.rs",
+    "start": 665,
+    "end": 701,
+    "read_at": "2026-10-03T20:45:21.579Z",
+    "evidence": "665 |     /// With an unbounded capacity nothing blocks, so the only observable effect\n666 |     /// of a drop is memory: the dropped side's buffered items must be freed and\n667 |     /// no further clone queued for it.\n668 |     #[tokio::test]\n669 |     async fn test_shared_stream_unbounded_stops_buffering_for_dropped_side() {\n670 |         let (tx, rx) = tokio::sync::mpsc::channel::<u32>(10);\n671 |         for i in 0..4 {\n672 |             tx.send(i).await.unwrap();\n673 |         }\n674 |         let (left, mut right) = ReceiverStream::new(rx).boxed().share(Capacity::Unbounded);\n675 | \n676 |         // Right reads ahead, so every item is also cloned into the buffer for left.\n677 |         assert_eq!(right.next().await.unwrap(), 0);\n678 |         assert_eq!(right.next().await.unwrap(), 1);\n679 |         assert_eq!(right.state.lock().unwrap().buffer.len(), 2);\n680 | \n681 |         drop(left);\n682 |         assert!(\n683 |             right.state.lock().unwrap().buffer.is_empty(),\n684 |             \"the dropped side's buffered items must be released\"\n685 |         );\n686 | \n687 |         for expected in 2..4 {\n688 |             let item = tokio::time::timeout(std::time::Duration::from_secs(5), right.next()).await;\n689 |             assert_eq!(\n690 |                 item.expect(\"survivor wedged after peer drop\").unwrap(),\n691 |                 expected\n692 |             );\n693 |         }\n694 |         let state = right.state.lock().unwrap();\n695 |         assert!(\n696 |             state.buffer.is_empty(),\n697 |             \"no clone may be queued for a dropped side\"\n698 |         );\n699 |         assert_eq!(state.left_buffered, 0);\n700 |     }\n701 | }"
+  },
+  {
+    "id": 20,
+    "path": "protos/index.proto",
+    "start": 287,
+    "end": 302,
+    "read_at": "2026-10-03T20:45:21.579Z",
+    "evidence": "287 |   /* Number of consecutive tokens joined into one shingle; at least 1. A text\n288 |    * with fewer tokens forms one shingle of all of them.\n289 |    */\n290 |   uint32 shingle_size = 3;\n291 | \n292 |   /* The tokenizer, recorded as a full text search index records it and\n293 |    * rebuilt from this message alone at query time. Required. Fields that only\n294 |    * shape full text search postings (`with_position`, `block_size`,\n295 |    * `posting_format_version`, `document_granularity`) are carried unchanged\n296 |    * and ignored. The details must identify the tokenizer completely, so\n297 |    * settings the message cannot record (custom stop words, document-level\n298 |    * text extraction) and tokenizers that load data from outside Lance (the\n299 |    * jieba and lindera dictionaries) are rejected.\n300 |    */\n301 |   lance.table.InvertedIndexDetails tokenizer = 4;\n302 | "
+  }
+]

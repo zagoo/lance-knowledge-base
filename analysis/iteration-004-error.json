@@ -1,0 +1,329 @@
+{
+  "iteration": 4,
+  "files": [
+    {
+      "path": "rust/lance-core/src/error.rs",
+      "module": "L1-modules/rust-lance-core.md",
+      "reviewed": true,
+      "role": "Central public error enum, source-preserving constructors/conversions, typed writer and commit signals, feature-gated backtrace support, cloneable degradation rules, Result aliases, and regression tests. This module classifies errors but does not itself implement transactions, retries, storage IO or writer state transitions.",
+      "ranges": [
+        [
+          1,
+          10,
+          "SPDX, fmt, ArrowError, and Snafu imports. Private alias BoxedError=Box<dyn std::error::Error+Send+Sync+'static> is used in public signatures; its expanded trait-object type is the contract even though the alias name is not public. IntoError is imported anonymously for generated-selector methods."
+        ],
+        [
+          11,
+          32,
+          "With feature backtrace, private module backtrace_support defines pub-in-private-module MaybeBacktrace(pub Option<std::backtrace::Backtrace>) with Debug. GenerateImplicitData::generate delegates to Snafu's Option<Backtrace> generation; AsBacktrace borrows the optional trace. Actual environment gating is delegated to dependencies, not an env read implemented here."
+        ],
+        [
+          33,
+          56,
+          "Without feature backtrace, the same module/type name is a zero-sized unit struct. Generation returns Self and AsBacktrace always None. The selected type is privately imported. This establishes no-backtrace storage for that field, not a zero-size Error enum or a measured overhead guarantee."
+        ],
+        [
+          57,
+          92,
+          "Public FieldNotFoundError has public field_name:String and candidates:Vec<String>, deriving Debug and implementing Display/Error. Formatting prints the missing name, calls levenshtein::find_best_suggestion lazily, optionally prints Did you mean, then the first ten candidates in original order and an exact remaining count if longer. It still passes the entire candidate list to suggestion search; ten is a display limit, not a search limit. Empty candidates print empty brackets. Formatting errors propagate via ?. No escaping of names is added. The Error impl has no custom source."
+        ],
+        [
+          93,
+          128,
+          "Public CommitStatusUnknownError derives Debug but its version:u64 and source:BoxedError fields are private. Public version(&self)->u64 reads the version. Display explicitly says commit may or may not have applied and table state must be checked before retrying; source() returns the original boxed source. The comment explains wrapping inside existing Error::Wrapped avoids adding a variant to the exhaustive public Error enum. This type signals uncertain outcome, not definite conflict or missing object."
+        ],
+        [
+          129,
+          155,
+          "Public inline box_error(e:impl Error+Send+Sync+'static)->BoxedError allocates the concrete error. Public FenceReason derives Debug/Clone/Copy/PartialEq/Eq/Hash with PeerClaimedEpoch and PersistenceFailure; both are documented terminal writer fences, distinguishing takeover from own WAL failure/replay requirement. Display uses stable strings peer claimed epoch and persistence failure. No retry or reopening is performed here."
+        ],
+        [
+          156,
+          183,
+          "Public exhaustive Error derives Debug/Snafu and requests pub selector visibility. InvalidInput stores source:BoxedError; DatasetAlreadyExists stores uri:String; SchemaMismatch stores difference:String. Each includes implicit Location and MaybeBacktrace. Their Snafu Display attributes respectively identify invalid user input, existing dataset and append schema difference. Exact format strings and generated-selector source annotations are preserved in evidence; macro-expanded generic APIs are not independently expanded here."
+        ],
+        [
+          184,
+          209,
+          "DatasetNotFound stores path:String plus boxed source; CorruptFile stores object_store::path::Path plus boxed source; NotSupported stores boxed source. Each has implicit location/backtrace and contextual Display text. DatasetNotFound is a distinct variant from NotFound and is not recognized by is_not_found below; variant names alone must not substitute for accessor behavior (rust/lance-core/src/error.rs:601-615)."
+        ],
+        [
+          210,
+          243,
+          "CommitConflict and RetryableCommitConflict each carry version:u64, boxed source, implicit location/backtrace; IncompatibleTransaction has boxed source and implicit location/backtrace without version. TooMuchWriteContention carries message:String with implicit location/backtrace. Their names and display labels distinguish conflict categories; no automatic retry policy or conflict matrix is implemented in these declarations."
+        ],
+        [
+          244,
+          275,
+          "Timeout carries message:String and implicit Location without backtrace. Internal carries message/location/backtrace and its Display requests a bug report at the literal URL. PrerequisiteFailed and Unprocessable likewise carry message/location/backtrace. URLs are retained source text, not accessed. Location and trace presence vary by variant; do not assume every diagnostic captures both."
+        ],
+        [
+          276,
+          307,
+          "Arrow and Schema variants carry message:String plus implicit location/backtrace; NotFound carries uri:String plus implicit location/backtrace; IO stores boxed source plus implicit location/backtrace. Arrow here is a Lance enum category, not the original ArrowError type. IO preserves an inspectable source unless constructed from only a string."
+        ],
+        [
+          308,
+          336,
+          "Index stores message:String/location/backtrace; IndexNotFound identity:String/location/backtrace; InvalidTableLocation only message:String. Stop is a fieldless early-stop signal. Wrapped stores error:BoxedError explicitly marked snafu(source), plus implicit location/backtrace. Wrapped does not itself guarantee a particular classification; typed accessors inspect selected sources."
+        ],
+        [
+          337,
+          372,
+          "Cloned and Execution store message:String/location/backtrace. InvalidRef, RefConflict, RefNotFound, Cleanup and VersionNotFound contain only message:String. VersionConflict adds major_version:u16, minor_version:u16, implicit location/backtrace to message; its Display renders only the message and does not interpolate those numeric version fields. Exact field retention and human text are different contracts."
+        ],
+        [
+          373,
+          401,
+          "Namespace holds boxed source/location/backtrace. Transparent External holds only boxed source and is intended to preserve user error downcasts. Transparent FieldNotFound holds FieldNotFoundError. DiskCapExceeded carries cap_bytes:u64, used_bytes:u64 and Location, without backtrace, and prints cap/usage. Constructors do not validate that used_bytes actually exceeds cap; tests below intentionally use cap100/used50."
+        ],
+        [
+          402,
+          426,
+          "Fenced stores FenceReason, message:String and implicit Location; Display retains Writer fenced prefix for legacy text consumers, while new callers should use fence_reason(). Backpressure has message/Location; documentation states write was never accepted and can be retried after pipeline drain, suggesting HTTP503. These are declared semantics that writer call sites must uphold; the error type does not enforce no-data-loss or an HTTP mapping itself."
+        ],
+        [
+          427,
+          478,
+          "With backtrace feature, public backtrace(&self)->Option<&Backtrace> exhaustively matches all 24 backtrace-carrying variants and delegates to AsBacktrace. Thirteen non-trace variants (InvalidTableLocation, Stop, five message-only ref/cleanup/version variants, External, FieldNotFound, Timeout, DiskCapExceeded, Fenced, Backpressure) explicitly return None, making future enum additions require match maintenance. The docs require compile feature and RUST_BACKTRACE=1; actual generation remains Snafu-dependent. Count and exact variants are retained in the enum/index; no wildcard suppresses new-variant review."
+        ],
+        [
+          479,
+          503,
+          "Without backtrace feature the same public backtrace signature always returns None. track_caller corrupt_file(path:Path,message:impl Into<String>)->Self uses CorruptFileSnafu with a boxed string error. corrupt_file_named(name:&str,message:impl Into<String>)->Self converts a logical/section name into Path then delegates; docs explicitly warn that this path field need not be a real filesystem location."
+        ],
+        [
+          504,
+          519,
+          "track_caller invalid_input(message), invalid_input_source(BoxedError) and io(message) use generated selectors. Message forms convert Into<String> and then into a boxed error, so they preserve text but no original concrete source; the source form retains the supplied box. Location capture depends on track_caller and Snafu's implicit generation."
+        ],
+        [
+          520,
+          549,
+          "track_caller fenced_by_peer(message)->Self and writer_poisoned(message)->Self build Fenced with the corresponding reason. fence_reason(&self)->Option<FenceReason> matches only a direct Fenced variant, returning copied reason or None; it does not recurse through Wrapped/IO/External sources. Thus wrapping a fence is not equivalent to preserving this accessor unless a conversion unwraps it first."
+        ],
+        [
+          550,
+          570,
+          "track_caller backpressure(message)->Self builds Backpressure. is_backpressure(&self)->bool is a direct-variant match, not source-chain traversal. track_caller io_source(source:BoxedError)->Self retains the box through IOSnafu. Backpressure's no-acceptance meaning is documented in the constructor/type, not verified against writer implementations here."
+        ],
+        [
+          571,
+          600,
+          "track_caller dataset_already_exists(uri), dataset_not_found(path,source), version_conflict(message,major_version:u16,minor_version:u16), and not_found(uri) construct their exact variants through selectors. Inputs are Into<String> where shown; no URI parsing, version validation or storage access occurs. version_conflict preserves both u16 fields even though Display uses only its message."
+        ],
+        [
+          601,
+          620,
+          "is_not_found(&self)->bool returns true for direct NotFound; specifically returns false for Wrapped whose immediate boxed error is CommitStatusUnknownError; recursively inspects only IO.source and other Wrapped.error through error_source_is_not_found; every other variant returns false. This intentionally prevents uncertain commit visibility from being treated as definite absence. wrapped(BoxedError)->Self is track_caller and builds Wrapped without classifying its source."
+        ],
+        [
+          621,
+          646,
+          "track_caller schema(message) builds Schema. not_supported(message) string-boxes its text; not_supported_source preserves the original source box. internal(message) builds Internal. These constructors allocate/convert diagnostic payloads and do not independently decide whether the underlying operation was user error, unsupported or internal."
+        ],
+        [
+          647,
+          673,
+          "track_caller timeout(message) builds Timeout; namespace(message) string-boxes text; namespace_source explicitly accepts Box<dyn Error+Send+Sync+'static>; arrow(message) builds Arrow. Source-preserving versus string constructors are deliberate API alternatives; same display text does not imply downcast equivalence."
+        ],
+        [
+          674,
+          704,
+          "track_caller execution(message), cloned(message), schema_mismatch(difference) and unprocessable(message) directly build matching message/difference variants. cloned is a constructor, not an implementation of Clone for Error. Error itself does not derive Clone."
+        ],
+        [
+          705,
+          737,
+          "track_caller too_much_write_contention(message), prerequisite_failed(message), index(message), index_not_found(identity) each call matching Snafu selector build. There is no message parsing, automatic retry flag, or validation in these convenience methods."
+        ],
+        [
+          738,
+          767,
+          "track_caller commit_conflict_source(version,source) and retryable_commit_conflict_source(version,source) retain typed source boxes. commit_status_unknown_source(version,source) constructs CommitStatusUnknownError, boxes it and delegates to wrapped. is_commit_status_unknown(&self)->bool checks only direct Wrapped whose immediate source downcasts to that type, not arbitrary nested chains. incompatible_transaction_source(source) builds its matching variant. All source parameters expand to boxed Send+Sync+'static error traits."
+        ],
+        [
+          768,
+          791,
+          "track_caller disk_cap_exceeded(cap_bytes:u64,used_bytes:u64)->Self stores values without comparing them. external(source:BoxedError)->Self directly constructs transparent External and has no track_caller/location. field_not_found(field_name:impl Into<String>,candidates:Vec<String>)->Self moves owned candidate strings into FieldNotFoundError; suggestions are computed later at Display time."
+        ],
+        [
+          792,
+          812,
+          "external_source(&self)->Option<&BoxedError> borrows the source only for direct External. into_external(self)->std::result::Result<BoxedError,Self> moves it out for External, otherwise returns Err(original self) unchanged. Neither traverses nested sources, and callers can chain handling without losing ownership on a mismatch."
+        ],
+        [
+          813,
+          823,
+          "Private error_source_is_not_found(source:&(dyn std::error::Error+'static))->bool first downcasts Lance Error and delegates is_not_found, thereby respecting its deliberate negative cases; then object_store::Error matches NotFound or recursively inspects its source; all other errors recurse through source(). No std::io::ErrorKind::NotFound or message matching is performed. There is no visited-set/depth guard for pathological cyclic/custom source chains."
+        ],
+        [
+          824,
+          842,
+          "Public LanceOptionExt<T>::expect_ok(self)->Result<T> is implemented for Option<T>; track_caller impl uses ok_or_else to create Internal with fixed Expected option to have value only on None, preserving Some payload. Public Result<T>=std::result::Result<T,Error> and ArrowResult<T>=std::result::Result<T,ArrowError> aliases exist unconditionally; DataFusionResult<T> is gated by datafusion. Alias declarations are fully qualified in evidence to avoid confusing different Result types."
+        ],
+        [
+          843,
+          865,
+          "Owned From<ArrowError> recovers a boxed Lance Error directly from ExternalError when downcast succeeds; any other external concrete error becomes transparent External; all non-external Arrow errors become Arrow with to_string. Borrowed From<&ArrowError> always stringifies into Arrow, losing typed identity. Both conversion methods are track_caller."
+        ],
+        [
+          866,
+          883,
+          "From<std::io::Error> checks its immediate get_ref for Lance Error; if so consumes into_inner and downcasts, preserving the exact variant. expect calls are justified by preceding presence/type check on the same owned error, not unchecked unsafe operations. Otherwise boxes the original std IO error into Lance IO. Plain IO NotFound kind is not promoted to Lance NotFound by this conversion."
+        ],
+        [
+          884,
+          901,
+          "From<object_store::Error> converts direct NotFound path to Lance NotFound and intentionally drops its original source; every other store error is boxed as IO. From<prost::DecodeError> retains the decode error as boxed IO. Both track caller. Losing the source for direct store NotFound is an explicit exception to general preservation."
+        ],
+        [
+          902,
+          936,
+          "track_caller From implementations for prost::EncodeError, prost::UnknownEnumValue, tokio::task::JoinError, object_store::path::Error and url::ParseError all box the original as IO. JoinError conversion here is categorization, unlike spawn_cpu's explicit resume_unwind behavior (rust/lance-core/src/utils/tokio.rs:194-208). No runtime panic is resumed by these From implementations."
+        ],
+        [
+          937,
+          956,
+          "From<serde_json::Error> stringifies into Arrow, discarding the concrete JSON error type. From<Error> for ArrowError passes External source directly to Arrow ExternalError, maps Schema.message to Arrow SchemaError while dropping other fields, and wraps every other Lance Error intact in Arrow ExternalError. Therefore most owned Arrow round trips recover variants, but Schema -> Arrow SchemaError -> Lance Arrow is category-lossy (rust/lance-core/src/error.rs:843-855)."
+        ],
+        [
+          957,
+          980,
+          "Under datafusion feature, ParserError and TokenizerError convert to boxed IO, preserving source. From<Lance Error> for DataFusionError always wraps intact in External(Box<Error>). All three methods are track_caller. Direct parser/tokenizer conversions differ from DataFusionError::SQL categorization below."
+        ],
+        [
+          981,
+          1007,
+          "DataFusionError -> Error is feature-gated and track_caller. Diagnostic and Context wrappers are consumed, their annotations/context discarded, and inner error recursively classified. Collection chooses only its first error and drops the rest; empty collection becomes Execution with a fixed message. SQL, Plan, Configuration and SchemaError become InvalidInput with the entire corresponding inner DataFusion error boxed. The source comments call wrappers display-transparent, but local conversion still discards wrapper-specific data."
+        ],
+        [
+          1008,
+          1028,
+          "DataFusion ArrowError consumes boxed Arrow error and ignores the companion context before delegating to Arrow conversion. NotImplemented preserves the DataFusion error as NotSupported source. Execution is stringified into Lance Execution. Shared attempts Arc::try_unwrap: sole owner recursively classifies the inner error; multiple owners reconstruct DataFusion Shared inside Lance External to retain an inspectable typed source chain instead of forcing a message-only clone. Direct category thus depends on shared ownership."
+        ],
+        [
+          1029,
+          1052,
+          "DataFusion External tries downcast to Lance Error and recovers it unchanged, otherwise becomes External with original source. Every remaining DataFusion variant becomes boxed IO. From<Lance Error> for object_store::Error always wraps Generic {store:N/A,source:Box<Error>} to satisfy store-stream signatures; converting that Generic back normally adds Lance IO rather than directly recovering the original category, though is_not_found may traverse the chain (rust/lance-core/src/error.rs:813-821; rust/lance-core/src/error.rs:884-892)."
+        ],
+        [
+          1053,
+          1075,
+          "Public track_caller get_caller_location()->&'static std::panic::Location<'static> returns Location::caller(). Public CloneableError(pub Error) has documentation specifying selective category/accessor preservation while degrading non-cloneable sources to strings. It is not a general lossless error clone. External is deliberately not preserved because a fake reconstructed source would make external_source misleading."
+        ],
+        [
+          1076,
+          1095,
+          "Private DisplayError(Error) implements Debug by delegating to its own Display, Display by formatting the inner Error, and Error::source as Some(&inner). It hides structural debug detail while retaining a typed source link, allowing cloned not-found diagnostics to remain recognizable through recursive detection."
+        ],
+        [
+          1096,
+          1112,
+          "CloneableError::clone is track_caller. First, a direct Wrapped CommitStatusUnknownError is rebuilt with the same version and a source string obtained from the original immediate source (falling back to unknown's own display). That string becomes Error::Cloned inside DisplayError then is boxed into a new unknown-commit wrapper. The original concrete source type and original location/trace are not cloned; typed unknown outcome/version survive repeated clones."
+        ],
+        [
+          1113,
+          1139,
+          "Clone dispatch then preserves NotFound URI via Wrapped(DisplayError(NotFound)); other errors whose is_not_found is true become analogous wrappers with original display text stored as URI. Timeout retains message/category; IO retains category but source becomes a string error; Fenced retains reason/message; Backpressure retains category/message. Everything else becomes Cloned(original.to_string()). Constructors generate new diagnostics rather than copying original Location/backtrace. Accessor preservation is explicit; arbitrary source identity is not."
+        ],
+        [
+          1140,
+          1154,
+          "Public #[derive(Clone)] CloneableResult<T:Clone>(pub std::result::Result<T,CloneableError>) provides a cloneable success/error container. From<Lance Result<T>> maps Err into CloneableError without cloning yet and leaves Ok payload. Private test module imports parent symbols, std Error trait methods and fmt. There is no reverse conversion supplied here."
+        ],
+        [
+          1155,
+          1192,
+          "cloneable_error_preserves_accessor_contracts tests both fence reasons, backpressure, and unknown commit version7 wrapped around Timeout. It checks direct and cloned accessor results, clones the clone and verifies unknown status persists and not-found remains false. The test does not assert every rebuilt source's exact concrete type or captured location."
+        ],
+        [
+          1193,
+          1239,
+          "cloneable_error_preserves_not_found_contract checks direct NotFound then two clone generations, case-insensitive display/debug contains not found, and discoverable Lance Error in source chain. It wraps the clone through store Generic, IO and Wrapped and checks recognition remains. It also checks Timeout and IO categories survive cloning. It does not claim Error implements Clone directly."
+        ],
+        [
+          1240,
+          1281,
+          "Caller-location tests record get_caller_location and use ? on store Generic/NotFound inside closures, then assert resulting IO/NotFound Location line equals the source error-construction line offset (+4/+2 respectively). A comment warns .into() does not capture the same location; this file's tests exercise ?, not every conversion-syntax variant. Panic fallback branches identify unexpected categories."
+        ],
+        [
+          1282,
+          1310,
+          "test_object_store_not_found_converts_to_not_found checks path retained as URI. Private MyCustomError {code:i32,message:String} derives Debug, formats MyCustomError(code): message, and implements Error with no source; it is the typed marker for subsequent downcast tests."
+        ],
+        [
+          1311,
+          1337,
+          "IO conversion tests wrap DiskCapExceeded(cap100,used50) in std::io::Error::other, require exact recovered numeric fields, and separately convert plain std IO NotFound kind to Lance IO. This asserts category preservation for a directly embedded Lance error, not validation of disk-cap arithmetic or generic NotFound-kind promotion."
+        ],
+        [
+          1338,
+          1356,
+          "test_commit_status_unknown_is_structured_without_masking_as_not_found uses version42 with a NotFound source, asserts unknown true/not-found false and display contains version, then downcasts Wrapped source to CommitStatusUnknownError and checks version42. The test name/comment explain why an exhaustive-enum-compatible wrapper matters."
+        ],
+        [
+          1357,
+          1391,
+          "test_external_error_creation retains custom code42/message; test_external_source_method borrows/downcasts code123 and checks IO.external_source() is None. These tests distinguish original source preservation from matching text."
+        ],
+        [
+          1392,
+          1415,
+          "test_into_external_method consumes/downcasts custom code456 through Ok(source), and checks a non-External IO comes back unchanged as Err(Error::IO). No source-chain extraction is promised."
+        ],
+        [
+          1416,
+          1451,
+          "Arrow external conversion test consumes Arrow ExternalError(custom code789) and checks Lance External downcast. The external-to-Arrow test checks custom code999 reaches Arrow ExternalError directly, with no extra Lance wrapper. It tests one direction by inspecting Arrow output rather than converting it all the way back."
+        ],
+        [
+          1452,
+          1479,
+          "DataFusion-gated schema-error test constructs missing_col FieldNotFound with empty valid fields, converts it and asserts InvalidInput plus column name in text. Comments tie this classification to downstream FFI/Python mapping, but those bindings themselves remain unreviewed."
+        ],
+        [
+          1480,
+          1520,
+          "DataFusion-gated rstest has four wrappers: Diagnostic, Context, one-element Collection and nested Diagnostic(Context). Each wraps Plan invalid function no_such_function and asserts InvalidInput plus retained function name. This covers recursive category recovery and useful inner message, not preservation of wrapper annotations or multi-error collections."
+        ],
+        [
+          1521,
+          1559,
+          "Wrapped-internal test expects DataFusion Context(Internal) -> Lance IO, ensuring it is not misclassified as user input. Wrapped-external-Lance test sends Lance IO through DataFusion External and Context, then requires recovered IO source message. These pin fallback and downcast behavior separately."
+        ],
+        [
+          1560,
+          1599,
+          "Two datafusion-gated tests preserve MyCustomError code111 from direct DataFusion External and code222 from DataFusion ArrowError(Arrow ExternalError). They assert concrete type recovery, not only text equality."
+        ],
+        [
+          1600,
+          1648,
+          "Owned InvalidInput round trips through Arrow and, under feature gate, DataFusion are tested for same category and message. These examples support the recovery branch; they do not establish lossless Schema or borrowed Arrow conversion, which follow different branches."
+        ],
+        [
+          1649,
+          1684,
+          "DataFusion Shared multi-owner test keeps a second Arc, converts shared custom code42, then walks Error::source until MyCustomError is found. It asserts discovery, not direct External source downcast or retained top-level category. No sole-owner Shared or empty/multi-element Collection-specific test appears here."
+        ],
+        [
+          1685,
+          1703,
+          "test_backtrace_accessor creates IO and calls backtrace. With feature enabled it only checks the call can execute (binds/discards the Option); without feature it asserts None. The enabled branch does not require capture."
+        ],
+        [
+          1704,
+          1732,
+          "test_backtrace_captured_when_feature_enabled comments require RUST_BACKTRACE=1 before process startup because capture checks may cache. Actual enabled assertion runs whenever std::env::var(RUST_BACKTRACE).is_ok(), not only when value equals 1, so comment and predicate differ for values such as 0 or empty. If unset it makes no capture assertion. Feature-disabled branch asserts None. No environment is changed by the test itself."
+        ],
+        [
+          1733,
+          1748,
+          "Final test requires None for InvalidTableLocation, InvalidRef and Stop. Its name mentions variants without location, but the broader accessor also returns None for variants with Location but no trace field (Timeout, DiskCapExceeded, Fenced, Backpressure). All tests were read but not executed; no coverage or performance measurement is claimed. The complete no-trace branch is at rust/lance-core/src/error.rs:462-486."
+        ]
+      ],
+      "limits": "The public suggestion algorithm is analyzed at rust/lance-core/src/levenshtein.rs:17-89. Snafu macro expansion/implicit-data environment implementation, dependency error source semantics, full external conversion callers, Python/Java error mappings and writer/commit call sites remain pending. Source-error chain recursion has no cycle guard; typed accessors vary between direct-variant checks and selected recursive detection (rust/lance-core/src/error.rs:541-565; rust/lance-core/src/error.rs:601-615; rust/lance-core/src/error.rs:753-821). No unsafe block, async task or storage operation is implemented here."
+    }
+  ]
+}

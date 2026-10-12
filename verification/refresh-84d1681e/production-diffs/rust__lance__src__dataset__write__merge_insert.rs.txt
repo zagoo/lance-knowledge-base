@@ -1,0 +1,189 @@
+@@ -149,6 +149,20 @@ mod assign_action;
+  149  mod exec;
+  150  mod logical_plan;
+  151  
+  152 +/// Check a merge source against the target schema. As on append, a legacy
+  153 +/// blob input matches a Blob v2 target column; the writer converts it.
+  154 +fn check_source_schema(
+  155 +    source: &lance_core::datatypes::Schema,
+  156 +    target: &lance_core::datatypes::Schema,
+  157 +    options: &SchemaCompareOptions,
+  158 +) -> Result<()> {
+  159 +    source.check_compatible(target, options).or_else(|err| {
+  160 +        let source = super::promote_legacy_blob_schema(source)?;
+  161 +        let target = super::promote_legacy_blob_schema(target)?;
+  162 +        source.check_compatible(&target, options).map_err(|_| err)
+  163 +    })
+  164 +}
+  165 +
+  166  /// Build a source schema in target field order while preserving the source's
+  167  /// logical leaf types. The latter matters for extension columns such as Arrow
+  168  /// JSON, whose write input is Utf8 while the dataset's physical type is binary.
+
+@@ -1262,18 +1276,14 @@ impl MergeInsertJob {
+ 1276          options.ignore_field_order = true;
+ 1277  
+ 1278          // Try full schema match first.
+ 1265 -        if lance_schema
+ 1266 -            .check_compatible(target_schema, &options)
+ 1267 -            .is_ok()
+ 1268 -        {
+ 1279 +        if check_source_schema(&lance_schema, target_schema, &options).is_ok() {
+ 1280              return Ok(SchemaComparison::FullCompatible);
+ 1281          }
+ 1282  
+ 1283          // If full match fails, try subschema match.
+ 1284          options.allow_subschema = true;
+ 1285  
+ 1275 -        lance_schema
+ 1276 -            .check_compatible(target_schema, &options)
+ 1286 +        check_source_schema(&lance_schema, target_schema, &options)
+ 1287              .map(|_| SchemaComparison::Subschema)
+ 1288      }
+ 1289  
+
+@@ -1793,17 +1803,9 @@ impl MergeInsertJob {
+ 1803                      // Exact, deletion-free coverage can be written directly because the
+ 1804                      // batches are sorted by row address.
+ 1805  
+ 1796 -                    let mut writer = versions::open_writer(
+ 1797 -                        write_version,
+ 1798 -                        &dataset.object_store,
+ 1799 -                        &write_schema,
+ 1800 -                        &dataset.base,
+ 1801 -                        super::WriterOptions {
+ 1802 -                            add_data_dir: true,
+ 1803 -                            ..Default::default()
+ 1804 -                        },
+ 1805 -                    )
+ 1806 -                    .await?;
+ 1806 +                    let mut writer =
+ 1807 +                        versions::open_update_writer(write_version, &dataset, &write_schema, false)
+ 1808 +                            .await?;
+ 1809  
+ 1810                      // We need to remove rowaddr before writing.
+ 1811                      batches
+
+@@ -2327,6 +2329,16 @@ impl MergeInsertJob {
+ 2329          }
+ 2330      }
+ 2331  
+ 2332 +    /// Whether the source provides a dataset column with a blob anywhere in it.
+ 2333 +    fn source_carries_blob(&self, source_schema: &Schema) -> bool {
+ 2334 +        self.dataset
+ 2335 +            .schema()
+ 2336 +            .fields
+ 2337 +            .iter()
+ 2338 +            .filter(|field| source_schema.column_with_name(&field.name).is_some())
+ 2339 +            .any(subtree_has_blob)
+ 2340 +    }
+ 2341 +
+ 2342      /// Resolves the caller's [`MergeInsertWriteMode`] against this operation.
+ 2343      ///
+ 2344      /// [`WriteSink::RewriteColumns`] only ever replaces column data within a
+
+@@ -2394,14 +2406,7 @@ impl MergeInsertJob {
+ 2406          // the top-level fields it carries and then descends: a blob nested
+ 2407          // anywhere under one of them (struct member, list item, map value) is
+ 2408          // still patched by writing that whole top-level column.
+ 2397 -        if self
+ 2398 -            .dataset
+ 2399 -            .schema()
+ 2400 -            .fields
+ 2401 -            .iter()
+ 2402 -            .filter(|field| source_schema.column_with_name(&field.name).is_some())
+ 2403 -            .any(subtree_has_blob)
+ 2404 -        {
+ 2409 +        if self.source_carries_blob(source_schema) {
+ 2410              blockers.push("the source carries a blob column, whose stored form differs from the one it provides");
+ 2411          }
+ 2412  
+
+@@ -2567,11 +2572,7 @@ impl MergeInsertJob {
+ 2572  
+ 2573          // Execute the plan
+ 2574          // Assert that we have exactly one partition since we're designed for single-partition execution
+ 2570 -        let partition_count = match plan.properties().output_partitioning() {
+ 2571 -            datafusion_physical_expr::Partitioning::RoundRobinBatch(n) => *n,
+ 2572 -            datafusion_physical_expr::Partitioning::Hash(_, n) => *n,
+ 2573 -            datafusion_physical_expr::Partitioning::UnknownPartitioning(n) => *n,
+ 2574 -        };
+ 2575 +        let partition_count = plan.properties().output_partitioning().partition_count();
+ 2576  
+ 2577          if partition_count != 1 {
+ 2578              return Err(Error::invalid_input(format!(
+
+@@ -2655,8 +2656,9 @@ impl MergeInsertJob {
+ 2656          // Convert to lance schema for comparison
+ 2657          let lance_schema = lance_core::datatypes::Schema::try_from(source_schema)?;
+ 2658          let full_schema = self.dataset.schema();
+ 2658 -        let is_full_schema = full_schema.compare_with_options(
+ 2659 +        let is_full_schema = check_source_schema(
+ 2660              &lance_schema,
+ 2661 +            full_schema,
+ 2662              &SchemaCompareOptions {
+ 2663                  compare_metadata: false,
+ 2664                  // Allow nullable source fields for non-nullable targets.
+
+@@ -2665,16 +2667,21 @@ impl MergeInsertJob {
+ 2667                  ignore_field_order: true,
+ 2668                  ..Default::default()
+ 2669              },
+ 2668 -        );
+ 2670 +        )
+ 2671 +        .is_ok();
+ 2672  
+ 2673          // Partial-schema upsert: every source field must exist in the target
+ 2671 -        // and have a compatible data type. Missing target columns will be
+ 2674 +        // and have a compatible data type (legacy blob input matches Blob v2,
+ 2675 +        // as in `check_source_schema`). Missing target columns will be
+ 2676          // filled from the target side of the join in `create_plan`.
+ 2677          let is_subset_schema = !is_full_schema
+ 2678              && lance_schema.fields.iter().all(|sf| {
+ 2679                  full_schema
+ 2680                      .field(&sf.name)
+ 2677 -                    .map(|tf| tf.data_type() == sf.data_type())
+ 2681 +                    .map(|tf| {
+ 2682 +                        tf.data_type() == sf.data_type()
+ 2683 +                            || (tf.is_blob_v2() && sf.is_blob() && !sf.is_blob_v2())
+ 2684 +                    })
+ 2685                      .unwrap_or(false)
+ 2686              });
+ 2687  
+
+@@ -2715,8 +2722,10 @@ impl MergeInsertJob {
+ 2722          // probe: the sink decides how many bytes are written, the probe only how
+ 2723          // the matched rows are found. Merges that write nothing (no matched
+ 2724          // update) or write whole rows on both paths (a full-schema source) are
+ 2718 -        // unaffected, so they keep the index.
+ 2719 -        let write_mode_needs_v2 = self.params.write_mode == MergeInsertWriteMode::RewriteRows
+ 2725 +        // unaffected, so they keep the index. A source carrying a blob column
+ 2726 +        // needs whole rows too: patching cannot write blobs (`select_write_sink`).
+ 2727 +        let write_mode_needs_v2 = (self.params.write_mode == MergeInsertWriteMode::RewriteRows
+ 2728 +            || self.source_carries_blob(source_schema))
+ 2729              && is_subset_schema
+ 2730              && matches!(
+ 2731                  self.params.when_matched,
+
+@@ -2805,8 +2814,9 @@ impl MergeInsertJob {
+ 2814          let source_schema = source.schema();
+ 2815          let lance_schema = lance_core::datatypes::Schema::try_from(source_schema.as_ref())?;
+ 2816          let full_schema = self.dataset.schema();
+ 2808 -        let is_full_schema = full_schema.compare_with_options(
+ 2817 +        let is_full_schema = check_source_schema(
+ 2818              &lance_schema,
+ 2819 +            full_schema,
+ 2820              &SchemaCompareOptions {
+ 2821                  compare_metadata: false,
+ 2822                  // Allow nullable source fields for non-nullable targets.
+
+@@ -2816,7 +2826,8 @@ impl MergeInsertJob {
+ 2826                  ignore_field_order: true,
+ 2827                  ..Default::default()
+ 2828              },
+ 2819 -        );
+ 2829 +        )
+ 2830 +        .is_ok();
+ 2831          let source = if is_full_schema {
+ 2832              let target_schema = Schema::from(full_schema);
+ 2833              let canonical_schema = Arc::new(canonical_source_schema(

@@ -1,0 +1,110 @@
+[
+  {
+    "id": 1,
+    "path": "rust/lance-table/src/rowids/serde.rs",
+    "start": 340,
+    "end": 345,
+    "unit": "lines",
+    "read_at": "2026-10-04T05:20:06.492Z",
+    "evidence": "340 | /// Serialize a rowid sequence to a buffer.\n341 | pub fn write_row_ids(sequence: &RowIdSequence) -> Vec<u8> {\n342 |     let pb_sequence = pb::RowIdSequence::from(sequence.clone());\n343 |     pb_sequence.encode_to_vec()\n344 | }\n345 | "
+  },
+  {
+    "id": 3,
+    "path": "rust/lance-encoding/src/buffer.rs",
+    "start": 283,
+    "end": 311,
+    "unit": "lines",
+    "read_at": "2026-10-04T05:20:06.493Z",
+    "evidence": "283 |     /// Returns a new [LanceBuffer] that is a slice of this buffer starting at `offset`,\n284 |     /// with `length` bytes.\n285 |     /// Doing so allows the same memory region to be shared between lance buffers.\n286 |     /// # Panics\n287 |     /// Panics if `(offset + length)` is larger than the existing length.\n288 |     pub fn slice_with_length(&self, offset: usize, length: usize) -> Self {\n289 |         let original_buffer_len = self.len();\n290 |         assert!(\n291 |             offset.saturating_add(length) <= original_buffer_len,\n292 |             \"the offset + length of the sliced Buffer cannot exceed the existing length\"\n293 |         );\n294 |         Self(self.0.slice_with_length(offset, length))\n295 |     }\n296 | \n297 |     /// Returns a new [LanceBuffer] that is a slice of this buffer starting at bit `offset`\n298 |     /// with `length` bits.\n299 |     ///\n300 |     /// Unlike `slice_with_length`, this method allows for slicing at a bit level but always\n301 |     /// requires a copy of the data (unless offset is byte-aligned)\n302 |     ///\n303 |     /// This method performs the bit slice using the Arrow convention of *bitwise* little-endian\n304 |     ///\n305 |     /// This means, given the bit buffer 0bABCDEFGH_HIJKLMNOP and the slice starting at bit 3 and\n306 |     /// with length 8, the result will be 0bNOPABCDE\n307 |     pub fn bit_slice_le_with_length(&self, offset: usize, length: usize) -> Self {\n308 |         let sliced = self.0.bit_slice(offset, length);\n309 |         Self(sliced)\n310 |     }\n311 | "
+  },
+  {
+    "id": 5,
+    "path": "rust/lance-table/src/io/commit.rs",
+    "start": 467,
+    "end": 489,
+    "unit": "lines",
+    "read_at": "2026-10-04T05:20:06.493Z",
+    "evidence": "467 |     let mut probed = vec![(from_version, meta)];\n468 |     let mut version = from_version;\n469 |     loop {\n470 |         let next = version + 1;\n471 |         match object_store\n472 |             .inner\n473 |             .head(&scheme.manifest_path(base, next))\n474 |             .await\n475 |         {\n476 |             Ok(meta) => {\n477 |                 probed.push((next, meta));\n478 |                 version = next;\n479 |             }\n480 |             // NotFound means we found the latest version.\n481 |             Err(ObjectStoreError::NotFound { .. }) => break,\n482 |             // A transient error means a newer version might exist that we\n483 |             // failed to observe — surface it so callers fall back to listing.\n484 |             Err(e) => return Err(e.into()),\n485 |         }\n486 |     }\n487 |     Ok(Some((version, scheme, probed)))\n488 | }\n489 | "
+  },
+  {
+    "id": 6,
+    "path": "protos/filtered_read.proto",
+    "start": 99,
+    "end": 116,
+    "unit": "lines",
+    "read_at": "2026-10-04T05:20:06.493Z",
+    "evidence": "99 | // Top-level wrapper for FilteredReadExec serialization.\n100 | message FilteredReadExecProto {\n101 |   TableIdentifier table = 1;\n102 |   FilteredReadOptionsProto options = 2;\n103 |   /* FilteredRead has two modes\n104 |    * Plan-then-execute (distributed): The planner creates a FilteredReadPlan and sends it to a remote executor.\n105 |    * Plan-and-execute (local): The executor creates the plan itself at execution time.\n106 |    */\n107 |   optional FilteredReadPlanProto plan = 3;\n108 |   /* Note: FilteredReadExec.index_input (child ExecutionPlan) is NOT serialized here.\n109 |    * DataFusion's PhysicalExtensionCodec handles child plans automatically: it walks\n110 |    * the plan tree via children() / with_new_children(), serializes each node, and\n111 |    * passes deserialized children back as the `inputs` parameter in try_decode.\n112 |    * This means any ExecutionPlan in the tree (including index_input) must also\n113 |    * implement try_encode/try_decode in the PhysicalExtensionCodec.\n114 |    * TODO: implement serialize/deserialize for lance-specific index input ExecutionPlans.\n115 |    */\n116 | }"
+  },
+  {
+    "id": 7,
+    "path": "rust/lance-table/src/io/commit/external_manifest.rs",
+    "start": 1968,
+    "end": 2011,
+    "unit": "lines",
+    "read_at": "2026-10-04T05:20:06.493Z",
+    "evidence": "1968 |         let commit_error = handler\n1969 |             .commit(\n1970 |                 &mut manifest,\n1971 |                 None,\n1972 |                 &base_path,\n1973 |                 &object_store,\n1974 |                 write_manifest_file_to_path,\n1975 |                 ManifestNamingScheme::V2,\n1976 |                 None,\n1977 |             )\n1978 |             .await\n1979 |             .expect_err(\"the simulated copy failure must be surfaced\");\n1980 |         assert!(matches!(commit_error, CommitError::CommitConflict));\n1981 |         assert!(\n1982 |             !fail_next_copy.load(Ordering::SeqCst),\n1983 |             \"the one-shot copy failure must be consumed\"\n1984 |         );\n1985 | \n1986 |         let recorded_location = external_store\n1987 |             .get_manifest_location(base_path.as_ref(), version)\n1988 |             .await\n1989 |             .expect(\"the external store must retain the committed staging location\");\n1990 |         let staging_path = failed_copy_source\n1991 |             .lock()\n1992 |             .unwrap()\n1993 |             .clone()\n1994 |             .expect(\"the failure must be injected at copy(staging, canonical)\");\n1995 |         assert_eq!(recorded_location.path, staging_path);\n1996 |         object_store\n1997 |             .inner\n1998 |             .head(&staging_path)\n1999 |             .await\n2000 |             .expect(\"the winning staging manifest must be retained\");\n2001 | \n2002 |         let canonical_error = object_store\n2003 |             .inner\n2004 |             .head(&canonical_path)\n2005 |             .await\n2006 |             .expect_err(\"copy failed before creating the canonical manifest\");\n2007 |         assert!(\n2008 |             matches!(canonical_error, ObjectStoreError::NotFound { .. }),\n2009 |             \"unexpected canonical manifest error: {canonical_error}\"\n2010 |         );\n2011 | "
+  },
+  {
+    "id": 8,
+    "path": "rust/lance-table/benches/row_id_index.rs",
+    "start": 54,
+    "end": 75,
+    "unit": "lines",
+    "read_at": "2026-10-04T05:25:32.609Z",
+    "evidence": "54 | fn make_frag_sequences(\n55 |     num_rows: u64,\n56 |     num_frags: u64,\n57 |     percent_deletion: f32,\n58 | ) -> Vec<(u32, Arc<RowIdSequence>)> {\n59 |     let rows_per_frag = num_rows / num_frags;\n60 |     let mut start = 0;\n61 |     (0..num_frags)\n62 |         .map(|i| {\n63 |             let sequence = make_sequence(\n64 |                 start..(start + rows_per_frag),\n65 |                 (rows_per_frag as f32 * percent_deletion) as usize,\n66 |             );\n67 |             start += rows_per_frag;\n68 |             (i as u32, Arc::new(sequence))\n69 |         })\n70 |         .collect()\n71 | }\n72 | \n73 | // For range of values\n74 | // https://bheisler.github.io/criterion.rs/book/user_guide/benchmarking_with_inputs.html\n75 | "
+  },
+  {
+    "id": 9,
+    "path": "rust/lance-table/src/rowids/bitmap.rs",
+    "start": 348,
+    "end": 358,
+    "unit": "lines",
+    "read_at": "2026-10-04T05:20:06.493Z",
+    "evidence": "348 |     proptest::proptest! {\n349 |         #[test]\n350 |         fn test_bitmap_iter_property(\n351 |             values in proptest::collection::vec(proptest::bool::ANY, 0..100)\n352 |         ) {\n353 |             let bitmap = Bitmap::from(values.as_slice());\n354 |             let iter_values: Vec<bool> = bitmap.iter().collect();\n355 |             assert_eq!(iter_values, values);\n356 |         }\n357 |     }\n358 | }"
+  },
+  {
+    "id": 10,
+    "path": "rust/lance-table/Cargo.toml",
+    "start": 49,
+    "end": 57,
+    "unit": "lines",
+    "read_at": "2026-10-04T05:20:06.493Z",
+    "evidence": "49 | [dev-dependencies]\n50 | lance-datagen.workspace = true\n51 | lance-testing.workspace = true\n52 | arrow-schema.workspace = true\n53 | criterion.workspace = true\n54 | pretty_assertions.workspace = true\n55 | proptest.workspace = true\n56 | rstest.workspace = true\n57 | "
+  },
+  {
+    "id": 15,
+    "path": "rust/lance-table/src/transaction/validate.rs",
+    "start": 507,
+    "end": 532,
+    "unit": "lines",
+    "read_at": "2026-10-04T05:20:18.956Z",
+    "evidence": "507 |     fn one_field_schema() -> LanceSchema {\n508 |         LanceSchema::try_from(&ArrowSchema::new(vec![ArrowField::new(\n509 |             \"a\",\n510 |             DataType::Int32,\n511 |             true,\n512 |         )]))\n513 |         .unwrap()\n514 |     }\n515 | \n516 |     fn fragment_with_file_fields(id: u64, path: &str, fields: Vec<i32>) -> Fragment {\n517 |         let mut fragment = Fragment::new(id);\n518 |         fragment\n519 |             .files\n520 |             .push(DataFile::new_legacy_from_fields(path, fields, None));\n521 |         fragment\n522 |     }\n523 | \n524 |     fn manifest_with_file_fields(schema: LanceSchema, fields: Vec<i32>) -> Manifest {\n525 |         Manifest::new(\n526 |             schema,\n527 |             Arc::new(vec![fragment_with_file_fields(0, \"f.lance\", fields)]),\n528 |             DataStorageFormat::new(ConcreteFileVersion::V2_0),\n529 |             HashMap::new(),\n530 |         )\n531 |     }\n532 | "
+  },
+  {
+    "id": 16,
+    "path": "rust/lance-table/src/utils/stream.rs",
+    "start": 849,
+    "end": 882,
+    "unit": "lines",
+    "read_at": "2026-10-04T05:20:18.957Z",
+    "evidence": "849 | \n850 | #[cfg(test)]\n851 | mod tests {\n852 |     use std::sync::Arc;\n853 | \n854 |     use arrow::{array::AsArray, datatypes::UInt64Type};\n855 |     use arrow_array::{RecordBatch, UInt32Array, types::Int32Type};\n856 |     use arrow_schema::ArrowError;\n857 |     use futures::{\n858 |         FutureExt, StreamExt, TryStreamExt,\n859 |         stream::{self, BoxStream},\n860 |     };\n861 |     use lance_core::{\n862 |         ROW_ID,\n863 |         utils::{address::RowAddress, deletion::DeletionVector},\n864 |     };\n865 |     use lance_datagen::{BatchCount, RowCount};\n866 |     use lance_io::{ReadBatchParams, stream::arrow_stream_to_lance_stream};\n867 |     use roaring::RoaringBitmap;\n868 | \n869 |     use crate::{rowids::RowIdSequence, utils::stream::ReadBatchTask};\n870 | \n871 |     use super::RowIdAndDeletesConfig;\n872 | \n873 |     fn batch_task_stream(\n874 |         datagen_stream: BoxStream<'static, std::result::Result<RecordBatch, ArrowError>>,\n875 |     ) -> super::ReadBatchTaskStream {\n876 |         arrow_stream_to_lance_stream(datagen_stream)\n877 |             .map(|batch| ReadBatchTask {\n878 |                 num_rows: batch.as_ref().unwrap().num_rows() as u32,\n879 |                 task: std::future::ready(batch).boxed(),\n880 |             })\n881 |             .boxed()\n882 |     }"
+  },
+  {
+    "id": 18,
+    "path": "rust/lance-table/src/rowids/segment.rs",
+    "start": 1565,
+    "end": 1602,
+    "unit": "lines",
+    "read_at": "2026-10-04T05:20:18.957Z",
+    "evidence": "1565 |         for missing in [999, 1100, 1250, 1299, 1500, 1649, 1999, 2000, 5000] {\n1566 |             assert_eq!(runs.position(missing), None, \"missing {missing}\");\n1567 |             assert!(!runs.contains(missing));\n1568 |         }\n1569 |         assert_eq!(runs.get(values.len()), None);\n1570 |         assert_eq!(\n1571 |             runs.slice(95, 20).iter().collect::<Vec<_>>(),\n1572 |             values[95..115].to_vec()\n1573 |         );\n1574 | \n1575 |         let deleted = [1000, 1050, 1400];\n1576 |         assert_eq!(\n1577 |             runs.delete(&deleted).iter().collect::<Vec<_>>(),\n1578 |             bitmap.delete(&deleted).iter().collect::<Vec<_>>()\n1579 |         );\n1580 |         let (mut masked_runs, mut masked_bitmap) = (runs.clone(), bitmap);\n1581 |         masked_runs.mask(&[0, 1, 7]);\n1582 |         masked_bitmap.mask(&[0, 1, 7]);\n1583 |         assert_eq!(\n1584 |             masked_runs.iter().collect::<Vec<_>>(),\n1585 |             masked_bitmap.iter().collect::<Vec<_>>()\n1586 |         );\n1587 | \n1588 |         // The cursor path streaming readers use.\n1589 |         let mut cursor = SegmentCursorState::default();\n1590 |         let mut got = Vec::new();\n1591 |         cursor.extend_range(&runs, 90..110, &mut got);\n1592 |         assert_eq!(got, values[90..110].to_vec());\n1593 |         got.clear();\n1594 |         cursor.extend_range(&runs, 300..values.len() + 10, &mut got);\n1595 |         assert_eq!(got, values[300..].to_vec());\n1596 |         assert_eq!(runs.cursor().get(400), Some(values[400]));\n1597 | \n1598 |         let higher = runs.clone().with_new_high(2500).unwrap();\n1599 |         assert_eq!(higher.iter().last(), Some(2500));\n1600 |         assert_eq!(higher.len(), values.len() + 1);\n1601 |     }\n1602 | "
+  },
+  {
+    "id": 19,
+    "path": "rust/lance-table/src/format/overlay/staleness.rs",
+    "start": 183,
+    "end": 215,
+    "unit": "lines",
+    "read_at": "2026-10-04T05:20:18.957Z",
+    "evidence": "183 |     /// `outer: struct<middle: struct<a: i32, b: i32>>`, for the ancestry checks.\n184 |     fn nested_struct_schema() -> Schema {\n185 |         use arrow_schema::{DataType, Field as ArrowField, Fields, Schema as ArrowSchema};\n186 | \n187 |         let mid = Fields::from(vec![\n188 |             ArrowField::new(\"a\", DataType::Int32, true),\n189 |             ArrowField::new(\"b\", DataType::Int32, true),\n190 |         ]);\n191 |         let outer_fields =\n192 |             Fields::from(vec![ArrowField::new(\"middle\", DataType::Struct(mid), true)]);\n193 |         let mut schema = Schema::try_from(&ArrowSchema::new(vec![ArrowField::new(\n194 |             \"outer\",\n195 |             DataType::Struct(outer_fields),\n196 |             true,\n197 |         )]))\n198 |         .unwrap();\n199 |         schema.set_field_id(None);\n200 |         schema\n201 |     }\n202 | \n203 |     /// A dense overlay covering `offsets` for `field_ids`, committed at `version`.\n204 |     fn dense_overlay(\n205 |         field_ids: Vec<i32>,\n206 |         offsets: impl IntoIterator<Item = u32>,\n207 |         version: u64,\n208 |     ) -> DataOverlayFile {\n209 |         DataOverlayFile {\n210 |             data_file: DataFile::new_legacy_from_fields(\"o.lance\", field_ids, None),\n211 |             coverage: OverlayCoverage::dense(bitmap(offsets)),\n212 |             committed_version: version,\n213 |         }\n214 |     }\n215 | "
+  }
+]

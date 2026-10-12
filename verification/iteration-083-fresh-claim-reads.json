@@ -1,0 +1,164 @@
+[
+  {
+    "id": 1,
+    "path": "rust/lance-table/src/io/commit.rs",
+    "start": 1579,
+    "end": 1611,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:39:32.341Z",
+    "evidence": "1579 |             Ok(_) => {\n1580 |                 // Successfully committed\n1581 |                 write_version_hint(object_store, base_path, manifest.version).await;\n1582 |                 Ok(ManifestLocation {\n1583 |                     version: manifest.version,\n1584 |                     path,\n1585 |                     size: Some(res.size as u64),\n1586 |                     naming_scheme,\n1587 |                     e_tag: None, // Re-name can change e-tag.,\n1588 |                     identity: None,\n1589 |                 })\n1590 |             }\n1591 |             Err(ObjectStoreError::AlreadyExists { .. }) => {\n1592 |                 // Another transaction has already been committed\n1593 |                 // Attempt to clean up temporary object, but ignore errors if we can't\n1594 |                 let _ = object_store.delete(&tmp_path).await;\n1595 | \n1596 |                 return Err(CommitError::CommitConflict);\n1597 |             }\n1598 |             Err(e) => {\n1599 |                 // Something else went wrong\n1600 |                 return Err(CommitError::OtherError(e.into()));\n1601 |             }\n1602 |         }\n1603 |     }\n1604 | }\n1605 | \n1606 | impl Debug for RenameCommitHandler {\n1607 |     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n1608 |         f.debug_struct(\"RenameCommitHandler\").finish()\n1609 |     }\n1610 | }\n1611 | "
+  },
+  {
+    "id": 2,
+    "path": "rust/lance-file/src/concat.rs",
+    "start": 765,
+    "end": 794,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:39:32.342Z",
+    "evidence": "765 |         for (column_index, (column, baseline)) in metadata\n766 |             .column_infos\n767 |             .iter()\n768 |             .zip(baseline_columns)\n769 |             .enumerate()\n770 |         {\n771 |             if !column.buffer_offsets_and_sizes.is_empty() {\n772 |                 return Ok(Some(FileConcatReason::ColumnBuffers {\n773 |                     input_index,\n774 |                     column_index,\n775 |                     count: column.buffer_offsets_and_sizes.len(),\n776 |                 }));\n777 |             }\n778 |             if column.index != baseline.index {\n779 |                 return Ok(Some(FileConcatReason::ColumnLayoutMismatch {\n780 |                     input_index,\n781 |                     column_index: Some(column_index),\n782 |                 }));\n783 |             }\n784 |             if encoded_column_encoding(column)? != baseline_encodings[column_index] {\n785 |                 return Ok(Some(FileConcatReason::ColumnEncodingMismatch {\n786 |                     input_index,\n787 |                     column_index,\n788 |                 }));\n789 |             }\n790 |         }\n791 |     }\n792 |     Ok(None)\n793 | }\n794 | "
+  },
+  {
+    "id": 3,
+    "path": "rust/lance-file/benches/reader.rs",
+    "start": 63,
+    "end": 94,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:39:32.342Z",
+    "evidence": "63 |         group.bench_function(\"decode\", |b| {\n64 |             b.iter(|| {\n65 |                 let object_store = &object_store;\n66 |                 let file_path = &file_path;\n67 |                 let data = &data;\n68 |                 rt.block_on(async move {\n69 |                     let store_scheduler = ScanScheduler::new(\n70 |                         object_store.clone(),\n71 |                         SchedulerConfig::default_for_testing(),\n72 |                     );\n73 |                     let scheduler = store_scheduler\n74 |                         .open_file(file_path, &CachedFileSize::unknown())\n75 |                         .await\n76 |                         .unwrap();\n77 |                     let reader = FileReader::try_open(\n78 |                         scheduler.clone(),\n79 |                         None,\n80 |                         Arc::<DecoderPlugins>::default(),\n81 |                         &test_cache(),\n82 |                         FileReaderOptions::default(),\n83 |                     )\n84 |                     .await\n85 |                     .unwrap();\n86 |                     let stream = reader\n87 |                         .read_tasks(\n88 |                             lance_io::ReadBatchParams::RangeFull,\n89 |                             16 * 1024,\n90 |                             None,\n91 |                             FilterExpression::no_filter(),\n92 |                         )\n93 |                         .await\n94 |                         .unwrap();"
+  },
+  {
+    "id": 4,
+    "path": "rust/lance-table/src/system_index/frag_reuse/ledger.rs",
+    "start": 690,
+    "end": 720,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:39:32.342Z",
+    "evidence": "690 |     #[test]\n691 |     fn unknown_fields_do_not_partially_apply_a_known_mapping() {\n692 |         let mut raw = partition(1, 2).encode_to_vec();\n693 |         message_field(17, b\"future metadata\", &mut raw);\n694 |         prost::encoding::encode_key(7, WireType::Varint, &mut raw);\n695 |         prost::encoding::encode_varint(100, &mut raw);\n696 |         let mut content = Vec::new();\n697 |         message_field(2, &raw, &mut content);\n698 |         let ledger = FragReuseLedger::decode_content(1, content.into()).unwrap();\n699 |         assert!(ledger.transitions().is_empty());\n700 |         assert!(ledger.has_unsupported_transitions());\n701 |     }\n702 | \n703 |     #[test]\n704 |     fn unknown_mapping_is_omitted_without_discarding_supported_transitions() {\n705 |         let mut unknown = partition(2, 3);\n706 |         unknown.mapping = None;\n707 |         let mut raw = unknown.encode_to_vec();\n708 |         message_field(17, b\"future mapping\", &mut raw);\n709 |         let mut content =\n710 |             history(vec![partition(3, 4), partition(1, 2), partition(10, 11)]).to_vec();\n711 |         message_field(2, &raw, &mut content);\n712 |         let ledger = FragReuseLedger::decode_content(1, content.into()).unwrap();\n713 |         assert!(ledger.has_unsupported_transitions());\n714 |         assert_eq!(ledger.transitions().len(), 3);\n715 |         assert!(ledger.consumer(1).is_some());\n716 |         assert_eq!(ledger.consumer(2), None);\n717 |         assert!(ledger.consumer(3).is_some());\n718 |         assert!(ledger.consumer(10).is_some());\n719 |     }\n720 | "
+  },
+  {
+    "id": 5,
+    "path": "rust/lance-encoding/src/repdef.rs",
+    "start": 1277,
+    "end": 1318,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:39:32.343Z",
+    "evidence": "1277 |     /// Registers a nullable validity bitmap\n1278 |     pub fn add_validity_bitmap(&mut self, validity: NullBuffer) {\n1279 |         self.check_validity_len(validity.len());\n1280 |         if validity.null_count() == 0 {\n1281 |             self.add_no_null(validity.len());\n1282 |             return;\n1283 |         }\n1284 |         self.repdefs.push(RawRepDef::Validity(ValidityDesc {\n1285 |             num_values: validity.len(),\n1286 |             validity: Some(validity.into_inner()),\n1287 |         }));\n1288 |     }\n1289 | \n1290 |     /// Registers an all-valid validity layer\n1291 |     pub fn add_no_null(&mut self, len: usize) {\n1292 |         self.check_validity_len(len);\n1293 |         self.repdefs.push(RawRepDef::Validity(ValidityDesc {\n1294 |             validity: None,\n1295 |             num_values: len,\n1296 |         }));\n1297 |     }\n1298 | \n1299 |     pub fn add_fsl(&mut self, validity: Option<NullBuffer>, dimension: usize, num_values: usize) {\n1300 |         if let Some(len) = self.len {\n1301 |             assert_eq!(num_values, len);\n1302 |         }\n1303 |         self.len = Some(num_values * dimension);\n1304 |         debug_assert!(validity.is_none() || validity.as_ref().unwrap().len() == num_values);\n1305 |         self.repdefs.push(RawRepDef::Fsl(FslDesc {\n1306 |             num_values,\n1307 |             validity: validity.map(|v| v.into_inner()),\n1308 |             dimension,\n1309 |         }))\n1310 |     }\n1311 | \n1312 |     fn check_offset_len(&mut self, offsets: &[i64]) {\n1313 |         if let Some(len) = self.len {\n1314 |             assert!(offsets.len() == len + 1);\n1315 |         }\n1316 |         self.len = Some(offsets[offsets.len() - 1] as usize);\n1317 |     }\n1318 | "
+  },
+  {
+    "id": 7,
+    "path": "rust/lance-encoding/src/repdef.rs",
+    "start": 930,
+    "end": 957,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:39:32.343Z",
+    "evidence": "930 | \n931 |     fn record_validity_buf(&mut self, validity: &Option<BooleanBuffer>) {\n932 |         if let Some(validity) = validity {\n933 |             let def_level = self.checkout_def(DefinitionInterpretation::NullableItem);\n934 |             self.do_record_validity(validity, def_level);\n935 |         } else {\n936 |             self.checkout_def(DefinitionInterpretation::AllValidItem);\n937 |         }\n938 |     }\n939 | \n940 |     fn record_validity(&mut self, validity_desc: &ValidityDesc) {\n941 |         self.record_validity_buf(&validity_desc.validity)\n942 |     }\n943 | \n944 |     fn record_fsl(&mut self, fsl_desc: &FslDesc) {\n945 |         self.has_fsl = true;\n946 |         self.record_validity_buf(&fsl_desc.validity);\n947 |         self.multiply_levels(fsl_desc.dimension);\n948 |     }\n949 | \n950 |     fn normalize_specials(&mut self) {\n951 |         for def in self.def_levels.iter_mut() {\n952 |             if *def > SPECIAL_THRESHOLD {\n953 |                 *def -= SPECIAL_THRESHOLD;\n954 |             }\n955 |         }\n956 |     }\n957 | "
+  },
+  {
+    "id": 8,
+    "path": "rust/lance-table/src/io/commit.rs",
+    "start": 963,
+    "end": 993,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:39:32.343Z",
+    "evidence": "963 |     /// List manifest locations with version `> since_version`, in descending\n964 |     /// order of version.\n965 |     ///\n966 |     /// On lexically-ordered stores this is the standard listing with early\n967 |     /// termination. On non-lexically-ordered stores (e.g. S3 Express) it uses\n968 |     /// the version hint to avoid an O(n) listing, falling back to a full\n969 |     /// listing if the hint is missing or stale.\n970 |     fn list_manifest_locations_since<'a>(\n971 |         &self,\n972 |         base_path: &Path,\n973 |         object_store: &'a ObjectStore,\n974 |         since_version: u64,\n975 |     ) -> BoxStream<'a, Result<ManifestLocation>> {\n976 |         default_list_manifest_locations_since(base_path, object_store, since_version)\n977 |     }\n978 | \n979 |     /// Commit a manifest.\n980 |     ///\n981 |     /// This function should return an [CommitError::CommitConflict] if another\n982 |     /// transaction has already been committed to the path.\n983 |     async fn commit(\n984 |         &self,\n985 |         manifest: &mut Manifest,\n986 |         indices: Option<Vec<IndexMetadata>>,\n987 |         base_path: &Path,\n988 |         object_store: &ObjectStore,\n989 |         manifest_writer: ManifestWriter,\n990 |         naming_scheme: ManifestNamingScheme,\n991 |         transaction: Option<Transaction>,\n992 |     ) -> std::result::Result<ManifestLocation, CommitError>;\n993 | "
+  },
+  {
+    "id": 9,
+    "path": "rust/lance-encoding/src/encodings/physical/rle.rs",
+    "start": 3055,
+    "end": 3097,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:39:32.344Z",
+    "evidence": "3055 | \n3056 |             // Compress the data\n3057 |             let array = Int32Array::from(data.clone());\n3058 |             let (compressed, _) =\n3059 |                 compress_miniblock(&encoder, DataBlock::from_array(array)).unwrap();\n3060 | \n3061 |             // Decompress and verify\n3062 |             match MiniBlockDecompressor::decompress(\n3063 |                 &decompressor,\n3064 |                 compressed.data,\n3065 |                 compressed.num_values,\n3066 |             ) {\n3067 |                 Ok(decompressed) => match decompressed {\n3068 |                     DataBlock::FixedWidth(ref block) => {\n3069 |                         let values: &[i32] = bytemuck::cast_slice(block.data.as_ref());\n3070 |                         assert_eq!(\n3071 |                             values.len(),\n3072 |                             1024,\n3073 |                             \"Test case {} got {} values, expected 1024\",\n3074 |                             test_name,\n3075 |                             values.len()\n3076 |                         );\n3077 |                         assert_eq!(\n3078 |                             block.data.len(),\n3079 |                             4096,\n3080 |                             \"Test case {} got {} bytes, expected 4096\",\n3081 |                             test_name,\n3082 |                             block.data.len()\n3083 |                         );\n3084 |                         assert_eq!(values, &data[..], \"Test case {} data mismatch\", test_name);\n3085 |                     }\n3086 |                     _ => panic!(\"Test case {} expected FixedWidth block\", test_name),\n3087 |                 },\n3088 |                 Err(e) => {\n3089 |                     if e.to_string().contains(\"4092\") {\n3090 |                         panic!(\"Test case {} found bug 4092: {}\", test_name, e);\n3091 |                     }\n3092 |                     panic!(\"Test case {} failed with error: {}\", test_name, e);\n3093 |                 }\n3094 |             }\n3095 |         }\n3096 |     }\n3097 | "
+  },
+  {
+    "id": 10,
+    "path": "rust/lance-encoding/src/data.rs",
+    "start": 758,
+    "end": 796,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:41:58.087Z",
+    "evidence": "758 |     /// The offset width Arrow mandates for `data_type`, or `None` if the type\n759 |     /// does not use the `[offsets, bytes]` layout this block represents.\n760 |     fn expected_bits_per_offset(data_type: &DataType) -> Option<u8> {\n761 |         match data_type {\n762 |             DataType::Binary | DataType::Utf8 => Some(32),\n763 |             DataType::LargeBinary | DataType::LargeUtf8 => Some(64),\n764 |             _ => None,\n765 |         }\n766 |     }\n767 | \n768 |     fn layout_error(&self, data_type: &DataType, detail: impl std::fmt::Display) -> Error {\n769 |         Self::format_layout_error(\n770 |             data_type,\n771 |             detail,\n772 |             self.num_values,\n773 |             self.bits_per_offset,\n774 |             self.offsets.len(),\n775 |             self.data.len(),\n776 |         )\n777 |     }\n778 | \n779 |     fn format_layout_error(\n780 |         data_type: &DataType,\n781 |         detail: impl std::fmt::Display,\n782 |         num_values: u64,\n783 |         bits_per_offset: u8,\n784 |         offsets_size: usize,\n785 |         data_size: usize,\n786 |     ) -> Error {\n787 |         Error::corrupt_file_named(\n788 |             \"variable width data block\",\n789 |             format!(\n790 |                 \"invalid variable-width layout for {}: {} (num_values: {}, bits_per_offset: {}, \\\n791 |                  offsets buffer size: {} bytes, data buffer size: {} bytes)\",\n792 |                 data_type, detail, num_values, bits_per_offset, offsets_size, data_size,\n793 |             ),\n794 |         )\n795 |     }\n796 | "
+  },
+  {
+    "id": 11,
+    "path": "rust/lance-encoding/src/compression.rs",
+    "start": 1363,
+    "end": 1390,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:39:38.834Z",
+    "evidence": "1363 | fn validate_rle_block_child_inner(compression: &Compression, role: &str) -> Result<(u64, bool)> {\n1364 |     match compression {\n1365 |         Compression::Flat(flat) => Ok((flat.bits_per_value, false)),\n1366 |         Compression::OutOfLineBitpacking(out_of_line) => {\n1367 |             let values = out_of_line.values.as_ref().ok_or_else(|| {\n1368 |                 Error::invalid_input(format!(\n1369 |                     \"RLE {role} bitpacking child missing values encoding\"\n1370 |                 ))\n1371 |             })?;\n1372 |             let Compression::Flat(_) = values.compression.as_ref().ok_or_else(|| {\n1373 |                 Error::invalid_input(format!(\n1374 |                     \"RLE {role} bitpacking child missing values compression\"\n1375 |                 ))\n1376 |             })?\n1377 |             else {\n1378 |                 return Err(Error::invalid_input(format!(\n1379 |                     \"RLE {role} bitpacking child only supports flat values\"\n1380 |                 )));\n1381 |             };\n1382 |             Ok((out_of_line.uncompressed_bits_per_value, true))\n1383 |         }\n1384 |         other => Err(Error::invalid_input(format!(\n1385 |             \"RLE {role} general child only supports flat or out-of-line bitpacking inner encodings, got {}\",\n1386 |             compression_name(other)\n1387 |         ))),\n1388 |     }\n1389 | }\n1390 | "
+  },
+  {
+    "id": 12,
+    "path": "rust/lance-encoding/src/repdef.rs",
+    "start": 43,
+    "end": 83,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:39:38.836Z",
+    "evidence": "43 | //!\n44 | //! # Definition Levels\n45 | //!\n46 | //! Definition levels are simpler.  We can think of them as zipping together various validity bitmaps\n47 | //! (from different levels of nesting) into a single buffer.  For example, we could zip the arrays\n48 | //! [1, 1, 0, 0] and [1, 0, 1, 0] into [11, 10, 01, 00].  However, 00 and 01 are redundant.  If the\n49 | //! outer level is null then the validity of the inner levels is irrelevant.  To save space we instead\n50 | //! encode a \"level\" which is the \"depth\" of the null.  Let's look at a more complete example:\n51 | //!\n52 | //! Array: [{\"middle\": {\"inner\": 1]}}, NULL, {\"middle\": NULL}, {\"middle\": {\"inner\": NULL}}]\n53 | //!\n54 | //! In Arrow we would have the following validity arrays:\n55 | //! Outer validity : 1, 0, 1, 1\n56 | //! Middle validity: 1, ?, 0, 1\n57 | //! Inner validity : 1, ?, ?, 0\n58 | //! Values         : 1, ?, ?, ?\n59 | //!\n60 | //! The ? values are undefined in the Arrow format.  We can convert these into definition levels as follows:\n61 | //!\n62 | //! | Values | Definition |\n63 | //! | ------ | ---------- |\n64 | //! |      1 |          0 | // Valid at all levels\n65 | //! |      - |          3 | // Null at outer level\n66 | //! |      - |          2 | // Null at middle level\n67 | //! |      - |          1 | // Null at inner level\n68 | //!\n69 | //! # Compression\n70 | //!\n71 | //! Note that we only need 2 bits of definition levels to represent 3 levels of nesting.  Definition\n72 | //! levels are always more compact than the input validity arrays.  However, compressed levels are not\n73 | //! necessarily more compact than the compressed validity arrays.\n74 | //!\n75 | //! Repetition levels are more complex.  If there are very large lists then a sparse array of offsets\n76 | //! (which has one element per list) might be more compact than a dense array of repetition levels\n77 | //! (which has one element per list value, possibly even more if there are empty lists).\n78 | //!\n79 | //! However, both repetition levels and definition levels are typically very compressible with RLE.\n80 | //!\n81 | //! However, in Lance we don't always take advantage of that compression because we want to be able\n82 | //! to zip rep-def levels together with our values.  This gives us fewer IOPS when accessing row values.\n83 | //!"
+  },
+  {
+    "id": 13,
+    "path": "rust/lance-table/src/format/index.rs",
+    "start": 319,
+    "end": 337,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:39:38.836Z",
+    "evidence": "319 | impl From<&IndexMetadata> for pb::IndexMetadata {\n320 |     fn from(idx: &IndexMetadata) -> Self {\n321 |         let mut fragment_bitmap = Vec::new();\n322 |         if let Some(bitmap) = &idx.fragment_bitmap {\n323 |             // Fragment ids are allocated monotonically, so index coverage is\n324 |             // highly contiguous. Run containers are part of the standard\n325 |             // roaring serialization format, so converting eligible containers\n326 |             // to runs before writing shrinks the bitmap from O(fragments) to\n327 |             // O(runs) bytes.\n328 |             let mut bitmap = bitmap.clone();\n329 |             bitmap.optimize();\n330 |             if let Err(e) = bitmap.serialize_into(&mut fragment_bitmap) {\n331 |                 // In theory, this should never error. But if we do, just\n332 |                 // recover gracefully.\n333 |                 log::error!(\"Failed to serialize fragment bitmap: {}\", e);\n334 |                 fragment_bitmap.clear();\n335 |             }\n336 |         }\n337 | "
+  },
+  {
+    "id": 14,
+    "path": "rust/lance-encoding/src/decoder.rs",
+    "start": 4117,
+    "end": 4139,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:39:38.836Z",
+    "evidence": "4117 |     #[tokio::test]\n4118 |     async fn test_byte_sized_batches_respect_row_limit() {\n4119 |         use arrow_array::Int32Array;\n4120 | \n4121 |         let num_rows: i32 = 1000;\n4122 |         let schema = Arc::new(ArrowSchema::new(vec![ArrowField::new(\n4123 |             \"x\",\n4124 |             DataType::Int32,\n4125 |             false,\n4126 |         )]));\n4127 |         let input_batch = RecordBatch::try_new(\n4128 |             schema,\n4129 |             vec![Arc::new(Int32Array::from_iter_values(0..num_rows))],\n4130 |         )\n4131 |         .unwrap();\n4132 | \n4133 |         // The byte limit can hold every row, so the 100-row limit must win.\n4134 |         let batches =\n4135 |             decode_batches_with_byte_limit(&input_batch, /*batch_size=*/ 100, Some(10_000)).await;\n4136 |         assert_eq!(batches.len(), 10);\n4137 |         assert!(batches.iter().all(|batch| batch.num_rows() == 100));\n4138 |     }\n4139 | "
+  },
+  {
+    "id": 15,
+    "path": "rust/lance-file/src/versions/v1/writer/mod.rs",
+    "start": 66,
+    "end": 87,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:39:38.836Z",
+    "evidence": "66 | /// [FileWriter] writes Arrow [RecordBatch] to one Lance file.\n67 | ///\n68 | /// ```ignored\n69 | /// use lance::io::FileWriter;\n70 | /// use futures::stream::Stream;\n71 | ///\n72 | /// let mut file_writer = FileWriter::new(object_store, &path, &schema);\n73 | /// while let Ok(batch) = stream.next().await {\n74 | ///     file_writer.write(&batch).unwrap();\n75 | /// }\n76 | /// // Need to close file writer to flush buffer and footer.\n77 | /// file_writer.shutdown();\n78 | /// ```\n79 | pub struct FileWriter<M: ManifestProvider + Send + Sync> {\n80 |     pub object_writer: Box<dyn Writer>,\n81 |     schema: Schema,\n82 |     batch_id: i32,\n83 |     page_table: PageTable,\n84 |     metadata: Metadata,\n85 |     stats_collector: Option<statistics::StatisticsCollector>,\n86 |     manifest_provider: PhantomData<M>,\n87 | }"
+  },
+  {
+    "id": 16,
+    "path": "rust/lance-core/src/datatypes/schema.rs",
+    "start": 1333,
+    "end": 1364,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:39:38.836Z",
+    "evidence": "1333 |     /// Adds all fields from the base schema satisfying a predicate\n1334 |     pub fn union_predicate(mut self, predicate: impl Fn(&Field) -> bool) -> Self {\n1335 |         for field in self.base.schema().fields_pre_order() {\n1336 |             if predicate(field) {\n1337 |                 self.field_ids.insert(field.id);\n1338 |             }\n1339 |         }\n1340 |         self\n1341 |     }\n1342 | \n1343 |     /// Removes all fields in the base schema satisfying a predicate\n1344 |     pub fn subtract_predicate(mut self, predicate: impl Fn(&Field) -> bool) -> Self {\n1345 |         for field in self.base.schema().fields_pre_order() {\n1346 |             if predicate(field) {\n1347 |                 self.field_ids.remove(&field.id);\n1348 |             }\n1349 |         }\n1350 |         self\n1351 |     }\n1352 | \n1353 |     /// Creates a new projection that is the intersection of this projection and another\n1354 |     pub fn intersect(mut self, other: &Self) -> Self {\n1355 |         self.field_ids = HashSet::from_iter(self.field_ids.intersection(&other.field_ids).copied());\n1356 |         self.with_row_id = self.with_row_id && other.with_row_id;\n1357 |         self.with_row_addr = self.with_row_addr && other.with_row_addr;\n1358 |         self.with_row_last_updated_at_version =\n1359 |             self.with_row_last_updated_at_version && other.with_row_last_updated_at_version;\n1360 |         self.with_row_created_at_version =\n1361 |             self.with_row_created_at_version && other.with_row_created_at_version;\n1362 |         self\n1363 |     }\n1364 | "
+  },
+  {
+    "id": 17,
+    "path": "rust/lance-table/src/transaction/row_version.rs",
+    "start": 356,
+    "end": 375,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:39:38.837Z",
+    "evidence": "356 | \n357 |                 match existing_row_count.cmp(&physical_rows) {\n358 |                     Ordering::Equal => {\n359 |                         // Row IDs already match physical rows, continue to next fragment\n360 |                         continue;\n361 |                     }\n362 |                     Ordering::Less => {\n363 |                         // Partial row IDs - need to fill the remaining ones\n364 |                         let remaining_rows = physical_rows - existing_row_count;\n365 |                         let new_row_ids = *next_row_id..(*next_row_id + remaining_rows);\n366 | \n367 |                         // Merge existing and new row IDs\n368 |                         let combined_sequence = match &fragment.row_id_meta {\n369 |                             Some(RowIdMeta::Inline(data)) => read_row_ids(data)?,\n370 |                             _ => {\n371 |                                 return Err(Error::internal(\n372 |                                     \"Failed to deserialize existing row ID sequence\",\n373 |                                 ));\n374 |                             }\n375 |                         };"
+  },
+  {
+    "id": 18,
+    "path": "rust/lance-encoding/src/data.rs",
+    "start": 1671,
+    "end": 1684,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:39:38.837Z",
+    "evidence": "1671 | fn max_index_val(index_type: &DataType) -> u64 {\n1672 |     match index_type {\n1673 |         DataType::Int8 => i8::MAX as u64,\n1674 |         DataType::Int16 => i16::MAX as u64,\n1675 |         DataType::Int32 => i32::MAX as u64,\n1676 |         DataType::Int64 => i64::MAX as u64,\n1677 |         DataType::UInt8 => u8::MAX as u64,\n1678 |         DataType::UInt16 => u16::MAX as u64,\n1679 |         DataType::UInt32 => u32::MAX as u64,\n1680 |         DataType::UInt64 => u64::MAX,\n1681 |         _ => panic!(\"Invalid dictionary index type\"),\n1682 |     }\n1683 | }\n1684 | "
+  },
+  {
+    "id": 20,
+    "path": "rust/lance-table/src/utils/stream.rs",
+    "start": 1752,
+    "end": 1791,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:39:38.837Z",
+    "evidence": "1752 |         let created_versions: Vec<u64> = batches\n1753 |             .iter()\n1754 |             .flat_map(|b| {\n1755 |                 b.column_by_name(\"_row_created_at_version\")\n1756 |                     .unwrap()\n1757 |                     .as_primitive::<UInt64Type>()\n1758 |                     .values()\n1759 |                     .to_vec()\n1760 |             })\n1761 |             .collect();\n1762 |         let last_updated_versions: Vec<u64> = batches\n1763 |             .iter()\n1764 |             .flat_map(|b| {\n1765 |                 b.column_by_name(\"_row_last_updated_at_version\")\n1766 |                     .unwrap()\n1767 |                     .as_primitive::<UInt64Type>()\n1768 |                     .values()\n1769 |                     .to_vec()\n1770 |             })\n1771 |             .collect();\n1772 |         let surviving_positions: Vec<u64> = (20..60).chain(80..100).collect();\n1773 |         let expected_created: Vec<u64> = surviving_positions\n1774 |             .iter()\n1775 |             .map(|position| 1_000 + position)\n1776 |             .collect();\n1777 |         let expected_last_updated: Vec<u64> = surviving_positions\n1778 |             .iter()\n1779 |             .map(|position| match position {\n1780 |                 0..=6 => 11,\n1781 |                 7..=19 => 22,\n1782 |                 20 => 33,\n1783 |                 21..=49 => 44,\n1784 |                 _ => 55,\n1785 |             })\n1786 |             .collect();\n1787 | \n1788 |         assert_eq!(created_versions, expected_created);\n1789 |         assert_eq!(last_updated_versions, expected_last_updated);\n1790 |     }\n1791 | "
+  }
+]

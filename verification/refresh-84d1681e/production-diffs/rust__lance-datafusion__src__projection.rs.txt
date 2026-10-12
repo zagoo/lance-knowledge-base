@@ -1,0 +1,43 @@
+@@ -16,7 +16,7 @@ use tracing::instrument;
+   16  use lance_core::{
+   17      Error, ROW_ADDR, ROW_CREATED_AT_VERSION, ROW_ID, ROW_LAST_UPDATED_AT_VERSION, ROW_OFFSET,
+   18      Result, WILDCARD,
+   19 -    datatypes::{OnMissing, Projectable, Projection, Schema},
+   19 +    datatypes::{OnMissing, OnTypeMismatch, Projectable, Projection, Schema},
+   20  };
+   21  
+   22  use crate::{
+
+@@ -309,8 +309,10 @@ impl ProjectionPlan {
+  309              if lance_core::is_system_column(&field.name) {
+  310                  // Handle known system columns that can be included in projections
+  311                  if field.name == ROW_ID {
+  312 +                    // Only `_rowoffset` needs `AddRowOffsetExec`. Requesting that node for
+  313 +                    // `_rowid` leaves it without the `_rowaddr` column it reads, so the scan
+  314 +                    // fails to plan with "Input plan does not have a _rowaddr column".
+  315                      with_row_id = true;
+  313 -                    must_add_row_offset = true;
+  316                  } else if field.name == ROW_ADDR {
+  317                      with_row_addr = true;
+  318                  } else if field.name == ROW_OFFSET {
+
+@@ -339,6 +341,19 @@ impl ProjectionPlan {
+  341              metadata: projection.metadata.clone(),
+  342          };
+  343  
+  344 +        // Resolve the requested fields against the base schema first.
+  345 +        // `union_schema` records any field carrying a non-negative id without
+  346 +        // checking that the base knows that id, so a schema numbered
+  347 +        // independently of the dataset -- `Schema::try_from(&ArrowSchema)` gives
+  348 +        // every field a fresh id -- yields a projection that silently resolves
+  349 +        // to fewer columns than were asked for, or to the wrong ones. Matching
+  350 +        // by name and type here reports that instead.
+  351 +        let data_schema = base.schema().project_by_schema(
+  352 +            &data_schema,
+  353 +            OnMissing::Error,
+  354 +            OnTypeMismatch::Error,
+  355 +        )?;
+  356 +
+  357          // Calculate the physical projection from data columns only
+  358          let mut physical_projection = Projection::empty(base).union_schema(&data_schema);
+  359          physical_projection.with_row_id = with_row_id;

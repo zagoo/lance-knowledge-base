@@ -1,0 +1,14 @@
+> **Historical declarations — excluded from V2.1 production scope.** Retained from iteration 85.
+
+# Excluded declarations from rust-lance-file-readers.md
+
+| `lance_file::versions::v2_0::reader::test_projection_length` | crate-internal effective (private module) | `pub fn test_projection_length(     schema: &Schema,     column_indices: &[u32],     column_lengths: &[u64], ) -> Result<u64> {` | [rust/lance-file/src/versions/v2_0/reader.rs:398-402](../../L2-files/rust/lance-file/src/versions/v2_0/reader.rs.md) |
+| `lance_file::versions::v2_1::reader::grammar_tests` | private | `mod grammar_tests {` | [rust/lance-file/src/versions/v2_1/reader.rs:270-270](../../L2-files/rust/lance-file/src/versions/v2_1/reader.rs.md) |
+| `lance_file::versions::v2_1::reader::grammar_tests::rejects_nested_variable_packed_struct` | private | `fn rejects_nested_variable_packed_struct() {` | [rust/lance-file/src/versions/v2_1/reader.rs:278-278](../../L2-files/rust/lance-file/src/versions/v2_1/reader.rs.md) |
+| `lance_file::versions::v2_1::reader::test_projection_length` | crate-internal effective (private module) | `pub fn test_projection_length(     schema: &Schema,     column_indices: &[u32],     column_lengths: &[u64], ) -> Result<u64> {` | [rust/lance-file/src/versions/v2_1/reader.rs:261-265](../../L2-files/rust/lance-file/src/versions/v2_1/reader.rs.md) |
+| `lance_file::versions::v2_2::reader::grammar_tests` | private | `mod grammar_tests {` | [rust/lance-file/src/versions/v2_2/reader.rs:263-263](../../L2-files/rust/lance-file/src/versions/v2_2/reader.rs.md) |
+| `lance_file::versions::v2_2::reader::grammar_tests::flat` | private | `fn flat(bits_per_value: u64) -> CompressiveEncoding {` | [rust/lance-file/src/versions/v2_2/reader.rs:270-270](../../L2-files/rust/lance-file/src/versions/v2_2/reader.rs.md) |
+| `lance_file::versions::v2_2::reader::grammar_tests::rejects_nested_variable_width_rle` | private | `fn rejects_nested_variable_width_rle() {` | [rust/lance-file/src/versions/v2_2/reader.rs:280-280](../../L2-files/rust/lance-file/src/versions/v2_2/reader.rs.md) |
+| `lance_file::versions::v2_3::reader::grammar_tests` | private | `mod grammar_tests {` | [rust/lance-file/src/versions/v2_3/reader.rs:301-301](../../L2-files/rust/lance-file/src/versions/v2_3/reader.rs.md) |
+| `lance_file::versions::v2_3::reader::grammar_tests::accepts_nested_variable_width_rle` | private | `fn accepts_nested_variable_width_rle() {` | [rust/lance-file/src/versions/v2_3/reader.rs:318-318](../../L2-files/rust/lance-file/src/versions/v2_3/reader.rs.md) |
+| `lance_file::versions::v2_3::reader::grammar_tests::flat` | private | `fn flat(bits_per_value: u64) -> CompressiveEncoding {` | [rust/lance-file/src/versions/v2_3/reader.rs:308-308](../../L2-files/rust/lance-file/src/versions/v2_3/reader.rs.md) |

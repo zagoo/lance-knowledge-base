@@ -1,0 +1,1245 @@
+@@ -138,10 +138,14 @@ use tracing::instrument;
+  138  use uuid::Uuid;
+  139  
+  140  pub mod builder;
+  141 +mod coreset_algo;
+  142  pub mod io;
+  143  mod partition_serde;
+  144 +mod streaming_hamming;
+  145  pub mod v2;
+  146  
+  147 +use coreset_algo::{FloatCoresetAlgorithm, HammingCoresetAlgorithm, StreamingCoresetAlgorithm};
+  148 +
+  149  // Cache wrapper for vector index trait objects
+  150  // Cache key for IVF partitions in the legacy IVF index
+  151  #[derive(Debug, Clone)]
+
+@@ -3626,12 +3630,287 @@ impl<'a> FixedIvfTrainingSampler<'a> {
+ 3630  
+ 3631  type KMeansProgressCallback = Arc<dyn Fn(u32, u32) + Send + Sync>;
+ 3632  
+ 3633 +struct StreamingCoresetTrainingRequest<'a> {
+ 3634 +    dataset: &'a Dataset,
+ 3635 +    column: &'a str,
+ 3636 +    dimension: usize,
+ 3637 +    metric_type: MetricType,
+ 3638 +    params: &'a IvfBuildParams,
+ 3639 +    fragment_ids: Option<&'a [u32]>,
+ 3640 +    progress: Arc<dyn lance_index::progress::IndexBuildProgress>,
+ 3641 +}
+ 3642 +
+ 3643 +/// Metric-specific behavior for streaming coreset training.
+ 3644 +///
+ 3645 +/// Cosine input is normalized by the sampler and therefore uses the L2 policy.
+ 3646 +#[async_trait]
+ 3647 +trait StreamingKMeansMetricPolicy: Send + Sync {
+ 3648 +    fn metric_type(&self) -> MetricType;
+ 3649 +
+ 3650 +    async fn train_coreset_ivf_model(
+ 3651 +        &self,
+ 3652 +        request: StreamingCoresetTrainingRequest<'_>,
+ 3653 +    ) -> Result<IvfModel>;
+ 3654 +
+ 3655 +    fn validate_sample_metric(&self, metric_type: MetricType) -> Result<()> {
+ 3656 +        if metric_type == self.metric_type() {
+ 3657 +            Ok(())
+ 3658 +        } else {
+ 3659 +            Err(Error::invalid_input(format!(
+ 3660 +                "streaming sampler returned metric {}, expected {}",
+ 3661 +                metric_type,
+ 3662 +                self.metric_type()
+ 3663 +            )))
+ 3664 +        }
+ 3665 +    }
+ 3666 +
+ 3667 +    fn disable_local_hierarchical(&self) -> bool {
+ 3668 +        false
+ 3669 +    }
+ 3670 +
+ 3671 +    fn local_coreset_k(
+ 3672 +        &self,
+ 3673 +        num_partitions: usize,
+ 3674 +        num_rows: usize,
+ 3675 +        coreset_rate: usize,
+ 3676 +        total_steps: usize,
+ 3677 +        has_decoupled_budget: bool,
+ 3678 +    ) -> usize {
+ 3679 +        streaming_local_coreset_k(
+ 3680 +            num_partitions,
+ 3681 +            num_rows,
+ 3682 +            coreset_rate,
+ 3683 +            total_steps,
+ 3684 +            has_decoupled_budget,
+ 3685 +        )
+ 3686 +    }
+ 3687 +
+ 3688 +    fn has_converged(&self, previous_loss: f64, loss: f64) -> bool {
+ 3689 +        if loss == 0.0 {
+ 3690 +            previous_loss == 0.0
+ 3691 +        } else {
+ 3692 +            (previous_loss - loss).abs() < 1e-4 * loss.abs()
+ 3693 +        }
+ 3694 +    }
+ 3695 +}
+ 3696 +
+ 3697 +/// Operations specific to floating-point coreset summaries.
+ 3698 +trait StreamingFloatKMeansMetricPolicy: StreamingKMeansMetricPolicy {
+ 3699 +    fn local_summary_loss(&self, distance: f32) -> f64;
+ 3700 +
+ 3701 +    fn merge_residual(&self, vector: &[f32], centroid: &[f32]) -> f64;
+ 3702 +
+ 3703 +    fn split_priority(
+ 3704 +        &self,
+ 3705 +        data_values: &[f32],
+ 3706 +        weights: &[f64],
+ 3707 +        indices: &[usize],
+ 3708 +        centroid: &[f32],
+ 3709 +        dimension: usize,
+ 3710 +        loss: f64,
+ 3711 +    ) -> f64;
+ 3712 +
+ 3713 +    fn initialize_centroids(
+ 3714 +        &self,
+ 3715 +        data_values: &[f32],
+ 3716 +        dimension: usize,
+ 3717 +        k: usize,
+ 3718 +        n: usize,
+ 3719 +        weights: &[f64],
+ 3720 +    ) -> Vec<f32> {
+ 3721 +        initialize_weighted_centroids(data_values, dimension, k, n, weights)
+ 3722 +    }
+ 3723 +}
+ 3724 +
+ 3725 +struct L2MetricPolicy;
+ 3726 +
+ 3727 +#[async_trait]
+ 3728 +impl StreamingKMeansMetricPolicy for L2MetricPolicy {
+ 3729 +    fn metric_type(&self) -> MetricType {
+ 3730 +        DistanceType::L2
+ 3731 +    }
+ 3732 +
+ 3733 +    async fn train_coreset_ivf_model(
+ 3734 +        &self,
+ 3735 +        request: StreamingCoresetTrainingRequest<'_>,
+ 3736 +    ) -> Result<IvfModel> {
+ 3737 +        train_streaming_coreset_ivf_model_with_algorithm(request, &FloatCoresetAlgorithm::new(self))
+ 3738 +            .await
+ 3739 +    }
+ 3740 +}
+ 3741 +
+ 3742 +impl StreamingFloatKMeansMetricPolicy for L2MetricPolicy {
+ 3743 +    fn local_summary_loss(&self, distance: f32) -> f64 {
+ 3744 +        distance as f64
+ 3745 +    }
+ 3746 +
+ 3747 +    fn merge_residual(&self, vector: &[f32], centroid: &[f32]) -> f64 {
+ 3748 +        squared_l2(vector, centroid)
+ 3749 +    }
+ 3750 +
+ 3751 +    fn split_priority(
+ 3752 +        &self,
+ 3753 +        _data_values: &[f32],
+ 3754 +        _weights: &[f64],
+ 3755 +        _indices: &[usize],
+ 3756 +        _centroid: &[f32],
+ 3757 +        _dimension: usize,
+ 3758 +        loss: f64,
+ 3759 +    ) -> f64 {
+ 3760 +        loss
+ 3761 +    }
+ 3762 +}
+ 3763 +
+ 3764 +struct DotMetricPolicy;
+ 3765 +
+ 3766 +#[async_trait]
+ 3767 +impl StreamingKMeansMetricPolicy for DotMetricPolicy {
+ 3768 +    fn metric_type(&self) -> MetricType {
+ 3769 +        DistanceType::Dot
+ 3770 +    }
+ 3771 +
+ 3772 +    async fn train_coreset_ivf_model(
+ 3773 +        &self,
+ 3774 +        request: StreamingCoresetTrainingRequest<'_>,
+ 3775 +    ) -> Result<IvfModel> {
+ 3776 +        train_streaming_coreset_ivf_model_with_algorithm(request, &FloatCoresetAlgorithm::new(self))
+ 3777 +            .await
+ 3778 +    }
+ 3779 +
+ 3780 +    fn disable_local_hierarchical(&self) -> bool {
+ 3781 +        true
+ 3782 +    }
+ 3783 +
+ 3784 +    fn local_coreset_k(
+ 3785 +        &self,
+ 3786 +        num_partitions: usize,
+ 3787 +        num_rows: usize,
+ 3788 +        coreset_rate: usize,
+ 3789 +        total_steps: usize,
+ 3790 +        has_decoupled_budget: bool,
+ 3791 +    ) -> usize {
+ 3792 +        let local_k = streaming_local_coreset_k(
+ 3793 +            num_partitions,
+ 3794 +            num_rows,
+ 3795 +            coreset_rate,
+ 3796 +            total_steps,
+ 3797 +            has_decoupled_budget,
+ 3798 +        );
+ 3799 +        // Dot summaries merge without residual loss, so distribute the final
+ 3800 +        // representative count across chunks. This also keeps flat local
+ 3801 +        // k-means below the number of rows.
+ 3802 +        local_k
+ 3803 +            .min(num_partitions.div_ceil(total_steps.max(1)))
+ 3804 +            .min(num_rows.saturating_sub(1))
+ 3805 +    }
+ 3806 +}
+ 3807 +
+ 3808 +impl StreamingFloatKMeansMetricPolicy for DotMetricPolicy {
+ 3809 +    fn local_summary_loss(&self, _distance: f32) -> f64 {
+ 3810 +        0.0
+ 3811 +    }
+ 3812 +
+ 3813 +    fn merge_residual(&self, _vector: &[f32], _centroid: &[f32]) -> f64 {
+ 3814 +        0.0
+ 3815 +    }
+ 3816 +
+ 3817 +    fn split_priority(
+ 3818 +        &self,
+ 3819 +        data_values: &[f32],
+ 3820 +        weights: &[f64],
+ 3821 +        indices: &[usize],
+ 3822 +        centroid: &[f32],
+ 3823 +        dimension: usize,
+ 3824 +        _loss: f64,
+ 3825 +    ) -> f64 {
+ 3826 +        indices
+ 3827 +            .iter()
+ 3828 +            .map(|&idx| {
+ 3829 +                let vector = &data_values[idx * dimension..(idx + 1) * dimension];
+ 3830 +                weights[idx] * squared_l2(vector, centroid)
+ 3831 +            })
+ 3832 +            .sum()
+ 3833 +    }
+ 3834 +}
+ 3835 +
+ 3836 +struct HammingMetricPolicy;
+ 3837 +
+ 3838 +#[async_trait]
+ 3839 +impl StreamingKMeansMetricPolicy for HammingMetricPolicy {
+ 3840 +    fn metric_type(&self) -> MetricType {
+ 3841 +        DistanceType::Hamming
+ 3842 +    }
+ 3843 +
+ 3844 +    async fn train_coreset_ivf_model(
+ 3845 +        &self,
+ 3846 +        request: StreamingCoresetTrainingRequest<'_>,
+ 3847 +    ) -> Result<IvfModel> {
+ 3848 +        train_streaming_coreset_ivf_model_with_algorithm(request, &HammingCoresetAlgorithm).await
+ 3849 +    }
+ 3850 +}
+ 3851 +
+ 3852 +static L2_METRIC_POLICY: L2MetricPolicy = L2MetricPolicy;
+ 3853 +static DOT_METRIC_POLICY: DotMetricPolicy = DotMetricPolicy;
+ 3854 +static HAMMING_METRIC_POLICY: HammingMetricPolicy = HammingMetricPolicy;
+ 3855 +
+ 3856 +fn streaming_kmeans_metric_policy(
+ 3857 +    metric_type: MetricType,
+ 3858 +) -> Result<&'static dyn StreamingKMeansMetricPolicy> {
+ 3859 +    match metric_type {
+ 3860 +        DistanceType::L2 | DistanceType::Cosine => Ok(&L2_METRIC_POLICY),
+ 3861 +        DistanceType::Dot => Ok(&DOT_METRIC_POLICY),
+ 3862 +        DistanceType::Hamming => Ok(&HAMMING_METRIC_POLICY),
+ 3863 +    }
+ 3864 +}
+ 3865 +
+ 3866 +fn streaming_float_kmeans_metric_policy(
+ 3867 +    metric_type: MetricType,
+ 3868 +) -> Result<&'static dyn StreamingFloatKMeansMetricPolicy> {
+ 3869 +    match metric_type {
+ 3870 +        DistanceType::L2 | DistanceType::Cosine => Ok(&L2_METRIC_POLICY),
+ 3871 +        DistanceType::Dot => Ok(&DOT_METRIC_POLICY),
+ 3872 +        _ => Err(Error::invalid_input(format!(
+ 3873 +            "floating-point streaming coreset IVF supports L2, Cosine, and Dot training, got {}",
+ 3874 +            metric_type
+ 3875 +        ))),
+ 3876 +    }
+ 3877 +}
+ 3878 +
+ 3879 +fn squared_l2(left: &[f32], right: &[f32]) -> f64 {
+ 3880 +    left.iter()
+ 3881 +        .zip(right)
+ 3882 +        .map(|(left, right)| {
+ 3883 +            let diff = f64::from(*left) - f64::from(*right);
+ 3884 +            diff * diff
+ 3885 +        })
+ 3886 +        .sum()
+ 3887 +}
+ 3888 +
+ 3889 +fn validate_finite_kmeans_distance(
+ 3890 +    distance: f32,
+ 3891 +    row_idx: usize,
+ 3892 +    metric_type: MetricType,
+ 3893 +    operation: &str,
+ 3894 +) -> Result<()> {
+ 3895 +    if distance.is_finite() {
+ 3896 +        Ok(())
+ 3897 +    } else {
+ 3898 +        Err(Error::invalid_input(format!(
+ 3899 +            "{operation} produced a nonfinite distance at row {row_idx} \
+ 3900 +            for metric {metric_type}. Input vector magnitudes may exceed \
+ 3901 +            the numeric range used during streaming k-means training. \
+ 3902 +            Consider uniformly scaling the vectors to smaller magnitudes."
+ 3903 +        )))
+ 3904 +    }
+ 3905 +}
+ 3906 +
+ 3907  struct KMeansStepOptions {
+ 3908      dimension: usize,
+ 3909      metric_type: MetricType,
+ 3910      num_partitions: usize,
+ 3911      sample_rate: usize,
+ 3912      max_iters: usize,
+ 3913 +    disable_hierarchical: bool,
+ 3914      on_progress: KMeansProgressCallback,
+ 3915  }
+ 3916  
+
+@@ -3649,10 +3928,9 @@ where
+ 3928          KMeansParams::new(centroids, options.max_iters as u32, 1, options.metric_type)
+ 3929              .with_balance_factor(1.0)
+ 3930              .with_on_progress(options.on_progress.clone());
+ 3652 -    if has_centroids {
+ 3653 -        // Incremental refinement already has the full centroid set.  The
+ 3654 -        // hierarchical trainer bootstraps a smaller tree and is only suitable
+ 3655 -        // for the initial training pass.
+ 3931 +    if has_centroids || options.disable_hierarchical {
+ 3932 +        // Incremental refinement already has the full centroid set. Streaming
+ 3933 +        // metric policy can also require flat local training.
+ 3934          kmeans_params = kmeans_params.with_hierarchical_k(1);
+ 3935      }
+ 3936      lance_index::vector::kmeans::train_kmeans::<T>(
+
+@@ -3667,37 +3945,24 @@ where
+ 3945  fn train_ivf_kmeans_step_arrow_array_no_loss(
+ 3946      centroids: Option<Arc<FixedSizeListArray>>,
+ 3947      data: &FixedSizeListArray,
+ 3670 -    metric_type: MetricType,
+ 3671 -    num_partitions: usize,
+ 3672 -    sample_rate: usize,
+ 3673 -    max_iters: usize,
+ 3674 -    on_progress: Arc<dyn Fn(u32, u32) + Send + Sync>,
+ 3948 +    options: KMeansStepOptions,
+ 3949  ) -> Result<KMeans> {
+ 3676 -    let dimension = data.value_length() as usize;
+ 3950      let values = data.values();
+ 3678 -    let step_options = KMeansStepOptions {
+ 3679 -        dimension,
+ 3680 -        metric_type,
+ 3681 -        num_partitions,
+ 3682 -        sample_rate,
+ 3683 -        max_iters,
+ 3684 -        on_progress,
+ 3685 -    };
+ 3686 -    let kmeans = match (values.data_type(), metric_type) {
+ 3951 +    let kmeans = match (values.data_type(), options.metric_type) {
+ 3952          (DataType::Float16, _) => train_ivf_kmeans_step::<Float16Type>(
+ 3953              centroids,
+ 3954              values.as_primitive::<Float16Type>(),
+ 3690 -            &step_options,
+ 3955 +            &options,
+ 3956          )?,
+ 3957          (DataType::Float32, _) => train_ivf_kmeans_step::<Float32Type>(
+ 3958              centroids,
+ 3959              values.as_primitive::<Float32Type>(),
+ 3695 -            &step_options,
+ 3960 +            &options,
+ 3961          )?,
+ 3962          (DataType::Float64, _) => train_ivf_kmeans_step::<Float64Type>(
+ 3963              centroids,
+ 3964              values.as_primitive::<Float64Type>(),
+ 3700 -            &step_options,
+ 3965 +            &options,
+ 3966          )?,
+ 3967          (DataType::Int8, DistanceType::L2)
+ 3968          | (DataType::Int8, DistanceType::Dot)
+
+@@ -3706,18 +3971,18 @@ fn train_ivf_kmeans_step_arrow_array_no_loss(
+ 3971              train_ivf_kmeans_step::<Float32Type>(
+ 3972                  centroids,
+ 3973                  data.values().as_primitive::<Float32Type>(),
+ 3709 -                &step_options,
+ 3974 +                &options,
+ 3975              )?
+ 3976          }
+ 3977          (DataType::UInt8, DistanceType::Hamming) => train_ivf_kmeans_step::<UInt8Type>(
+ 3978              centroids,
+ 3979              values.as_primitive::<UInt8Type>(),
+ 3715 -            &step_options,
+ 3980 +            &options,
+ 3981          )?,
+ 3982          _ => Err(Error::index(format!(
+ 3983              "KMeans: can not train data type {} with distance type: {}",
+ 3984              values.data_type(),
+ 3720 -            metric_type
+ 3985 +            options.metric_type
+ 3986          )))?,
+ 3987      };
+ 3988      Ok(kmeans)
+
+@@ -3726,6 +3991,7 @@ fn train_ivf_kmeans_step_arrow_array_no_loss(
+ 3991  fn accumulate_refine_assignments(
+ 3992      data: &FixedSizeListArray,
+ 3993      centroids: &FixedSizeListArray,
+ 3994 +    metric_policy: &dyn StreamingFloatKMeansMetricPolicy,
+ 3995      cluster_sums: &mut [f32],
+ 3996      cluster_weights: &mut [f64],
+ 3997  ) -> Result<f64> {
+
+@@ -3733,7 +3999,7 @@ fn accumulate_refine_assignments(
+ 3999      let kmeans = KMeans::with_centroids(
+ 4000          centroids.values().clone(),
+ 4001          dimension,
+ 3736 -        DistanceType::L2,
+ 4002 +        metric_policy.metric_type(),
+ 4003          f64::MAX,
+ 4004      );
+ 4005      let (membership, distances) = kmeans.compute_membership_and_distances(data)?;
+
+@@ -3744,6 +4010,12 @@ fn accumulate_refine_assignments(
+ 4010          let (Some(cluster_id), Some(distance)) = (membership[row_idx], distances[row_idx]) else {
+ 4011              continue;
+ 4012          };
+ 4013 +        validate_finite_kmeans_distance(
+ 4014 +            distance,
+ 4015 +            row_idx,
+ 4016 +            metric_policy.metric_type(),
+ 4017 +            "streaming kmeans refinement",
+ 4018 +        )?;
+ 4019          let cluster_id = cluster_id as usize;
+ 4020          cluster_weights[cluster_id] += 1.0;
+ 4021          loss += distance as f64;
+
+@@ -3843,6 +4115,7 @@ async fn refine_streaming_f32_kmeans_with_sampler(
+ 4115      passes: usize,
+ 4116      on_progress: Arc<dyn Fn(u32, u32) + Send + Sync>,
+ 4117  ) -> Result<FixedSizeListArray> {
+ 4118 +    let metric_policy = streaming_float_kmeans_metric_policy(metric_type)?;
+ 4119      let dimension = initial_centroids.value_length() as usize;
+ 4120      let mut centroids = initial_centroids.clone();
+ 4121      for pass in 1..=passes {
+
+@@ -3854,16 +4127,12 @@ async fn refine_streaming_f32_kmeans_with_sampler(
+ 4127              let ranges = sample_ranges.chunk(row_offset, streaming_sample_size.max(1));
+ 4128              row_offset += ranges.iter().map(range_len).sum::<usize>();
+ 4129              let (training_data, mt) = sampler.sample_ranges(&ranges, metric_type).await?;
+ 3857 -            if mt != DistanceType::L2 {
+ 3858 -                return Err(Error::invalid_input(format!(
+ 3859 -                    "streaming IVF refinement currently supports L2/Cosine training, got {}",
+ 3860 -                    metric_type
+ 3861 -                )));
+ 3862 -            }
+ 4130 +            metric_policy.validate_sample_metric(mt)?;
+ 4131              let training_data = cast_training_data_to_f32(training_data)?;
+ 4132              loss += accumulate_refine_assignments(
+ 4133                  &training_data,
+ 4134                  &centroids,
+ 4135 +                metric_policy,
+ 4136                  &mut cluster_sums,
+ 4137                  &mut cluster_weights,
+ 4138              )?;
+
+@@ -3894,6 +4163,7 @@ async fn refine_streaming_f32_kmeans_with_resampling(
+ 4163      passes: usize,
+ 4164      on_progress: Arc<dyn Fn(u32, u32) + Send + Sync>,
+ 4165  ) -> Result<FixedSizeListArray> {
+ 4166 +    let metric_policy = streaming_float_kmeans_metric_policy(metric_type)?;
+ 4167      let dimension = initial_centroids.value_length() as usize;
+ 4168      let mut centroids = initial_centroids.clone();
+ 4169      for pass in 1..=passes {
+
+@@ -3912,16 +4182,12 @@ async fn refine_streaming_f32_kmeans_with_resampling(
+ 4182                  fragment_ids,
+ 4183              )
+ 4184              .await?;
+ 3915 -            if mt != DistanceType::L2 {
+ 3916 -                return Err(Error::invalid_input(format!(
+ 3917 -                    "streaming IVF refinement currently supports L2/Cosine training, got {}",
+ 3918 -                    metric_type
+ 3919 -                )));
+ 3920 -            }
+ 4185 +            metric_policy.validate_sample_metric(mt)?;
+ 4186              let training_data = cast_training_data_to_f32(training_data)?;
+ 4187              loss += accumulate_refine_assignments(
+ 4188                  &training_data,
+ 4189                  &centroids,
+ 4190 +                metric_policy,
+ 4191                  &mut cluster_sums,
+ 4192                  &mut cluster_weights,
+ 4193              )?;
+
+@@ -3940,6 +4206,98 @@ async fn refine_streaming_f32_kmeans_with_resampling(
+ 4206      Ok(centroids)
+ 4207  }
+ 4208  
+ 4209 +async fn refine_streaming_hamming_kmodes_with_sampler(
+ 4210 +    sampler: &FixedIvfTrainingSampler<'_>,
+ 4211 +    streaming_sample_size: usize,
+ 4212 +    sample_ranges: &FixedIvfTrainingRanges,
+ 4213 +    initial_centroids: &FixedSizeListArray,
+ 4214 +    passes: usize,
+ 4215 +    on_progress: KMeansProgressCallback,
+ 4216 +) -> Result<FixedSizeListArray> {
+ 4217 +    let dimension = initial_centroids.value_length() as usize;
+ 4218 +    let mut centroids = initial_centroids.clone();
+ 4219 +    for pass in 1..=passes {
+ 4220 +        let mut accumulator =
+ 4221 +            streaming_hamming::HammingAccumulator::try_new(centroids.len(), dimension)?;
+ 4222 +        let mut loss = 0.0;
+ 4223 +        let mut row_offset = 0;
+ 4224 +        while row_offset < sample_ranges.num_rows() {
+ 4225 +            let ranges = sample_ranges.chunk(row_offset, streaming_sample_size.max(1));
+ 4226 +            row_offset += ranges.iter().map(range_len).sum::<usize>();
+ 4227 +            let (training_data, metric_type) = sampler
+ 4228 +                .sample_ranges(&ranges, DistanceType::Hamming)
+ 4229 +                .await?;
+ 4230 +            HAMMING_METRIC_POLICY.validate_sample_metric(metric_type)?;
+ 4231 +            loss += streaming_hamming::accumulate_raw_assignments(
+ 4232 +                &training_data,
+ 4233 +                &centroids,
+ 4234 +                &mut accumulator,
+ 4235 +            )?;
+ 4236 +        }
+ 4237 +        centroids = streaming_hamming::update_raw_centroids(&centroids, &accumulator)?;
+ 4238 +        on_progress(pass as u32, passes as u32);
+ 4239 +        info!(
+ 4240 +            "Streaming IVF Hamming refinement pass {} / {} assigned {} vectors; pre-update loss={}",
+ 4241 +            pass,
+ 4242 +            passes,
+ 4243 +            accumulator.total_count()?,
+ 4244 +            loss
+ 4245 +        );
+ 4246 +    }
+ 4247 +    Ok(centroids)
+ 4248 +}
+ 4249 +
+ 4250 +#[allow(clippy::too_many_arguments)]
+ 4251 +async fn refine_streaming_hamming_kmodes_with_resampling(
+ 4252 +    dataset: &Dataset,
+ 4253 +    column: &str,
+ 4254 +    total_sample_rate: usize,
+ 4255 +    streaming_sample_rate: usize,
+ 4256 +    num_partitions: usize,
+ 4257 +    initial_centroids: &FixedSizeListArray,
+ 4258 +    fragment_ids: Option<&[u32]>,
+ 4259 +    passes: usize,
+ 4260 +    on_progress: KMeansProgressCallback,
+ 4261 +) -> Result<FixedSizeListArray> {
+ 4262 +    let dimension = initial_centroids.value_length() as usize;
+ 4263 +    let mut centroids = initial_centroids.clone();
+ 4264 +    for pass in 1..=passes {
+ 4265 +        let mut accumulator =
+ 4266 +            streaming_hamming::HammingAccumulator::try_new(centroids.len(), dimension)?;
+ 4267 +        let mut remaining_sample_rate = total_sample_rate;
+ 4268 +        let mut loss = 0.0;
+ 4269 +        while remaining_sample_rate > 0 {
+ 4270 +            let step_sample_rate = remaining_sample_rate.min(streaming_sample_rate);
+ 4271 +            let step_sample_size = num_partitions * step_sample_rate;
+ 4272 +            let (training_data, metric_type) = sample_ivf_training_chunk(
+ 4273 +                dataset,
+ 4274 +                column,
+ 4275 +                step_sample_size,
+ 4276 +                DistanceType::Hamming,
+ 4277 +                fragment_ids,
+ 4278 +            )
+ 4279 +            .await?;
+ 4280 +            HAMMING_METRIC_POLICY.validate_sample_metric(metric_type)?;
+ 4281 +            loss += streaming_hamming::accumulate_raw_assignments(
+ 4282 +                &training_data,
+ 4283 +                &centroids,
+ 4284 +                &mut accumulator,
+ 4285 +            )?;
+ 4286 +            remaining_sample_rate -= step_sample_rate;
+ 4287 +        }
+ 4288 +        centroids = streaming_hamming::update_raw_centroids(&centroids, &accumulator)?;
+ 4289 +        on_progress(pass as u32, passes as u32);
+ 4290 +        info!(
+ 4291 +            "Streaming IVF resampled Hamming refinement pass {} / {} assigned {} vectors; pre-update loss={}",
+ 4292 +            pass,
+ 4293 +            passes,
+ 4294 +            accumulator.total_count()?,
+ 4295 +            loss
+ 4296 +        );
+ 4297 +    }
+ 4298 +    Ok(centroids)
+ 4299 +}
+ 4300 +
+ 4301  fn f32_fsl_from_values(values: Vec<f32>, dimension: usize) -> Result<FixedSizeListArray> {
+ 4302      Ok(FixedSizeListArray::try_new_from_values(
+ 4303          Float32Array::from(values),
+
+@@ -3989,14 +4347,19 @@ impl WeightedCoreset {
+ 4347          ))
+ 4348      }
+ 4349  
+ 3992 -    fn reduce_to_budget(&mut self, dimension: usize, budget: usize) {
+ 4350 +    fn reduce_to_budget(
+ 4351 +        &mut self,
+ 4352 +        dimension: usize,
+ 4353 +        budget: usize,
+ 4354 +        metric_policy: &dyn StreamingFloatKMeansMetricPolicy,
+ 4355 +    ) -> Result<()> {
+ 4356          if self.len() <= budget {
+ 3994 -            return;
+ 4357 +            return Ok(());
+ 4358          }
+ 4359          let total_weight = self.weights.iter().sum::<f64>();
+ 4360          if total_weight <= 0.0 {
+ 4361              *self = Self::new(dimension, budget);
+ 3999 -            return;
+ 4362 +            return Ok(());
+ 4363          }
+ 4364  
+ 4365          let mut weighted_sums = vec![0.0_f64; dimension];
+
+@@ -4061,28 +4424,32 @@ impl WeightedCoreset {
+ 4424                      *value /= weight_sum as f32;
+ 4425                  }
+ 4426              }
+ 4427 +            if reduced.values[centroid_start..centroid_start + dimension]
+ 4428 +                .iter()
+ 4429 +                .any(|value| !value.is_finite())
+ 4430 +            {
+ 4431 +                return Err(Error::invalid_input(format!(
+ 4432 +                    "streaming coreset reduction produced nonfinite centroid for metric {}",
+ 4433 +                    metric_policy.metric_type()
+ 4434 +                )));
+ 4435 +            }
+ 4436  
+ 4437              let mut loss = 0.0;
+ 4438              let centroid = &reduced.values[centroid_start..centroid_start + dimension];
+ 4439              for &idx in &indices[group_start..group_end] {
+ 4440                  let vector = &self.values[idx * dimension..(idx + 1) * dimension];
+ 4069 -                let dist = vector
+ 4070 -                    .iter()
+ 4071 -                    .zip(centroid)
+ 4072 -                    .map(|(left, right)| {
+ 4073 -                        let diff = left - right;
+ 4074 -                        diff * diff
+ 4075 -                    })
+ 4076 -                    .sum::<f32>() as f64;
+ 4077 -                loss += self.losses[idx] + self.weights[idx] * dist;
+ 4441 +                let merge_residual = metric_policy.merge_residual(vector, centroid);
+ 4442 +                loss += self.losses[idx] + self.weights[idx] * merge_residual;
+ 4443              }
+ 4444              reduced.weights.push(weight_sum);
+ 4445              reduced.losses.push(loss);
+ 4446          }
+ 4447          *self = reduced;
+ 4448 +        Ok(())
+ 4449      }
+ 4450  }
+ 4451  
+ 4452 +#[derive(Debug)]
+ 4453  struct WeightedKMeansResult {
+ 4454      centroids: Vec<f32>,
+ 4455      membership: Vec<Option<u32>>,
+
+@@ -4128,14 +4495,7 @@ fn initialize_weighted_centroids(
+ 4495                  continue;
+ 4496              }
+ 4497              let vector = &data_values[row_idx * dimension..(row_idx + 1) * dimension];
+ 4131 -            let distance = vector
+ 4132 -                .iter()
+ 4133 -                .zip(last_centroid)
+ 4134 -                .map(|(left, right)| {
+ 4135 -                    let diff = left - right;
+ 4136 -                    diff * diff
+ 4137 -                })
+ 4138 -                .sum::<f32>() as f64;
+ 4498 +            let distance = squared_l2(vector, last_centroid);
+ 4499              min_distances[row_idx] = min_distances[row_idx].min(distance);
+ 4500          }
+ 4501  
+
+@@ -4182,12 +4542,13 @@ fn assign_weighted_f32_points(
+ 4542      weights: &[f64],
+ 4543      base_losses: &[f64],
+ 4544      centroid_values: &[f32],
+ 4185 -    metric_type: MetricType,
+ 4545 +    metric_policy: &dyn StreamingFloatKMeansMetricPolicy,
+ 4546  ) -> Result<WeightedKMeansResult> {
+ 4547      let dimension = data.value_length() as usize;
+ 4548      let k = centroid_values.len() / dimension;
+ 4549      let centroids = Arc::new(Float32Array::from(centroid_values.to_vec())) as ArrayRef;
+ 4190 -    let kmeans = KMeans::with_centroids(centroids, dimension, metric_type, f64::MAX);
+ 4550 +    let kmeans =
+ 4551 +        KMeans::with_centroids(centroids, dimension, metric_policy.metric_type(), f64::MAX);
+ 4552      let (membership, distances) = kmeans.compute_membership_and_distances(data)?;
+ 4553      let data_values = data.values().as_primitive::<Float32Type>().values();
+ 4554      let mut centroid_sums = vec![0.0_f32; k * dimension];
+
+@@ -4201,6 +4562,12 @@ fn assign_weighted_f32_points(
+ 4562          let Some(distance) = distances[row_idx] else {
+ 4563              continue;
+ 4564          };
+ 4565 +        validate_finite_kmeans_distance(
+ 4566 +            distance,
+ 4567 +            row_idx,
+ 4568 +            metric_policy.metric_type(),
+ 4569 +            "weighted kmeans",
+ 4570 +        )?;
+ 4571          let cluster_id = cluster_id as usize;
+ 4572          let weight = weights[row_idx];
+ 4573          cluster_weights[cluster_id] += weight;
+
+@@ -4227,6 +4594,12 @@ fn assign_weighted_f32_points(
+ 4594              );
+ 4595          }
+ 4596      }
+ 4597 +    if next_centroids.iter().any(|value| !value.is_finite()) {
+ 4598 +        return Err(Error::invalid_input(format!(
+ 4599 +            "weighted kmeans produced nonfinite centroid for metric {}",
+ 4600 +            metric_policy.metric_type()
+ 4601 +        )));
+ 4602 +    }
+ 4603  
+ 4604      let loss = cluster_losses.iter().sum();
+ 4605      Ok(WeightedKMeansResult {
+
+@@ -4243,7 +4616,7 @@ fn train_weighted_f32_kmeans(
+ 4616      weights: &[f64],
+ 4617      base_losses: &[f64],
+ 4618      k: usize,
+ 4246 -    metric_type: MetricType,
+ 4619 +    metric_policy: &dyn StreamingFloatKMeansMetricPolicy,
+ 4620      max_iters: usize,
+ 4621      on_progress: Arc<dyn Fn(u32, u32) + Send + Sync>,
+ 4622  ) -> Result<WeightedKMeansResult> {
+
+@@ -4265,14 +4638,14 @@ fn train_weighted_f32_kmeans(
+ 4638      let dimension = data.value_length() as usize;
+ 4639      let data_values = data.values().as_primitive::<Float32Type>().values();
+ 4640      let mut centroids =
+ 4268 -        initialize_weighted_centroids(data_values, dimension, k, data.len(), weights);
+ 4641 +        metric_policy.initialize_centroids(data_values, dimension, k, data.len(), weights);
+ 4642      let mut previous_loss = f64::MAX;
+ 4643      let max_iters = max_iters.max(1);
+ 4644      for iter in 1..=max_iters {
+ 4645          on_progress(iter as u32, max_iters as u32);
+ 4646          let mut result =
+ 4274 -            assign_weighted_f32_points(data, weights, base_losses, &centroids, metric_type)?;
+ 4275 -        let converged = (previous_loss - result.loss).abs() < 1e-4 * result.loss.max(1.0);
+ 4647 +            assign_weighted_f32_points(data, weights, base_losses, &centroids, metric_policy)?;
+ 4648 +        let converged = metric_policy.has_converged(previous_loss, result.loss);
+ 4649          previous_loss = result.loss;
+ 4650          if converged || iter == max_iters {
+ 4651              return Ok(result);
+
+@@ -4287,7 +4660,7 @@ fn refine_weighted_f32_kmeans(
+ 4660      weights: &[f64],
+ 4661      base_losses: &[f64],
+ 4662      initial_centroids: &FixedSizeListArray,
+ 4290 -    metric_type: MetricType,
+ 4663 +    metric_policy: &dyn StreamingFloatKMeansMetricPolicy,
+ 4664      max_iters: usize,
+ 4665      on_progress: Arc<dyn Fn(u32, u32) + Send + Sync>,
+ 4666  ) -> Result<WeightedKMeansResult> {
+
+@@ -4301,8 +4674,8 @@ fn refine_weighted_f32_kmeans(
+ 4674      for iter in 1..=max_iters {
+ 4675          on_progress(iter as u32, max_iters as u32);
+ 4676          let mut result =
+ 4304 -            assign_weighted_f32_points(data, weights, base_losses, &centroids, metric_type)?;
+ 4305 -        let converged = (previous_loss - result.loss).abs() < 1e-4 * result.loss.max(1.0);
+ 4677 +            assign_weighted_f32_points(data, weights, base_losses, &centroids, metric_policy)?;
+ 4678 +        let converged = metric_policy.has_converged(previous_loss, result.loss);
+ 4679          previous_loss = result.loss;
+ 4680          if converged || iter == max_iters {
+ 4681              return Ok(result);
+
+@@ -4315,7 +4688,7 @@ fn refine_weighted_f32_kmeans(
+ 4688  fn append_local_coreset(
+ 4689      coreset: &mut WeightedCoreset,
+ 4690      data: &FixedSizeListArray,
+ 4318 -    metric_type: MetricType,
+ 4691 +    metric_policy: &dyn StreamingFloatKMeansMetricPolicy,
+ 4692      local_k: usize,
+ 4693      max_iters: usize,
+ 4694      on_progress: Arc<dyn Fn(u32, u32) + Send + Sync>,
+
+@@ -4325,24 +4698,50 @@ fn append_local_coreset(
+ 4698      let kmeans = train_ivf_kmeans_step_arrow_array_no_loss(
+ 4699          None,
+ 4700          data,
+ 4328 -        metric_type,
+ 4329 -        local_k,
+ 4330 -        sample_rate,
+ 4331 -        max_iters,
+ 4332 -        on_progress,
+ 4701 +        KMeansStepOptions {
+ 4702 +            dimension,
+ 4703 +            metric_type: metric_policy.metric_type(),
+ 4704 +            num_partitions: local_k,
+ 4705 +            sample_rate,
+ 4706 +            max_iters,
+ 4707 +            disable_hierarchical: metric_policy.disable_local_hierarchical(),
+ 4708 +            on_progress,
+ 4709 +        },
+ 4710      )?;
+ 4711      let centroids = FixedSizeListArray::try_new_from_values(kmeans.centroids, dimension as i32)?;
+ 4335 -    let kmeans =
+ 4336 -        KMeans::with_centroids(centroids.values().clone(), dimension, metric_type, f64::MAX);
+ 4712 +    if centroids
+ 4713 +        .values()
+ 4714 +        .as_primitive::<Float32Type>()
+ 4715 +        .values()
+ 4716 +        .iter()
+ 4717 +        .any(|value| !value.is_finite())
+ 4718 +    {
+ 4719 +        return Err(Error::invalid_input(format!(
+ 4720 +            "local streaming kmeans produced nonfinite centroid for metric {}",
+ 4721 +            metric_policy.metric_type()
+ 4722 +        )));
+ 4723 +    }
+ 4724 +    let kmeans = KMeans::with_centroids(
+ 4725 +        centroids.values().clone(),
+ 4726 +        dimension,
+ 4727 +        metric_policy.metric_type(),
+ 4728 +        f64::MAX,
+ 4729 +    );
+ 4730      let (membership, distances) = kmeans.compute_membership_and_distances(data)?;
+ 4731      let mut weights = vec![0.0; centroids.len()];
+ 4732      let mut losses = vec![0.0; centroids.len()];
+ 4340 -    for (member, distance) in membership.into_iter().zip(distances) {
+ 4733 +    for (row_idx, (member, distance)) in membership.into_iter().zip(distances).enumerate() {
+ 4734          let (Some(member), Some(distance)) = (member, distance) else {
+ 4735              continue;
+ 4736          };
+ 4737 +        validate_finite_kmeans_distance(
+ 4738 +            distance,
+ 4739 +            row_idx,
+ 4740 +            metric_policy.metric_type(),
+ 4741 +            "local streaming kmeans",
+ 4742 +        )?;
+ 4743          weights[member as usize] += 1.0;
+ 4345 -        losses[member as usize] += distance as f64;
+ 4744 +        losses[member as usize] += metric_policy.local_summary_loss(distance);
+ 4745      }
+ 4746  
+ 4747      let centroid_values = centroids.values().as_primitive::<Float32Type>().values();
+
+@@ -4362,7 +4761,7 @@ struct WeightedCluster {
+ 4761      indices: Vec<usize>,
+ 4762      centroid: Vec<f32>,
+ 4763      weight: f64,
+ 4365 -    loss: f64,
+ 4764 +    split_priority: f64,
+ 4765      finalized: bool,
+ 4766  }
+ 4767  
+
+@@ -4370,7 +4769,9 @@ impl Eq for WeightedCluster {}
+ 4769  
+ 4770  impl PartialEq for WeightedCluster {
+ 4771      fn eq(&self, other: &Self) -> bool {
+ 4373 -        self.loss == other.loss && self.weight == other.weight
+ 4772 +        self.finalized == other.finalized
+ 4773 +            && self.split_priority == other.split_priority
+ 4774 +            && self.weight == other.weight
+ 4775      }
+ 4776  }
+ 4777  
+
+@@ -4380,8 +4781,8 @@ impl Ord for WeightedCluster {
+ 4781              (false, true) => std::cmp::Ordering::Greater,
+ 4782              (true, false) => std::cmp::Ordering::Less,
+ 4783              _ => self
+ 4383 -                .loss
+ 4384 -                .partial_cmp(&other.loss)
+ 4784 +                .split_priority
+ 4785 +                .partial_cmp(&other.split_priority)
+ 4786                  .unwrap_or(std::cmp::Ordering::Equal)
+ 4787                  .then_with(|| {
+ 4788                      self.weight
+
+@@ -4398,10 +4799,10 @@ impl PartialOrd for WeightedCluster {
+ 4799      }
+ 4800  }
+ 4801  
+ 4401 -struct WeightedHierarchicalKMeansParams {
+ 4802 +struct WeightedHierarchicalKMeansParams<'a> {
+ 4803      dimension: usize,
+ 4804      target_k: usize,
+ 4404 -    metric_type: MetricType,
+ 4805 +    metric_policy: &'a dyn StreamingFloatKMeansMetricPolicy,
+ 4806      max_iters: usize,
+ 4807      on_progress: Arc<dyn Fn(u32, u32) + Send + Sync>,
+ 4808  }
+
+@@ -4432,7 +4833,7 @@ fn train_weighted_hierarchical_f32_kmeans(
+ 4833      data: &FixedSizeListArray,
+ 4834      weights: &[f64],
+ 4835      losses: &[f64],
+ 4435 -    params: &WeightedHierarchicalKMeansParams,
+ 4836 +    params: &WeightedHierarchicalKMeansParams<'_>,
+ 4837  ) -> Result<FixedSizeListArray> {
+ 4838      if data.len() == 0 {
+ 4839          return Err(Error::index("empty weighted coreset"));
+
+@@ -4448,7 +4849,7 @@ fn train_weighted_hierarchical_f32_kmeans(
+ 4849  
+ 4850      let dimension = params.dimension;
+ 4851      let target_k = params.target_k;
+ 4451 -    let metric_type = params.metric_type;
+ 4852 +    let metric_policy = params.metric_policy;
+ 4853      let max_iters = params.max_iters;
+ 4854      let initial_k = 16_usize.min(target_k).min(data.len()).max(1);
+ 4855      let initial = train_weighted_f32_kmeans(
+
+@@ -4456,12 +4857,13 @@ fn train_weighted_hierarchical_f32_kmeans(
+ 4857          weights,
+ 4858          losses,
+ 4859          initial_k,
+ 4459 -        metric_type,
+ 4860 +        metric_policy,
+ 4861          max_iters,
+ 4862          params.on_progress.clone(),
+ 4863      )?;
+ 4864  
+ 4865      let centroids = initial.centroids;
+ 4866 +    let data_values = data.values().as_primitive::<Float32Type>().values();
+ 4867      let mut heap = std::collections::BinaryHeap::new();
+ 4868      let mut next_cluster_id = 0;
+ 4869      for cluster_id in 0..initial_k {
+
+@@ -4472,19 +4874,27 @@ fn train_weighted_hierarchical_f32_kmeans(
+ 4874              }
+ 4875          }
+ 4876          if !indices.is_empty() {
+ 4877 +            let centroid = centroids[cluster_id * dimension..(cluster_id + 1) * dimension].to_vec();
+ 4878 +            let split_priority = metric_policy.split_priority(
+ 4879 +                data_values,
+ 4880 +                weights,
+ 4881 +                &indices,
+ 4882 +                &centroid,
+ 4883 +                dimension,
+ 4884 +                initial.cluster_losses[cluster_id],
+ 4885 +            );
+ 4886              heap.push(WeightedCluster {
+ 4887                  id: next_cluster_id,
+ 4888                  indices,
+ 4478 -                centroid: centroids[cluster_id * dimension..(cluster_id + 1) * dimension].to_vec(),
+ 4889 +                centroid,
+ 4890                  weight: initial.cluster_weights[cluster_id],
+ 4480 -                loss: initial.cluster_losses[cluster_id],
+ 4891 +                split_priority,
+ 4892                  finalized: false,
+ 4893              });
+ 4894              next_cluster_id += 1;
+ 4895          }
+ 4896      }
+ 4897  
+ 4487 -    let data_values = data.values().as_primitive::<Float32Type>().values();
+ 4898      while heap.len() < target_k {
+ 4899          let mut cluster = heap
+ 4900              .pop()
+
+@@ -4508,7 +4918,7 @@ fn train_weighted_hierarchical_f32_kmeans(
+ 4918              &sub_weights,
+ 4919              &sub_losses,
+ 4920              cluster_k,
+ 4511 -            metric_type,
+ 4921 +            metric_policy,
+ 4922              max_iters.min(20),
+ 4923              params.on_progress.clone(),
+ 4924          )?;
+
+@@ -4537,13 +4947,22 @@ fn train_weighted_hierarchical_f32_kmeans(
+ 4947              if child_indices.is_empty() {
+ 4948                  continue;
+ 4949              }
+ 4950 +            let centroid =
+ 4951 +                split.centroids[child_id * dimension..(child_id + 1) * dimension].to_vec();
+ 4952 +            let split_priority = metric_policy.split_priority(
+ 4953 +                data_values,
+ 4954 +                weights,
+ 4955 +                &child_indices,
+ 4956 +                &centroid,
+ 4957 +                dimension,
+ 4958 +                split.cluster_losses[child_id],
+ 4959 +            );
+ 4960              heap.push(WeightedCluster {
+ 4961                  id: next_cluster_id,
+ 4962                  indices: child_indices,
+ 4543 -                centroid: split.centroids[child_id * dimension..(child_id + 1) * dimension]
+ 4544 -                    .to_vec(),
+ 4963 +                centroid,
+ 4964                  weight: split.cluster_weights[child_id],
+ 4546 -                loss: split.cluster_losses[child_id],
+ 4965 +                split_priority,
+ 4966                  finalized: false,
+ 4967              });
+ 4968              next_cluster_id += 1;
+
+@@ -4616,6 +5035,33 @@ async fn train_streaming_coreset_ivf_model(
+ 5035      fragment_ids: Option<&[u32]>,
+ 5036      progress: std::sync::Arc<dyn lance_index::progress::IndexBuildProgress>,
+ 5037  ) -> Result<IvfModel> {
+ 5038 +    streaming_kmeans_metric_policy(metric_type)?
+ 5039 +        .train_coreset_ivf_model(StreamingCoresetTrainingRequest {
+ 5040 +            dataset,
+ 5041 +            column,
+ 5042 +            dimension,
+ 5043 +            metric_type,
+ 5044 +            params,
+ 5045 +            fragment_ids,
+ 5046 +            progress,
+ 5047 +        })
+ 5048 +        .await
+ 5049 +}
+ 5050 +
+ 5051 +async fn train_streaming_coreset_ivf_model_with_algorithm<A: StreamingCoresetAlgorithm>(
+ 5052 +    request: StreamingCoresetTrainingRequest<'_>,
+ 5053 +    algorithm: &A,
+ 5054 +) -> Result<IvfModel> {
+ 5055 +    let StreamingCoresetTrainingRequest {
+ 5056 +        dataset,
+ 5057 +        column,
+ 5058 +        dimension,
+ 5059 +        metric_type,
+ 5060 +        params,
+ 5061 +        fragment_ids,
+ 5062 +        progress,
+ 5063 +    } = request;
+ 5064 +    let metric_policy = algorithm.metric_policy();
+ 5065      let num_partitions = params.num_partitions.unwrap_or(32);
+ 5066      let streaming_sample_rate = params.streaming_sample_rate.unwrap();
+ 5067      let total_sample_rate = params.sample_rate;
+
+@@ -4674,19 +5120,20 @@ async fn train_streaming_coreset_ivf_model(
+ 5120              .saturating_mul(coreset_rate)
+ 5121              .max(num_partitions);
+ 5122          let total_steps = total_sample_rate.div_ceil(streaming_sample_rate);
+ 4677 -        let decoupled_coreset_budget = params.streaming_coreset_rate.is_some();
+ 4678 -        let mut coreset = WeightedCoreset::new(dimension, coreset_budget.min(num_partitions * 16));
+ 5123 +        let has_decoupled_budget = params.streaming_coreset_rate.is_some();
+ 5124 +        let initial_capacity = coreset_budget.min(num_partitions.saturating_mul(16));
+ 5125 +        let mut coreset = algorithm.new_coreset(dimension, initial_capacity);
+ 5126          let mut step = 0;
+ 5127          while remaining_sample_rate > 0 {
+ 5128              let step_sample_rate = remaining_sample_rate.min(streaming_sample_rate);
+ 5129              let step_sample_size = num_partitions * step_sample_rate;
+ 5130              step += 1;
+ 5131              info!(
+ 4685 -                "Streaming coreset IVF training: step {}, sample_rate={}, sample_size={}",
+ 4686 -                step, step_sample_rate, step_sample_size
+ 5132 +                "Streaming coreset IVF training for metric {}: step {}, sample_rate={}, sample_size={}",
+ 5133 +                metric_type, step, step_sample_rate, step_sample_size
+ 5134              );
+ 5135  
+ 4689 -            let (training_data, mt) = if let (Some(sample_ranges), Some(sampler)) =
+ 5136 +            let (training_data, sampled_metric) = if let (Some(sample_ranges), Some(sampler)) =
+ 5137                  (&fixed_sample_ranges, &fixed_sampler)
+ 5138              {
+ 5139                  let ranges = sample_ranges.chunk(sample_offset, step_sample_size);
+
+@@ -4702,16 +5149,11 @@ async fn train_streaming_coreset_ivf_model(
+ 5149                  )
+ 5150                  .await?
+ 5151              };
+ 4705 -            if mt != DistanceType::L2 {
+ 4706 -                return Err(Error::invalid_input(format!(
+ 4707 -                    "streaming coreset IVF currently supports L2/Cosine training, got {}",
+ 4708 -                    metric_type
+ 4709 -                )));
+ 4710 -            }
+ 4711 -            let training_data = cast_training_data_to_f32(training_data)?;
+ 5152 +            let training_data = algorithm.prepare_sample(training_data, sampled_metric)?;
+ 5153              if training_data.len() < num_partitions {
+ 5154                  return Err(Error::index(format!(
+ 4714 -                    "Not enough training vectors for streaming coreset IVF. Requires at least {} rows but sampled {} rows",
+ 5155 +                    "Not enough training vectors for streaming coreset IVF with metric {}. Requires at least {} rows but sampled {} rows",
+ 5156 +                    metric_type,
+ 5157                      num_partitions,
+ 5158                      training_data.len()
+ 5159                  )));
+
+@@ -4719,99 +5161,74 @@ async fn train_streaming_coreset_ivf_model(
+ 5161  
+ 5162              max_training_vectors = max_training_vectors.max(training_data.len());
+ 5163              total_training_vectors += training_data.len();
+ 4722 -            let local_k = streaming_local_coreset_k(
+ 5164 +            let local_k = metric_policy.local_coreset_k(
+ 5165                  num_partitions,
+ 5166                  training_data.len(),
+ 5167                  coreset_rate,
+ 5168                  total_steps,
+ 4727 -                decoupled_coreset_budget,
+ 5169 +                has_decoupled_budget,
+ 5170              );
+ 4729 -            let mut chunk_coreset = WeightedCoreset::new(dimension, local_k);
+ 4730 -            append_local_coreset(
+ 5171 +            let mut chunk_coreset = algorithm.new_coreset(dimension, local_k);
+ 5172 +            algorithm.append_local_coreset(
+ 5173                  &mut chunk_coreset,
+ 5174                  &training_data,
+ 4733 -                mt,
+ 5175                  local_k,
+ 5176                  params.max_iters,
+ 5177                  on_progress.clone(),
+ 5178              )?;
+ 4738 -            coreset.append(chunk_coreset);
+ 4739 -            coreset.reduce_to_budget(dimension, coreset_budget);
+ 5179 +            algorithm.append_coreset(&mut coreset, chunk_coreset)?;
+ 5180 +            algorithm.reduce_coreset(&mut coreset, dimension, coreset_budget)?;
+ 5181              info!(
+ 4741 -                "Streaming coreset IVF step {} compressed {} vectors into {} weighted centroids",
+ 5182 +                "Streaming coreset IVF step {} compressed {} vectors into {} summaries for metric {}",
+ 5183                  step,
+ 5184                  total_training_vectors,
+ 4744 -                coreset.len()
+ 5185 +                algorithm.coreset_len(&coreset),
+ 5186 +                metric_type
+ 5187              );
+ 5188              remaining_sample_rate -= step_sample_rate;
+ 5189          }
+ 5190  
+ 4749 -        let coreset_len = coreset.len();
+ 4750 -        let (coreset_data, coreset_weights, coreset_losses) =
+ 4751 -            coreset.into_fsl_parts(dimension)?;
+ 4752 -        // Scope `weighted_hierarchical_params` so the `on_progress` clone it holds
+ 4753 -        // is dropped before the progress producer is closed below.
+ 4754 -        let mut centroids = {
+ 4755 -            let weighted_hierarchical_params = WeightedHierarchicalKMeansParams {
+ 4756 -                dimension,
+ 4757 -                target_k: num_partitions,
+ 4758 -                metric_type: DistanceType::L2,
+ 4759 -                max_iters: params.max_iters,
+ 4760 -                on_progress: on_progress.clone(),
+ 4761 -            };
+ 4762 -            train_weighted_hierarchical_f32_kmeans(
+ 4763 -                &coreset_data,
+ 4764 -                &coreset_weights,
+ 4765 -                &coreset_losses,
+ 4766 -                &weighted_hierarchical_params,
+ 4767 -            )?
+ 4768 -        };
+ 4769 -        let refine_iters = 3;
+ 4770 -        if refine_iters > 0 {
+ 4771 -            let refined = refine_weighted_f32_kmeans(
+ 4772 -                &coreset_data,
+ 4773 -                &coreset_weights,
+ 4774 -                &coreset_losses,
+ 4775 -                &centroids,
+ 4776 -                DistanceType::L2,
+ 4777 -                refine_iters,
+ 4778 -                on_progress.clone(),
+ 4779 -            )?;
+ 4780 -            centroids = f32_fsl_from_values(refined.centroids, dimension)?;
+ 4781 -        }
+ 5191 +        let coreset_len = algorithm.coreset_len(&coreset);
+ 5192 +        let mut centroids = algorithm.train_centroids(
+ 5193 +            coreset,
+ 5194 +            dimension,
+ 5195 +            num_partitions,
+ 5196 +            params.max_iters,
+ 5197 +            on_progress.clone(),
+ 5198 +        )?;
+ 5199          if params.streaming_refine_passes > 0 {
+ 5200              info!(
+ 4784 -                "Running {} streaming raw-vector refinement pass(es)",
+ 4785 -                params.streaming_refine_passes
+ 5201 +                "Running {} streaming raw-vector refinement pass(es) for metric {}",
+ 5202 +                params.streaming_refine_passes, metric_type
+ 5203              );
+ 4787 -            centroids = if let (Some(sample_ranges), Some(sampler)) =
+ 4788 -                (&fixed_sample_ranges, &fixed_sampler)
+ 4789 -            {
+ 4790 -                refine_streaming_f32_kmeans_with_sampler(
+ 4791 -                    sampler,
+ 4792 -                    metric_type,
+ 4793 -                    num_partitions * streaming_sample_rate,
+ 4794 -                    sample_ranges,
+ 4795 -                    &centroids,
+ 4796 -                    params.streaming_refine_passes,
+ 4797 -                    on_progress.clone(),
+ 4798 -                )
+ 4799 -                .await?
+ 4800 -            } else {
+ 4801 -                refine_streaming_f32_kmeans_with_resampling(
+ 4802 -                    dataset,
+ 4803 -                    column,
+ 4804 -                    metric_type,
+ 4805 -                    total_sample_rate,
+ 4806 -                    streaming_sample_rate,
+ 4807 -                    num_partitions,
+ 4808 -                    &centroids,
+ 4809 -                    fragment_ids,
+ 4810 -                    params.streaming_refine_passes,
+ 4811 -                    on_progress.clone(),
+ 4812 -                )
+ 4813 -                .await?
+ 4814 -            };
+ 5204 +            centroids =
+ 5205 +                if let (Some(sample_ranges), Some(sampler)) = (&fixed_sample_ranges, &fixed_sampler)
+ 5206 +                {
+ 5207 +                    algorithm
+ 5208 +                        .refine_with_sampler(
+ 5209 +                            sampler,
+ 5210 +                            num_partitions * streaming_sample_rate,
+ 5211 +                            sample_ranges,
+ 5212 +                            &centroids,
+ 5213 +                            params.streaming_refine_passes,
+ 5214 +                            on_progress.clone(),
+ 5215 +                        )
+ 5216 +                        .await?
+ 5217 +                } else {
+ 5218 +                    algorithm
+ 5219 +                        .refine_with_resampling(
+ 5220 +                            dataset,
+ 5221 +                            column,
+ 5222 +                            total_sample_rate,
+ 5223 +                            streaming_sample_rate,
+ 5224 +                            num_partitions,
+ 5225 +                            &centroids,
+ 5226 +                            fragment_ids,
+ 5227 +                            params.streaming_refine_passes,
+ 5228 +                            on_progress.clone(),
+ 5229 +                        )
+ 5230 +                        .await?
+ 5231 +                };
+ 5232          }
+ 5233  
+ 5234          Ok((IvfModel::new(centroids, None), coreset_len))
+
+@@ -4828,8 +5245,8 @@ async fn train_streaming_coreset_ivf_model(
+ 5245      .await?;
+ 5246  
+ 5247      info!(
+ 4831 -        "Streaming coreset IVF sampled {} vectors total; max in-memory training vectors per step: {}; coreset vectors: {}",
+ 4832 -        total_training_vectors, max_training_vectors, coreset_len
+ 5248 +        "Streaming coreset IVF for metric {} sampled {} vectors total; max in-memory training vectors per step: {}; coreset summaries: {}",
+ 5249 +        metric_type, total_training_vectors, max_training_vectors, coreset_len
+ 5250      );
+ 5251  
+ 5252      Ok(ivf_model)
+
+@@ -4923,11 +5340,15 @@ async fn train_streaming_ivf_model(
+ 5340              let kmeans = train_ivf_kmeans_step_arrow_array_no_loss(
+ 5341                  centroids.clone(),
+ 5342                  &training_data,
+ 4926 -                mt,
+ 5343 +                KMeansStepOptions {
+ 5344 +                    dimension: training_data.value_length() as usize,
+ 5345 +                    metric_type: mt,
+ 5346                  num_partitions,
+ 4928 -                step_sample_rate,
+ 4929 -                params.max_iters,
+ 4930 -                on_progress.clone(),
+ 5347 +                sample_rate: step_sample_rate,
+ 5348 +                max_iters: params.max_iters,
+ 5349 +                disable_hierarchical: false,
+ 5350 +                on_progress: on_progress.clone(),
+ 5351 +            },
+ 5352              )?;
+ 5353              let trained_centroids = Arc::new(FixedSizeListArray::try_new_from_values(
+ 5354                  kmeans.centroids,

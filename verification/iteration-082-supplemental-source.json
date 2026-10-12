@@ -1,0 +1,80 @@
+{
+  "iteration": 82,
+  "files": [
+    {
+      "path": "rust/lance-file/src/versions/v1/writer/statistics.rs",
+      "ranges": [
+        {
+          "start": 47,
+          "end": 82,
+          "text": "47 | fn compute_primitive_statistics<T: ArrowNumericType>(\n48 |     arrays: &[&ArrayRef],\n49 | ) -> (T::Native, T::Native, i64)\n50 | where\n51 |     T::Native: Bounded + PartialOrd,\n52 | {\n53 |     let mut min_value = T::Native::max_value();\n54 |     let mut max_value = T::Native::min_value();\n55 |     let mut null_count: i64 = 0;\n56 |     let mut all_values_null = true;\n57 |     let arrays_iterator = arrays.iter().map(|x| as_primitive_array::<T>(x));\n58 | \n59 |     for array in arrays_iterator {\n60 |         null_count += array.null_count() as i64;\n61 |         if array.null_count() == array.len() {\n62 |             continue;\n63 |         }\n64 |         all_values_null = false;\n65 | \n66 |         array.iter().for_each(|value| {\n67 |             if let Some(value) = value {\n68 |                 if let Some(Ordering::Greater) = value.partial_cmp(&max_value) {\n69 |                     max_value = value;\n70 |                 }\n71 |                 if let Some(Ordering::Less) = value.partial_cmp(&min_value) {\n72 |                     min_value = value;\n73 |                 }\n74 |             };\n75 |         });\n76 |     }\n77 | \n78 |     if all_values_null {\n79 |         return (T::Native::min_value(), T::Native::max_value(), null_count);\n80 |     }\n81 |     (min_value, max_value, null_count)\n82 | }"
+        }
+      ]
+    },
+    {
+      "path": "rust/lance-core/src/datatypes.rs",
+      "ranges": [
+        {
+          "start": 307,
+          "end": 320,
+          "text": "307 | fn parse_timeunit(unit: &str) -> Result<TimeUnit> {\n308 |     match unit {\n309 |         \"s\" => Ok(TimeUnit::Second),\n310 |         \"ms\" => Ok(TimeUnit::Millisecond),\n311 |         \"us\" => Ok(TimeUnit::Microsecond),\n312 |         \"ns\" => Ok(TimeUnit::Nanosecond),\n313 |         _ => Err(Error::arrow(format!(\"Unsupported TimeUnit: {unit}\"))),\n314 |     }\n315 | }\n316 | \n317 | impl TryFrom<&DataType> for LogicalType {\n318 |     type Error = Error;\n319 | \n320 |     fn try_from(dt: &DataType) -> Result<Self> {"
+        }
+      ]
+    },
+    {
+      "path": "rust/lance-file/src/writer.rs",
+      "ranges": [
+        {
+          "start": 98,
+          "end": 115,
+          "text": "98 |                 length: page.num_rows,\n99 |                 priority: page.priority,\n100 |             })\n101 |         })\n102 |         .collect::<Result<Vec<_>>>()?;\n103 |     let (buffer_offsets, buffer_sizes) = column.buffer_offsets_and_sizes.iter().copied().unzip();\n104 |     let encoding = Any::from_msg(&column.encoding)?.encode_to_vec();\n105 |     Ok(pbfile::ColumnMetadata {\n106 |         pages,\n107 |         buffer_offsets,\n108 |         buffer_sizes,\n109 |         encoding: Some(pbfile::Encoding {\n110 |             location: Some(pbfile::encoding::Location::Direct(pbfile::DirectEncoding {\n111 |                 encoding,\n112 |             })),\n113 |         }),\n114 |     })\n115 | }"
+        }
+      ]
+    },
+    {
+      "path": "rust/lance-core/src/cache/codec.rs",
+      "ranges": [
+        {
+          "start": 89,
+          "end": 119,
+          "text": "89 | fn parse_envelope(data: &Bytes) -> Option<ParsedEnvelope<'_>> {\n90 |     let bytes = data.as_ref();\n91 |     let mut off = 0usize;\n92 | \n93 |     let magic = bytes.get(off..off + 4)?;\n94 |     if magic != MAGIC {\n95 |         return None;\n96 |     }\n97 |     off += 4;\n98 | \n99 |     if *bytes.get(off)? != ENVELOPE_VERSION {\n100 |         return None;\n101 |     }\n102 |     off += 1;\n103 | \n104 |     let type_id_len = u16::from_le_bytes(bytes.get(off..off + 2)?.try_into().ok()?) as usize;\n105 |     off += 2;\n106 | \n107 |     let type_id = std::str::from_utf8(bytes.get(off..off + type_id_len)?).ok()?;\n108 |     off += type_id_len;\n109 | \n110 |     let type_version = u32::from_le_bytes(bytes.get(off..off + 4)?.try_into().ok()?);\n111 |     off += 4;\n112 | \n113 |     Some(ParsedEnvelope {\n114 |         type_id,\n115 |         type_version,\n116 |         body_offset: off,\n117 |     })\n118 | }\n119 | "
+        }
+      ]
+    },
+    {
+      "path": "rust/lance-table/src/rowids/encoded_array.rs",
+      "ranges": [
+        {
+          "start": 37,
+          "end": 65,
+          "text": "37 |     pub fn iter(&self) -> Box<dyn DoubleEndedIterator<Item = u64> + '_> {\n38 |         match self {\n39 |             Self::U16 { base, offsets } => {\n40 |                 Box::new(offsets.iter().cloned().map(move |o| base + o as u64))\n41 |             }\n42 |             Self::U32 { base, offsets } => {\n43 |                 Box::new(offsets.iter().cloned().map(move |o| base + o as u64))\n44 |             }\n45 |             Self::U64(values) => Box::new(values.iter().cloned()),\n46 |         }\n47 |     }\n48 | \n49 |     pub fn get(&self, i: usize) -> Option<u64> {\n50 |         match self {\n51 |             Self::U16 { base, offsets } => {\n52 |                 if i < offsets.len() {\n53 |                     Some(*base + offsets[i] as u64)\n54 |                 } else {\n55 |                     None\n56 |                 }\n57 |             }\n58 |             Self::U32 { base, offsets } => {\n59 |                 if i < offsets.len() {\n60 |                     Some(*base + offsets[i] as u64)\n61 |                 } else {\n62 |                     None\n63 |                 }\n64 |             }\n65 |             Self::U64(values) => values.get(i).copied(),"
+        }
+      ]
+    },
+    {
+      "path": "rust/lance-table/src/io/commit/dynamodb.rs",
+      "ranges": [
+        {
+          "start": 244,
+          "end": 249,
+          "text": "244 |     fn ddb_put(&self) -> PutItemFluentBuilder {\n245 |         self.client.put_item().table_name(&self.table_name)\n246 |     }\n247 | \n248 |     fn ddb_get(&self) -> GetItemFluentBuilder {\n249 |         self.client"
+        }
+      ]
+    },
+    {
+      "path": "rust/lance-table/src/io/commit/external_manifest.rs",
+      "ranges": [
+        {
+          "start": 45,
+          "end": 89,
+          "text": "45 |     naming_scheme: ManifestNamingScheme,\n46 | ) -> Result<ManifestLocation> {\n47 |     // Step 2: Copy staging to final path\n48 |     let final_path = naming_scheme.manifest_path(base_path, version);\n49 |     let final_e_tag =\n50 |         copy_or_verify_final_manifest(object_store, staging_path, &final_path, version, size)\n51 |             .await?;\n52 | \n53 |     let location = ManifestLocation {\n54 |         version,\n55 |         path: final_path.clone(),\n56 |         size: Some(size),\n57 |         naming_scheme,\n58 |         e_tag: final_e_tag,\n59 |         identity: None,\n60 |     };\n61 | \n62 |     // Step 3: Update the external index to the final path.\n63 |     //\n64 |     // Publish only generation-independent metadata. COPY and this update\n65 |     // are not one atomic operation, so an ETag observed above can already\n66 |     // be stale when this call linearizes. `location` still carries that\n67 |     // observation to the current caller for cache separation.\n68 |     let published = store\n69 |         .put_if_exists(base_path.as_ref(), version, final_path.as_ref(), size, None)\n70 |         .await;\n71 | \n72 |     if let Err(error) = published {\n73 |         // The canonical object is already durable and is the commit point.\n74 |         // Keep staging so an old or new reader that still observes the\n75 |         // reservation can retry this cache/index update. A DDB failure must\n76 |         // not turn an S3-committed transaction into a reported conflict.\n77 |         warn!(\n78 |             \"Final manifest '{}' is committed, but the external manifest index could not be updated; retaining staging manifest '{}' for repair: {}\",\n79 |             final_path, staging_path, error\n80 |         );\n81 |         return Ok(location);\n82 |     }\n83 | \n84 |     // Step 4: Delete staging manifest\n85 |     match object_store.delete(staging_path).await {\n86 |         Ok(_) => {}\n87 |         Err(ObjectStoreError::NotFound { .. }) => {}\n88 |         Err(error) => {\n89 |             // Staging is no longer authoritative after the canonical"
+        },
+        {
+          "start": 648,
+          "end": 691,
+          "text": "648 |             size,\n649 |         )\n650 |         .await?;\n651 | \n652 |         let location = ManifestLocation {\n653 |             version,\n654 |             path: final_manifest_path,\n655 |             size: Some(size),\n656 |             naming_scheme,\n657 |             e_tag: final_e_tag,\n658 |             identity: None,\n659 |         };\n660 | \n661 |         // Step 2: point the external index at the final location without an\n662 |         // ETag. A direct writer and any number of helping readers can perform\n663 |         // the same immutable COPY concurrently. Since COPY and index update\n664 |         // are not atomic, persisting a helper's observed generation would let\n665 |         // an older helper overwrite a newer token. `location` retains the\n666 |         // current helper's observation for runtime cache separation only.\n667 |         let published = self\n668 |             .external_manifest_store\n669 |             .put_if_exists(\n670 |                 base_path.as_ref(),\n671 |                 version,\n672 |                 location.path.as_ref(),\n673 |                 size,\n674 |                 None,\n675 |             )\n676 |             .await;\n677 | \n678 |         if let Err(error) = published {\n679 |             // The canonical object is the data authority. Retaining staging\n680 |             // lets another helper repair the external index without making\n681 |             // this successfully materialized commit appear to have failed.\n682 |             warn!(\n683 |                 \"Final manifest '{}' is committed, but the external manifest index could not be updated; retaining staging manifest '{}' for repair: {}\",\n684 |                 location.path, staging_manifest_path, error\n685 |             );\n686 |             return Ok(location);\n687 |         }\n688 | \n689 |         // step 3: delete the staging manifest\n690 |         match store.delete(staging_manifest_path).await {\n691 |             Ok(_) => {}"
+        }
+      ]
+    }
+  ]
+}

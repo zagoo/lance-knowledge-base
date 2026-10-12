@@ -1,0 +1,66 @@
+{
+  "iteration": 74,
+  "note": "Fresh displayed source for claim dependencies; does not promote new files. Additional lexical scans confirmed active test declarations and no async/unsafe in v2_1 reader.",
+  "files": [
+    {
+      "path": "rust/lance-table/src/transaction/manifest_build.rs",
+      "ranges": [
+        {
+          "start": 251,
+          "end": 370,
+          "text": "251 |     /// making the table look more covered than it is.\n252 |     pub fn apply_mem_wal_index_coverage(\n253 |         final_indices: &mut [IndexMetadata],\n254 |         segments_before: &LogicalIndexSegments,\n255 |         read_version_state: Option<ReadVersionState<'_>>,\n256 |         new_version: u64,\n257 |     ) -> Result<()> {\n258 |         let Some(pos) = final_indices\n259 |             .iter()\n260 |             .position(|idx| idx.name == MEM_WAL_INDEX_NAME)\n261 |         else {\n262 |             // The system index went away with this transaction (MemWAL disable,\n263 |             // or an overwrite). There is no coverage left to maintain.\n264 |             return Ok(());\n265 |         };\n266 | \n267 |         let mut details = load_mem_wal_index_details(final_indices[pos].clone())?;\n268 | \n269 |         // Nothing has ever been compacted, so no index can be behind and there\n270 |         // is no coverage to invalidate.\n271 |         if details.compacted_sstables.is_empty() && details.index_catchup.is_empty() {\n272 |             return Ok(());\n273 |         }\n274 | \n275 |         let segments_after = Self::logical_index_segments(final_indices);\n276 |         let catchup_before = std::mem::take(&mut details.index_catchup);\n277 | \n278 |         // Per shard: what this commit records as compacted, and the most the\n279 |         // read version may credit. Generations compacted after that read landed\n280 |         // in fragments no index under consideration has seen; the committed\n281 |         // value caps it in turn, so a read version since rolled back cannot\n282 |         // retire SSTables no live commit copied in.\n283 |         let read_details = read_version_state\n284 |             .map(|state| {\n285 |                 state\n286 |                     .indices\n287 |                     .iter()\n288 |                     .find(|idx| idx.name == MEM_WAL_INDEX_NAME)\n289 |                     .cloned()\n290 |                     .map(load_mem_wal_index_details)\n291 |                     .transpose()\n292 |             })\n293 |             .transpose()?\n294 |             .flatten();\n295 |         let shards: Vec<(Uuid, u64, u64)> = details\n296 |             .compacted_sstables\n297 |             .iter()\n298 |             .map(|committed| {\n299 |                 let at_read = read_details\n300 |                     .as_ref()\n301 |                     .and_then(|read| {\n302 |                         read.compacted_sstables\n303 |                             .iter()\n304 |                             .find(|s| s.shard_id == committed.shard_id)\n305 |                     })\n306 |                     .map_or(0, |s| s.generation);\n307 |                 (\n308 |                     committed.shard_id,\n309 |                     committed.generation,\n310 |                     at_read.min(committed.generation),\n311 |                 )\n312 |             })\n313 |             .collect();\n314 | \n315 |         // Every fragment live when the transaction read the table. An index\n316 |         // spanning all of them holds every row compacted by then.\n317 |         let read_fragments: Option<RoaringBitmap> = read_version_state.map(|state| {\n318 |             state\n319 |                 .manifest\n320 |                 .fragments\n321 |                 .iter()\n322 |                 .map(|fragment| fragment.id as u32)\n323 |                 .collect()\n324 |         });\n325 | \n326 |         let covers_read_version = |segments: &[CoverageIdentity]| -> bool {\n327 |             let Some(required) = read_fragments.as_ref() else {\n328 |                 return false;\n329 |             };\n330 |             if required.is_empty() {\n331 |                 // Subset-of-empty is trivially true, so this would credit every\n332 |                 // index on a table with no fragments. Refused because an empty\n333 |                 // fragment list is not only what an emptied table looks like:\n334 |                 // it is also what a manifest written before #8438 looks like,\n335 |                 // where UpdateMemWalState published no fragments at all. On\n336 |                 // such a table the SSTables are the last copy of those rows,\n337 |                 // and crediting coverage would retire them. The cost is that a\n338 |                 // genuinely emptied table keeps its SSTables.\n339 |                 return false;\n340 |             }\n341 |             let mut covered = RoaringBitmap::new();\n342 |             for segment in segments {\n343 |                 match segment.fragment_bitmap.as_ref() {\n344 |                     Some(bitmap) => covered |= bitmap,\n345 |                     // An unknown bitmap cannot be shown to cover anything.\n346 |                     None => return false,\n347 |                 }\n348 |             }\n349 |             required.is_subset(&covered)\n350 |         };\n351 | \n352 |         let mut rebuilt: Vec<IndexCatchupProgress> = Vec::new();\n353 |         for (name, after) in segments_after.iter() {\n354 |             // Compared by [`CoverageIdentity`], not segment UUID: an Update\n355 |             // that touches an indexed field prunes a segment's fragment bitmap\n356 |             // in place while keeping its UUID, so a UUID-only comparison would\n357 |             // carry a position forward that the index no longer earns.\n358 |             let unchanged = segments_before.get(name) == Some(after);\n359 |             let carried = unchanged\n360 |                 .then(|| catchup_before.iter().find(|e| e.index_name == *name))\n361 |                 .flatten();\n362 |             let proven = covers_read_version(after);\n363 | \n364 |             if carried.is_none() && !proven {\n365 |                 // Changed, and nothing shows the new index covers the read\n366 |                 // version. No entry: a missing one reads as \"not caught up\".\n367 |                 continue;\n368 |             }\n369 | \n370 |             let generations = shards"
+        }
+      ]
+    },
+    {
+      "path": "rust/lance-table/src/system_index/mem_wal.rs",
+      "ranges": [
+        {
+          "start": 156,
+          "end": 164,
+          "text": "156 | \n157 |     /// Get the caught up generation for a specific shard.\n158 |     /// Returns None if the shard is not present (assumed fully caught up).\n159 |     pub fn caught_up_generation_for_shard(&self, shard_id: &Uuid) -> Option<u64> {\n160 |         self.caught_up_generations\n161 |             .iter()\n162 |             .find(|sstable| &sstable.shard_id == shard_id)\n163 |             .map(|sstable| sstable.generation)\n164 |     }"
+        }
+      ]
+    },
+    {
+      "path": "rust/lance-core/src/datatypes/field.rs",
+      "ranges": [
+        {
+          "start": 134,
+          "end": 137,
+          "text": "134 | /// Lance Schema Field\n135 | ///\n136 | #[derive(Debug, Clone, PartialEq, DeepSizeOf)]\n137 | pub struct Field {"
+        },
+        {
+          "start": 888,
+          "end": 911,
+          "text": "888 |     pub(crate) fn resolve_case_insensitive<'a>(\n889 |         &'a self,\n890 |         split: &mut VecDeque<&str>,\n891 |         fields: &mut Vec<&'a Self>,\n892 |     ) -> bool {\n893 |         fields.push(self);\n894 |         if split.is_empty() {\n895 |             return true;\n896 |         }\n897 |         let first = split.pop_front().unwrap();\n898 |         // Try exact match first\n899 |         if let Some(child) = self.children.iter().find(|c| c.name == first) {\n900 |             return child.resolve_case_insensitive(split, fields);\n901 |         }\n902 |         // Fall back to case-insensitive match\n903 |         if let Some(child) = self\n904 |             .children\n905 |             .iter()\n906 |             .find(|c| c.name.eq_ignore_ascii_case(first))\n907 |         {\n908 |             return child.resolve_case_insensitive(split, fields);\n909 |         }\n910 |         false\n911 |     }"
+        }
+      ]
+    },
+    {
+      "path": "rust/lance-core/src/datatypes/schema.rs",
+      "ranges": [
+        {
+          "start": 230,
+          "end": 256,
+          "text": "230 |     pub fn resolve(&self, column: impl AsRef<str>) -> Option<Vec<&Field>> {\n231 |         let split = parse_field_path(column.as_ref()).ok()?;\n232 |         if split.is_empty() {\n233 |             return None;\n234 |         }\n235 | \n236 |         if split.len() == 1 {\n237 |             let field_name = &split[0];\n238 |             if let Some(field) = self.fields.iter().find(|f| &f.name == field_name) {\n239 |                 return Some(vec![field]);\n240 |             }\n241 |             return None;\n242 |         }\n243 | \n244 |         // Multiple segments - resolve as a nested field path\n245 |         let mut fields = Vec::with_capacity(split.len());\n246 |         let first = &split[0];\n247 | \n248 |         // Find the first field\n249 |         let field = self.fields.iter().find(|f| &f.name == first)?;\n250 | \n251 |         let mut split_refs: VecDeque<&str> = split[1..].iter().map(|s| s.as_str()).collect();\n252 |         if field.resolve(&mut split_refs, &mut fields) {\n253 |             Some(fields)\n254 |         } else {\n255 |             None\n256 |         }"
+        },
+        {
+          "start": 527,
+          "end": 544,
+          "text": "527 |     /// Get a field by its path. Return `None` if the field does not exist.\n528 |     /// Field names containing dots must be quoted: parent.\"child.with.dot\"\n529 |     pub fn field(&self, name: &str) -> Option<&Field> {\n530 |         self.resolve(name).and_then(|fields| fields.last().copied())\n531 |     }\n532 | \n533 |     /// Get a field by its path, with case-insensitive matching.\n534 |     ///\n535 |     /// This first tries an exact match, then falls back to case-insensitive matching.\n536 |     /// Returns the actual field from the schema (preserving original case).\n537 |     /// Field names containing dots must be quoted: parent.\"child.with.dot\"\n538 |     pub fn field_case_insensitive(&self, name: &str) -> Option<&Field> {\n539 |         self.resolve_case_insensitive(name)\n540 |             .and_then(|fields| fields.last().copied())\n541 |     }\n542 | \n543 |     /// Given a string column reference, resolve the path of fields with case-insensitive matching.\n544 |     ///"
+        }
+      ]
+    },
+    {
+      "path": "rust/lance-file/benches/reader.rs",
+      "ranges": [
+        {
+          "start": 48,
+          "end": 88,
+          "text": "48 |         let file_path = base_path.clone().join(\"foo.lance\");\n49 |         let object_writer = rt.block_on(object_store.create(&file_path)).unwrap();\n50 | \n51 |         let mut writer = file_versions::create_writer(\n52 |             version,\n53 |             object_writer,\n54 |             data.schema().as_ref().try_into().unwrap(),\n55 |             FileWriterOptions::default(),\n56 |         )\n57 |         .unwrap();\n58 |         rt.block_on(writer.write_batch(&data)).unwrap();\n59 |         rt.block_on(writer.finish()).unwrap();\n60 |         group.throughput(criterion::Throughput::Bytes(\n61 |             data.get_array_memory_size() as u64\n62 |         ));\n63 |         group.bench_function(\"decode\", |b| {\n64 |             b.iter(|| {\n65 |                 let object_store = &object_store;\n66 |                 let file_path = &file_path;\n67 |                 let data = &data;\n68 |                 rt.block_on(async move {\n69 |                     let store_scheduler = ScanScheduler::new(\n70 |                         object_store.clone(),\n71 |                         SchedulerConfig::default_for_testing(),\n72 |                     );\n73 |                     let scheduler = store_scheduler\n74 |                         .open_file(file_path, &CachedFileSize::unknown())\n75 |                         .await\n76 |                         .unwrap();\n77 |                     let reader = FileReader::try_open(\n78 |                         scheduler.clone(),\n79 |                         None,\n80 |                         Arc::<DecoderPlugins>::default(),\n81 |                         &test_cache(),\n82 |                         FileReaderOptions::default(),\n83 |                     )\n84 |                     .await\n85 |                     .unwrap();\n86 |                     let stream = reader\n87 |                         .read_tasks(\n88 |                             lance_io::ReadBatchParams::RangeFull,"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,117 @@
+@@ -24,6 +24,7 @@ import java.util.UUID;
+   24  /** Lance scan options. */
+   25  public class ScanOptions {
+   26    private final Optional<List<Integer>> fragmentIds;
+   27 +  private final Optional<List<FragmentSlice>> fragmentSlices;
+   28    private final Optional<List<UUID>> indexSegments;
+   29    private final Optional<Long> batchSize;
+   30    private final Optional<Long> batchSizeBytes;
+
+@@ -222,6 +223,7 @@ public class ScanOptions {
+  223        boolean disableScoringAutoprojection) {
+  224      this(
+  225          fragmentIds,
+  226 +        Optional.empty(),
+  227          indexSegments,
+  228          batchSize,
+  229          Optional.empty(),
+
+@@ -252,6 +254,7 @@ public class ScanOptions {
+  254  
+  255    private ScanOptions(
+  256        Optional<List<Integer>> fragmentIds,
+  257 +      Optional<List<FragmentSlice>> fragmentSlices,
+  258        Optional<List<UUID>> indexSegments,
+  259        Optional<Long> batchSize,
+  260        Optional<Long> batchSizeBytes,
+
+@@ -299,6 +302,7 @@ public class ScanOptions {
+  302          !(strictBatchSize && batchSizeBytes.isPresent()),
+  303          "strictBatchSize=true cannot be combined with batchSizeBytes");
+  304      this.fragmentIds = fragmentIds;
+  305 +    this.fragmentSlices = fragmentSlices;
+  306      this.indexSegments = indexSegments;
+  307      this.batchSize = batchSize;
+  308      this.batchSizeBytes = batchSizeBytes;
+
+@@ -336,6 +340,18 @@ public class ScanOptions {
+  340      return fragmentIds;
+  341    }
+  342  
+  343 +  /**
+  344 +   * Get the physical row slices to scan.
+  345 +   *
+  346 +   * <p>When fragment IDs are also specified, both restrictions are applied. Overlapping slices use
+  347 +   * set semantics and do not duplicate rows.
+  348 +   *
+  349 +   * @return Optional containing the fragment slices if specified, otherwise empty.
+  350 +   */
+  351 +  public Optional<List<FragmentSlice>> getFragmentSlices() {
+  352 +    return fragmentSlices;
+  353 +  }
+  354 +
+  355    /**
+  356     * Get the index segment UUIDs.
+  357     *
+
+@@ -564,6 +580,7 @@ public class ScanOptions {
+  580    public String toString() {
+  581      return MoreObjects.toStringHelper(this)
+  582          .add("fragmentIds", fragmentIds.orElse(null))
+  583 +        .add("fragmentSlices", fragmentSlices.orElse(null))
+  584          .add("indexSegments", indexSegments.orElse(null))
+  585          .add("batchSize", batchSize.orElse(null))
+  586          .add("batchSizeBytes", batchSizeBytes.orElse(null))
+
+@@ -600,6 +617,7 @@ public class ScanOptions {
+  617    /** Builder for constructing LanceScanOptions. */
+  618    public static class Builder {
+  619      private Optional<List<Integer>> fragmentIds = Optional.empty();
+  620 +    private Optional<List<FragmentSlice>> fragmentSlices = Optional.empty();
+  621      private Optional<List<UUID>> indexSegments = Optional.empty();
+  622      private Optional<Long> batchSize = Optional.empty();
+  623      private Optional<Long> batchSizeBytes = Optional.empty();
+
+@@ -636,6 +654,7 @@ public class ScanOptions {
+  654       */
+  655      public Builder(ScanOptions options) {
+  656        this.fragmentIds = options.getFragmentIds();
+  657 +      this.fragmentSlices = options.getFragmentSlices();
+  658        this.indexSegments = options.getIndexSegments();
+  659        this.batchSize = options.getBatchSize();
+  660        this.batchSizeBytes = options.getBatchSizeBytes();
+
+@@ -675,6 +694,24 @@ public class ScanOptions {
+  694        return this;
+  695      }
+  696  
+  697 +    /**
+  698 +     * Restrict the scan to physical row slices within fragments.
+  699 +     *
+  700 +     * <p>Each slice is interpreted against the dataset snapshot used to create the scanner. When
+  701 +     * {@link #fragmentIds(List)} is also set, both restrictions are applied. Slice order is not an
+  702 +     * output ordering contract; results follow the scanner's fragment and physical-row order.
+  703 +     * Fragment slices require V2 storage; legacy V1 storage throws {@link
+  704 +     * UnsupportedOperationException} when the scan is executed. Fragment slices currently cannot be
+  705 +     * combined with nearest-neighbor or full-text search.
+  706 +     *
+  707 +     * @param fragmentSlices physical fragment slices to scan
+  708 +     * @return Builder instance for method chaining.
+  709 +     */
+  710 +    public Builder fragmentSlices(List<FragmentSlice> fragmentSlices) {
+  711 +      this.fragmentSlices = Optional.of(fragmentSlices);
+  712 +      return this;
+  713 +    }
+  714 +
+  715      /**
+  716       * Restrict vector search to the specified index segment UUIDs from a single logical index.
+  717       *
+
+@@ -999,6 +1036,7 @@ public class ScanOptions {
+ 1036      public ScanOptions build() {
+ 1037        return new ScanOptions(
+ 1038            fragmentIds,
+ 1039 +          fragmentSlices,
+ 1040            indexSegments,
+ 1041            batchSize,
+ 1042            batchSizeBytes,

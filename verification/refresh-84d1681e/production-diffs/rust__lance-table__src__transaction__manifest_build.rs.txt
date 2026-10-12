@@ -1,0 +1,245 @@
+@@ -11,8 +11,8 @@
+   11  //! metadata it stamps, the validation that runs before it.
+   12  
+   13  use crate::feature_flags::{
+   14 -    FLAG_COVERED_INDEX_METADATA, FLAG_FRAGMENT_REUSE_INDEX, FLAG_STABLE_ROW_IDS,
+   15 -    apply_feature_flags, ensure_can_read_manifest, ensure_can_write_manifest,
+   14 +    FLAG_COVERED_INDEX_METADATA, FLAG_FRAGMENT_REUSE_INDEX, FLAG_MANAGED_BLOBS,
+   15 +    FLAG_STABLE_ROW_IDS, apply_feature_flags, ensure_can_read_manifest, ensure_can_write_manifest,
+   16      inherit_sticky_feature_flags,
+   17  };
+   18  use crate::format::overlay::{OverlayCoverage, TOMBSTONE_FIELD_ID};
+
+@@ -757,6 +757,13 @@ impl Transaction {
+  757                      "Clone operation should not enter build_manifest.".to_string(),
+  758                  ));
+  759              }
+  760 +            Operation::Unknown { .. } => {
+  761 +                return Err(Error::not_supported(format!(
+  762 +                    "Transaction {} has an operation written by a newer version of Lance \
+  763 +                     and cannot be committed by this version",
+  764 +                    self.uuid
+  765 +                )));
+  766 +            }
+  767              Operation::Append { fragments } => {
+  768                  final_fragments.extend(maybe_existing_fragments?.clone());
+  769                  let mut new_fragments =
+
+@@ -1071,6 +1078,12 @@ impl Transaction {
+ 1078                  if next_row_id.is_some() {
+ 1079                      // We can re-use indices, but need to rewrite the fragment bitmaps
+ 1080                      debug_assert!(rewritten_indices.is_empty());
+ 1081 +                    // If there is an FRI and the index uses addresses then we can
+ 1082 +                    // migrate fragment support.
+ 1083 +                    //
+ 1084 +                    // If there is an FRI and the index uses row ids (this is getting phased
+ 1085 +                    // out) then we can migrate fragment support without need for remap.
+ 1086 +                    let deferred_remap = frag_reuse_index.is_some();
+ 1087                      for index in final_indices.iter_mut() {
+ 1088                          // Its bitmap is lineage, not coverage, and a straddling
+ 1089                          // group would fail the recalculation.
+
+@@ -1079,7 +1092,7 @@ impl Transaction {
+ 1092                          }
+ 1093                          let results_are_row_addrs = index.results_are_row_addrs();
+ 1094                          if let Some(fragment_bitmap) = &mut index.fragment_bitmap {
+ 1082 -                            *fragment_bitmap = if results_are_row_addrs {
+ 1095 +                            *fragment_bitmap = if results_are_row_addrs && !deferred_remap {
+ 1096                                  // Stable row ids survive a rewrite, so a row-id-domain index
+ 1097                                  // can simply follow its data to the new fragments. An
+ 1098                                  // address-domain index cannot: its stored addresses point into
+
+@@ -1183,33 +1196,62 @@ impl Transaction {
+ 1196              Operation::Merge { fragments, .. } => {
+ 1197                  let existing_fragments = maybe_existing_fragments?;
+ 1198                  let mut merged_fragments = fragments.clone();
+ 1186 -                if next_row_id.is_some() {
+ 1187 -                    let prev_by_id: HashMap<u64, &Fragment> =
+ 1188 -                        existing_fragments.iter().map(|f| (f.id, f)).collect();
+ 1189 -                    for fragment in merged_fragments.iter_mut() {
+ 1190 -                        match prev_by_id.get(&fragment.id) {
+ 1191 -                            Some(prev) => {
+ 1192 -                                if merge_fragment_physically_rewritten(prev, fragment) {
+ 1193 -                                    crate::rowids::version::refresh_row_latest_update_meta_for_full_frag_rewrite_cols(
+ 1194 -                                        fragment,
+ 1195 -                                        new_version,
+ 1196 -                                    )?;
+ 1197 -                                }
+ 1198 -                            }
+ 1199 -                            None => {
+ 1200 -                                // Brand-new fragment ID not present in the previous manifest.
+ 1201 -                                // Set both last_updated and created version meta, consistent
+ 1202 -                                // with Append/Overwrite for genuinely new fragments.
+ 1203 -                                crate::rowids::version::refresh_row_latest_update_meta_for_full_frag_rewrite_cols(
+ 1204 -                                    fragment,
+ 1205 -                                    new_version,
+ 1206 -                                )?;
+ 1207 -                                fragment.created_at_version_meta =
+ 1208 -                                    fragment.last_updated_at_version_meta.clone();
+ 1209 -                            }
+ 1199 +
+ 1200 +                // For each previous id, the first occurrence in the list is the
+ 1201 +                // merged existing fragment; everything else is new (staged
+ 1202 +                // write_fragments output arrives with placeholder id 0, colliding
+ 1203 +                // with real fragment 0). merge_fragments_valid enforces this rule.
+ 1204 +                let prev_by_id: HashMap<u64, &Fragment> =
+ 1205 +                    existing_fragments.iter().map(|f| (f.id, f)).collect();
+ 1206 +                let mut seen_prev_ids = HashSet::new();
+ 1207 +                let is_new = merged_fragments
+ 1208 +                    .iter()
+ 1209 +                    .map(|f| !prev_by_id.contains_key(&f.id) || !seen_prev_ids.insert(f.id))
+ 1210 +                    .collect::<Vec<_>>();
+ 1211 +
+ 1212 +                // New fragments get Append's treatment: id assignment (0 means
+ 1213 +                // unassigned, non-zero pre-reserved) and, with stable row ids,
+ 1214 +                // row ids plus fresh version metadata.
+ 1215 +                for (fragment, is_new) in merged_fragments.iter_mut().zip(is_new.iter()) {
+ 1216 +                    if !*is_new {
+ 1217 +                        continue;
+ 1218 +                    }
+ 1219 +                    // Caller-supplied row ids are never checked against live
+ 1220 +                    // fragments or next_row_id, so keeping them could commit
+ 1221 +                    // duplicate or unallocated stable row ids.
+ 1222 +                    if fragment.row_id_meta.is_some() {
+ 1223 +                        return Err(Error::invalid_input(format!(
+ 1224 +                            "Merge operation includes new fragment (id {}) with row id \
+ 1225 +                             metadata. New fragments must not carry row ids; they are \
+ 1226 +                             assigned at commit time.",
+ 1227 +                            fragment.id
+ 1228 +                        )));
+ 1229 +                    }
+ 1230 +                    if fragment.id == 0 {
+ 1231 +                        fragment.id = fragment_id;
+ 1232 +                        fragment_id += 1;
+ 1233 +                    }
+ 1234 +                }
+ 1235 +
+ 1236 +                if let Some(next_row_id) = &mut next_row_id {
+ 1237 +                    for (fragment, is_new) in merged_fragments.iter_mut().zip(is_new.iter()) {
+ 1238 +                        if *is_new {
+ 1239 +                            Self::assign_row_ids(next_row_id, std::slice::from_mut(fragment))?;
+ 1240 +                            let version_meta = build_version_meta(fragment, new_version);
+ 1241 +                            fragment.last_updated_at_version_meta = version_meta.clone();
+ 1242 +                            fragment.created_at_version_meta = version_meta;
+ 1243 +                        } else if let Some(prev) = prev_by_id.get(&fragment.id)
+ 1244 +                            && merge_fragment_physically_rewritten(prev, fragment)
+ 1245 +                        {
+ 1246 +                            crate::rowids::version::refresh_row_latest_update_meta_for_full_frag_rewrite_cols(
+ 1247 +                                fragment,
+ 1248 +                                new_version,
+ 1249 +                            )?;
+ 1250                          }
+ 1251                      }
+ 1252                  }
+ 1253 +                let remaining_field_ids = schema.field_ids().into_iter().collect::<HashSet<_>>();
+ 1254 +                Self::retain_relevant_overlays(&mut merged_fragments, &remaining_field_ids);
+ 1255                  final_fragments.extend(merged_fragments);
+ 1256  
+ 1257                  // A Merge can rewrite a column's data file in place; the field stays
+
+@@ -1239,6 +1281,7 @@ impl Transaction {
+ 1281                          })
+ 1282                      });
+ 1283                  }
+ 1284 +                Self::retain_relevant_overlays(&mut final_fragments, &remaining_field_ids);
+ 1285  
+ 1286                  // Some fields that have indices may have been removed, so we should
+ 1287                  // remove those indices as well.
+
+@@ -1681,6 +1724,36 @@ impl Transaction {
+ 1724              )
+ 1725          };
+ 1726  
+ 1727 +        // Only newly published Blob data files activate the capability. Comparing
+ 1728 +        // physical files also covers column rewrites and overlays while leaving
+ 1729 +        // metadata-only changes and deletion vectors on old tables alone.
+ 1730 +        let blob_fields: Vec<_> = manifest
+ 1731 +            .schema
+ 1732 +            .fields_pre_order()
+ 1733 +            .filter(|field| field.is_blob_v2())
+ 1734 +            .map(|field| field.id)
+ 1735 +            .collect();
+ 1736 +        if !blob_fields.is_empty() {
+ 1737 +            let old_files: HashSet<_> = current_manifest
+ 1738 +                .into_iter()
+ 1739 +                .flat_map(|manifest| manifest.fragments.iter())
+ 1740 +                .flat_map(|fragment| fragment.referenced_lance_files())
+ 1741 +                .map(|file| (file.base_id, file.path.as_str()))
+ 1742 +                .collect();
+ 1743 +            if manifest
+ 1744 +                .fragments
+ 1745 +                .iter()
+ 1746 +                .flat_map(|fragment| fragment.referenced_lance_files())
+ 1747 +                .any(|file| {
+ 1748 +                    !old_files.contains(&(file.base_id, file.path.as_str()))
+ 1749 +                        && file.fields.iter().any(|id| blob_fields.contains(id))
+ 1750 +                })
+ 1751 +            {
+ 1752 +                manifest.reader_feature_flags |= FLAG_MANAGED_BLOBS;
+ 1753 +                manifest.writer_feature_flags |= FLAG_MANAGED_BLOBS;
+ 1754 +            }
+ 1755 +        }
+ 1756 +
+ 1757          manifest.tag.clone_from(&self.tag);
+ 1758  
+ 1759          if config.auto_set_feature_flags {
+
+@@ -1888,13 +1961,20 @@ impl Transaction {
+ 1961                  // Assign a new ID if not already assigned
+ 1962                  let mut base_to_add = new_base.clone();
+ 1963                  if base_to_add.id == 0 {
+ 1891 -                    let next_id = manifest
+ 1892 -                        .base_paths
+ 1893 -                        .keys()
+ 1894 -                        .max()
+ 1895 -                        .map(|&id| id + 1)
+ 1896 -                        .unwrap_or(1);
+ 1897 -                    base_to_add.id = next_id;
+ 1964 +                    base_to_add.id = crate::format::BasePath::unused_id(
+ 1965 +                        manifest
+ 1966 +                            .base_paths
+ 1967 +                            .keys()
+ 1968 +                            .copied()
+ 1969 +                            .chain(std::iter::once(0)),
+ 1970 +                    )?;
+ 1971 +                } else if manifest.has_managed_blobs()
+ 1972 +                    && let Some(existing) = manifest.base_paths.get(&base_to_add.id)
+ 1973 +                {
+ 1974 +                    return Err(Error::invalid_input(format!(
+ 1975 +                        "Cannot replace base ID {} bound to {:?} with {:?}",
+ 1976 +                        base_to_add.id, existing.path, base_to_add.path
+ 1977 +                    )));
+ 1978                  }
+ 1979  
+ 1980                  manifest.base_paths.insert(base_to_add.id, base_to_add);
+
+@@ -1915,6 +1995,7 @@ impl Transaction {
+ 1995              manifest.reader_feature_flags |= FLAG_FRAGMENT_REUSE_INDEX;
+ 1996              manifest.writer_feature_flags |= FLAG_FRAGMENT_REUSE_INDEX;
+ 1997          }
+ 1998 +
+ 1999          Ok((manifest, final_indices))
+ 2000      }
+ 2001  
+
+@@ -1928,6 +2009,20 @@ impl Transaction {
+ 2009              });
+ 2010          }
+ 2011      }
+ 2012 +
+ 2013 +    /// Remove overlays that no longer supply any field in the schema.
+ 2014 +    fn retain_relevant_overlays(fragments: &mut [Fragment], remaining_field_ids: &HashSet<i32>) {
+ 2015 +        for fragment in fragments {
+ 2016 +            fragment.overlays.retain(|overlay| {
+ 2017 +                overlay
+ 2018 +                    .data_file
+ 2019 +                    .fields
+ 2020 +                    .iter()
+ 2021 +                    .any(|field_id| remaining_field_ids.contains(field_id))
+ 2022 +            });
+ 2023 +        }
+ 2024 +    }
+ 2025 +
+ 2026      /// Coverage of an index that a rewrite invalidates: the rewritten fragments are
+ 2027      /// removed and the fragments they became are *not* added.
+ 2028      fn drop_rewritten_fragments(old: &RoaringBitmap, groups: &[RewriteGroup]) -> RoaringBitmap {

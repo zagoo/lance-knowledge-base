@@ -1,0 +1,123 @@
+@@ -40,6 +40,37 @@ pub(crate) const LOG_ELEMS_PER_CHUNK: u8 = 10;
+   40  /// Number of values encoded in each inline bitpacking chunk.
+   41  pub const ELEMS_PER_CHUNK: u64 = 1 << LOG_ELEMS_PER_CHUNK;
+   42  
+   43 +pub(crate) fn out_of_line_payload_byte_lengths(
+   44 +    num_values: u64,
+   45 +    uncompressed_bit_width: u64,
+   46 +    compressed_bit_width: u64,
+   47 +) -> Result<[u64; 2]> {
+   48 +    if !matches!(uncompressed_bit_width, 8 | 16 | 32 | 64) {
+   49 +        return Err(Error::invalid_input(format!(
+   50 +            "Out-of-line bitpacking requires an 8, 16, 32, or 64-bit word, got {uncompressed_bit_width}"
+   51 +        )));
+   52 +    }
+   53 +    if compressed_bit_width > uncompressed_bit_width {
+   54 +        return Err(Error::invalid_input(format!(
+   55 +            "Out-of-line bitpacking width {compressed_bit_width} is invalid for {uncompressed_bit_width}-bit values"
+   56 +        )));
+   57 +    }
+   58 +    let word_bytes = uncompressed_bit_width / 8;
+   59 +    let bytes_per_chunk =
+   60 +        (ELEMS_PER_CHUNK * compressed_bit_width).div_ceil(uncompressed_bit_width) * word_bytes;
+   61 +    let full_chunk_bytes = (num_values / ELEMS_PER_CHUNK)
+   62 +        .checked_mul(bytes_per_chunk)
+   63 +        .ok_or_else(|| Error::invalid_input("Bitpacking payload byte length overflows u64"))?;
+   64 +    let tail_values = num_values % ELEMS_PER_CHUNK;
+   65 +    let raw_tail_bytes = full_chunk_bytes
+   66 +        .checked_add(tail_values * word_bytes)
+   67 +        .ok_or_else(|| Error::invalid_input("Bitpacking payload byte length overflows u64"))?;
+   68 +    let padded_tail_bytes = full_chunk_bytes
+   69 +        .checked_add(if tail_values > 0 { bytes_per_chunk } else { 0 })
+   70 +        .ok_or_else(|| Error::invalid_input("Bitpacking payload byte length overflows u64"))?;
+   71 +    Ok([raw_tail_bytes, padded_tail_bytes])
+   72 +}
+   73 +
+   74  #[derive(Debug, Default)]
+   75  pub struct InlineBitpacking {
+   76      uncompressed_bit_width: u64,
+
+@@ -340,8 +371,12 @@ impl BlockCompressor for InlineBitpacking {
+  371  
+  372  impl MiniBlockDecompressor for InlineBitpacking {
+  373      fn decompress(&self, data: Vec<LanceBuffer>, num_values: u64) -> Result<DataBlock> {
+  343 -        assert_eq!(data.len(), 1);
+  344 -        let data = data.into_iter().next().unwrap();
+  374 +        let [data] = <[LanceBuffer; 1]>::try_from(data).map_err(|data| {
+  375 +            Error::invalid_input(format!(
+  376 +                "Inline bitpacking expects one buffer, got {}",
+  377 +                data.len()
+  378 +            ))
+  379 +        })?;
+  380          if num_values == 0 {
+  381              // Empty mini-blocks have no inline bit-width header to decode.
+  382              return Ok(self.empty_block());
+
+@@ -611,9 +646,29 @@ impl BlockDecompressor for OutOfLineBitpacking {
+  646              16 => std::mem::size_of::<u16>(),
+  647              32 => std::mem::size_of::<u32>(),
+  648              64 => std::mem::size_of::<u64>(),
+  614 -            _ => panic!("Bitpacking word size must be 8,16,32,64"),
+  649 +            bits => {
+  650 +                return Err(Error::invalid_input(format!(
+  651 +                    "Bitpacking word size must be 8, 16, 32, or 64, got {bits}"
+  652 +                )));
+  653 +            }
+  654          };
+  616 -        debug_assert_eq!(data.len() % word_size, 0);
+  655 +        // Stable writers have emitted both padded and raw tails. The writer's current
+  656 +        // size preference must not restrict which historical payloads the reader accepts.
+  657 +        let [raw_tail_bytes, padded_tail_bytes] = out_of_line_payload_byte_lengths(
+  658 +            num_values,
+  659 +            self.uncompressed_bit_width,
+  660 +            self.compressed_bit_width,
+  661 +        )?;
+  662 +        if data.len() as u64 != raw_tail_bytes && data.len() as u64 != padded_tail_bytes {
+  663 +            return Err(Error::corrupt_file_named(
+  664 +                "out-of-line bitpacking",
+  665 +                format!(
+  666 +                    "payload has {} bytes, expected {raw_tail_bytes} bytes (raw tail) or \
+  667 +                     {padded_tail_bytes} bytes (padded tail) for {num_values} values",
+  668 +                    data.len()
+  669 +                ),
+  670 +            ));
+  671 +        }
+  672          let total_words = (data.len() / word_size) as u64;
+  673          let block = FixedWidthDataBlock {
+  674              data,
+
+@@ -622,27 +677,14 @@ impl BlockDecompressor for OutOfLineBitpacking {
+  677              block_info: BlockInfo::new(),
+  678          };
+  679  
+  680 +        let num_values = usize::try_from(num_values).map_err(|_| {
+  681 +            Error::invalid_input("Out-of-line bitpacking cardinality does not fit usize")
+  682 +        })?;
+  683          let unpacked = match self.uncompressed_bit_width {
+  626 -            8 => unpack_out_of_line::<u8>(
+  627 -                block,
+  628 -                num_values as usize,
+  629 -                self.compressed_bit_width as usize,
+  630 -            ),
+  631 -            16 => unpack_out_of_line::<u16>(
+  632 -                block,
+  633 -                num_values as usize,
+  634 -                self.compressed_bit_width as usize,
+  635 -            ),
+  636 -            32 => unpack_out_of_line::<u32>(
+  637 -                block,
+  638 -                num_values as usize,
+  639 -                self.compressed_bit_width as usize,
+  640 -            ),
+  641 -            64 => unpack_out_of_line::<u64>(
+  642 -                block,
+  643 -                num_values as usize,
+  644 -                self.compressed_bit_width as usize,
+  645 -            ),
+  684 +            8 => unpack_out_of_line::<u8>(block, num_values, self.compressed_bit_width as usize),
+  685 +            16 => unpack_out_of_line::<u16>(block, num_values, self.compressed_bit_width as usize),
+  686 +            32 => unpack_out_of_line::<u32>(block, num_values, self.compressed_bit_width as usize),
+  687 +            64 => unpack_out_of_line::<u64>(block, num_values, self.compressed_bit_width as usize),
+  688              _ => unreachable!(),
+  689          };
+  690          Ok(DataBlock::FixedWidth(unpacked))

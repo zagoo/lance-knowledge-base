@@ -1,0 +1,204 @@
+@@ -51,13 +51,16 @@ pub mod codec;
+   51  mod entry_io;
+   52  mod key;
+   53  mod moka;
+   54 +mod priority;
+   55  mod quick;
+   56 +pub use priority::PriorityEntries;
+   57  mod registry;
+   58  
+   57 -pub use backend::{CacheBackend, CacheEntry};
+   59 +pub use backend::{CacheBackend, CacheEntry, CacheTier};
+   60  pub use backend_uri::{build_from_uri, parse_backend_uri};
+   61  pub use codec::{
+   60 -    CacheCodec, CacheCodecImpl, CacheDecode, CacheMissReason, MAGIC, has_cache_envelope,
+   62 +    CacheCodec, CacheCodecImpl, CacheDecode, CacheMissReason, CacheRangeReader, MAGIC,
+   63 +    has_cache_envelope,
+   64  };
+   65  pub use entry_io::{CacheEntryReader, CacheEntryWriter};
+   66  pub use key::{CACHE_KEY_FORMAT, CacheKeySchema, CacheNamespace, InternalCacheKey, KeyBuilder};
+
+@@ -137,6 +140,11 @@ pub trait CacheKey {
+  140          builder.write_str(self.key().as_ref());
+  141      }
+  142  
+  143 +    /// Per-key cache policy, defaulting to the value type's codec.
+  144 +    fn codec_for_key(&self) -> Option<CacheCodec> {
+  145 +        Self::codec()
+  146 +    }
+  147 +
+  148      /// Optional codec for serializing/deserializing this key's value type.
+  149      ///
+  150      /// Returns `None` by default. Cache backends that support persistence
+
+@@ -368,17 +376,91 @@ impl LanceCache {
+  376          let key = self.sized_key(cache_key);
+  377          self.state
+  378              .backend
+  371 -            .insert(&key, metadata, size, K::codec())
+  379 +            .insert(&key, metadata, size, cache_key.codec_for_key())
+  380              .await;
+  381      }
+  382  
+  383 +    /// Read a resident entry without loading its disk copy.
+  384 +    pub async fn get_resident_with_key<K>(&self, cache_key: &K) -> Option<Arc<K::ValueType>>
+  385 +    where
+  386 +        K: CacheKey,
+  387 +        K::ValueType: DeepSizeOf + Send + Sync + 'static,
+  388 +    {
+  389 +        let key = self.sized_key(cache_key);
+  390 +        self.state
+  391 +            .backend
+  392 +            .get_resident(&key)
+  393 +            .await?
+  394 +            .downcast::<K::ValueType>()
+  395 +            .ok()
+  396 +    }
+  397 +
+  398 +    /// Report whether an entry is resident without counting as an access.
+  399 +    pub async fn peek_resident_with_key<K: CacheKey>(&self, cache_key: &K) -> bool {
+  400 +        let key = self.sized_key(cache_key);
+  401 +        self.state.backend.peek_resident(&key).await
+  402 +    }
+  403 +
+  404 +    /// Predict which tier would serve a read of the entry, without reading it
+  405 +    /// or counting as an access; see [`CacheBackend::peek_tier`].
+  406 +    pub async fn peek_tier_with_key<K: CacheKey>(&self, cache_key: &K) -> CacheTier {
+  407 +        let key = self.sized_key(cache_key);
+  408 +        self.state.backend.peek_tier(&key).await
+  409 +    }
+  410 +
+  411 +    /// Whether lower layered planes gate RAM admission on a resident sign plane.
+  412 +    pub fn plane_admission_gated(&self) -> bool {
+  413 +        self.state.backend.plane_admission_gated()
+  414 +    }
+  415 +
+  416 +    /// Read memory or persistent storage without promoting a persistent hit.
+  417 +    pub async fn get_without_promotion_with_key<K>(
+  418 +        &self,
+  419 +        cache_key: &K,
+  420 +    ) -> Option<Arc<K::ValueType>>
+  421 +    where
+  422 +        K: CacheKey,
+  423 +        K::ValueType: DeepSizeOf + Send + Sync + 'static,
+  424 +    {
+  425 +        let key = self.sized_key(cache_key);
+  426 +        self.state
+  427 +            .backend
+  428 +            .get_without_promotion(&key, cache_key.codec_for_key())
+  429 +            .await?
+  430 +            .downcast::<K::ValueType>()
+  431 +            .ok()
+  432 +    }
+  433 +
+  434 +    /// Read selected rows from a persistent entry without memory admission.
+  435 +    pub async fn get_rows_with_key<K>(
+  436 +        &self,
+  437 +        cache_key: &K,
+  438 +        rows: &[u32],
+  439 +    ) -> Option<Arc<K::ValueType>>
+  440 +    where
+  441 +        K: CacheKey,
+  442 +        K::ValueType: DeepSizeOf + Send + Sync + 'static,
+  443 +    {
+  444 +        self.state
+  445 +            .backend
+  446 +            .get_rows(&self.sized_key(cache_key), rows, cache_key.codec_for_key())
+  447 +            .await?
+  448 +            .downcast::<K::ValueType>()
+  449 +            .ok()
+  450 +    }
+  451 +
+  452      pub async fn get_with_key<K>(&self, cache_key: &K) -> Option<Arc<K::ValueType>>
+  453      where
+  454          K: CacheKey,
+  455          K::ValueType: DeepSizeOf + Send + Sync + 'static,
+  456      {
+  457          let key = self.sized_key(cache_key);
+  381 -        let Some(entry) = self.state.backend.get(&key, K::codec()).await else {
+  458 +        let Some(entry) = self
+  459 +            .state
+  460 +            .backend
+  461 +            .get(&key, cache_key.codec_for_key())
+  462 +            .await
+  463 +        else {
+  464              self.state.misses.fetch_add(1, Ordering::Relaxed);
+  465              return None;
+  466          };
+
+@@ -454,7 +536,7 @@ impl LanceCache {
+  536          let (entry, was_cached) = self
+  537              .state
+  538              .backend
+  457 -            .get_or_insert(&key, typed_loader, K::codec())
+  539 +            .get_or_insert(&key, typed_loader, cache_key.codec_for_key())
+  540              .await?;
+  541          let entry = entry.downcast::<K::ValueType>().map_err(|_| {
+  542              self.state.misses.fetch_add(1, Ordering::Relaxed);
+
+@@ -590,6 +672,65 @@ impl WeakLanceCache {
+  672          }
+  673      }
+  674  
+  675 +    /// Read RAM only, avoiding whole-entry promotion for candidate range reads.
+  676 +    pub async fn get_resident_with_key<K>(&self, cache_key: &K) -> Option<Arc<K::ValueType>>
+  677 +    where
+  678 +        K: CacheKey,
+  679 +        K::ValueType: DeepSizeOf + Send + Sync + 'static,
+  680 +    {
+  681 +        self.upgrade()?.get_resident_with_key(cache_key).await
+  682 +    }
+  683 +
+  684 +    /// Report residency without counting as an access; a dropped cache holds nothing.
+  685 +    pub async fn peek_resident_with_key<K: CacheKey>(&self, cache_key: &K) -> bool {
+  686 +        match self.upgrade() {
+  687 +            Some(cache) => cache.peek_resident_with_key(cache_key).await,
+  688 +            None => false,
+  689 +        }
+  690 +    }
+  691 +
+  692 +    /// Predict the serving tier without counting as an access; a dropped
+  693 +    /// cache holds nothing.
+  694 +    pub async fn peek_tier_with_key<K: CacheKey>(&self, cache_key: &K) -> CacheTier {
+  695 +        match self.upgrade() {
+  696 +            Some(cache) => cache.peek_tier_with_key(cache_key).await,
+  697 +            None => CacheTier::Absent,
+  698 +        }
+  699 +    }
+  700 +
+  701 +    /// Whether lower layered planes gate RAM admission; a dropped cache keeps the default.
+  702 +    pub fn plane_admission_gated(&self) -> bool {
+  703 +        self.upgrade()
+  704 +            .is_none_or(|cache| cache.plane_admission_gated())
+  705 +    }
+  706 +
+  707 +    /// Read a cached candidate plane without whole-entry RAM admission.
+  708 +    pub async fn get_without_promotion_with_key<K>(
+  709 +        &self,
+  710 +        cache_key: &K,
+  711 +    ) -> Option<Arc<K::ValueType>>
+  712 +    where
+  713 +        K: CacheKey,
+  714 +        K::ValueType: DeepSizeOf + Send + Sync + 'static,
+  715 +    {
+  716 +        self.upgrade()?
+  717 +            .get_without_promotion_with_key(cache_key)
+  718 +            .await
+  719 +    }
+  720 +
+  721 +    /// Read selected cached rows without promoting a whole plane.
+  722 +    pub async fn get_rows_with_key<K>(
+  723 +        &self,
+  724 +        cache_key: &K,
+  725 +        rows: &[u32],
+  726 +    ) -> Option<Arc<K::ValueType>>
+  727 +    where
+  728 +        K: CacheKey,
+  729 +        K::ValueType: DeepSizeOf + Send + Sync + 'static,
+  730 +    {
+  731 +        self.upgrade()?.get_rows_with_key(cache_key, rows).await
+  732 +    }
+  733 +
+  734      /// Weighted capacity in bytes, if the cache is alive and its backend
+  735      /// reports one.
+  736      pub fn capacity_bytes(&self) -> Option<usize> {

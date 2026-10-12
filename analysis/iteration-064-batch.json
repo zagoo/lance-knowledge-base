@@ -1,0 +1,349 @@
+{
+  "iteration": 64,
+  "files": [
+    {
+      "path": "rust/lance-file/src/versions/v1/writer/statistics.rs",
+      "module": "L1-modules/rust-lance-file-v1-statistics.md",
+      "reviewed": true,
+      "role": "Frozen V1 synchronous statistics reducers, 64-byte prefix and successor algorithms, collector/builder lifecycle, and fourteen deterministic/property test entry points. Pub declarations are inside a private module; automatic writer eligibility is narrower than low-level dispatch.",
+      "limits": "Every physical line1-2249 read in eight complete bounded source outputs during ANALYZE64. Tests and external ScalarValue/Arrow implementations were not executed or fetched. Literal fixed-binary width disagreement and decimal fixture parameter assumptions are documented without claiming runtime failures. No source changes, internet, builds, tests, lint, benchmarks, installs or fixture generators. Preserve frozen legacy behavior; modern statistics/encoding and full Dataset/backend flows remain separately pending (AGENTS.md:13-18).",
+      "ranges": [
+        [
+          1,
+          32,
+          "SPDX and module purpose, followed by synchronous Arrow array/builders/casts, primitive type markers, Arrow schema/errors, DataFusion ScalarValue, Lance Field/Schema/Result and numeric traits. BTreeMap gives deterministic field-ID order; Arc owns output arrays. This file has no IO, async work, locks, unsafe blocks, environment/configuration lookup or format-version negotiation. Its pub items live behind the private writer::statistics module (rust/lance-file/src/versions/v1/writer/mod.rs:4-4), so they are not a separately re-exported public crate API."
+        ],
+        [
+          33,
+          46,
+          "Private BINARY_PREFIX_LENGTH=64 is a byte limit, not a Unicode-character count. StatisticsRow derives Debug/PartialEq and exposes crate-visible null_count:i64 and min_value/max_value:ScalarValue. A row represents all arrays supplied to one collection, not necessarily one Arrow batch. Bound absence is represented in typed ScalarValue options and differs by algorithm."
+        ],
+        [
+          47,
+          82,
+          "compute_primitive_statistics<T:ArrowNumericType> requires Native:Bounded+PartialOrd, starts min at native maximum and max at native minimum, casts every array to T, sums physical null counts as i64, skips arrays whose entire length is null (including empty arrays), then compares only Some values. all_values_null becomes false upon any non-all-null array. If no valid value exists, return full native [MIN,MAX] and accumulated null count, not null bounds. No checked null-count conversion/sum, mixed-type validation or data concatenation occurs."
+        ],
+        [
+          83,
+          100,
+          "get_statistics<T> debug-asserts nonempty outer input, calls primitive reduction, and constructs nonnull primitive ScalarValues using arrays[0].data_type(), unwrapping both conversions. Using the actual first DataType preserves temporal parameters such as timezone rather than generic T::DATA_TYPE. Later arrays are downcast but no cross-array parameter equality check occurs locally. Empty outer input can panic at first-array indexing even without debug assertions."
+        ],
+        [
+          101,
+          137,
+          "compute_float_statistics<T> initializes [+infinity,-infinity], sums physical null counts before skipping all-null/empty arrays, and changes bounds only for strict partial_cmp Greater/Less. NaN comparisons produce no update, but NaNs do not increment null_count. If both sentinels remain unchanged, replace them with [-infinity,+infinity], covering empty, all-null and all-NaN input. Actual single positive or negative infinity updates the opposite bound, preserving a constant-infinity interval."
+        ],
+        [
+          138,
+          162,
+          "get_float_statistics uses the float reducer, normalizes any minimum equal to zero to negative zero and any maximum equal to negative zero to positive zero; floating equality covers both zero signs. Converts the resulting native numbers through ScalarValue::from; returns nonnull bounds even for no ordered value. No total-order NaN comparison or timezone/type parameter is involved for Float32/64."
+        ],
+        [
+          163,
+          175,
+          "get_decimal_statistics reuses Decimal128 native i128 reduction, then reads precision and scale from the first array and wraps both values without precision validation here. No Decimal256 branch exists. Empty/all-null Decimal128 therefore uses native i128 extrema rather than decimal-precision-limited extrema; downstream scalar/Arrow conversion may impose separate constraints, not checked by this reducer."
+        ],
+        [
+          176,
+          192,
+          "truncate_utf8 asserts data.len()>=length, walks char_indices backward over the original entire string, and returns the longest NONEMPTY valid prefix whose ending byte offset is <=length. It returns None when no full character fits, including length0; it never manufactures Some(empty). The comment says less than length, but actual condition permits equality. Backward traversal may scan the long suffix; the 64-byte comparison limit does not make truncation constant-time in input length. Caller invokes it only for strings longer than64, where at least one Unicode scalar fits."
+        ],
+        [
+          193,
+          215,
+          "increment_utf8 owns bytes and tries indices right-to-left. For each index it repeatedly increments that byte up to overflow, validating the entire candidate with str::from_utf8 after each attempt; first valid candidate is returned. On exhausting a byte it restores its original value before trying the previous position. Unlike binary carry it does not zero the suffix, change byte length, or construct the next Unicode scalar across multiple changed bytes. A lexically greater same-length valid candidate is conservative; None means this algorithm found none, not a proof that no Unicode upper bound of another form exists. Empty input also returns None."
+        ],
+        [
+          216,
+          240,
+          "truncate_binary asserts input length>=requested length and always returns Some(exact prefix of that length), including zero; there is no all-maximal-byte special case despite the adjacent comment. increment performs big-endian-style carry from the last byte: overflow writes0 and continues left, first nonoverflow returns the same-length vector. All0xFF or empty input returns None. Both less-than comments are imprecise: a prefix may equal the stated length."
+        ],
+        [
+          241,
+          280,
+          "get_string_statistics<T:OffsetSizeTrait> casts each array to the chosen UTF8 offset width, accumulates null counts and skips all-null/empty arrays. Each nonnull string longer than64 bytes is truncated at a UTF8 boundary and sets one global bounds_truncated flag. Min/max compare these prefixes lexically with strict comparisons, keeping borrowed references until final ownership conversion. Any truncated value sets the flag even if it never supplies the maximum; short values and empty strings remain eligible."
+        ],
+        [
+          281,
+          315,
+          "If any string was truncated and a maximum exists, increment_utf8 of the chosen maximum prefix provides the output upper bound; failure turns max into typed None. This also increments a short maximum when a different, smaller value was truncated. Min stays a lower prefix. Borrowed bounds become owned strings; first DataType selects Utf8 versus LargeUtf8, otherwise unreachable. All-null/empty string arrays yield both bounds None, with actual null_count. No truncation means an exact observed maximum, including length exactly64."
+        ],
+        [
+          316,
+          357,
+          "get_binary_statistics<T> mirrors string reduction using generic binary casts and raw byte lexicographic ordering. It truncates each value longer than64 to exactly64 bytes, sets a global truncation flag, and compares borrowed slices. Accumulates null counts for every array before skipping all-null/empty arrays. Input consistency is assumed rather than validated."
+        ],
+        [
+          358,
+          388,
+          "Binary minimum is cloned; maximum is cloned unchanged if no value was truncated, otherwise increment carries through its bytes and can yield None for an all0xFF prefix. The global flag can widen a maximum not itself truncated. First DataType selects Binary or LargeBinary ScalarValue, unmatched type unreachable. Empty/all-null inputs have both typed None; exact64-byte all0xFF remains a present exact maximum when no other value triggers truncation."
+        ],
+        [
+          389,
+          431,
+          "get_fixed_size_binary_statistics obtains declared width from the first array, sets do_truncate if width>64, then scans nonnull values with lexical byte comparison, truncating each to64 if enabled. Accumulates physical null counts, skips all-null arrays, and assumes common width/type across arrays. Width<=64 compares full values. This helper is callable by the dispatcher but excluded from automatic collector eligibility."
+        ],
+        [
+          432,
+          452,
+          "Fixed-binary outputs clone the lower prefix and optionally increment the upper prefix on width>64; all-maximal prefix yields None. BOTH ScalarValue::FixedSizeBinary constructors retain the original width, even when present payload has only64 bytes or max is absent. This is a descriptive bound representation, not evidence that those truncated scalar bytes can be appended as valid fixed-width Arrow values. The builder has no fixed-binary append arm (rust/lance-file/src/versions/v1/writer/statistics.rs:918-928)."
+        ],
+        [
+          453,
+          483,
+          "get_boolean_statistics tracks presence of true/false and sums each array null count before an early continue. Once both values have appeared, later arrays need not be scanned for values but still contribute nulls. Within the current array the for_each does not break early. Bounds are Some(true_present&&!false_present) and Some(true_present||!false_present): onlytrue gives true/true, onlyfalse false/false, mixed false/true, no valid values false/true."
+        ],
+        [
+          484,
+          492,
+          "cast_dictionary_arrays<T> downcasts every dictionary and collects borrowed Arc references to each complete VALUES array into a new Vec. It does not follow keys, deduplicate shared dictionaries, slice values to referenced entries or include key null counts. The returned lifetime is tied to input references."
+        ],
+        [
+          493,
+          514,
+          "get_dictionary_statistics inspects the first Dictionary key type and dispatches Int8/16/32/64 or UInt8/16/32/64 to value extraction, then recursively collect_statistics on those full values arrays. Returned bound scalar type is the dictionary VALUE type. Null count is the sum of values-array null counts, possibly repeatedly counting the same shared dictionary; it is not decoded-row/key null count. Unused dictionary entries affect bounds. Unsupported key type panics naming key type, non-Dictionary call panics naming actual type. This helper remains outside automatic collector selection."
+        ],
+        [
+          515,
+          549,
+          "get_temporal_statistics maps Time32 Second/Millisecond, Time64 Microsecond/Nanosecond, Date32/64, all four Timestamp units and all four Duration units to corresponding primitive marker. Timestamp timezone propagates via get_statistics first-array DataType; values are not timezone converted. Other unit/type combinations are unreachable. Native integer extrema supply empty/all-null bounds; temporal domain limits are not validated here."
+        ],
+        [
+          550,
+          585,
+          "collect_statistics is pub within the private module and panics with No arrays to collect statistics from on an empty outer slice. It dispatches Boolean, eight integers, Float32/64, temporal families, Decimal128, both binary/string offset widths, FixedSizeBinary and Dictionary based only on the first DataType. Null, Float16, Decimal256, views, structs, lists and other unsupported types reach unreachable; Decimal256 TODO and commented list arms are not support. Returns a row, not Result, and performs no common-type/parameter preflight."
+        ],
+        [
+          586,
+          610,
+          "supports_stats_collection is deliberately narrower than collect_statistics: Boolean, eight integers, Float32/64, Date32/64, Utf8/LargeUtf8, Binary/LargeBinary and Decimal128 only. Excludes Time32/64, Timestamp, Duration, Dictionary and FixedSizeBinary despite reducer support; excludes all other unmatched types. FixedSizeBinary is commented out. Do not infer that a dispatcher arm enables on-disk writer statistics."
+        ],
+        [
+          611,
+          634,
+          "StatisticsCollector derives Debug and owns private BTreeMap<i32,(Field,StatisticsBuilder)>. try_new traverses only roots and struct descendants, filters eligible types, clones each Field and creates a builder. BTreeMap keys are original field IDs, so output sorts by numeric ID; duplicate IDs overwrite an earlier entry during collection rather than error. Empty eligible set returns None. get_builder returns a mutable builder or None for absent ID, without allocation or validation."
+        ],
+        [
+          635,
+          660,
+          "Collector finish drains each null-count/min/max Arrow builder in ascending ID order, builds Struct children named null_count:Int64 nonnullable and min_value/max_value:original dtype nullable, then a nonnullable root named decimal original field ID. Bounds remain nullable even for a nonnullable data field; null_count builder is appended with nonnull values, and its cloned null buffer supplies root validity. Original Field name/metadata/nullability are not copied to roots. Individual StructArray::new invariants are enforced by Arrow and can panic before the later Result check."
+        ],
+        [
+          661,
+          672,
+          "Construct RecordBatch using the generated schema/arrays. Any RecordBatch::try_new error is replaced with ArrowError::SchemaError(all columns in a record batch must have the same length), converted to Lance error; original detail is discarded. Builders have already been finished/reset even when this returns Err. No rollback or recovery from prior accumulated rows; caller may collect new rows but cannot retry the old contents. No closed flag prohibits subsequent finish calls."
+        ],
+        [
+          673,
+          687,
+          "visit_fields creates reversed root stack, pops in schema order, and pushes reversed children ONLY for Struct. It emits the struct node as well as descendants; eligibility later removes structs. Lists, fixed-size lists, dictionaries and other nested types are emitted without descending. This differs from writer fields_in_batches, which emits scalar leaves in reverse root/child traversal order (rust/lance-file/src/versions/v1/writer/mod.rs:654-692)."
+        ],
+        [
+          688,
+          703,
+          "StatisticsBuilder owns an Int64 null-count primitive builder, type-erased boxed min/max ArrayBuilders, and cloned DataType. Custom Debug prints only null_count and dt, omitting bound builders. All fields and the constructor are private; append is pub inside private module. There is no synchronization, capacity budget or per-row validation state."
+        ],
+        [
+          704,
+          717,
+          "new makes a fresh null-count builder and two make_builder(data_type,1) bound builders, retains cloned dtype and returns Self. The1 is initial capacity, not a hard row limit. Arrow make_builder/type support is delegated; collector only calls this for its eligible types."
+        ],
+        [
+          718,
+          762,
+          "string_statistics_appender<T> downcasts both bound builders and unwraps before mutation. Appends the supplied i64 null_count with no sign/range check. Utf8 or LargeUtf8 Some values matching self.dt append normally; None OR a mismatched ScalarValue variant appends a null bound instead of an error. Unexpected self.dt is unreachable. Offset-width mismatch panics at downcast."
+        ],
+        [
+          763,
+          807,
+          "binary_statistics_appender<T> has equivalent behavior for Binary/LargeBinary: checked-by-unwrap builder downcasts, unchecked signed null_count append, matching Some bytes appended and any other ScalarValue mapped to null. It neither truncates nor recomputes statistics; caller supplies row semantics. Unexpected dtype unreachable."
+        ],
+        [
+          808,
+          841,
+          "statistics_appender<T> downcasts both primitive builders, converts each ScalarValue to a one-element array, unwraps conversion/downcast, and reads raw value(0) without checking validity. Only after both values are obtained does it append count and nonnull min/max. A typed null scalar is not propagated as a null bound; its underlying value is read. Type mismatch or conversion error panics. Scalar type parameters are not independently compared with self.dt."
+        ],
+        [
+          842,
+          868,
+          "boolean_appender downcasts both Boolean builders, appends count, then matching Some Boolean bounds; absent or wrong-variant minimum becomes false and maximum becomes true. It never emits a null Boolean bound. This fallback differs from string/binary null insertion and primitive raw value extraction."
+        ],
+        [
+          869,
+          918,
+          "append matches stored dt, routing Boolean, eight integers, Float32/64, Date32/64, supported Time32/64 units, all four Timestamp and Duration units and Decimal128 to the corresponding appender. Temporal branches exist even though automatic collector filters them out. No row type/count validation or error-return channel precedes dispatch."
+        ],
+        [
+          919,
+          931,
+          "Append handles Binary/LargeBinary and Utf8/LargeUtf8 with correct offset marker. Decimal256 remains TODO, Dictionary has a comment that stats concern values but no dictionary branch, and FixedSizeBinary also has no branch. Everything else executes todo!(Stats collection for {} is not supported yet). End of builder impl; no persisted format is directly emitted here."
+        ],
+        [
+          932,
+          959,
+          "Test-only module imports concrete Arrow arrays/builders, Datum/scalar conversion, interleave, proptest and schema aliases. test_no_arrays explicitly expects panic containing No arrays to collect statistics from for an empty Vec of arrays. Tests are source-read only, not executed in this goal."
+        ],
+        [
+          960,
+          996,
+          "test_edge_cases begins with one empty UInt32 array, requiring count0 and [u32::MIN,u32::MAX]. One empty Utf8 and one empty LargeUtf8 array each require count0 with correctly typed None/None bounds. These are nonempty outer slices, distinct from the previous panic test."
+        ],
+        [
+          997,
+          1032,
+          "Remaining empty cases require typed None/None for Binary and LargeBinary and Some(false)/Some(true) for Boolean, all null_count0. No fixed-binary/decimal/all-null assertion appears in this edge-case test."
+        ],
+        [
+          1033,
+          1122,
+          "test_collect_primitive_stats private TestCase stores source arrays, expected min/max and expected i64 count. First8 of24 cases test Int8/16/32/64 using [4,3,7,2] plus [-10,3,5] ->[-10,7], and UInt8/16/32/64 using [4,3,7,2] plus [10,3,5] ->[2,10]. Every expected count is0, with exact matching scalar width."
+        ],
+        [
+          1123,
+          1185,
+          "Primitive cases9-15 cover Boolean [true,false] ->[false,true]; Date32/Date64 and Time32 Second/Millisecond, Time64 Microsecond/Nanosecond each use [53,42] plus [68,32] ->[32,68] with the corresponding scalar variant and count0. No temporal range validation or null entries are tested."
+        ],
+        [
+          1186,
+          1246,
+          "Four Timestamp cases use each unit Second/Millisecond/Microsecond/Nanosecond on [53,42] plus [68,32], explicitly attach UTC to both arrays, and expect same-unit UTC ScalarValues32/68 with count0. They check metadata propagation, not timezone conversion or mismatched zones."
+        ],
+        [
+          1247,
+          1294,
+          "Final primitive cases cover four Duration units with the same32/68 bounds/count0; Decimal128 arrays are constructed from [53,42] and [68,32] and expected scalars are explicitly try_new_decimal128(32 or68,38,10). No explicit with_precision_and_scale is applied to source arrays here; dependency defaults/equality are not independently validated by this source-reading task."
+        ],
+        [
+          1295,
+          1311,
+          "Iterate all24 cases, borrow each ArrayRef, collect and compare complete StatisticsRow with expected bounds/count, including input arrays in assertion failure text. No collector builder or file serialization is involved."
+        ],
+        [
+          1312,
+          1378,
+          "test_collect_float_stats checks Float32 [4,3,NaN,2] plus [-10,3,5,NaN] ->[-10,5], count0; Float64 [4,-infinity,+infinity] ->full infinite bounds,count0; Float32[-0,+0] expected negative-zero minimum/positive-zero maximum via ScalarValue equality; three Float64 NaNs ->[-infinity,+infinity],count0. It does not separately compare zero sign bits or test mixed null/NaN here."
+        ],
+        [
+          1379,
+          1440,
+          "test_collect_binary_stats declares filler literal 48 chars of filler followed by30 spaces (actual byte length48), a64-byte0xFF vector and private TestCase(source_arrays,stats);13cases follow. Utf8 foo/null/bar plus yee/haw ->bar/yee,count1. Filler+bacteriologists+scientist emoji and filler+terrestial planet ->filler+bacteriologists lower prefix and filler+terrestial planf upper successor,count0. Exact64-byte filler+terrestial planf keeps identical bounds. Source misspells terrestrial and Sting; retain literal fixture strings."
+        ],
+        [
+          1441,
+          1490,
+          "Three LargeUtf8 cases repeat the short/null, multibyte-truncation/successor and exact64-byte fixtures with LargeUtf8 scalar variants and identical expected counts/bounds. The maximal original filler+terrestial planet is65 bytes, truncated to filler+terrestial plane before its last byte increments to produce the64-byte upper bound ending planf."
+        ],
+        [
+          1491,
+          1541,
+          "Binary and LargeBinary each test one69-byte all0xFF value ->64-byte all0xFF minimum and None maximum, count0, and one64-byte all0xFF value ->both exact present64-byte bounds,count0. These deterministic cases cover0xFF overflow omitted by later property generator. The adjacent comment wording is confusing; the literal fixtures/assertions define expected behavior."
+        ],
+        [
+          1542,
+          1591,
+          "FixedSizeBinary cases: width2 values[0,1],[2,3],[4,5],[6,7],[8,9] ->[0,1]/[8,9]; width64 all0xFF ->same present64-byte bounds; width71 all0xFF ->expected minimum tagged71 carrying64bytes, but expected absent maximum tagged64. Production constructs BOTH bounds tagged original width71 (rust/lance-file/src/versions/v1/writer/statistics.rs:446-450). Record the literal tag discrepancy without claiming test failure: ScalarValue equality implementation and test execution were not checked. All expected counts0."
+        ],
+        [
+          1592,
+          1602,
+          "Loop through13 binary/string/fixed-binary cases and assert complete collected StatisticsRow equals fixture stats, with input arrays in failure message. This does not append fixed-binary bounds through StatisticsBuilder or serialize/reopen them."
+        ],
+        [
+          1603,
+          1627,
+          "test_collect_dictionary_stats initializes Int32 StringDictionaryBuilder from values[null,abc,def], appends def, null key, abc, and expects count1/boundsabc..def from complete values. Dictionary-value null count happens to equal key-null count in this fixture; that coincidence does not prove decoded-row semantics."
+        ],
+        [
+          1628,
+          1646,
+          "Second dictionary fixture shares values[A,C,G,T] across UInt32 keys[1,0,2,1] and[0,1,3,0], expects count0/A..T. Both full values arrays are scanned; one array never references T and the other never references G. Across combined rows both extrema are referenced, so this assertion does not isolate unused-entry or repeated-null counting."
+        ],
+        [
+          1647,
+          1678,
+          "test_stats_collector builds nullable a:Int32,b:Utf8 schema. Append two rows to a only: count2 bounds1..3 then count0 boundsi32MIN..MAX. finish is asserted is_err because b has zero rows; no error variant/message check. Comment correctly warns finished builders lost prior rows; test constructs a new collector instead of retrying old contents."
+        ],
+        [
+          1679,
+          1732,
+          "Recreated collector appends same two a rows, then b count6 aaa..bbb and count0 typed None/None. Successful finish must have roots named0/1 in ID order, each nonnullable Struct with nonnullable Int64 null_count and nullable correctly typed bounds. Exact schema equality asserted; original names a/b are absent."
+        ],
+        [
+          1733,
+          1769,
+          "Build complete expected two-row batch: root0 null counts[2,0],min[1,i32MIN],max[3,i32MAX]; root1 counts[6,0],min[aaa,null],max[bbb,null]. All structs are valid and both Arrow root/bound types match expected schema. Assert full RecordBatch equality, not just schema or min/max extrema."
+        ],
+        [
+          1770,
+          1818,
+          "Second collector fixture uses Boolean,Binary,LargeBinary,Utf8,LargeUtf8 roots with IDs0..4. Appends one row each,count0; Boolean boundsfalse/true and all four string/binary variants typed None/None. These rows are manually supplied, not derived from input arrays."
+        ],
+        [
+          1819,
+          1866,
+          "Expected five-root schema spells decimal names0..4 with nonnullable Struct/null_count and nullable min/max in Boolean,Binary,LargeBinary,Utf8,LargeUtf8 respectively. The schema declaration verifies type and nullability preservation, not automatic eligibility of other types."
+        ],
+        [
+          1867,
+          1912,
+          "Expected one-row batch starts roots0..2: each count[0]; Boolean min[false]/max[true], Binary and LargeBinary both single null bounds. Uses separate StructArrays and Arc child fields. No root nulls are introduced."
+        ],
+        [
+          1913,
+          1949,
+          "Expected roots3/4 use cloned one-element None string vector in StringArray and LargeStringArray; counts[0]. finish actual collector and assert both schema equality and entire batch equality. End of deterministic collector test; it does not test duplicate IDs, empty eligible schema, parent validity or post-finish retry."
+        ],
+        [
+          1950,
+          1982,
+          "assert_min_max_constant_property converts ScalarValue to scalar array, optionally interleaves one null BEFORE the value, calls collect on the resulting array, and asserts count1/0 and exact original value as both bounds. Comments exclude NaN/null and strings/binary>64; helper does not filter those itself. Returns TestCaseError through prop_assert_eq, unwraps Arrow construction."
+        ],
+        [
+          1983,
+          2012,
+          "test_min_max_constant_property applies helper with/without null to19 supplied values: true,false;1 in each of8integer types; Float32/64 each1,+infinity,-infinity; Utf8 foo; Utf8 a repeated64; Binary zero repeated64. No float signed-zero, long-string, large-offset, decimal or fixed-binary case in this list."
+        ],
+        [
+          2013,
+          2037,
+          "Timestamp proptest chooses timezone index0..3 and timeunit index0..4, maps value42 to each Timestamp unit with None,UTC,America/New_York timezone, and invokes constant helper with/without null. This samples combinations using proptest; no fixed exhaustive enumeration or runtime result is claimed."
+        ],
+        [
+          2038,
+          2068,
+          "assert_min_max_ordering_float<F> builds8candidate native values: negative/positive infinity,positive/negative zero,one,NaN,native min/max. Default TestRunner samples subsequence with size range(0,all_options); converts each sampled subset to nonnull PrimitiveArray and pairs subset with computed row. No arbitrary finite-number generation or explicit null array here."
+        ],
+        [
+          2069,
+          2099,
+          "Float property asserts every non-NaN sampled value >=minimum and <=maximum using ScalarValue::new_primitive; NaNs are explicitly exempt. Empty subset additionally requires negative/positive infinite bounds. Returns runner error via? and otherwiseOk. Null-count correctness is not asserted by this property."
+        ],
+        [
+          2100,
+          2105,
+          "test_min_max_ordering_float invokes the generic helper for Float32Type then Float64Type and unwraps both results. This is one test entry point with two primitive widths."
+        ],
+        [
+          2106,
+          2137,
+          "String proptest uses vec(regex .{0, 100},0..10), creates Utf8 array, requires None bounds if empty, lower bound<=all values, upper bound either null or>=all values, and each present bound byte length<=64. Wrong scalar variant unreachable. Comment says less than64 while assertions allow equality. Generated array has no null entries; generator string and ranges are preserved exactly rather than treating this as an exhaustive Unicode proof."
+        ],
+        [
+          2138,
+          2169,
+          "Binary proptest nests vec(0..u8::MAX,0..100) inside vec(...,0..10). Byte generation is half-open and excludes0xFF; lengths likewise use half-open ranges. Asserts empty typed None bounds, lower<=each value, upper null or>=each, and present byte lengths<=64. Does not assert null_count or generate null entries. Deterministic all0xFF cases provide separate overflow evidence."
+        ],
+        [
+          2170,
+          2207,
+          "Fixed-binary proptest generates byte vectors of exactly100 using0..u8::MAX and outer0..10; empty input uses new_empty_array(FixedSizeBinary100) because the normal constructor cannot infer width. Checks empty typed width100 None bounds, lexical inequalities against width100 original values, and present bound payload<=64bytes while retaining tag100. No builder append/Arrow scalar materialization of those shortened payloads is tested."
+        ],
+        [
+          2208,
+          2249,
+          "test_boolean_statistics_multi_array builds [true,false,true,null,null] and [false,true,false,null,null], asserts individual null counts2 each, then combined count4 and minfalse/maxtrue. Specifically protects summing later-array nulls after both Boolean values have already been found; early continue happens after null accumulation. No per-array bound assertion appears. End of tests and file."
+        ]
+      ]
+    }
+  ]
+}

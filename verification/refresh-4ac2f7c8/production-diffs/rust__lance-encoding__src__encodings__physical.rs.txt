@@ -1,0 +1,66 @@
+@@ -1,14 +1,65 @@
+    1  // SPDX-License-Identifier: Apache-2.0
+    2  // SPDX-FileCopyrightText: Copyright The Lance Authors
+    3  
+    4 +use arrow_buffer::{ArrowNativeType, ScalarBuffer};
+    5 +use lance_core::{Error, Result};
+    6 +
+    7 +use crate::data::FixedWidthDataBlock;
+    8 +
+    9  pub mod binary;
+   10  #[cfg(feature = "bitpacking")]
+   11  pub mod bitpacking;
+   12  pub mod block;
+   13  pub mod byte_stream_split;
+   14  pub mod constant;
+   15 +pub mod delta;
+   16 +pub mod dictionary;
+   17  pub mod fsst;
+   18  pub mod general;
+   19  pub mod packed;
+   20 +pub mod range;
+   21  pub mod rle;
+   22 +pub(crate) mod sequence;
+   23  pub mod value;
+   24 +
+   25 +pub(crate) fn try_vec_with_capacity<T>(num_values: u64, label: &str) -> Result<Vec<T>> {
+   26 +    let capacity = usize::try_from(num_values)
+   27 +        .map_err(|_| Error::invalid_input(format!("{label} cardinality does not fit usize")))?;
+   28 +    let output_bytes = capacity
+   29 +        .checked_mul(std::mem::size_of::<T>())
+   30 +        .ok_or_else(|| Error::invalid_input(format!("{label} byte length overflows usize")))?;
+   31 +    if output_bytes > isize::MAX as usize {
+   32 +        return Err(Error::invalid_input(format!(
+   33 +            "{label} byte length {output_bytes} exceeds isize::MAX"
+   34 +        )));
+   35 +    }
+   36 +    let mut values = Vec::new();
+   37 +    values.try_reserve_exact(capacity).map_err(|error| {
+   38 +        Error::invalid_input(format!(
+   39 +            "{label} could not reserve {capacity} values ({output_bytes} bytes): {error}"
+   40 +        ))
+   41 +    })?;
+   42 +    Ok(values)
+   43 +}
+   44 +
+   45 +pub(crate) fn checked_fixed_values<T: ArrowNativeType>(
+   46 +    data: &FixedWidthDataBlock,
+   47 +    label: &str,
+   48 +) -> Result<ScalarBuffer<T>> {
+   49 +    let expected = usize::try_from(data.num_values)
+   50 +        .ok()
+   51 +        .and_then(|len| len.checked_mul(std::mem::size_of::<T>()))
+   52 +        .ok_or_else(|| Error::invalid_input(format!("{label} byte length overflows usize")))?;
+   53 +    if expected > isize::MAX as usize {
+   54 +        return Err(Error::invalid_input(format!(
+   55 +            "{label} byte length {expected} exceeds isize::MAX"
+   56 +        )));
+   57 +    }
+   58 +    if data.data.len() != expected {
+   59 +        return Err(Error::invalid_input(format!(
+   60 +            "{label} has {} bytes, expected {expected}",
+   61 +            data.data.len()
+   62 +        )));
+   63 +    }
+   64 +    Ok(data.data.borrow_to_typed_slice::<T>())
+   65 +}

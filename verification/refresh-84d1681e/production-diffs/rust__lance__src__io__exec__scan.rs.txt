@@ -1,0 +1,26 @@
+@@ -809,6 +809,25 @@ impl ExecutionPlan for LanceScanExec {
+  809      }
+  810  
+  811      fn partition_statistics(&self, _partition: Option<usize>) -> Result<Arc<Statistics>> {
+  812 +        if self.config.with_make_deletions_null {
+  813 +            // Ranges use visible-row offsets. Trust `physical_rows` only with a writer version.
+  814 +            if self.range.is_some() || self.dataset.manifest().writer_version.is_none() {
+  815 +                return Ok(Arc::new(Statistics {
+  816 +                    num_rows: Precision::Absent,
+  817 +                    ..Statistics::new_unknown(self.schema().as_ref())
+  818 +                }));
+  819 +            }
+  820 +            let num_rows = self
+  821 +                .fragments
+  822 +                .iter()
+  823 +                .map(|fragment| fragment.physical_rows)
+  824 +                .sum::<Option<usize>>()
+  825 +                .map_or(Precision::Absent, Precision::Exact);
+  826 +            return Ok(Arc::new(Statistics {
+  827 +                num_rows,
+  828 +                ..Statistics::new_unknown(self.schema().as_ref())
+  829 +            }));
+  830 +        }
+  831          // Some fragments from older datasets might have the row count stats missing.
+  832          let (row_count, is_exact) =
+  833              self.fragments

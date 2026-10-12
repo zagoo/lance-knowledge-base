@@ -1,0 +1,178 @@
+{
+  "iteration": 45,
+  "files": [
+    {
+      "path": "rust/lance-table/src/system_index/mem_wal.rs",
+      "module": "L1-modules/rust-lance-table.md",
+      "reviewed": true,
+      "role": "Public MemWAL metadata models, protobuf conversion, synchronous details opening and failure-atomic compaction-progress metadata replacement. Complete shard fencing/recovery/store IO is outside this module.",
+      "ranges": [
+        [
+          1,
+          26,
+          "SPDX and module documentation describe configuration, compaction progress and eventually consistent shard snapshots. Comments say writers now update shard manifests rather than rewriting the index per write; complete writer execution is outside this file. Imports HashMap/HashSet, Arc, core errors/deep size, serde, UUID and generated metadata. Public reserved name is exactly __lance_mem_wal. No environment reads, async work, locks or IO are introduced here."
+        ],
+        [
+          27,
+          55,
+          "Public ShardId aliases Uuid; the UUID-v4 comment is not a type-level restriction. Public SsTable derives debug/clone/equality/serde/deep size; generation and path identify immutable flushed MemTable data stored as a Lance dataset by contract. Optional in_memory_bytes estimates payload only, excluding reader per-array overhead. physical_rows counts older duplicate-key rows hidden by deletion vectors. primary_key_bytes is total across physical rows, not per-row, and is absent for no primary key. None means unmeasured, never zero; public construction imposes no consistency/path/count checks."
+        ],
+        [
+          56,
+          80,
+          "SsTable::unmeasured stores supplied generation/path with all three measurements None. Borrowed conversion to pb::SsTable clones path and copies scalars/options without validation, file access or measurement. Some(0) remains distinct from None."
+        ],
+        [
+          81,
+          99,
+          "Owned pb::SsTable conversion moves path and preserves generation/measurement options unchanged. Public CompactedSsTable derives Debug/Clone/equality/PartialOrd/Hash/serde, owning UUID and generation. Derived ordering considers shard_id before generation; it is not a per-shard progress validator. No Ord derive is declared."
+        ],
+        [
+          100,
+          124,
+          "CompactedSsTable deep-size children returns0 for fixed inline UUID/u64; new merely stores values. Borrowed protobuf conversion always writes Some UUID bytes through format converter and exact generation. Neither constructor nor encoder checks UUID variant/version or positive generation."
+        ],
+        [
+          125,
+          140,
+          "Owned CompactedSsTable protobuf decoding requires shard_id Option or InvalidInput Missing shard_id in CompactedSsTable, then propagates Uuid::try_from errors using nested ?. The shared UUID converter requires16 bytes but does not enforce v4 (rust/lance-table/src/format.rs:57-68). All u64 generations including0 accepted."
+        ],
+        [
+          141,
+          165,
+          "Public Default/serde/deep-size IndexCatchupProgress stores index_name and ordered Vec<CompactedSsTable>. new stores unchecked input. caught_up_generation_for_shard linearly finds the first matching shard and copies generation; duplicate entries are not normalized. None on absence is documented as fully caught up, not generation0, and method performs no comparison against current compaction."
+        ],
+        [
+          166,
+          193,
+          "IndexCatchupProgress encoding clones name and maps entries in existing order. Decoding moves name, converts every CompactedSsTable with short-circuit Result collection and preserves order. UUID errors propagate; empty names/lists and duplicate shard IDs are accepted here."
+        ],
+        [
+          194,
+          226,
+          "Public Copy/Default/equality/serde ShardStatus has default Active and Sealed. Docs describe Sealed as reversible durable in-doubt state for drop-table two-phase commit, rejecting writer claims elsewhere. Private to_i32 writes0/1; from_i32 maps exactly1 to Sealed and every other signed value to Active. Unknown values therefore lose their original discriminant when roundtripped. This forward-default policy does not itself enforce fencing or rollback."
+        ],
+        [
+          227,
+          256,
+          "Public ShardManifest owns shard UUID, version, u32 spec ID, HashMap<String,Vec<u8>> computed field values, writer_epoch, two WAL positions, current_generation, ordered SSTables and status. Field bytes are documented LE Arrow scalar representation interpreted by ShardingField.result_type; no encoding/validation performed here. Replay-after is last covered position and recovery starts+1;0 means no flush, last-seen0 means no written entry, positions otherwise1-based by contract. Status-preservation and sole-writer comments describe external protocols, not guarantees of this freely mutable struct."
+        ],
+        [
+          257,
+          274,
+          "ShardManifest::next_version returns self.version+1 with ordinary u64 arithmetic, without checked overflow or mutation. Docs require gap-free CAS allocation because readers stop at the first missing version, but no CAS/IO is implemented. At u64MAX ordinary Rust overflow behavior applies; not a Result error. DeepSizeOf counts only field-map and SSTable-vector children; scalars/status/UUID remain inline."
+        ],
+        [
+          275,
+          298,
+          "Borrowed ShardManifest protobuf conversion emits Some shard UUID; copies counters/spec/positions; turns HashMap fields into cloned repeated entries in unspecified map iteration order; maps SSTables preserving order; and writes status discriminant. Equivalent maps can produce differently ordered protobuf vectors. No version/position monotonicity, field-type, uniqueness or generation checks."
+        ],
+        [
+          299,
+          328,
+          "Owned ShardManifest decoder first requires valid16-byte shard UUID, then collects repeated field entries into HashMap so later duplicate field IDs replace earlier values. Moves SSTable values through infallible converter and maps unknown status to Active. No relation checked between replay-after and last-seen, no SSTable sorting or spec-field interpretation. Only missing/malformed shard UUID yields a local validation error."
+        ],
+        [
+          329,
+          364,
+          "Public ShardingField derives debug/clone/equality/serde/deep size, with field_id String, source_ids Vec<i32>, optional transform/expression strings, result_type String and string parameters. Borrowed protobuf conversion clones all fields; owned reverse moves them. Both transform and expression may be present or absent, source IDs may repeat or be negative, and arbitrary types/parameters pass without parsing. Actual sharding validation/evaluation is elsewhere."
+        ],
+        [
+          365,
+          390,
+          "Public ShardingSpec contains u32 spec_id and ordered Vec<ShardingField> with the same derives. Encoding maps borrowed fields and copies ID; decoding consumes/maps fields. No sorting, duplicate spec/field checks, source existence checks or expression execution. Empty fields accepted."
+        ],
+        [
+          391,
+          410,
+          "Public Default MemWalIndexDetails contains signed snapshot timestamp, u32 shard count, optional opaque inline snapshot bytes, sharding specs, maintained index names, maintain_all_indexes bool, compacted generations, index catchup and writer_config_defaults string map. Derived defaults are0/false/None/empty; docs say persisted writer defaults can be overridden by per-writer nonpersisted config. This struct neither parses config nor materializes snapshot bytes or derives num_shards from their contents."
+        ],
+        [
+          411,
+          430,
+          "Borrowed details conversion copies scalars, clones snapshots/name/config maps, maps specs/progress in Vec order and always emits maintain_all_indexes Some(bool). It does not preserve absence of that protobuf optional flag. Full nested structures are cloned into a new protobuf object; no byte serialization or storage in this conversion."
+        ],
+        [
+          431,
+          460,
+          "Owned details decoder moves snapshots/config/names, maps specs, defaults absent maintain_all_indexes to false, then fallibly decodes compacted entries followed by catchup entries. Error precedence follows those two collections; malformed UUID can fail despite arbitrary other metadata being accepted. No duplicate/index-name/generation/spec/config validation, no snapshot count/timestamp consistency checks. Unknown protobuf fields have already been handled by dependency decoder."
+        ],
+        [
+          461,
+          489,
+          "Public MemWalIndex derives Debug/Clone/equality/deep size and exposes mutable details. new only stores. compacted_generation_for_shard linearly returns first matching compacted marker. index_caught_up_generation first finds exact index name then first shard entry; absent index or shard returns None, documented as fully caught up. It does not inspect maintain_all_indexes or infer catchup from latest generation. Duplicate earlier entries shadow later ones."
+        ],
+        [
+          490,
+          509,
+          "Public load_mem_wal_index_details consumes IndexMetadata but borrows its optional Any. Missing details yields Error::Index; explicit type-url precheck is case-sensitive ends_with MemWalIndexDetails, then Any::to_msg<pb::MemWalIndexDetails> and fallible object conversion run with propagated errors. The suffix precheck is not a complete description of dependency to_msg type validation. No index name/index_version/fields/files/base/UUID checks or IO. A borrowed caller must clone metadata to retain it."
+        ],
+        [
+          510,
+          517,
+          "Public open_mem_wal_index consumes metadata, synchronously loads details, wraps MemWalIndex in a fresh Arc and returns Result. Despite open in its name, this function performs no storage access/cache lookup, and owns no async cancellation lifecycle. Parsing/allocation errors propagate before a returned Arc exists."
+        ],
+        [
+          518,
+          539,
+          "Public update_mem_wal_index_compacted_sstables takes mutable metadata slice, caller dataset_version and owned progress Vec. Docs explain row mutations must publish with matching generation; accepting a stale worker while retaining a newer marker could hide uninserted SSTable rows. Empty proposed Vec returns Ok immediately, before index existence/type checks and without changing any UUID/version. Local code mutates metadata only; complete transaction publication is a caller obligation."
+        ],
+        [
+          540,
+          564,
+          "Before inspecting current metadata, allocate HashSet to proposed count and reject any repeated UUID with InvalidInput, even if generations equal/differ. Then choose first metadata entry with exact reserved name; if absent return InvalidInput explaining compaction progress cannot invent a system index. Duplicate reserved entries are not rejected; first wins. Validation precedence is empty, duplicate proposal, missing current index."
+        ],
+        [
+          565,
+          585,
+          "Clone selected IndexMetadata and fully decode into local mutable details before any slice mutation. For each proposed shard in supplied order, find first matching stored marker: reject generation<=existing with both values and UUID; greater replaces only generation; absent appends proposed entry including generation0. Earlier local changes are discarded if a later proposal fails. Existing duplicate shard markers are not rejected and only first is updated; no shard existence check against specs/snapshots, no num_shards update and no automatic catchup advancement. Expected proposal HashSet work is linear; repeated stored Vec scans can be O(proposals*(existing+proposals))."
+        ],
+        [
+          586,
+          591,
+          "After all validation, build fresh metadata then assign at original index position; ? evaluates before replacement, so Result failure leaves caller slice unchanged. Other indices/order remain intact. Unrelated decoded MemWalIndexDetails fields are carried through, but unknown protobuf bytes and optional maintain_all flag absence are not byte-verbatim preserved. Outer metadata fields are recreated by new_mem_wal_index_meta, not copied from old entry. No files written or rows changed here."
+        ],
+        [
+          592,
+          618,
+          "Public new_mem_wal_index_meta consumes details and returns IndexMetadata with fresh v4 UUID, reserved name, empty indexed/covering fields, caller dataset_version, no fragment bitmap, Some Arc Any encoding of details, index_version0, current UTC creation timestamp, no base_id and no files. UUID is generated before Any serialization; timestamp after it. Failure returns before metadata is installed. Docs explain UUID change invalidates decoded-details cache; contextual dataset open includes metadata UUID in cache-key construction (rust/lance/src/index.rs:3802-3832). The helper performs serialization/allocation/randomness/time reads but no object-store IO."
+        ],
+        [
+          619,
+          642,
+          "Private cfg(test) module imports parent. First test constructs old-style pb::SsTable with all three size fields None and generation7, converts it and asserts generation and every None. No physical older release fixture is read, no path assertion or storage IO. This tests presence semantics via current protobuf construction."
+        ],
+        [
+          643,
+          660,
+          "Second test constructs generation7/path aaa_gen_7 with4096 payload bytes,10 physical rows and80 primary-key bytes. Borrowed encoder must preserve all Some values and owned decoder must equal full original SsTable. Exactly two local unit tests; they were read, not executed. Other methods have contextual tests in lance/src/index/mem_wal.rs, which remains partially analyzed."
+        ]
+      ],
+      "limits": "All660 physical lines read. Two local tests read, not run. Contextual dataset cache and transaction callers plus selected external tests are documented separately; these partial reads do not mark those files analyzed. No source modification, network or source build/test occurred."
+    },
+    {
+      "path": "rust/lance-table/src/system_index.rs",
+      "module": "L1-modules/rust-lance-table.md",
+      "reviewed": true,
+      "role": "Table-owned system-index module facade and name predicate.",
+      "ranges": [
+        [
+          1,
+          13,
+          "Module documentation motivates owning index internals at table level when table semantics interpret fragment remapping or row visibility. Its claim that lance-index has trait adapters/reexports is a source-comment relationship pending inspection of those files."
+        ],
+        [
+          14,
+          20,
+          "Public frag_reuse and mem_wal child modules; imports IndexMetadata and the two child name constants privately. Both complete child implementations are now analyzed. The reserved constants are __lance_frag_reuse and __lance_mem_wal (rust/lance-table/src/system_index/frag_reuse.rs:26-27; rust/lance-table/src/system_index/mem_wal.rs:26-29)."
+        ],
+        [
+          21,
+          24,
+          "is_system_index compares index_meta.name for exact equality against either imported name. It does not inspect index_details, schema, UUID or type payload, and does not validate system-index contents."
+        ]
+      ],
+      "limits": "All24 lines and both system-index child modules are analyzed; downstream index-trait adapters, writer/recovery execution and complete dataset consumers remain pending. No Rust build or test was run."
+    }
+  ]
+}

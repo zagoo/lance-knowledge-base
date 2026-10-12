@@ -1,0 +1,496 @@
+{
+  "iteration": 51,
+  "files": [
+    {
+      "path": "rust/lance-table/src/utils/stream.rs",
+      "module": "L1-modules/rust-lance-table-stream.md",
+      "reviewed": true,
+      "role": "Public task-stream alignment and row-ID/address/version/deletion materialization over already scheduled batch futures. Private state preserves ordered metadata cursor expansion while allowing later batch futures to execute concurrently.",
+      "ranges": [
+        [
+          1,
+          28,
+          "SPDX and imports: fmt, Arc/OnceLock; Arrow arrays/schema/validity; futures boxed/shared/ordered streams; RecordBatchExt; core errors and four system-field constants; RowAddress/DeletionVector; ReadBatchParams; tracing; row-ID sequence/cursor. No local feature gate, filesystem API, runtime creation or unsafe block."
+        ],
+        [
+          29,
+          40,
+          "Public ReadBatchFut is BoxFuture<'static,Result<RecordBatch>>. Public ReadBatchTask exposes task plus declared num_rows:u32; public task/future stream aliases are boxed static streams. Private SharedReadBatchFut changes errors to Arc<Error> so futures::Shared can clone results. Declared row count is a scheduling contract, not validated by the type."
+        ],
+        [
+          41,
+          62,
+          "Private Debug SharedReadError owns Arc<Error>, delegates Display and exposes original Error through source(). Splitting later wraps this adapter in Error::Wrapped, preserving source but changing the outer variant. PendingReadBatch stores optional original/shared future and u32 consumed offset/remaining rows."
+        ],
+        [
+          63,
+          89,
+          "PendingReadBatch::new retains the input future and declared count, with no shared wrapper and offset zero. take debug-asserts requested count <= remaining. An unsplit whole take marks remaining zero and moves the original future directly, preserving its error variant and batch without slicing. Missing original task becomes an asynchronously returned Internal error, not a panic."
+        ],
+        [
+          90,
+          118,
+          "On first partial take, lazily move original task into a boxed Shared future that maps failures to Arc; missing task produces Internal. Clone shared handle per slice, capture offset, advance/subtract u32 counters, and return a future awaiting shared completion then batch.slice(offset,count). Errors become Wrapped SharedReadError. Sibling slices share one execution and Arrow buffers; surviving handles can retain the entire input batch/error. Invalid declared lengths can make batch.slice panic. No task spawn or explicit abort is added."
+        ],
+        [
+          119,
+          160,
+          "Private MergeStream owns input streams, one optional pending chunk per stream and next poll index. emit chooses minimum remaining rows (zero allowed), queues one take from each present chunk into FuturesOrdered, and clears depleted slots. Returned future awaits first result then merges later batches in stream order; first error short-circuits. Empty queued input yields Internal. FuturesOrdered permits concurrent polling with ordered yielding, but this function itself spawns no runtime tasks. RecordBatchExt merge checks equal actual row counts and preserves left schema metadata; matching names may merge nested structures or keep left values rather than duplicate all columns (rust/lance-arrow/src/lib.rs:657-677; rust/lance-arrow/src/lib.rs:1231-1332)."
+        ],
+        [
+          161,
+          193,
+          "MergeStream::poll_next emits when every pending slot is populated. Otherwise it rotates past filled slots and polls the next empty slot; a ready task becomes PendingReadBatch, any exhausted input ends output immediately, and Pending returns without polling subsequent missing streams that time. It does not compare total lengths, drain trailing inputs or add a fused terminal flag. Polling this stream schedules chunks but does not await their batch futures. Construction guarantees nonempty streams before indexing/modulo."
+        ],
+        [
+          194,
+          216,
+          "Public merge_streams consumes Vec<ReadBatchTaskStream>; no inputs returns an empty boxed stream, otherwise initialize equally sized None slots/index zero. Documented alignment handles differing batch boundaries and stops at shortest input without checking others ended. Column-order description applies to disjoint names; delegated merging handles collisions as described above. Caller must ensure streams represent the same physical row ordering, not merely equal counts."
+        ],
+        [
+          217,
+          234,
+          "Private apply_deletions_as_nulls turns mask.values into a validity NullBuffer, ignoring any BooleanArray null bitmap. True means live. All-valid mask returns original batch. Rationale is avoiding filter copies and preserving physical row alignment for column rewrites; performance benefit is a comment, not measured here. Internal deletion predicates supply nonnull booleans."
+        ],
+        [
+          235,
+          264,
+          "For each schema field/column pair, only names _rowid and _rowaddr receive union of existing nulls and deletion mask (validity AND). Rebuild ArrayData with merged null buffer and propagate builder errors; all other columns clone Arc handles unchanged, including payload and version columns. Reconstruct with original schema and explicit row count. If neither named ID/address column exists, null-mode deletes no visible values; no local rejection enforces the upstream contract."
+        ],
+        [
+          265,
+          290,
+          "version_values_for_selection_with_cursor slices params by selected-position batch offset/count and unwraps slice/to_ranges errors. With exactly one run, repeat its version num_rows times without checking run span/count or selected physical offsets against sequence length. The comment O(1) describes run lookup only: vector allocation/fill still scales with num_rows and selection construction can allocate. Otherwise allocate output capacity then extend each selected physical range through reusable version cursor, propagating its Result errors."
+        ],
+        [
+          291,
+          315,
+          "Direct version_values_for_selection performs the same unwrapped selection construction before the single-run shortcut. Multi-run/empty sequences construct a fresh cursor and call the other helper, repeating selection construction; direct calls do not reuse cursor state across batches. Unknown/missing metadata defaults are supplied by caller below, not this helper."
+        ],
+        [
+          316,
+          344,
+          "Public Debug RowIdAndDeletesConfig has public params; four independent with_row_id/addr/last_updated_at_version/created_at_version booleans; optional Arc deletion vector, row-ID sequence, and both version sequences; make_deletions_null; total_num_rows:u32. No Default/builder/validation exists here. The total count comment mentions RangeTo conversion, while actual local use is selected_row_count/read-ahead sizing. Presence of sequences alone does not request their output columns."
+        ],
+        [
+          345,
+          369,
+          "Private has_system_cols ORs all four output switches. Public apply_row_id_and_deletes consumes a batch, selected-position offset, fragment ID and borrowed config, forwarding to the common transformer with empty precomputed columns and no schema cache. It performs synchronous CPU/Arrow work, with no IO or spawned tasks."
+        ],
+        [
+          370,
+          389,
+          "Default private PrecomputedSystemColumns stores optional Result<Arc<UInt64Array>> for IDs and two versions, allowing eager metadata errors to be delivered by batch futures later. ROW_ID_READ_AHEAD_ROWS is 64*1024 (65,536), a target row count rather than a hard global memory cap. PrecomputedRowIdChunk records logical selected offset and Arc values; CachedOutputSchema retains input/output SchemaRef."
+        ],
+        [
+          390,
+          405,
+          "Chunk end_offset uses ordinary offset+length. slice rejects starts before chunk with checked_sub and ranges beyond end, returns the same Arc for exact full coverage or an Arrow slice wrapped in a new Arc otherwise. Addition is unchecked. Slices share backing values and can keep a larger chunk alive after cache replacement."
+        ],
+        [
+          406,
+          449,
+          "decode_row_id_chunk slices params and unwraps conversion to ranges. Exactly one range uses const-selected dense expansion or ordinary range expansion with reusable row-ID cursor; other shapes flatten ordered physical offsets through select_with_cursor, preserving requested order/duplicates. Require decoded length exactly chunk_len or CorruptFile named row ID metadata with selected offset, actual and required counts. Returns Arc values and logical offset. Sequence errors represented by truncation become explicit corruption here; malformed params may panic earlier."
+        ],
+        [
+          450,
+          463,
+          "selected_row_count returns Range.len, sum of Ranges end-start casts, supplied total for RangeFull, end for RangeTo, saturating total-start for RangeFrom, or indices.len. It does not validate ranges against total, reject reversed/overflowed ranges, inspect index values/nulls or ensure u32 fit. This estimate bounds read-ahead, not all direct address-generation behavior."
+        ],
+        [
+          464,
+          488,
+          "Common transformer is debug-instrumented skip_all. Unpack precomputed Results, normalize only Some(NoDeletions) to None, then debug-assert payload columns OR any system column OR a remaining vector. Empty Set/Bitmap are not normalized here. Debug assertions are not a public configuration validation boundary."
+        ],
+        [
+          489,
+          515,
+          "Generate physical addresses when requested, when _rowid is requested without stable sequence, or whenever a non-NoDeletions vector exists. Cast batch.num_rows to u32 unchecked, slice config params at selected offset/count with unwrap, iterate physical u32 ranges and construct RowAddress(fragment_id,row_offset), allocating a Vec/UInt64Array. iter_offset_ranges errors propagate. Context: range endpoints cast to u32 and Indices consumes raw values ignoring validity, with ordinary i+1 arithmetic (rust/lance-io/src/lib.rs:248-260). total_num_rows is not used to validate these physical offsets."
+        ],
+        [
+          516,
+          545,
+          "Requested stable IDs prefer precomputed Result, with only debug length assertion; otherwise flatten selected ranges and call RowIdSequence::select into a new array. Without stable sequence reuse the physical-address Arc. If IDs are not requested, ignore the supplied/precomputed ID data. Direct select does not use wrapper chunk-length corruption check; later batch construction may report length mismatch."
+        ],
+        [
+          546,
+          559,
+          "Build deletion predicate from generated physical addresses using DeletionVector::build_predicate, not stable ID values. row_addrs unwrap relies on has_deletions forcing address generation. System-column vector reserves four entries and appends requested _rowid then _rowaddr, using canonical core fields and prebuilt arrays."
+        ],
+        [
+          560,
+          591,
+          "Last-updated and created version columns independently prefer their precomputed Result, otherwise decode provided sequence through direct helper, otherwise allocate all ones (version 1). Output order is last-updated then created after ID/address. Missing sequence is not an error and does not use current manifest version. Version errors can occur before deletion removes the affected rows."
+        ],
+        [
+          592,
+          628,
+          "No requested system columns returns input batch unchanged before deletion. Cached path initializes one OnceLock with the first completing batch input/output schema, appending four possible field declarations while preserving input metadata. Reuse output Arc for pointer-identical or structurally equal input schemas; unequal schemas get fresh output without replacing the first cache entry. Clone all input column Arcs, append system arrays, and use try_new_with_options with input row count. Cache path lacks the explicit duplicate-name check in incremental append (rust/lance-arrow/src/schema.rs:146-157); Arrow validation is delegated."
+        ],
+        [
+          629,
+          641,
+          "Without schema cache, append each system column with RecordBatchExt::try_with_column, which rejects an existing field of the same name and constructs a new schema/batch per column (rust/lance-arrow/src/lib.rs:643-648; rust/lance-arrow/src/schema.rs:146-157). Finally return unchanged batch if predicate None; otherwise filter every column when make_deletions_null=false or null only ID/address fields when true. Empty filtered batches are returned, not suppressed."
+        ],
+        [
+          642,
+          667,
+          "Public wrap_with_row_id_and_delete changes task stream into future stream because deletion can change actual row count. Create row-ID cursor only when sequence exists and with_row_id=true; cursor_with_dense_range_expansion chooses one const-generic implementation once per wrapper. No downstream buffering/concurrency limit is selected here."
+        ],
+        [
+          668,
+          691,
+          "Private wrapper owns Arc config, Arc OnceLock schema cache, optional one current row-ID chunk, inferred uniform batch size and initially enabled fast paths. Compute selected count once. Create independent reusable version cursors only for requested sequences with more than one run; single-run/default versions are produced in batch futures. Offset begins zero and follows declared task rows."
+        ],
+        [
+          692,
+          719,
+          "On each pulled task, clone config, capture prior offset and advance u32 offset by declared rows before awaiting input. First nonzero count defines uniform size. A differing nonzero size disables fast paths permanently only when its end is strictly before selected_rows; final short task is exempt, and zero tasks do not set/change size. Schema cache is attached only while fast paths enabled. Cursor expansion happens synchronously during ordered stream pull, so later concurrent completion cannot race those mutable cursors."
+        ],
+        [
+          720,
+          745,
+          "For requested stable IDs, zero task yields empty array. Once fast paths disabled and current chunk exhausted/missing, clear it and decode exactly this task count. Otherwise reuse a fitting slice from current chunk even after disabling fast paths, draining existing cached data before exact decoding. Errors are stored in precomputed Result, not emitted as a stream item error at pull time."
+        ],
+        [
+          746,
+          770,
+          "When batch straddles cached end, retain available prefix, compute missing suffix and new decode offset. Uniform path targets max(missing, batch_size*max(65536/batch_size,1)), then limits to selected rows remaining; irregular path decodes missing only. A task larger than 65,536 yields a chunk at least that task size, so constant is not a strict cap. Arithmetic uses checked/saturating operations in some places but ordinary offset additions elsewhere."
+        ],
+        [
+          771,
+          798,
+          "Decode new chunk, require it can slice all missing rows or CorruptFile with actual and missing counts. Straddling prefix+suffix copies into a new task-sized Vec; otherwise return zero-copy suffix slice. Store new chunk for later tasks. Whole old/new/task buffers may coexist, and already emitted futures retain their slices, so one cached chunk does not bound total downstream memory."
+        ],
+        [
+          799,
+          828,
+          "Requested multi-run last-updated and created sequences are expanded separately with mutable cursors while pulling tasks. Map each Result<Vec<u64>> into UInt64Array/Arc and keep failures as optional Results. Work is done even if the eventual input future fails or is never polled; dropping emitted futures discards their precomputed arrays."
+        ],
+        [
+          829,
+          848,
+          "Map each original batch future: input error propagates first via batch?, otherwise run common transformer with captured offset/config/metadata/cache. Thus metadata error can be masked by earlier input failure. Output stream yields boxed futures; it does not await/spawn them or enforce advertised-versus-actual task size. Future completion order may differ while offset/cursor assignment stays input-task order."
+        ],
+        [
+          849,
+          882,
+          "cfg(test) imports Arrow/DataGen/futures/IO wrappers and helpers. batch_task_stream converts Arrow error stream to Lance, unwraps each result to inspect row count, then produces an already-ready boxed task. This fixture helper cannot exercise an input error without panicking during scheduling; it does not simulate delayed IO."
+        ],
+        [
+          883,
+          914,
+          "Basic zip creates x/y streams of ten 100-row batches, merges with buffered(1), collects and compares exact combined batches to a two-column generator. This asserts aligned columns/order for disjoint names; no mismatched totals or errors."
+        ],
+        [
+          915,
+          944,
+          "Concurrent stable-ID/deletion fixture builds IDs 10000..120000 excluding multiples of13, encodes sequence, deletes every997th physical position, and chunks payload into257 rows. Config requests IDs and addresses, fragment7, real filtering and full selection. These are in-memory ready tasks; no file/store read occurs."
+        ],
+        [
+          945,
+          992,
+          "Run wrapper buffered(8), collect output, extract ID/address columns and compare both against enumerated survivors with original physical offsets. Filtering must not renumber surviving addresses. Test checks correctness under buffered futures but imposes no timing or forced out-of-order-completion schedule."
+        ],
+        [
+          993,
+          1041,
+          "Unsorted stable-ID fixture uses IDs100..140 excluding multiples of3, selection indices[8,2,9,1,6], declared task sizes[2,2,1], buffered3 and expected positional lookup in that exact order. No addresses/deletions/version columns requested."
+        ],
+        [
+          1042,
+          1081,
+          "Repeated-index boundary fixture extends row IDs0..5 with10..20, selects physical[4,4,5] across task sizes1,2 and asserts[4,4,10]. This protects duplicate selection across bulk/segment boundaries, not duplicate live IDs in the dataset."
+        ],
+        [
+          1082,
+          1121,
+          "Read-ahead boundary fixture makes IDs10000..120000 excluding multiples11, selects physical range1234..71237 and emits1025-row tasks plus tail, with stable IDs only. Setup deliberately crosses a chunk boundary and includes nonzero selection start."
+        ],
+        [
+          1122,
+          1156,
+          "Buffered8 output must have69 batches and tail303. Pointer equality asserts batch62 shares first chunk storage at offset62*1025, and batch68 shares batch64 storage at offset4*1025. Flattened output equals original selected slice. These assertions prove selected shared slices for fixture, not zero-copy on every irregular boundary."
+        ],
+        [
+          1157,
+          1194,
+          "Zero-task fixture emits counts0 then1, stable sequence[42], buffered2; asserts first batch empty and second IDs[42]. It preserves empty tasks rather than dropping them."
+        ],
+        [
+          1195,
+          1228,
+          "Truncated sequence fixture advertises ten payload rows but only five stable IDs and selected count ten. Wrapper must return CorruptFile and exact diagnostic containing selected offset0, actual5 and required10. This checks wrapper eager decoding, not direct-call fallback."
+        ],
+        [
+          1229,
+          1259,
+          "Unsorted truncated fixture has sequence0..5, declared total6 and indices[0,5,1,2] in four one-row tasks. buffered1 collection must fail with CorruptFile; diagnostic text is not asserted. An out-of-range middle selection must not silently shift following IDs."
+        ],
+        [
+          1260,
+          1303,
+          "Variable-boundary fixture uses3*65536+41 IDs excluding multiples17 and alternates32768/32769 task requests with a short tail. Stable-ID-only full-selection config exercises cache draining and cross-chunk stitching after permanent fast-path disable."
+        ],
+        [
+          1304,
+          1320,
+          "Buffered3 output must use distinct schema Arcs for batches1 and2 after irregular sizes, then flattened IDs must equal full expected list. No allocator count or latency assertion is present."
+        ],
+        [
+          1321,
+          1354,
+          "Schema-sharing fixture creates three distinct-but-equal payload schemas with ten rows each, confirms initial pointers differ, and requests all four system columns with a sparse30-ID sequence and absent version sequences. This exercises structural equality rather than only input Arc identity."
+        ],
+        [
+          1355,
+          1383,
+          "Buffered3 output must order payload,_rowid,_rowaddr,_row_last_updated_at_version,_row_created_at_version, share one schema Arc across consecutive outputs, and have five columns each. It does not assert the default version values or differing-metadata/schema fallback."
+        ],
+        [
+          1384,
+          1423,
+          "Differing-boundary merge fixture splits left rows6+4 and right4+6. buffered3 merged results must have counts4,2,4 with exact aligned x/y values. This exercises splitting both sources and shared futures, but not split-source error fanout or unequal total length."
+        ],
+        [
+          1424,
+          1473,
+          "check_row_id helper crosses payload present/absent with fragment0/10 over ten ten-row batches. It uses no stable sequence, requests row IDs, and compares each output to physical RowAddress(fragment,expected_offset). Expected slices advance by actual output rows; there are no deletions."
+        ],
+        [
+          1474,
+          1492,
+          "test_row_id covers RangeFull, reversed Indices0..100, explicit1000..1100, RangeFrom1000, and RangeTo1000 while reading only100 rows. This demonstrates parameters can address offsets beyond config.total_num_rows when no stable-ID read-ahead uses that count; no Ranges case is present here."
+        ],
+        [
+          1493,
+          1527,
+          "Deletion matrix uses None, Some(NoDeletions), Bitmap0..35 and Set0..35, payload yes/no, ID yes/no, null/filter mode and fragment0/1. It explicitly skips no-work configurations and null mode without row IDs as upstream-invalid rather than expecting local validation. Address-only null mode is not tested."
+        ],
+        [
+          1528,
+          1572,
+          "Each deletion case creates100 physical rows in ten batches, configures physical IDs with no stable/version sequences, wraps buffered1, and removes zero-row outputs in the test itself before collecting. The production wrapper does not perform that empty-batch removal."
+        ],
+        [
+          1573,
+          1620,
+          "Assert null count plus physically removed rows equals expected vector length. Null mode keeps physical address30 under a null slot and five nulls in fourth batch; filter mode first surviving address is35. If IDs disabled require absent _rowid. This does not test existing ID null buffers, explicit empty Set/Bitmap or arbitrary selected ranges with deletion."
+        ],
+        [
+          1621,
+          1675,
+          "Created-version deletion test uses one100-row run version42, bitmap0..35 and physical row IDs. After filtering empty batches, total65 and all retained created versions42 are asserted. No null-deletion/version-column interaction is checked."
+        ],
+        [
+          1676,
+          1715,
+          "Multi-run fixture sets created version1000+position for every one-row run and last-updated versions11 on0..7,22 on7..20,33 on20..21,44 on21..50 and55 on50..100. This stresses fragmented RLE alignment across ten-row batches."
+        ],
+        [
+          1716,
+          1751,
+          "Delete0..20 and60..80, request both version columns and physical IDs, run buffered8 and discard empty outputs, then assert60 surviving rows. The nearby v1/v2/v3 survivor comment is stale relative to the actual five last-updated runs; executable expected values below are authoritative."
+        ],
+        [
+          1752,
+          1791,
+          "Flatten both version columns and compare to physical positions20..60 plus80..100, created1000+position and exact five-way last-updated oracle. Deletion crossing run boundaries must advance both sequences consistently."
+        ],
+        [
+          1792,
+          1829,
+          "Unsorted version fixture has ten one-row runs with version100+position, indices[8,2,9,1,6], tasks2,2,1 and only last-updated requested; no ID/address/deletion. This checks version cursor backwards seeks independently of row-ID cursor."
+        ],
+        [
+          1830,
+          1850,
+          "Buffered3 result is flattened and compared with100+selected position in requested order. The fixture does not force future completion ordering or test malformed version sequence length."
+        ],
+        [
+          1851,
+          1887,
+          "Direct fallback test constructs five one-row version runs10+position, requests indices[4,1,3] in a three-row batch, calls public synchronous apply and asserts[14,11,13]. This covers fresh-cursor direct path, with no stream cache, deletions, default version or single-run bounds check. Test module ends here; no tests were executed."
+        ]
+      ],
+      "limits": "All 1887 physical lines were freshly read and authored. Source contains no unsafe or direct storage IO. Source-derived failure/cost observations are not executed regressions. Exact reader/Arrow helper snippets and two fragment call sites were read as context only; their full files, scheduling/overlay/projection integration and external dependency implementations remain pending. Source tests/benchmarks were read, not run."
+    },
+    {
+      "path": "rust/lance-table/benches/manifest_intern.rs",
+      "module": "L1-modules/rust-lance-table-benchmarks.md",
+      "reviewed": true,
+      "role": "Criterion fixture for protobuf fragment conversion with/without metadata interning and DeepSizeOf estimates; no dataset storage or production reads.",
+      "ranges": [
+        [
+          1,
+          18,
+          "SPDX, allowed stderr-print lint and module docs identify fields/column_indices/inline-version interning. Imports Criterion, core DeepSizeOf, prost encoding, generated pb, Fragment and DataFileFieldInterner. The claimed memory/throughput purpose is a benchmark design, not an observed measurement."
+        ],
+        [
+          19,
+          25,
+          "num_fragments reads BENCH_NUM_FRAGMENTS, defaults to100000 on env read failure, and unwraps u64 parsing for any successfully read string. No positivity/range validation; malformed/negative text panics rather than falling back."
+        ],
+        [
+          26,
+          49,
+          "Uniform fixture builds field IDs and column indices0..num_fields cast to i32. Encode one protobuf RowDatasetVersionSequence with span0..1000/version42 as raw bytes. This payload is reused by cloning into each protobuf message; no file is written."
+        ],
+        [
+          50,
+          79,
+          "Collect n protobuf fragments with sequential u64 IDs, one data/{i}.lance file, copied field/column vectors, file version2.0, size0/baseNone, empty overlays/deletion/row-ID metadata, physical_rows1000, and identical cloned bytes in both creation/update arms. This is synthetic conversion input, not a validated stable-ID dataset or actual post-compaction snapshot."
+        ],
+        [
+          80,
+          96,
+          "Baseline clones each protobuf fragment, Fragment::try_from unwraps and collects Vec. Interned path creates a fresh DataFileFieldInterner per whole conversion then clones/interns every fragment and collects. Both include protobuf cloning and result allocation; timed routine is not raw protobuf byte decoding or end-to-end manifest IO. Interner map lifetime ends on return while shared output Arcs survive."
+        ],
+        [
+          97,
+          124,
+          "Diverse fixture makes same fields/columns, computes group_size=n/unique_versions and encodes one span0..1000 per version0..unique_versions. unique_versions0 divides by zero immediately. Fixed caller values10/100/500 avoid that parameter case. Memory includes all encoded payloads before fragment construction."
+        ],
+        [
+          125,
+          157,
+          "Each fragment chooses version index min(i/group_size,unique_versions-1), then copies the same metadata shape as uniform. Final group absorbs remainder. If0<n<unique_versions, group_size0 makes the first mapping divide by zero; n=0 produces no fragments and does not execute that mapping. No input validation protects small BENCH_NUM_FRAGMENTS values across all diverse cases."
+        ],
+        [
+          158,
+          181,
+          "manifest_intern group benchmarks uniform10/50 fields with protobuf fixtures built outside b.iter. Both no-intern and intern conversion functions are called per measured iteration; outputs are returned to Criterion. No local equality, memory-saving or throughput-normalization assertion is made."
+        ],
+        [
+          182,
+          205,
+          "Same group benchmarks diverse10/100/500 versions with ten fields, again both conversion paths and setup outside iterations, then finish. Group uses Criterion defaults, no local sample/warmup/measurement overrides. BENCH_NUM_FRAGMENTS must be at least500 for all positive-count diverse cases to avoid division by zero."
+        ],
+        [
+          206,
+          238,
+          "manifest_memory constructs both decoded vectors simultaneously outside timing and calls deep_size_of independently, each with its own traversal context. Prints no-intern/intern sizes and difference divided by1048576, labeled MB though units are MiB, and percentage savings. These are DeepSizeOf graph estimates, not process RSS, peak memory or allocator measurements; proto fixture and interner transient allocations are not the output graph. Difference uses ordinary usize subtraction without underflow protection. No actual values were measured in this task."
+        ],
+        [
+          239,
+          254,
+          "Only deep_size_of on the retained interned vector is timed in memory group. No baseline measurement-time comparison or correctness assertion. Both output vectors explicitly drop after each field-count case; group finishes."
+        ],
+        [
+          255,
+          263,
+          "Linux criterion_group registers deserialization and memory with pprof100Hz/flamegraph; non-Linux registers same targets with default Criterion. criterion_main defines benchmark entry. Profiler installation/output success and benchmark execution are unverified."
+        ]
+      ],
+      "limits": "All263lines read. Synthetic metadata conversion and graph estimates only; no source benchmark run, stderr measurements, historical fixture validation or memory/performance claim. Full dependency Criterion/prost/runtime behavior is not inferred."
+    },
+    {
+      "path": "rust/lance-table/benches/system_columns.rs",
+      "module": "L1-modules/rust-lance-table-benchmarks.md",
+      "reviewed": true,
+      "role": "Criterion benchmark for full task-stream row-ID/system-column materialization across sparse ID densities, payload presence and variable task sizes.",
+      "ranges": [
+        [
+          1,
+          17,
+          "SPDX/imports std black_box/Arc/Duration, Arrow batches/explicit row-count options, schema, Criterion BatchSize/IDs, ready futures/streams, read params and public row-ID/stream APIs. No platform-specific profiler or file/store API."
+        ],
+        [
+          18,
+          38,
+          "make_batch creates a nonnullable UInt64 value column of zeros or an empty-schema zero-column batch with explicit requested row count. Constructors unwrap. Payload vector/schema are prepared once per benchmark shape, later cloned/sliced."
+        ],
+        [
+          39,
+          70,
+          "make_tasks lazily emits until offset==total_rows. Variable mode alternates max(batch_size-1,1) then batch_size; fixed mode always batch_size. Clamp each request to remaining rows, advance offset, clone full batch or slice prefix, and emit a ready boxed task with num_rows as u32. Actual task production/cloning occurs when benchmark consumes the lazy stream, not all in setup. No validation: batch_size0 with positive total loops on zero-length tasks in fixed mode; variable mode can attempt a one-row slice of a zero-row batch."
+        ],
+        [
+          71,
+          91,
+          "make_config always requests stable row IDs with supplied Arc sequence and RangeFull. all-system switch additionally requests address and both version columns; versions absent therefore become version1 in stream implementation. No deletion/null mode; total_rows cast unchecked to u32. This does not measure multi-run version expansion."
+        ],
+        [
+          92,
+          106,
+          "BENCH_SYSTEM_ROWS defaults100000usize; BENCH_SYSTEM_BATCH_SIZE defaults1024usize then min(total_rows). Successful malformed values panic via parse.unwrap; missing/non-Unicode env uses defaults. BENCH_SYSTEM_VARIABLE_BATCHES is true only for exact string1 (no trimming). Current-thread Tokio runtime is built without enable_all; ready-future workload needs no real IO/timer. Zero total yields zero tasks; zero batch with positive total is not rejected."
+        ],
+        [
+          107,
+          130,
+          "stream_row_ids uses10 samples,1s warmup,3s measurement. Sparse sequences are built once per hole_stride2/17 by excluding multiples from infinite u64 source until total_rows live IDs, then encoding. Cross payload false/true with IDs-only/all-system for eight shapes. Parameter names include density stride, payload, system mode and variable flag, not total row/batch counts. No resulting encoding type is asserted."
+        ],
+        [
+          131,
+          162,
+          "iter_batched SmallInput setup clones batch/sequence and constructs lazy task stream plus config. Measured routine wraps stream, buffers8, block_on collects every RecordBatch into Vec, unwraps and black_boxes complete outputs. This includes lazy task creation, array/schema work, stream driving and retained output buffers; setup excludes bulk sequence construction. No ID/value/count oracle or throughput Elements normalization. It measures full selected-stream processing per iteration, not single-batch latency."
+        ],
+        [
+          163,
+          172,
+          "Close all shape loops/group; criterion_group and criterion_main register only bench_stream_row_ids on every platform. No benchmark was run and timing settings are requests to Criterion, not observed duration or throughput."
+        ]
+      ],
+      "limits": "All172lines read. Whole in-memory stream benchmark retains all results; no IO, deletes, corrupt-input assertions or measured results. Environment hazards are source deductions. Source benchmark not run."
+    },
+    {
+      "path": "rust/lance-table/benches/version_columns.rs",
+      "module": "L1-modules/rust-lance-table-benchmarks.md",
+      "reviewed": true,
+      "role": "Criterion comparison of direct per-batch and reusable-cursor full-stream version expansion for varying RLE run counts.",
+      "ranges": [
+        [
+          1,
+          21,
+          "SPDX/imports std black_box/Arc/Duration, Arrow batch/UInt64, schema, Criterion, ready futures/streams, read params, U64Segment and row-version/stream APIs. No filesystem or profiler hooks."
+        ],
+        [
+          22,
+          33,
+          "make_version_sequence steps physical positions by run_length cast usize, builds capped Range spans and monotonically increasing version run_index+1, and returns public run vector. Zero step panics, overflow/casts unchecked; caller controls four shapes below. All values are synthetic positional versions."
+        ],
+        [
+          34,
+          45,
+          "make_batch creates one nonnullable UInt64 value column of zeros with size cast usize and unwraps RecordBatch construction. Payload array and schema are shared by later batch clones/slices."
+        ],
+        [
+          46,
+          61,
+          "Config is RangeFull, last-updated only, supplied Arc version sequence, no IDs/addresses/created/deletions and no null mode; total_rows cast to u32. It exercises version materialization independently of row-ID decoding."
+        ],
+        [
+          62,
+          79,
+          "make_tasks uses step_by(batch_size as usize), emits full cloned batches or short final prefix slice, and wraps ready successes with u32 advertised count. Stream is lazy. Zero step panics even if total row range is empty; oversized counts/casts are not validated."
+        ],
+        [
+          80,
+          98,
+          "Direct group reads BENCH_VERSION_ROWS default100000u64 and BENCH_VERSION_BATCH_SIZE default1024u64 then caps to total. Parse unwrap can panic. Build payload outside measurement; configure10 samples,1s warmup,3s measurement. Iterate run lengths[total_rows,1024,32,1], create sequence/config outside timing and label by actual run count. Zero total makes first run_length0 panic; small totals may produce duplicate run-count benchmark IDs, whose Criterion handling is not established here."
+        ],
+        [
+          99,
+          113,
+          "Direct timed iteration clones one fixed-size batch, calls apply_row_id_and_deletes at mutable u32 offset, unwraps/black_boxes output, advances by batch_size and resets when another full batch would exceed total. It skips a nondivisible short tail and does not share version cursor across calls. Zero batch with positive total repeatedly processes zero rows; offset can wrap/panic if values exceed u32 range. No correctness assertions."
+        ],
+        [
+          114,
+          130,
+          "Stream group independently rereads same env defaults/caps, builds payload and current-thread runtime outside timing, then configures10 samples,1s warmup,3s measurement. It uses no real IO and does not share state with direct group."
+        ],
+        [
+          131,
+          157,
+          "For same four run lengths, iter_batched SmallInput setup clones Arc/batch and makes lazy tasks/config. Measured block_on wraps stream, buffers8, collects all output batches including tail, unwraps and black_boxes Vec. It measures a full stream per iteration versus one batch in direct group; without normalization timings are not direct like-for-like latency comparisons. Multi-run cursor state is reused within each stream, reset per iteration. No returned-version oracle or memory bound asserted."
+        ],
+        [
+          158,
+          160,
+          "criterion_group registers direct and stream groups and criterion_main supplies entry; no platform branches. These are source workloads only, not executed performance or correctness results."
+        ]
+      ],
+      "limits": "All160lines read. No source benchmark execution; environment/cast/zero-step and measurement-unit caveats derived from source. Full Criterion handling of duplicate benchmark IDs is not claimed."
+    }
+  ]
+}

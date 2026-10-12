@@ -1,0 +1,1088 @@
+@@ -0,0 +1,1087 @@
+    1 +// SPDX-License-Identifier: Apache-2.0
+    2 +// SPDX-FileCopyrightText: Copyright The Lance Authors
+    3 +
+    4 +//! Choosing and materializing the placeholder ("blank") values that restore deleted
+    5 +//! rows when a fragment's columns are rewritten. See [`super::DeletionRestorer`].
+    6 +
+    7 +use std::{collections::HashMap, sync::Arc};
+    8 +
+    9 +use arrow_array::cast::AsArray;
+   10 +use arrow_array::{
+   11 +    Array, ArrayRef, BinaryArray, BinaryViewArray, FixedSizeListArray, GenericListArray,
+   12 +    LargeBinaryArray, LargeStringArray, MapArray, OffsetSizeTrait, RecordBatch, StringArray,
+   13 +    StringViewArray, StructArray, UInt32Array, new_empty_array, new_null_array,
+   14 +};
+   15 +use arrow_buffer::{NullBuffer, NullBufferBuilder, OffsetBuffer};
+   16 +use arrow_schema::{ArrowError, DataType, Field as ArrowField};
+   17 +use arrow_select::dictionary::garbage_collect_any_dictionary;
+   18 +use arrow_select::interleave::interleave;
+   19 +use lance_arrow::FieldExt;
+   20 +use lance_core::datatypes::Field as LanceField;
+   21 +use lance_core::{Error, Result, datatypes::Schema};
+   22 +use lance_file::version::ConcreteFileVersion;
+   23 +
+   24 +/// Materialize the one-row source that later blank-only batches copy from.
+   25 +///
+   26 +/// [`super::DeletionRestorer::take_pending_blanks_with_plans`] appends this row to the
+   27 +/// blanks and then slices it back off, so the source row itself never reaches the output.
+   28 +/// A blank's value comes from its plan -- a filler, or rebuilt empty offsets -- not from
+   29 +/// the source, for every plan except [`BlankPlan::Take`] and [`BlankPlan::FixedSizeList`],
+   30 +/// which read the source row. So only those two keep the row's bytes.
+   31 +///
+   32 +/// This shrinks every other column, recursively, to an empty one-row stand-in of the same
+   33 +/// type: a top-level or nested [`BlankPlan::Interleave`] column becomes its filler; a
+   34 +/// `List`/`Map` becomes a single empty row (its child dropped); a `Struct` recurses per
+   35 +/// child. Without this a multi-megabyte first live value -- the `data` of an empty-inline
+   36 +/// blob blank, a list's items, a view's buffers -- would be retained behind a single blank
+   37 +/// and deep-copied into every blank-only batch. Rebuilding preserves each column's type, so
+   38 +/// [`blank_plans`] derives the identical plan on the compacted source. Dictionaries behind
+   39 +/// a `Take` are still garbage collected.
+   40 +///
+   41 +/// A column that falls back to `Take` (an unstorable map, a blob layout that cannot take
+   42 +/// the empty-inline descriptor) or plans as `FixedSizeList` keeps the whole row, including
+   43 +/// any variable-width bytes in it. That is bounded to one row and is what every blank
+   44 +/// copied before this optimization.
+   45 +pub(super) fn compact_blank_source(
+   46 +    source: &RecordBatch,
+   47 +    storage_version: ConcreteFileVersion,
+   48 +    write_schema: Option<&Schema>,
+   49 +) -> Result<RecordBatch> {
+   50 +    debug_assert_eq!(source.num_rows(), 1);
+   51 +    let source = arrow_select::take::take_record_batch(source, &UInt32Array::from(vec![0]))?;
+   52 +    let plans = blank_plans(&source, storage_version, write_schema)?;
+   53 +    let columns = source
+   54 +        .columns()
+   55 +        .iter()
+   56 +        .zip(&plans)
+   57 +        .map(|(array, plan)| compact_for_plan(array, plan))
+   58 +        .collect::<Result<Vec<_>>>()?;
+   59 +    Ok(RecordBatch::try_new(source.schema(), columns)?)
+   60 +}
+   61 +
+   62 +/// Shrink one column of the blank source to the minimum its plan reads back.
+   63 +///
+   64 +/// Mirrors [`apply_blank_plan`]: only `Take` and `FixedSizeList` copy the source row's
+   65 +/// payload, so everything else is replaced with an empty one-row value of the same type.
+   66 +/// See [`compact_blank_source`].
+   67 +fn compact_for_plan(array: &ArrayRef, plan: &BlankPlan) -> Result<ArrayRef> {
+   68 +    match plan {
+   69 +        // The blank is the filler and the appended source row is sliced off, so the
+   70 +        // column's row is never read. Keep only the one-row filler.
+   71 +        BlankPlan::Interleave(filler) => Ok(filler.clone()),
+   72 +        // The blank rebuilds offsets to an empty (or null) list/map and the source row is
+   73 +        // sliced off, so the child values are never read. Drop them.
+   74 +        BlankPlan::List { .. } => empty_one_row_list(array),
+   75 +        BlankPlan::Map { .. } => empty_one_row_map(array),
+   76 +        // Children are planned independently: recurse so a variable-width child that plans
+   77 +        // as a filler is dropped, while a `Take` child keeps its payload. Preserve the
+   78 +        // struct's own validity, which `apply_blank_plan` mirrors into the blank rows.
+   79 +        BlankPlan::Struct(child_plans) => {
+   80 +            let struct_array = array.as_struct();
+   81 +            let children = struct_array
+   82 +                .columns()
+   83 +                .iter()
+   84 +                .zip(child_plans)
+   85 +                .map(|(child, child_plan)| compact_for_plan(child, child_plan))
+   86 +                .collect::<Result<Vec<_>>>()?;
+   87 +            Ok(Arc::new(StructArray::try_new_with_length(
+   88 +                struct_array.fields().clone(),
+   89 +                children,
+   90 +                struct_array.nulls().cloned(),
+   91 +                struct_array.len(),
+   92 +            )?))
+   93 +        }
+   94 +        // `FixedSizeList` indexes its child by `input_row * size` and `Take` copies the row
+   95 +        // outright, so both need the source payload; still GC dictionaries behind them.
+   96 +        BlankPlan::FixedSizeList { .. } | BlankPlan::Take => {
+   97 +            compact_nested_dictionaries(array.clone())
+   98 +        }
+   99 +    }
+  100 +}
+  101 +
+  102 +/// Rebuild a list column as a single empty (offsets `[0, 0]`) row, preserving row zero's
+  103 +/// validity and dropping the child values the blank never reads.
+  104 +///
+  105 +/// The child is a freshly allocated empty array, not `values().slice(0, 0)`: a zero-length
+  106 +/// slice still holds the source child's buffers, and the writer would copy them again into
+  107 +/// every deferred blank-only batch.
+  108 +fn empty_one_row_list(array: &ArrayRef) -> Result<ArrayRef> {
+  109 +    match array.data_type() {
+  110 +        DataType::List(field) => {
+  111 +            let list = array.as_list::<i32>();
+  112 +            Ok(Arc::new(GenericListArray::<i32>::try_new(
+  113 +                field.clone(),
+  114 +                OffsetBuffer::<i32>::from_lengths([0]),
+  115 +                new_empty_array(field.data_type()),
+  116 +                list.nulls().cloned(),
+  117 +            )?))
+  118 +        }
+  119 +        DataType::LargeList(field) => {
+  120 +            let list = array.as_list::<i64>();
+  121 +            Ok(Arc::new(GenericListArray::<i64>::try_new(
+  122 +                field.clone(),
+  123 +                OffsetBuffer::<i64>::from_lengths([0]),
+  124 +                new_empty_array(field.data_type()),
+  125 +                list.nulls().cloned(),
+  126 +            )?))
+  127 +        }
+  128 +        other => Err(Error::internal(format!(
+  129 +            "Fragment Updater: list blank source on non-list column {other}"
+  130 +        ))),
+  131 +    }
+  132 +}
+  133 +
+  134 +/// Rebuild a map column as a single empty (offsets `[0, 0]`) row, preserving row zero's
+  135 +/// validity and dropping the entries the blank never reads. Only reached for a map whose
+  136 +/// entries field is non-nullable and null-free, since [`blank_plan`] routes any other map
+  137 +/// to `Take`; that is exactly what `MapArray::try_new` requires. The entries are freshly
+  138 +/// allocated for the same reason as in [`empty_one_row_list`].
+  139 +fn empty_one_row_map(array: &ArrayRef) -> Result<ArrayRef> {
+  140 +    match array.data_type() {
+  141 +        DataType::Map(entries_field, ordered) => {
+  142 +            let map = array.as_map();
+  143 +            let entries = new_empty_array(entries_field.data_type());
+  144 +            Ok(Arc::new(MapArray::try_new(
+  145 +                entries_field.clone(),
+  146 +                OffsetBuffer::<i32>::from_lengths([0]),
+  147 +                entries.as_struct().clone(),
+  148 +                map.nulls().cloned(),
+  149 +                *ordered,
+  150 +            )?))
+  151 +        }
+  152 +        other => Err(Error::internal(format!(
+  153 +            "Fragment Updater: map blank source on non-map column {other}"
+  154 +        ))),
+  155 +    }
+  156 +}
+  157 +
+  158 +/// Rebuild `array` with every dictionary it contains narrowed to the values its keys
+  159 +/// actually reference.
+  160 +///
+  161 +/// The container arms exist only to reach nested dictionaries; they rebuild the
+  162 +/// wrapper unchanged otherwise. Note that [`arrow_array::AnyDictionaryArray::with_values`] drops
+  163 +/// the `is_ordered` flag, which is immaterial for a blank source.
+  164 +fn compact_nested_dictionaries(array: ArrayRef) -> Result<ArrayRef> {
+  165 +    match array.data_type() {
+  166 +        DataType::Dictionary(_, _) => {
+  167 +            let dictionary = garbage_collect_any_dictionary(array.as_any_dictionary())?;
+  168 +            let values =
+  169 +                compact_nested_dictionaries(dictionary.as_any_dictionary().values().clone())?;
+  170 +            Ok(dictionary.as_any_dictionary().with_values(values))
+  171 +        }
+  172 +        DataType::Struct(_) => {
+  173 +            let array = array.as_struct();
+  174 +            let columns = array
+  175 +                .columns()
+  176 +                .iter()
+  177 +                .cloned()
+  178 +                .map(compact_nested_dictionaries)
+  179 +                .collect::<Result<Vec<_>>>()?;
+  180 +            // Supply the length: `try_new` cannot infer it for a struct with no fields.
+  181 +            Ok(Arc::new(StructArray::try_new_with_length(
+  182 +                array.fields().clone(),
+  183 +                columns,
+  184 +                array.nulls().cloned(),
+  185 +                array.len(),
+  186 +            )?))
+  187 +        }
+  188 +        DataType::List(field) => {
+  189 +            let array = array.as_list::<i32>();
+  190 +            let values = compact_nested_dictionaries(array.values().clone())?;
+  191 +            Ok(Arc::new(GenericListArray::<i32>::try_new(
+  192 +                field.clone(),
+  193 +                array.offsets().clone(),
+  194 +                values,
+  195 +                array.nulls().cloned(),
+  196 +            )?))
+  197 +        }
+  198 +        DataType::LargeList(field) => {
+  199 +            let array = array.as_list::<i64>();
+  200 +            let values = compact_nested_dictionaries(array.values().clone())?;
+  201 +            Ok(Arc::new(GenericListArray::<i64>::try_new(
+  202 +                field.clone(),
+  203 +                array.offsets().clone(),
+  204 +                values,
+  205 +                array.nulls().cloned(),
+  206 +            )?))
+  207 +        }
+  208 +        DataType::FixedSizeList(field, size) => {
+  209 +            let array = array.as_fixed_size_list();
+  210 +            let values = compact_nested_dictionaries(array.values().clone())?;
+  211 +            Ok(Arc::new(FixedSizeListArray::try_new_with_length(
+  212 +                field.clone(),
+  213 +                *size,
+  214 +                values,
+  215 +                array.nulls().cloned(),
+  216 +                array.len(),
+  217 +            )?))
+  218 +        }
+  219 +        DataType::Map(entries, ordered) => {
+  220 +            let entries = entries.clone();
+  221 +            let ordered = *ordered;
+  222 +            // `MapArray::try_new` rejects both a nullable entries field and an entries
+  223 +            // struct that carries a null (arrow 58: `field.is_nullable() || entries
+  224 +            // .null_count() != 0`), either of which the Arrow spec forbids but Lance
+  225 +            // tolerates. Leave such a map untouched rather than error: `blank_plan` routes
+  226 +            // it to `Take`, and skipping dictionary GC on a one-row source is immaterial.
+  227 +            let entries_unstorable = entries.is_nullable()
+  228 +                || array
+  229 +                    .as_map_opt()
+  230 +                    .map(|map| map.entries().null_count() != 0)
+  231 +                    .unwrap_or(true);
+  232 +            if entries_unstorable {
+  233 +                return Ok(array);
+  234 +            }
+  235 +            let map = array.as_map();
+  236 +            let compacted_entries = compact_nested_dictionaries(Arc::new(map.entries().clone()))?;
+  237 +            Ok(Arc::new(MapArray::try_new(
+  238 +                entries,
+  239 +                map.offsets().clone(),
+  240 +                compacted_entries.as_struct().clone(),
+  241 +                map.nulls().cloned(),
+  242 +                ordered,
+  243 +            )?))
+  244 +        }
+  245 +        _ => Ok(array),
+  246 +    }
+  247 +}
+  248 +
+  249 +/// Add blank rows where there are deleted rows
+  250 +///
+  251 +/// `batch_offsets` must be strictly increasing, and no offset may require more
+  252 +/// live rows before it than the batch has left: an offset is the position a blank
+  253 +/// takes in the output, so either kind of violation asks for an impossible number
+  254 +/// of live rows in between.
+  255 +///
+  256 +/// A blank holds the cheapest value its column can represent, chosen per column by
+  257 +/// [`blank_plan`]: a null where the column is nullable, an empty value for the
+  258 +/// variable-width types whose byte cost depends on the value, and a copy of the batch's
+  259 +/// first row for the fixed-width ones where every value costs the same (so the batch
+  260 +/// must have at least one row). Legacy (v1) files opt out entirely and copy row zero.
+  261 +///
+  262 +/// Every live row in `batch` appears exactly once and in its original order. Live
+  263 +/// rows not consumed before the last blank offset are appended to the output. In
+  264 +/// particular, offsets `0..n` produce `n` blanks followed by the complete input;
+  265 +/// [`super::DeletionRestorer::take_pending_blanks_with_plans`] relies on this when it
+  266 +/// removes that trailing source row.
+  267 +///
+  268 +/// [`super::DeletionRestorer::restore`] defers blanks from an empty batch until a live
+  269 +/// row is available as a source. Only legacy files, which cannot defer without changing
+  270 +/// their row-group layout, can still reach the error below.
+  271 +pub(super) fn add_blanks(
+  272 +    batch: RecordBatch,
+  273 +    batch_offsets: &[u32],
+  274 +    storage_version: ConcreteFileVersion,
+  275 +    write_schema: Option<&Schema>,
+  276 +) -> Result<RecordBatch> {
+  277 +    // Fast early return
+  278 +    if batch_offsets.is_empty() {
+  279 +        return Ok(batch);
+  280 +    }
+  281 +
+  282 +    if batch.num_rows() == 0 {
+  283 +        return Err(Error::not_supported(
+  284 +            "Fragment Updater: missing too many rows in merge, run compaction to materialize \
+  285 +             deletions first",
+  286 +        ));
+  287 +    }
+  288 +
+  289 +    let plans = blank_plans(&batch, storage_version, write_schema)?;
+  290 +    add_blanks_with_plans(batch, batch_offsets, &plans)
+  291 +}
+  292 +
+  293 +pub(super) fn blank_plans(
+  294 +    batch: &RecordBatch,
+  295 +    storage_version: ConcreteFileVersion,
+  296 +    write_schema: Option<&Schema>,
+  297 +) -> Result<Vec<BlankPlan>> {
+  298 +    // Exhaustive on purpose. `matches!` would let a future format variant fall through
+  299 +    // to the `!cheap_blanks` path below and silently return to copying row zero, which
+  300 +    // reintroduces the offset overflow this fixes on the newest format. A `match` forces
+  301 +    // a deliberate choice for every version, the same way `validate_nulls` and
+  302 +    // `check_field_conflict` do.
+  303 +    let cheap_blanks = match storage_version {
+  304 +        // Legacy (v1) is largely deprecated and its writer supports physical nulls for a
+  305 +        // narrower set of types, so it keeps the original behavior of copying row zero
+  306 +        // into every blank.
+  307 +        ConcreteFileVersion::V1 => false,
+  308 +        // Everything below the planner assumes the format can store a null for any type
+  309 +        // it will actually null: v2.0 only forbids struct-level nulls, and the planner
+  310 +        // never nulls a struct (it mirrors row zero's validity), so v2.0+ is uniform.
+  311 +        ConcreteFileVersion::V2_0
+  312 +        | ConcreteFileVersion::V2_1
+  313 +        | ConcreteFileVersion::V2_2
+  314 +        | ConcreteFileVersion::V2_3 => true,
+  315 +    };
+  316 +    if !cheap_blanks {
+  317 +        return Ok((0..batch.num_columns()).map(|_| BlankPlan::Take).collect());
+  318 +    }
+  319 +
+  320 +    // Index the write schema's top-level fields by name instead of calling
+  321 +    // `Schema::field`, which parses its argument as a dotted field path. A field name
+  322 +    // is not a path: a backtick is legal in one but is the path syntax's quote
+  323 +    // character, so `Schema::field` would either fail to parse the name or resolve it
+  324 +    // to a different field.
+  325 +    let write_fields = write_schema.map(|schema| {
+  326 +        schema
+  327 +            .fields
+  328 +            .iter()
+  329 +            .map(|field| (field.name.as_str(), field))
+  330 +            .collect::<HashMap<_, _>>()
+  331 +    });
+  332 +    batch
+  333 +        .schema()
+  334 +        .fields()
+  335 +        .iter()
+  336 +        .zip(batch.columns())
+  337 +        .map(|(field, array)| {
+  338 +            let write_field = match &write_fields {
+  339 +                Some(fields) => Some(*fields.get(field.name().as_str()).ok_or_else(|| {
+  340 +                    Error::internal(format!(
+  341 +                        "Fragment Updater: field {} is missing from the write schema",
+  342 +                        field.name()
+  343 +                    ))
+  344 +                })?),
+  345 +                None => None,
+  346 +            };
+  347 +            blank_plan(field, write_field, array)
+  348 +        })
+  349 +        .collect()
+  350 +}
+  351 +
+  352 +/// Apply precomputed blank plans to a batch.
+  353 +///
+  354 +/// `plans` must have been produced by [`blank_plans`] for `batch`; plan variants
+  355 +/// and their nested fillers are coupled to the batch's column order and types.
+  356 +pub(super) fn add_blanks_with_plans(
+  357 +    batch: RecordBatch,
+  358 +    batch_offsets: &[u32],
+  359 +    plans: &[BlankPlan],
+  360 +) -> Result<RecordBatch> {
+  361 +    debug_assert!(!batch_offsets.is_empty());
+  362 +    debug_assert_eq!(batch.num_columns(), plans.len());
+  363 +    // A blank can need a live row to copy, and the Arrow kernels below run unchecked,
+  364 +    // so refuse an empty batch here rather than in debug only. `add_blanks` reports the
+  365 +    // same condition with the wording callers already match on.
+  366 +    if batch.num_rows() == 0 {
+  367 +        return Err(Error::internal(
+  368 +            "Fragment Updater: cannot place blanks in a batch with no live rows",
+  369 +        ));
+  370 +    }
+  371 +
+  372 +    let needs_take = plans.iter().any(BlankPlan::needs_take);
+  373 +    let needs_interleave = plans.iter().any(BlankPlan::needs_interleave);
+  374 +    let output_len = batch
+  375 +        .num_rows()
+  376 +        .checked_add(batch_offsets.len())
+  377 +        .ok_or_else(|| Error::internal("Fragment Updater: blank output row count overflow"))?;
+  378 +    let mut take_indices = needs_take.then(|| Vec::with_capacity(output_len));
+  379 +    // Indices for `interleave`: `(0, pos)` picks live row `pos` out of the column
+  380 +    // itself, `(1, 0)` picks the column's one-row blank filler.
+  381 +    let mut interleave_indices = needs_interleave.then(|| Vec::with_capacity(output_len));
+  382 +
+  383 +    let num_live_rows = u32::try_from(batch.num_rows()).map_err(|_| {
+  384 +        Error::internal(format!(
+  385 +            "Fragment Updater: blank source has {} rows, exceeding the u32 row-address limit",
+  386 +            batch.num_rows()
+  387 +        ))
+  388 +    })?;
+  389 +    let mut batch_pos = 0;
+  390 +    let mut next_id = 0;
+  391 +    for (idx, batch_offset) in batch_offsets.iter().enumerate() {
+  392 +        // A non-increasing offset panics in debug and wraps in release; reject it
+  393 +        // up front so the error names the real problem.
+  394 +        let num_rows = batch_offset.checked_sub(next_id).ok_or_else(|| {
+  395 +            Error::internal(format!(
+  396 +                "Fragment Updater: blank offsets must be strictly increasing, but offset \
+  397 +                 {batch_offset} (entry {idx} of {}) is below the expected minimum {next_id}",
+  398 +                batch_offsets.len()
+  399 +            ))
+  400 +        })?;
+  401 +        // An offset needing more live rows than remain would index past the batch.
+  402 +        // The Arrow kernels run unchecked below, so catch this here rather than
+  403 +        // letting them panic or, worse, read the wrong rows.
+  404 +        if num_rows > num_live_rows - batch_pos {
+  405 +            return Err(Error::internal(format!(
+  406 +                "Fragment Updater: blank offset {batch_offset} (entry {idx} of \
+  407 +                 {}) needs {num_rows} more live rows before it, but {} of the batch's \
+  408 +                 {num_live_rows} are still unused",
+  409 +                batch_offsets.len(),
+  410 +                num_live_rows - batch_pos
+  411 +            )));
+  412 +        }
+  413 +        if let Some(indices) = take_indices.as_mut() {
+  414 +            indices.extend(batch_pos..batch_pos + num_rows);
+  415 +            indices.push(0);
+  416 +        }
+  417 +        if let Some(indices) = interleave_indices.as_mut() {
+  418 +            indices.extend((batch_pos..batch_pos + num_rows).map(|pos| (0, pos as usize)));
+  419 +            indices.push((1, 0));
+  420 +        }
+  421 +        next_id = batch_offset.checked_add(1).ok_or_else(|| {
+  422 +            Error::internal(format!(
+  423 +                "Fragment Updater: blank offset {batch_offset} cannot be followed by another row"
+  424 +            ))
+  425 +        })?;
+  426 +        batch_pos = batch_pos.checked_add(num_rows).ok_or_else(|| {
+  427 +            Error::internal("Fragment Updater: live-row selection position overflow")
+  428 +        })?;
+  429 +    }
+  430 +    if let Some(indices) = take_indices.as_mut() {
+  431 +        indices.extend(batch_pos..num_live_rows);
+  432 +    }
+  433 +    if let Some(indices) = interleave_indices.as_mut() {
+  434 +        indices.extend((batch_pos..num_live_rows).map(|pos| (0, pos as usize)));
+  435 +    }
+  436 +    let take_indices = take_indices.map(UInt32Array::from);
+  437 +
+  438 +    let arrays = batch
+  439 +        .columns()
+  440 +        .iter()
+  441 +        .zip(plans)
+  442 +        .map(|(array, plan)| {
+  443 +            apply_blank_plan(
+  444 +                array,
+  445 +                plan,
+  446 +                take_indices.as_ref(),
+  447 +                interleave_indices.as_deref(),
+  448 +            )
+  449 +            .map_err(|error| Error::arrow(format!("Failed to add blanks: {error}")))
+  450 +        })
+  451 +        .collect::<Result<Vec<_>>>()?;
+  452 +
+  453 +    let batch = RecordBatch::try_new(batch.schema(), arrays)?;
+  454 +
+  455 +    Ok(batch)
+  456 +}
+  457 +
+  458 +pub(super) enum BlankPlan {
+  459 +    /// Copy row zero for each blank. This is the cheapest option when every value
+  460 +    /// has the same physical cost, and it preserves dictionary values buffers.
+  461 +    Take,
+  462 +    /// Interleave a one-row empty or null filler with the live rows.
+  463 +    Interleave(ArrayRef),
+  464 +    /// Rebuild list offsets while preserving the child array unchanged.
+  465 +    List { blank_is_null: bool },
+  466 +    /// Rebuild map offsets while preserving the entries array unchanged.
+  467 +    Map { blank_is_null: bool },
+  468 +    /// Expand each selected parent row into child selections and apply the child plan.
+  469 +    FixedSizeList {
+  470 +        child: Box<Self>,
+  471 +        blank_is_null: bool,
+  472 +    },
+  473 +    /// Apply the two strategies independently to the children and rebuild validity.
+  474 +    Struct(Vec<Self>),
+  475 +}
+  476 +
+  477 +impl BlankPlan {
+  478 +    fn needs_take(&self) -> bool {
+  479 +        match self {
+  480 +            Self::Take => true,
+  481 +            Self::Interleave(_) | Self::List { .. } | Self::Map { .. } => false,
+  482 +            // Struct and FixedSizeList validity follows the same source rows as
+  483 +            // their `Take` children, so both require the take selection.
+  484 +            Self::FixedSizeList { .. } | Self::Struct(_) => true,
+  485 +        }
+  486 +    }
+  487 +
+  488 +    fn needs_interleave(&self) -> bool {
+  489 +        match self {
+  490 +            Self::Take => false,
+  491 +            Self::Interleave(_)
+  492 +            | Self::List { .. }
+  493 +            | Self::Map { .. }
+  494 +            | Self::FixedSizeList { .. }
+  495 +            | Self::Struct(_) => true,
+  496 +        }
+  497 +    }
+  498 +}
+  499 +
+  500 +fn interleaved_nulls(
+  501 +    array: &dyn Array,
+  502 +    blank_is_null: bool,
+  503 +    indices: &[(usize, usize)],
+  504 +) -> std::result::Result<Option<NullBuffer>, ArrowError> {
+  505 +    let mut nulls = NullBufferBuilder::new(indices.len());
+  506 +    for (source, row) in indices {
+  507 +        let is_valid = match source {
+  508 +            0 => array.is_valid(*row),
+  509 +            1 => !blank_is_null,
+  510 +            _ => {
+  511 +                return Err(ArrowError::InvalidArgumentError(format!(
+  512 +                    "blank plan has invalid source {source}"
+  513 +                )));
+  514 +            }
+  515 +        };
+  516 +        nulls.append(is_valid);
+  517 +    }
+  518 +    Ok(nulls.finish())
+  519 +}
+  520 +
+  521 +/// Build the output offsets for a list-like column whose blanks are empty.
+  522 +///
+  523 +/// Reusing absolute input offsets is valid because `add_blanks` keeps every live row
+  524 +/// exactly once and in identity order, inserting only zero-length blanks. `kind` names
+  525 +/// the layout in error messages.
+  526 +fn blank_offsets<O: OffsetSizeTrait>(
+  527 +    kind: &str,
+  528 +    value_offsets: &[O],
+  529 +    num_live_rows: usize,
+  530 +    indices: &[(usize, usize)],
+  531 +) -> std::result::Result<OffsetBuffer<O>, ArrowError> {
+  532 +    let first = *value_offsets.first().ok_or_else(|| {
+  533 +        ArrowError::ComputeError(format!("{kind} blank plan has no initial offset"))
+  534 +    })?;
+  535 +    let mut offsets = Vec::with_capacity(indices.len() + 1);
+  536 +    offsets.push(first);
+  537 +    let mut next_live_row = 0;
+  538 +    for (source, row) in indices {
+  539 +        let last = *offsets.last().ok_or_else(|| {
+  540 +            ArrowError::ComputeError(format!("{kind} blank plan has no preceding offset"))
+  541 +        })?;
+  542 +        let next = match source {
+  543 +            0 if *row == next_live_row && next_live_row < num_live_rows => {
+  544 +                next_live_row += 1;
+  545 +                value_offsets[row + 1]
+  546 +            }
+  547 +            0 => {
+  548 +                return Err(ArrowError::InvalidArgumentError(format!(
+  549 +                    "{kind} blank plan requires live row {next_live_row}, got {row}"
+  550 +                )));
+  551 +            }
+  552 +            // A blank is an empty value, so it does not advance the child offset.
+  553 +            1 if *row == 0 => last,
+  554 +            1 => {
+  555 +                return Err(ArrowError::InvalidArgumentError(format!(
+  556 +                    "{kind} blank plan requires filler row 0, got {row}"
+  557 +                )));
+  558 +            }
+  559 +            source => {
+  560 +                return Err(ArrowError::InvalidArgumentError(format!(
+  561 +                    "{kind} blank plan has invalid source {source}"
+  562 +                )));
+  563 +            }
+  564 +        };
+  565 +        // Monotonicity holds for any well-formed input, but check it rather than let
+  566 +        // `OffsetBuffer::new` assert: a panic here would take down the writer.
+  567 +        if next < last {
+  568 +            return Err(ArrowError::ComputeError(format!(
+  569 +                "{kind} blank plan produced a non-monotonic offset: {next:?} after {last:?}"
+  570 +            )));
+  571 +        }
+  572 +        offsets.push(next);
+  573 +    }
+  574 +    if next_live_row != num_live_rows {
+  575 +        return Err(ArrowError::InvalidArgumentError(format!(
+  576 +            "{kind} blank plan selected {next_live_row} of {num_live_rows} live rows"
+  577 +        )));
+  578 +    }
+  579 +    Ok(OffsetBuffer::new(offsets.into()))
+  580 +}
+  581 +
+  582 +fn apply_list_blank_plan<O: OffsetSizeTrait>(
+  583 +    array: &GenericListArray<O>,
+  584 +    blank_is_null: bool,
+  585 +    indices: &[(usize, usize)],
+  586 +) -> std::result::Result<ArrayRef, ArrowError> {
+  587 +    let field = match array.data_type() {
+  588 +        DataType::List(field) | DataType::LargeList(field) => field.clone(),
+  589 +        data_type => {
+  590 +            return Err(ArrowError::InvalidArgumentError(format!(
+  591 +                "list blank plan requires a list array, got {data_type}"
+  592 +            )));
+  593 +        }
+  594 +    };
+  595 +    Ok(Arc::new(GenericListArray::<O>::try_new(
+  596 +        field,
+  597 +        blank_offsets("list", array.value_offsets(), array.len(), indices)?,
+  598 +        array.values().clone(),
+  599 +        interleaved_nulls(array, blank_is_null, indices)?,
+  600 +    )?))
+  601 +}
+  602 +
+  603 +fn apply_map_blank_plan(
+  604 +    array: &MapArray,
+  605 +    blank_is_null: bool,
+  606 +    indices: &[(usize, usize)],
+  607 +) -> std::result::Result<ArrayRef, ArrowError> {
+  608 +    let (entries, ordered) = match array.data_type() {
+  609 +        DataType::Map(entries, ordered) => (entries.clone(), *ordered),
+  610 +        data_type => {
+  611 +            return Err(ArrowError::InvalidArgumentError(format!(
+  612 +                "map blank plan requires a map array, got {data_type}"
+  613 +            )));
+  614 +        }
+  615 +    };
+  616 +    Ok(Arc::new(MapArray::try_new(
+  617 +        entries,
+  618 +        blank_offsets("map", array.value_offsets(), array.len(), indices)?,
+  619 +        array.entries().clone(),
+  620 +        interleaved_nulls(array, blank_is_null, indices)?,
+  621 +        ordered,
+  622 +    )?))
+  623 +}
+  624 +
+  625 +fn apply_fixed_size_list_blank_plan(
+  626 +    array: &FixedSizeListArray,
+  627 +    child_plan: &BlankPlan,
+  628 +    blank_is_null: bool,
+  629 +    take_indices: &UInt32Array,
+  630 +    interleave_indices: &[(usize, usize)],
+  631 +) -> std::result::Result<ArrayRef, ArrowError> {
+  632 +    let (field, list_size) = match array.data_type() {
+  633 +        DataType::FixedSizeList(field, size) => (field.clone(), *size),
+  634 +        data_type => {
+  635 +            return Err(ArrowError::InvalidArgumentError(format!(
+  636 +                "fixed-size-list blank plan requires a FixedSizeList array, got {data_type}"
+  637 +            )));
+  638 +        }
+  639 +    };
+  640 +    let size = usize::try_from(list_size).map_err(|_| {
+  641 +        ArrowError::InvalidArgumentError(format!("FixedSizeList has a negative size {list_size}"))
+  642 +    })?;
+  643 +    let output_len = interleave_indices.len();
+  644 +    // Both index vectors are built in one pass by `add_blanks_with_plans`, so they
+  645 +    // describe the same output rows. Check it rather than only assert in debug:
+  646 +    // `UInt32Array::value` panics out of range, and this is the writer's path.
+  647 +    if take_indices.len() != output_len {
+  648 +        return Err(ArrowError::InvalidArgumentError(format!(
+  649 +            "fixed-size-list blank plan got {} take indices for {output_len} output rows",
+  650 +            take_indices.len()
+  651 +        )));
+  652 +    }
+  653 +
+  654 +    let values = if size == 0 {
+  655 +        array.values().clone()
+  656 +    } else {
+  657 +        let child_len = output_len.checked_mul(size).ok_or_else(|| {
+  658 +            ArrowError::ComputeError("FixedSizeList child selection length overflow".to_string())
+  659 +        })?;
+  660 +        // One entry per child row is `size` times the parent's, so only build the
+  661 +        // selection the child plan actually reads.
+  662 +        let mut child_take_indices = child_plan
+  663 +            .needs_take()
+  664 +            .then(|| Vec::with_capacity(child_len));
+  665 +        let mut child_interleave_indices = child_plan
+  666 +            .needs_interleave()
+  667 +            .then(|| Vec::with_capacity(child_len));
+  668 +
+  669 +        for (output_row, (source, _)) in interleave_indices.iter().enumerate() {
+  670 +            let input_row = take_indices.value(output_row) as usize;
+  671 +            // `FixedSizeListArray::value_offset` truncates this product to `i32`, and
+  672 +            // slicing already rebases the child array, so compute it directly.
+  673 +            let start = input_row.checked_mul(size).ok_or_else(|| {
+  674 +                ArrowError::ComputeError("FixedSizeList child offset overflow".to_string())
+  675 +            })?;
+  676 +            let end = start.checked_add(size).ok_or_else(|| {
+  677 +                ArrowError::ComputeError("FixedSizeList child range overflow".to_string())
+  678 +            })?;
+  679 +            for child_row in start..end {
+  680 +                if let Some(indices) = child_take_indices.as_mut() {
+  681 +                    indices.push(u32::try_from(child_row).map_err(|_| {
+  682 +                        ArrowError::ComputeError(
+  683 +                            "FixedSizeList child index exceeds UInt32 capacity".to_string(),
+  684 +                        )
+  685 +                    })?);
+  686 +                }
+  687 +                if let Some(indices) = child_interleave_indices.as_mut() {
+  688 +                    indices.push(match source {
+  689 +                        0 => (0, child_row),
+  690 +                        1 => (1, 0),
+  691 +                        _ => {
+  692 +                            return Err(ArrowError::InvalidArgumentError(format!(
+  693 +                                "fixed-size-list blank plan has invalid source {source}"
+  694 +                            )));
+  695 +                        }
+  696 +                    });
+  697 +                }
+  698 +            }
+  699 +        }
+  700 +
+  701 +        let child_take_indices = child_take_indices.map(UInt32Array::from);
+  702 +        apply_blank_plan(
+  703 +            array.values(),
+  704 +            child_plan,
+  705 +            child_take_indices.as_ref(),
+  706 +            child_interleave_indices.as_deref(),
+  707 +        )?
+  708 +    };
+  709 +
+  710 +    let mut nulls = NullBufferBuilder::new(output_len);
+  711 +    for (output_row, (source, _)) in interleave_indices.iter().enumerate() {
+  712 +        let input_row = take_indices.value(output_row) as usize;
+  713 +        nulls.append(match source {
+  714 +            0 => array.is_valid(input_row),
+  715 +            // When a null blank is unavailable, preserve row zero's validity so
+  716 +            // any nullable children copied by `Take` remain masked.
+  717 +            1 => !blank_is_null && array.is_valid(input_row),
+  718 +            _ => {
+  719 +                return Err(ArrowError::InvalidArgumentError(format!(
+  720 +                    "fixed-size-list blank plan has invalid source {source}"
+  721 +                )));
+  722 +            }
+  723 +        });
+  724 +    }
+  725 +
+  726 +    Ok(Arc::new(FixedSizeListArray::try_new_with_length(
+  727 +        field,
+  728 +        list_size,
+  729 +        values,
+  730 +        nulls.finish(),
+  731 +        output_len,
+  732 +    )?))
+  733 +}
+  734 +
+  735 +fn apply_blank_plan(
+  736 +    array: &ArrayRef,
+  737 +    plan: &BlankPlan,
+  738 +    take_indices: Option<&UInt32Array>,
+  739 +    interleave_indices: Option<&[(usize, usize)]>,
+  740 +) -> std::result::Result<ArrayRef, ArrowError> {
+  741 +    match plan {
+  742 +        BlankPlan::Take => arrow::compute::take(
+  743 +            array.as_ref(),
+  744 +            take_indices.ok_or_else(|| {
+  745 +                ArrowError::InvalidArgumentError("take indices are missing".to_string())
+  746 +            })?,
+  747 +            None,
+  748 +        ),
+  749 +        BlankPlan::Interleave(filler) => interleave(
+  750 +            &[array.as_ref(), filler.as_ref()],
+  751 +            interleave_indices.ok_or_else(|| {
+  752 +                ArrowError::InvalidArgumentError("interleave indices are missing".to_string())
+  753 +            })?,
+  754 +        ),
+  755 +        BlankPlan::List { blank_is_null } => match array.data_type() {
+  756 +            DataType::List(_) => apply_list_blank_plan(
+  757 +                array.as_list::<i32>(),
+  758 +                *blank_is_null,
+  759 +                interleave_indices.ok_or_else(|| {
+  760 +                    ArrowError::InvalidArgumentError("interleave indices are missing".to_string())
+  761 +                })?,
+  762 +            ),
+  763 +            DataType::LargeList(_) => apply_list_blank_plan(
+  764 +                array.as_list::<i64>(),
+  765 +                *blank_is_null,
+  766 +                interleave_indices.ok_or_else(|| {
+  767 +                    ArrowError::InvalidArgumentError("interleave indices are missing".to_string())
+  768 +                })?,
+  769 +            ),
+  770 +            data_type => Err(ArrowError::InvalidArgumentError(format!(
+  771 +                "list blank plan requires a list array, got {data_type}"
+  772 +            ))),
+  773 +        },
+  774 +        BlankPlan::Map { blank_is_null } => {
+  775 +            let array = array.as_map_opt().ok_or_else(|| {
+  776 +                ArrowError::InvalidArgumentError(format!(
+  777 +                    "map blank plan requires a map array, got {}",
+  778 +                    array.data_type()
+  779 +                ))
+  780 +            })?;
+  781 +            apply_map_blank_plan(
+  782 +                array,
+  783 +                *blank_is_null,
+  784 +                interleave_indices.ok_or_else(|| {
+  785 +                    ArrowError::InvalidArgumentError("interleave indices are missing".to_string())
+  786 +                })?,
+  787 +            )
+  788 +        }
+  789 +        BlankPlan::FixedSizeList {
+  790 +            child,
+  791 +            blank_is_null,
+  792 +        } => {
+  793 +            let array = array.as_fixed_size_list_opt().ok_or_else(|| {
+  794 +                ArrowError::InvalidArgumentError(format!(
+  795 +                    "fixed-size-list blank plan requires a FixedSizeList array, got {}",
+  796 +                    array.data_type()
+  797 +                ))
+  798 +            })?;
+  799 +            apply_fixed_size_list_blank_plan(
+  800 +                array,
+  801 +                child,
+  802 +                *blank_is_null,
+  803 +                take_indices.ok_or_else(|| {
+  804 +                    ArrowError::InvalidArgumentError("take indices are missing".to_string())
+  805 +                })?,
+  806 +                interleave_indices.ok_or_else(|| {
+  807 +                    ArrowError::InvalidArgumentError("interleave indices are missing".to_string())
+  808 +                })?,
+  809 +            )
+  810 +        }
+  811 +        BlankPlan::Struct(plans) => {
+  812 +            let struct_array = array.as_struct_opt().ok_or_else(|| {
+  813 +                ArrowError::InvalidArgumentError(format!(
+  814 +                    "struct blank plan requires a struct array, got {}",
+  815 +                    array.data_type()
+  816 +                ))
+  817 +            })?;
+  818 +            let children = struct_array
+  819 +                .columns()
+  820 +                .iter()
+  821 +                .zip(plans)
+  822 +                .map(|(array, plan)| {
+  823 +                    apply_blank_plan(array, plan, take_indices, interleave_indices)
+  824 +                })
+  825 +                .collect::<std::result::Result<Vec<_>, _>>()?;
+  826 +
+  827 +            let indices = take_indices.ok_or_else(|| {
+  828 +                ArrowError::InvalidArgumentError("take indices are missing".to_string())
+  829 +            })?;
+  830 +            let mut nulls = NullBufferBuilder::new(indices.len());
+  831 +            for row in indices.values() {
+  832 +                // A blank copies row zero for every child on the `Take` path, so
+  833 +                // its parent validity must match that same row. This keeps child
+  834 +                // nulls masked exactly as they were in the input struct.
+  835 +                nulls.append(struct_array.is_valid(*row as usize));
+  836 +            }
+  837 +            // Supply the length: a struct with no fields has no child to take it from,
+  838 +            // and `NullBufferBuilder::finish` yields `None` when every row is valid.
+  839 +            Ok(Arc::new(StructArray::try_new_with_length(
+  840 +                struct_array.fields().clone(),
+  841 +                children,
+  842 +                nulls.finish(),
+  843 +                indices.len(),
+  844 +            )?))
+  845 +        }
+  846 +    }
+  847 +}
+  848 +
+  849 +/// Choose how to add a blank to a column, recursing into nested children.
+  850 +///
+  851 +/// Never reached for legacy (v1) files (see [`blank_plans`]); v2.0+ can store a null for
+  852 +/// every type this plans a null for.
+  853 +///
+  854 +/// Fixed-width and dictionary arrays use `take`: copying a key or fixed-width value
+  855 +/// costs no more than any synthetic replacement, and dictionary values remain shared.
+  856 +/// Variable-width arrays take a physical null where the column allows one, and an empty
+  857 +/// value where it does not. Variable-size containers only rebuild their offsets and
+  858 +/// preserve their children. Structs and fixed-size lists plan children independently, so
+  859 +/// dictionary values stay shared while variable-width siblings are still shrunk.
+  860 +///
+  861 +/// Null beats empty for a nullable column even though both cost nothing to store: an
+  862 +/// empty value is a real value, and a reader is entitled to interpret it. A blob v2
+  863 +/// column, for instance, is a struct of `data` and `uri`, and an empty `uri` reads as an
+  864 +/// external reference to nowhere rather than as "no blob".
+  865 +///
+  866 +/// `arrow_field` supplies the input nullability and logical-type metadata.
+  867 +/// `write_field` carries the dataset's nullability contract when one is known. Both
+  868 +/// must allow nulls, recursively, so a permissive update stream cannot introduce a
+  869 +/// null into a non-nullable nested dataset field. Logical extension types are checked
+  870 +/// against the physical type the writer will receive.
+  871 +///
+  872 +/// A struct never takes a null itself, even when it could: its children already hold the
+  873 +/// cheapest value each of them can, so nulling the parent would save nothing and would
+  874 +/// discard row zero's validity, which `apply_blank_plan` preserves.
+  875 +fn blank_plan(
+  876 +    arrow_field: &ArrowField,
+  877 +    write_field: Option<&LanceField>,
+  878 +    array: &ArrayRef,
+  879 +) -> Result<BlankPlan> {
+  880 +    const EMPTY: &[u8] = &[];
+  881 +    let is_nullable = arrow_field.is_nullable() && write_field.is_none_or(|field| field.nullable);
+  882 +    // A blob v2 column cannot take the generic struct blank. Its `data` and `uri` children
+  883 +    // are both declared nullable, so that plan would null both -- a *valid* struct with null
+  884 +    // children, which the preprocessor rejects ("must set exactly one of `data` and `uri`").
+  885 +    // A non-nullable column additionally cannot hold the null blob that "no data and no uri"
+  886 +    // would otherwise mean. The empty-inline descriptor sidesteps both, on every version and
+  887 +    // for either nullability, so blob-ness alone selects it. Ask it of both schemas: the
+  888 +    // planner sees the caller's batch field, while the preprocessor decides from the write
+  889 +    // schema, and an untagged batch field survives `Field::project_by_field`, which
+  890 +    // short-circuits on blob fields without comparing metadata.
+  891 +    if arrow_field.is_blob_v2() || write_field.is_some_and(|field| field.is_blob_v2()) {
+  892 +        return Ok(blob_blank_plan(array, write_field));
+  893 +    }
+  894 +    // A nullable column takes a null blank, a non-nullable one takes the empty value. No
+  895 +    // per-version null check is needed: v1 is already excluded, and the only null v2.0
+  896 +    // forbids is a struct-level one, which the `Struct` arm never produces (it mirrors
+  897 +    // row zero's validity). Every null blank below is for a non-struct type, which v2.0+
+  898 +    // stores. The arrow.json physical type (LargeBinary) also stores nulls on these
+  899 +    // versions, so there is no carve-out to make for it either.
+  900 +    let can_be_null = is_nullable;
+  901 +    let filler = |empty: ArrayRef| {
+  902 +        BlankPlan::Interleave(if can_be_null {
+  903 +            new_null_array(array.data_type(), 1)
+  904 +        } else {
+  905 +            empty
+  906 +        })
+  907 +    };
+  908 +    let plan = match array.data_type() {
+  909 +        DataType::Utf8 => filler(Arc::new(StringArray::from(vec![""]))),
+  910 +        DataType::LargeUtf8 => filler(Arc::new(LargeStringArray::from(vec![""]))),
+  911 +        DataType::Utf8View => filler(Arc::new(StringViewArray::from(vec![""]))),
+  912 +        DataType::Binary => filler(Arc::new(BinaryArray::from(vec![EMPTY]))),
+  913 +        DataType::LargeBinary => filler(Arc::new(LargeBinaryArray::from(vec![EMPTY]))),
+  914 +        DataType::BinaryView => filler(Arc::new(BinaryViewArray::from(vec![EMPTY]))),
+  915 +        DataType::List(_) | DataType::LargeList(_) => BlankPlan::List {
+  916 +            blank_is_null: can_be_null,
+  917 +        },
+  918 +        DataType::Map(entries_field, _) => {
+  919 +            // The blank path rebuilds the map with `MapArray::try_new`, which arrow 58
+  920 +            // rejects on `field.is_nullable() || entries.null_count() != 0`. The Arrow spec
+  921 +            // forbids both, but Lance's `Field` validation lets them through and the old
+  922 +            // `take` path never checked. Fall back to copying row zero for either shape so
+  923 +            // those maps keep working instead of newly failing on a deleted fragment.
+  924 +            let entries_unstorable = entries_field.is_nullable()
+  925 +                || array
+  926 +                    .as_map_opt()
+  927 +                    .map(|map| map.entries().null_count() != 0)
+  928 +                    .unwrap_or(true);
+  929 +            if entries_unstorable {
+  930 +                BlankPlan::Take
+  931 +            } else {
+  932 +                BlankPlan::Map {
+  933 +                    blank_is_null: can_be_null,
+  934 +                }
+  935 +            }
+  936 +        }
+  937 +        DataType::FixedSizeList(child_field, _) => {
+  938 +            let child = blank_plan(
+  939 +                child_field,
+  940 +                write_child_field(write_field, child_field.name()),
+  941 +                array.as_fixed_size_list().values(),
+  942 +            )?;
+  943 +            if matches!(child, BlankPlan::Take) {
+  944 +                BlankPlan::Take
+  945 +            } else {
+  946 +                BlankPlan::FixedSizeList {
+  947 +                    child: Box::new(child),
+  948 +                    blank_is_null: can_be_null,
+  949 +                }
+  950 +            }
+  951 +        }
+  952 +        DataType::Struct(fields) => {
+  953 +            let plans = fields
+  954 +                .iter()
+  955 +                .zip(array.as_struct().columns())
+  956 +                .map(|(field, child)| {
+  957 +                    let write_child = required_write_child_field(write_field, field.name())?;
+  958 +                    blank_plan(field, write_child, child)
+  959 +                })
+  960 +                .collect::<Result<Vec<_>>>()?;
+  961 +            if plans.iter().all(|plan| matches!(plan, BlankPlan::Take)) {
+  962 +                BlankPlan::Take
+  963 +            } else {
+  964 +                BlankPlan::Struct(plans)
+  965 +            }
+  966 +        }
+  967 +        // These layouts spend the same bytes on every logical value. In
+  968 +        // particular, dictionary arrays only need their fixed-width keys taken;
+  969 +        // Arrow's take kernel shares the values array.
+  970 +        _ => BlankPlan::Take,
+  971 +    };
+  972 +    Ok(plan)
+  973 +}
+  974 +
+  975 +/// Plan the blank for a blob v2 column, nullable or not.
+  976 +///
+  977 +/// The cheapest descriptor a blob column can hold is the *empty inline blob*: `data`
+  978 +/// present and zero length, `uri` absent. The preprocessor routes that to
+  979 +/// `push_inline(b"")` -- below both the inline and dedicated thresholds -- so it consumes
+  980 +/// no blob id and writes no sidecar bytes, which is the whole point of not copying row
+  981 +/// zero. `BlobArrayBuilder::push_empty` builds exactly this shape. It sets exactly one of
+  982 +/// `data`/`uri` and never nulls the struct, so it satisfies the preprocessor's contract on
+  983 +/// every file version and regardless of the column's nullability.
+  984 +///
+  985 +/// Three layouts must not take it. A *prepared* or stored *descriptor* struct carries a
+  986 +/// `kind` discriminant, and `validate_prepared_blob_array` rejects a row whose `kind`
+  987 +/// says inline while `data` is absent -- and the generic plan would `Take` `kind` from
+  988 +/// row zero while nulling `data`. A struct with a non-nullable non-`data` child (a
+  989 +/// `position`/`size` the schema pins as required) cannot be nulled down to `data` alone.
+  990 +/// Anything that is not the logical `{data, uri, ..}` shape falls back to copying row
+  991 +/// zero, which is what every blank did before this optimization and is always a valid
+  992 +/// descriptor.
+  993 +fn blob_blank_plan(array: &ArrayRef, write_field: Option<&LanceField>) -> BlankPlan {
+  994 +    let Some(fields) = array.as_struct_opt().map(|array| array.fields().clone()) else {
+  995 +        return BlankPlan::Take;
+  996 +    };
+  997 +    // Require a `data` child of `LargeBinary` and no `kind` discriminant. Anything else
+  998 +    // copies row zero.
+  999 +    let Some(data_index) = fields
+ 1000 +        .iter()
+ 1001 +        .position(|field| field.name() == "data" && field.data_type() == &DataType::LargeBinary)
+ 1002 +    else {
+ 1003 +        return BlankPlan::Take;
+ 1004 +    };
+ 1005 +    if fields.iter().any(|field| field.name() == "kind") {
+ 1006 +        return BlankPlan::Take;
+ 1007 +    }
+ 1008 +    // The empty-inline descriptor is a valid blob row only when every non-`data` child is
+ 1009 +    // null, so the row sets `data` alone. A child can be nulled only when both the batch
+ 1010 +    // field and the write schema allow it -- the same recursive nullability `blank_plan`
+ 1011 +    // uses -- so if either pins a non-`data` child (a `position`/`size` the schema marks
+ 1012 +    // required) it cannot be nulled, and taking it from row zero would leave, say,
+ 1013 +    // `position`/`size` set while `uri` is null, a descriptor the blob writer rejects.
+ 1014 +    // Fall back to copying row zero for that shape, the always-valid pre-optimization blank.
+ 1015 +    let child_nullable = |field: &ArrowField| {
+ 1016 +        field.is_nullable()
+ 1017 +            && write_child_field(write_field, field.name()).is_none_or(|f| f.nullable)
+ 1018 +    };
+ 1019 +    if fields
+ 1020 +        .iter()
+ 1021 +        .enumerate()
+ 1022 +        .any(|(index, field)| index != data_index && !child_nullable(field))
+ 1023 +    {
+ 1024 +        return BlankPlan::Take;
+ 1025 +    }
+ 1026 +    let plans = fields
+ 1027 +        .iter()
+ 1028 +        .enumerate()
+ 1029 +        .map(|(index, field)| {
+ 1030 +            if index == data_index {
+ 1031 +                // Present and empty. Absent `data` together with absent `uri` is how the
+ 1032 +                // preprocessor spells a null blob, which this column cannot hold.
+ 1033 +                BlankPlan::Interleave(Arc::new(LargeBinaryArray::from(vec![&[] as &[u8]])))
+ 1034 +            } else {
+ 1035 +                // Every non-`data` child is nullable here, so the blank nulls it and sets
+ 1036 +                // `data` alone -- exactly one of `data`/`uri`, with no `position`/`size`.
+ 1037 +                BlankPlan::Interleave(new_null_array(field.data_type(), 1))
+ 1038 +            }
+ 1039 +        })
+ 1040 +        .collect();
+ 1041 +    BlankPlan::Struct(plans)
+ 1042 +}
+ 1043 +
+ 1044 +/// Find a nested write-schema field by its literal name, if the schema models it.
+ 1045 +///
+ 1046 +/// Field names are not parsed as paths here: nested names may legally contain dots or
+ 1047 +/// backticks, just like the top-level names handled by [`blank_plans`].
+ 1048 +///
+ 1049 +/// `None` means "the write schema places no constraint on this child", which is not an
+ 1050 +/// error. A Lance `Field` only gets children for a fixed-size list when the item is a
+ 1051 +/// struct, so a `FixedSizeList<Float32>` -- an embedding column -- has none at all, and
+ 1052 +/// its item nullability is not persisted; it is rebuilt as nullable from the logical type
+ 1053 +/// string. Falling back to the Arrow field is the only declaration there is. For the
+ 1054 +/// shapes that are modelled, the writer's own recursive null check is the backstop.
+ 1055 +///
+ 1056 +/// `Schema::validate` rejects duplicate names only among top-level fields, so a struct
+ 1057 +/// could in principle declare two children with the same name and the first would win
+ 1058 +/// here. No public API builds such a schema, and the consequence would be bounded to a
+ 1059 +/// blank at a deleted row's slot, so this resolves by first match rather than erroring.
+ 1060 +fn write_child_field<'a>(
+ 1061 +    write_parent: Option<&'a LanceField>,
+ 1062 +    child_name: &str,
+ 1063 +) -> Option<&'a LanceField> {
+ 1064 +    write_parent?
+ 1065 +        .children
+ 1066 +        .iter()
+ 1067 +        .find(|child| child.name == child_name)
+ 1068 +}
+ 1069 +
+ 1070 +/// Resolve a child for a container whose children are always represented in a Lance
+ 1071 +/// schema. A missing child here is a schema mismatch, not an absent constraint.
+ 1072 +fn required_write_child_field<'a>(
+ 1073 +    write_parent: Option<&'a LanceField>,
+ 1074 +    child_name: &str,
+ 1075 +) -> Result<Option<&'a LanceField>> {
+ 1076 +    let Some(write_parent) = write_parent else {
+ 1077 +        return Ok(None);
+ 1078 +    };
+ 1079 +    write_child_field(Some(write_parent), child_name)
+ 1080 +        .map(Some)
+ 1081 +        .ok_or_else(|| {
+ 1082 +            Error::internal(format!(
+ 1083 +                "Fragment Updater: child field {child_name} is missing from write-schema field {}",
+ 1084 +                write_parent.name
+ 1085 +            ))
+ 1086 +        })
+ 1087 +}

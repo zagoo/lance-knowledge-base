@@ -1,0 +1,119 @@
+[
+  {
+    "id": 1,
+    "path": "rust/lance-file/src/versions/v1/writer/statistics.rs",
+    "start": 83,
+    "end": 100,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:19:56.116Z",
+    "evidence": "83 | \n84 | fn get_statistics<T: ArrowNumericType>(arrays: &[&ArrayRef]) -> StatisticsRow\n85 | where\n86 |     T::Native: Bounded,\n87 |     datafusion_common::scalar::ScalarValue: From<<T as ArrowPrimitiveType>::Native>,\n88 | {\n89 |     debug_assert!(!arrays.is_empty());\n90 |     // Note: we take data_type off of arrays instead of using T::DATA_TYPE because\n91 |     // there might be parameters like timezone for temporal types that need to\n92 |     // be propagated.\n93 |     let (min_value, max_value, null_count) = compute_primitive_statistics::<T>(arrays);\n94 |     StatisticsRow {\n95 |         null_count,\n96 |         min_value: ScalarValue::new_primitive::<T>(Some(min_value), arrays[0].data_type()).unwrap(),\n97 |         max_value: ScalarValue::new_primitive::<T>(Some(max_value), arrays[0].data_type()).unwrap(),\n98 |     }\n99 | }\n100 | "
+  },
+  {
+    "id": 3,
+    "path": "rust/lance-core/src/datatypes.rs",
+    "start": 539,
+    "end": 559,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:19:56.117Z",
+    "evidence": "539 |                 \"timestamp\" => {\n540 |                     if splits.len() < 3 {\n541 |                         Err(Error::schema(format!(\"Unsupported timestamp type: {}\", lt)))\n542 |                     } else {\n543 |                         let timeunit = parse_timeunit(splits[1])?;\n544 |                         // A fixed-offset timezone such as \"+08:00\" contains a colon, so the\n545 |                         // trailing segments must be rejoined instead of read as a single one.\n546 |                         let tz_str = splits[2..].join(\":\");\n547 |                         let tz: Option<Arc<str>> = if tz_str == \"-\" {\n548 |                             None\n549 |                         } else {\n550 |                             Some(tz_str.into())\n551 |                         };\n552 |                         Ok(Timestamp(timeunit, tz))\n553 |                     }\n554 |                 }\n555 |                 _ => Err(Error::schema(format!(\"Unsupported logical type: {}\", lt))),\n556 |             }\n557 |         }\n558 |     }\n559 | }"
+  },
+  {
+    "id": 4,
+    "path": "rust/lance-file/src/writer.rs",
+    "start": 104,
+    "end": 116,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:19:56.117Z",
+    "evidence": "104 |     let encoding = Any::from_msg(&column.encoding)?.encode_to_vec();\n105 |     Ok(pbfile::ColumnMetadata {\n106 |         pages,\n107 |         buffer_offsets,\n108 |         buffer_sizes,\n109 |         encoding: Some(pbfile::Encoding {\n110 |             location: Some(pbfile::encoding::Location::Direct(pbfile::DirectEncoding {\n111 |                 encoding,\n112 |             })),\n113 |         }),\n114 |     })\n115 | }\n116 | "
+  },
+  {
+    "id": 5,
+    "path": "rust/lance-table/src/transaction/manifest_build.rs",
+    "start": 1017,
+    "end": 1039,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:19:56.118Z",
+    "evidence": "1017 |             Operation::Overwrite { fragments, .. } => {\n1018 |                 // Every fragment in an overwrite is newly written, so all of them\n1019 |                 // take fresh ids regardless of the id they arrive with. Fragments\n1020 |                 // carried over from the dataset being replaced are rejected by\n1021 |                 // `validate_operation`, which is what makes ignoring the incoming\n1022 |                 // id safe here.\n1023 |                 let mut new_fragments = fragments.clone();\n1024 |                 for fragment in new_fragments.iter_mut() {\n1025 |                     fragment.id = fragment_id;\n1026 |                     fragment_id += 1;\n1027 |                 }\n1028 |                 if let Some(next_row_id) = &mut next_row_id {\n1029 |                     Self::assign_row_ids(next_row_id, new_fragments.as_mut_slice())?;\n1030 |                     // Add version metadata for all new fragments\n1031 |                     for fragment in new_fragments.iter_mut() {\n1032 |                         let version_meta = build_version_meta(fragment, new_version);\n1033 |                         fragment.last_updated_at_version_meta = version_meta.clone();\n1034 |                         fragment.created_at_version_meta = version_meta;\n1035 |                     }\n1036 |                 }\n1037 |                 final_fragments.extend(new_fragments);\n1038 |                 final_indices = Vec::new();\n1039 |             }"
+  },
+  {
+    "id": 6,
+    "path": "rust/lance-file/src/versions/v1/reader.rs",
+    "start": 290,
+    "end": 300,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:19:56.118Z",
+    "evidence": "290 |     /// Open one Lance data file for read.\n291 |     pub async fn try_new(object_store: &ObjectStore, path: &Path, schema: Schema) -> Result<Self> {\n292 |         // If just reading a lance data file we assume the schema is the schema of the data file\n293 |         let max_field_id = schema.max_field_id().unwrap_or_default();\n294 |         Self::try_new_with_fragment_id(object_store, path, schema, 0, 0, max_field_id, None).await\n295 |     }\n296 | \n297 |     fn io_parallelism(&self) -> usize {\n298 |         self.object_reader.io_parallelism()\n299 |     }\n300 | "
+  },
+  {
+    "id": 7,
+    "path": "rust/lance-core/src/utils/aimd.rs",
+    "start": 102,
+    "end": 123,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:19:56.118Z",
+    "evidence": "102 |     /// Validate that the configuration values are sensible.\n103 |     pub fn validate(&self) -> Result<()> {\n104 |         // Reject NaN and infinity first. The sign and ordering checks below\n105 |         // compare with `<`/`>`, which are `false` for NaN and for a `+inf` on\n106 |         // a field with no opposing bound, so a non-finite rate would otherwise\n107 |         // slip through and silently disable throttling (a NaN rate makes the\n108 |         // token bucket refill to full on every acquire) or, with a zero burst\n109 |         // capacity, panic in `Duration::from_secs_f64`.\n110 |         for (name, value) in [\n111 |             (\"initial_rate\", self.initial_rate),\n112 |             (\"min_rate\", self.min_rate),\n113 |             (\"max_rate\", self.max_rate),\n114 |             (\"decrease_factor\", self.decrease_factor),\n115 |             (\"additive_increment\", self.additive_increment),\n116 |             (\"throttle_threshold\", self.throttle_threshold),\n117 |         ] {\n118 |             if !value.is_finite() {\n119 |                 return Err(crate::Error::invalid_input(format!(\n120 |                     \"{name} must be finite, got {value}\"\n121 |                 )));\n122 |             }\n123 |         }"
+  },
+  {
+    "id": 8,
+    "path": "rust/lance-core/src/cache/codec.rs",
+    "start": 62,
+    "end": 75,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:19:56.118Z",
+    "evidence": "62 | /// Returns `true` if `data` begins with the cache-entry [`MAGIC`].\n63 | ///\n64 | /// A cheap prefix check for backends that need to recognize Lance cache\n65 | /// entries without fully [`deserialize`](CacheCodec::deserialize)-ing them. A\n66 | /// `true` result only means the framing looks like ours; the entry can still\n67 | /// decode to a [`Miss`](CacheDecode::Miss) (e.g. wrong `type_id`).\n68 | pub fn has_cache_envelope(data: &[u8]) -> bool {\n69 |     data.get(..MAGIC.len()) == Some(&MAGIC[..])\n70 | }\n71 | \n72 | /// Version of the envelope framing itself. Bumped only if the outer frame\n73 | /// (magic/version/type_id/type_version layout) ever changes — expected never.\n74 | const ENVELOPE_VERSION: u8 = 1;\n75 | "
+  },
+  {
+    "id": 9,
+    "path": "rust/lance-table/benches/version_columns.rs",
+    "start": 158,
+    "end": 160,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:19:56.118Z",
+    "evidence": "158 | \n159 | criterion_group!(benches, bench_apply_versions, bench_stream_versions);\n160 | criterion_main!(benches);"
+  },
+  {
+    "id": 10,
+    "path": "rust/lance-file/src/versions/v2_0/mod.rs",
+    "start": 50,
+    "end": 67,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:19:56.118Z",
+    "evidence": "50 | \n51 | /// Build persisted field-to-column entries for a v2.0 data file.\n52 | pub fn data_file_columns(schema: &Schema) -> (Vec<i32>, Vec<i32>) {\n53 |     let mut field_ids = Vec::new();\n54 |     let mut column_indices = Vec::new();\n55 |     append_physical_fields(&schema.fields, &mut field_ids, &mut column_indices, &mut 0);\n56 |     (field_ids, column_indices)\n57 | }\n58 | \n59 | pub(super) fn field_id_to_column_index(schema: &Schema) -> BTreeMap<u32, u32> {\n60 |     let (field_ids, column_indices) = data_file_columns(schema);\n61 |     field_ids\n62 |         .into_iter()\n63 |         .zip(column_indices)\n64 |         .map(|(field_id, column_index)| (field_id as u32, column_index as u32))\n65 |         .collect()\n66 | }\n67 | "
+  },
+  {
+    "id": 13,
+    "path": "rust/lance-table/src/rowids/segment.rs",
+    "start": 480,
+    "end": 506,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:20:04.823Z",
+    "evidence": "480 |     /// Check if a value is contained in the segment\n481 |     pub fn contains(&self, val: u64) -> bool {\n482 |         match self {\n483 |             Self::Range(range) => range.contains(&val),\n484 |             Self::RangeWithHoles { range, holes } => {\n485 |                 if !range.contains(&val) {\n486 |                     return false;\n487 |                 }\n488 |                 // Check if the value is not in the holes\n489 |                 !holes.iter().any(|hole| hole == val)\n490 |             }\n491 |             Self::RangeWithBitmap { range, bitmap } => {\n492 |                 if !range.contains(&val) {\n493 |                     return false;\n494 |                 }\n495 |                 // Check if the bitmap has the value set (not cleared)\n496 |                 let idx = (val - range.start) as usize;\n497 |                 bitmap.get(idx)\n498 |             }\n499 |             Self::Ranges { range, runs } => {\n500 |                 range.contains(&val) && runs.position((val - range.start) as u32).is_some()\n501 |             }\n502 |             Self::SortedArray(array) => array.binary_search(val).is_ok(),\n503 |             Self::Array(array) => array.iter().any(|v| v == val),\n504 |         }\n505 |     }\n506 | "
+  },
+  {
+    "id": 15,
+    "path": "rust/lance-file/src/versions/mod.rs",
+    "start": 374,
+    "end": 402,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:20:04.823Z",
+    "evidence": "374 | /// Encode a self-described batch for an exact file version.\n375 | pub fn encode_self_described_batch(\n376 |     version: ConcreteFileVersion,\n377 |     batch: &EncodedBatch,\n378 | ) -> Result<Bytes> {\n379 |     match version {\n380 |         ConcreteFileVersion::V1 => Err(Error::not_supported(\n381 |             \"Lance v1 does not support self-described current-format batches\".to_string(),\n382 |         )),\n383 |         ConcreteFileVersion::V2_0 => v2_0::encode_self_described_batch(batch),\n384 |         ConcreteFileVersion::V2_1 => v2_1::encode_self_described_batch(batch),\n385 |         ConcreteFileVersion::V2_2 => v2_2::encode_self_described_batch(batch),\n386 |         ConcreteFileVersion::V2_3 => v2_3::encode_self_described_batch(batch),\n387 |     }\n388 | }\n389 | \n390 | /// Encode a mini-lance batch for an exact file version.\n391 | pub fn encode_mini_batch(version: ConcreteFileVersion, batch: &EncodedBatch) -> Result<Bytes> {\n392 |     match version {\n393 |         ConcreteFileVersion::V1 => Err(Error::not_supported(\n394 |             \"Lance v1 does not support mini-lance current-format batches\".to_string(),\n395 |         )),\n396 |         ConcreteFileVersion::V2_0 => v2_0::encode_mini_batch(batch),\n397 |         ConcreteFileVersion::V2_1 => v2_1::encode_mini_batch(batch),\n398 |         ConcreteFileVersion::V2_2 => v2_2::encode_mini_batch(batch),\n399 |         ConcreteFileVersion::V2_3 => v2_3::encode_mini_batch(batch),\n400 |     }\n401 | }\n402 | "
+  },
+  {
+    "id": 18,
+    "path": "rust/lance-table/src/format/manifest.rs",
+    "start": 1787,
+    "end": 1825,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:20:04.824Z",
+    "evidence": "1787 |         // Step 4: write deletion files and verify summary\n1788 |         let mut fragment_with_deletion = Fragment::new(0)\n1789 |             .with_file(\n1790 |                 \"data_with_deletion.lance\",\n1791 |                 vec![0, 1],\n1792 |                 vec![0, 1],\n1793 |                 stable_file_version(),\n1794 |                 NonZero::new(1000),\n1795 |             )\n1796 |             .with_physical_rows(50);\n1797 |         fragment_with_deletion.deletion_file = Some(DeletionFile {\n1798 |             read_version: 123,\n1799 |             id: 456,\n1800 |             file_type: DeletionFileType::Array,\n1801 |             num_deleted_rows: Some(10),\n1802 |             base_id: None,\n1803 |         });\n1804 | \n1805 |         let manifest_with_deletion = Manifest::new(\n1806 |             schema,\n1807 |             Arc::new(vec![fragment_with_deletion]),\n1808 |             DataStorageFormat::default(),\n1809 |             HashMap::new(),\n1810 |         );\n1811 | \n1812 |         let deletion_summary = manifest_with_deletion.summary();\n1813 |         assert_eq!(deletion_summary.total_rows, 40); // 50 - 10\n1814 |         assert_eq!(deletion_summary.total_files_size, 1000);\n1815 |         assert_eq!(deletion_summary.total_fragments, 1);\n1816 |         assert_eq!(deletion_summary.total_data_files, 1);\n1817 |         assert_eq!(deletion_summary.total_deletion_file_rows, 10);\n1818 |         assert_eq!(deletion_summary.total_data_file_rows, 50);\n1819 |         assert_eq!(deletion_summary.total_deletion_files, 1);\n1820 | \n1821 |         //Just verify the transformation is OK\n1822 |         let stats_map: BTreeMap<String, String> = deletion_summary.into();\n1823 |         assert_eq!(stats_map.len(), 7)\n1824 |     }\n1825 | }"
+  },
+  {
+    "id": 20,
+    "path": "rust/lance-table/src/io/commit/dynamodb.rs",
+    "start": 456,
+    "end": 485,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:20:04.824Z",
+    "evidence": "456 |     /// Put the manifest path for a given base_uri and version, should fail if the version **does not** already exist\n457 |     async fn put_if_exists(\n458 |         &self,\n459 |         base_uri: &str,\n460 |         version: u64,\n461 |         path: &str,\n462 |         size: u64,\n463 |         _e_tag: Option<String>,\n464 |     ) -> Result<()> {\n465 |         // Replacing the staging pointer with the canonical path publishes the\n466 |         // same generation-independent `(path, size)` tuple from every helper.\n467 |         // Each helper still returns the canonical ETag it observed to its caller.\n468 |         self.ddb_put()\n469 |             .item(base_uri!(), AttributeValue::S(base_uri.into()))\n470 |             .item(version!(), AttributeValue::N(version.to_string()))\n471 |             .item(path!(), AttributeValue::S(path.to_string()))\n472 |             .item(committer!(), AttributeValue::S(self.committer_name.clone()))\n473 |             .item(\"size\", AttributeValue::N(size.to_string()))\n474 |             .condition_expression(format!(\n475 |                 \"attribute_exists({}) AND attribute_exists({})\",\n476 |                 base_uri!(),\n477 |                 version!(),\n478 |             ))\n479 |             .send()\n480 |             .await\n481 |             .wrap_err()?;\n482 | \n483 |         Ok(())\n484 |     }\n485 | "
+  }
+]

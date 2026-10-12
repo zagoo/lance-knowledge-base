@@ -1,0 +1,414 @@
+{
+  "iteration": 77,
+  "files": [
+    {
+      "path": "rust/lance-encoding/src/compression.rs",
+      "module": "L1-modules/rust-lance-encoding.md",
+      "role": "Shared structural compression contracts, statistic-driven selection helpers, metadata parsing, decoder dispatch and 40 local test functions. Production version policy is composed outside this module.",
+      "reviewed": true,
+      "limits": "Every line read in bounded primary outputs in ANALYZE77. No source build, test, lint, benchmark, generator, installation or network. Runtime effects and no-bitpacking concern are source deductions, not reproductions. Partial dependencies are not promoted.",
+      "ranges": [
+        [
+          1,
+          18,
+          "SPDX/module docs describe structural compression after validity/offset shredding, transparent independent per-value access, opaque atomic mini-block chunks and whole-block compression with least random access. Documentation says2.1, but helpers are also composed by later version strategies. This module has no concrete default CompressionStrategy implementation or file-version argument."
+        ],
+        [
+          19,
+          74,
+          "Imports connect Arc, Arrow UInt64 statistics/DataType, Field, LanceBuffer, error helpers, compression parameters, miniblock/per-value interfaces, protobuf21, all physical codecs and FSST constants. InlineBitpacking/OutOfLineBitpacking imports alone are cfg(bitpacking); many other imports are unconditional. No async, IO, unsafe or local environment read in this file."
+        ],
+        [
+          75,
+          85,
+          "Private constants: default RLE threshold0.5, general block size32768 bytes, RLE block header size_of u64=8. Despite default-threshold naming/comment, the ratio check runs only when params.rle_threshold is Some; no0.5 rejection applies in automatic mode. Header cost is added to RLE block payload estimate, not mini estimate. (rust/lance-encoding/src/compression.rs:174-198; rust/lance-encoding/src/compression.rs:278-322)"
+        ],
+        [
+          86,
+          105,
+          "Public BlockCompressor:Debug+Send+Sync requires compress(DataBlock)->Result<(Option<LanceBuffer>,CompressiveEncoding)>. None means metadata-only, while Some(empty) is an actual payload. Whole-block opaque/self-described contract is stated; trait itself enforces no metadata/count/shape invariant."
+        ],
+        [
+          106,
+          140,
+          "Public CompressionStrategy:Send+Sync+Debug requires block, per-value and mini-block factory methods accepting Field and borrowed DataBlock, returning boxed codecs. Selection can inspect initialized statistics. Comment describes mini chunks0..16KiB; this trait does not enforce size. Concrete version policies live in lance-file."
+        ],
+        [
+          141,
+          153,
+          "Crate-internal compress_required_block creates selected block compressor then compresses owned data. Propagates factory/codec errors and rejects None payload with Internal; Some(empty) accepted. It returns payload plus descriptor and performs no IO or additional count validation."
+        ],
+        [
+          154,
+          173,
+          "Private try_bss_for_mini_block refuses missing compression and exact none before considering BssMode(defaultAuto). If should_use_bss returns true, constructs ByteStreamSplitEncoder using bits cast to usize. It does not parse codec name: fsst or unknown non-none strings satisfy this initial prerequisite; downstream wrapping differs."
+        ],
+        [
+          174,
+          199,
+          "rle_is_applicable permits fixed widths8/16/32/64 only, expects scalar RunCount (panic if absent/type/shape invalid), and applies strict runs<num_values*threshold only when explicitly configured. No finite/range validation: NaN fails comparison, negative/zero normally reject, >1 allowed locally. Return logical raw bytes as u128 num_values*(bits/8), not physical buffer length."
+        ],
+        [
+          200,
+          219,
+          "rle_beats_raw_and_bitpacking requires encoded<raw; with bitpacking feature compares estimated inline bytes and rejects only when bitpacking strictly smaller. A tie with raw loses, a tie with bitpacking favors RLE. Unknown/unavailable bitpacking estimate adds no restriction."
+        ],
+        [
+          220,
+          234,
+          "Fixed-u8 mini RLE first applies width/ratio gate, estimates payload with MAX_MINIBLOCK_VALUES segmentation and U8 run lengths, suppresses estimator errors into None via ok?, and selects RleEncoder only if estimate beats raw/bitpacking. No actual trial compression here."
+        ],
+        [
+          235,
+          268,
+          "Child-aware mini RLE selects adaptive run width/estimated bytes and optional child compression config; constructs encoder with same config for values/lengths and child bitpacking enabled. Measure selected_payload_size only if child compression exists or bitpacking compiled AND initial estimate is >=raw or worse than estimated inline. Otherwise trust estimate. Measurement/estimator errors become None fallback. Final raw/bitpacking comparison repeats; selection may allocate/compress children then actual encode repeats work. (rust/lance-encoding/src/encodings/physical/rle.rs:1013-1039)"
+        ],
+        [
+          269,
+          277,
+          "rle_child_compression_config returns None for missing/exact none/fsst. Other strings parse via case-sensitive CompressionScheme; unknown parse error silently becomes None here. Valid codec plus optional level retained, without invoking compressor feature validation in this helper. (rust/lance-encoding/src/encodings/physical/block.rs:124-138)"
+        ],
+        [
+          278,
+          323,
+          "try_rle_for_block_with_width rechecks widths, requires initialized RunCount and optional strict explicit threshold, adds8-byte header with saturating u128 addition, requires total<logical raw size and rejects if block-bitpacking estimate strictly smaller. Creates raw-child RleEncoder with selected run width; tie with bitpacking favors RLE. Params compression/level/BSS are not used here."
+        ],
+        [
+          324,
+          345,
+          "Fixed-u8 and adaptive block wrappers return Ok(None) for unsupported widths, then estimate using no segment bound before invoking common ratio/size gate. Estimation errors propagate via Result, unlike mini selection. Adaptive chooses run width; fixed forcesU8."
+        ],
+        [
+          346,
+          371,
+          "Private estimate adapters pass actual LanceBuffer, declared count, fixed width and optional max segment to physical RLE estimators. Adaptive estimator chooses cheapest among8/16/32 run-length widths; equal cost retains earlier narrower width. Cost is entries*(value bytes+length bytes), without block header. Full entry collection/codec file remains pending. (rust/lance-encoding/src/encodings/physical/rle.rs:138-218)"
+        ],
+        [
+          372,
+          386,
+          "Private mini bitpacking with feature enabled requires successful inline size estimate, which accepts only native widths, then returns InlineBitpacking. Feature disabled returnsNone. No statistical scan performed here beyond borrowed estimate inputs."
+        ],
+        [
+          387,
+          420,
+          "Feature-gated inline estimator rejects unsupported width or zero declared count. Expects UInt64 BitWidth array; for every statistic entry, counts one native header word plus floor(1024*maxbits/nativebits) words, sums/multiplies saturating u128, and requires estimate strictly smaller than actual physical data_size. Tail treated as padded1024. Converts total to u64 orNone; no validation of stat length/nulls/width range or physical/logical count consistency."
+        ],
+        [
+          421,
+          449,
+          "Private block bitpacking requires8/16/32/64 and initialized BitWidth, max unwrap panics for empty stats. max>=native skips. Single stat segment with min_size_bytes(max)>=actual data_size skips. Declared count<=1024 selects Inline, otherwise OutOfLine(max,native). Function and public wrapper are ungated despite references to cfg-imported types: no-bitpacking compile concern, not compiled here."
+        ],
+        [
+          450,
+          474,
+          "Feature-gated block bitpacking cost rejects unsupported widths/zero count, gets statistic max optionally (empty=>None), estimates inline padded1024+header for count<=1024 or out-of-line words otherwise, converts to bytes with saturation and requires strictly smaller physical data_size. Eligibility and estimate are separate logic; do not assume the private selection helper performs this exact full-cost check."
+        ],
+        [
+          475,
+          510,
+          "Feature-gated out-of-line word estimate checked-converts count/widths to usize, rejects compressed>=native, computes ceil(count/1024) chunks and ceil(1024*compressed/native) words/chunk. Whole chunks return product; a runt tail is padded/compressed only if padding-bit cost strictly less than saved bits, otherwise raw tail words. Tie uses raw tail. Some usize products remain unchecked; no positive-native-width guard for standalone helper."
+        ],
+        [
+          511,
+          525,
+          "maybe_wrap_general_for_mini_block leaves inner unchanged for missing/exact none/fsst. Other strings must parse, with Unknown compression scheme InvalidInput on failure. Wraps GeneralMiniBlockCompressor with chosen level; no trial ratio check and no local feature validation at construction."
+        ],
+        [
+          526,
+          554,
+          "try_general_compression returnsNone for exact none. Any other explicit scheme parses and uses CompressedBufferEncoder::try_new, propagating unsupported/config errors, returning codec and original config. Automatic selection occurs only if physical data_size>32768 (strict), using default encoder/config. Comment says currently unused but try_general_block below calls it. Default encoder prefers compiled zstd(level0), else lz4(levelNone), else none. (rust/lance-encoding/src/encodings/physical/block.rs:471-489)"
+        ],
+        [
+          555,
+          587,
+          "Public field_metadata_params copies compression verbatim, parses i32 level/f64 RLE threshold with ok() silently ignoring malformed strings, parses BssMode with warning on invalid, and parses signed i64 minichunk with warning on invalid. Negative/zero chunk sizes and nonfinite/out-of-range f64 parse successfully; semantic checks not here. Defaults leave all fields None. No column/type merge or version filter here."
+        ],
+        [
+          588,
+          600,
+          "Public finalize_miniblock_compressor applies general wrapper only for direct FixedWidth; all other block kinds return selected codec unchanged. Variable-width helpers perform their own wrapping. Packed structs/fixed-size lists do not acquire a wrapper through this function."
+        ],
+        [
+          601,
+          619,
+          "Public try_uncompressed_fixed_width_miniblock picks raw ValueEncoder for directFixedWidth plus exactnone without reading stats. Public try_byte_stream_split_miniblock type-guards directFixedWidth then delegates BSS prerequisite/heuristic. Nonmatching kinds returnNone."
+        ],
+        [
+          620,
+          641,
+          "Public try_fixed_u8_rle_miniblock and try_child_rle_miniblock are directFixedWidth guards around respective policies; former preserves original u8 raw-child grammar, latter adaptive width and child selection. They do not accept nullable/list/struct wrappers as fixed data. Version gating belongs to callers."
+        ],
+        [
+          642,
+          655,
+          "Public try_bitpacking_miniblock directFixedWidth delegates optional feature-gated choice; public try_raw_fixed_width_miniblock returns rawValueEncoder for direct fixed only, no stat or parameter checks."
+        ],
+        [
+          656,
+          698,
+          "Public try_variable_width_miniblock returnsOk(None) for other kinds, rejects offset width except32/64, then reads DataSize and MaxLength before exactnone raw shortcut. FSST selected if explicitfsst OR missing compression and non-Binary/non-LargeBinary field and max length>=FSST minimum and data size>=FSST minimum. Choose FSST or BinaryMini(minichunk). Explicit non-fsst/non-none scheme parses and wraps GeneralMini; no automatic general wrapper. Explicit zstd/lz4 bypass autoFSST. Invalid strings error; absent stats panic even withnone."
+        ],
+        [
+          699,
+          725,
+          "Public fixed-packed mini helper accepts Struct only, rejects has_variable_width_child (any direct non-FixedWidth child) withInvalidInput, otherwise FixedMini. Empty struct passes this gate and fails deeper encoder assumptions. Raw fixed-size-list mini helper usesValueEncoder. Raw per-value acceptsFixedWidth orFixedSizeList only. (rust/lance-encoding/src/data.rs:1037-1041; rust/lance-encoding/src/encodings/physical/packed.rs:40-68)"
+        ],
+        [
+          726,
+          738,
+          "Private validate_packed_struct returnsNone for nonStruct, rejects child count differing from schema field children, then reports has_variable_width_child. Does not check nonempty children, row counts, actual schema type agreement, validity or buffers. Deeper packed encoders validate additional invariants."
+        ],
+        [
+          739,
+          756,
+          "Public reject_packed_struct_per_value uses that validation. Variable child returnsNotSupported with file-format message; fixed-only returnsInvalidInput saying per-value should not be used. For nonstruct returnsOk(None). No version argument; productionV2.1 selects this helper. (rust/lance-file/src/versions/v2_1/compression.rs:85-104)"
+        ],
+        [
+          757,
+          776,
+          "Public try_variable_packed_struct_per_value validates and returnsNone nonstruct, errorsInvalidInput for fixed-only, otherwise builds variable packed encoder from injected Arc strategy and cloned field children. ProductionV2.2 uses this; decoder support does not imply writers select it in every version. (rust/lance-file/src/versions/v2_2/compression.rs:77-99)"
+        ],
+        [
+          777,
+          798,
+          "Public try_packed_struct_per_value supports either variable or fixed-only Struct after count validation; clones children and retains strategy only for variable encoder. ProductionV2.3 and test StructuralU32 use this general helper, so test mode differs from productionV2.2 fixed-packed restriction. (rust/lance-file/src/versions/v2_3/compression.rs:77-99; rust/lance-encoding/src/testing.rs:162-181)"
+        ],
+        [
+          799,
+          823,
+          "Public variable per-value returnsNone nonvariable and rawVariableEncoder immediately for exactnone, before stat/offset validation. Otherwise reads MaxLength/DataSize. If (max_length>32768 OR any explicit nonfsst scheme) AND size>=32768, returns exactzstd with configuredlevel via try_new, or defaultCompressedBufferEncoder for every other case. Thus explicitlz4/unknown can select defaultcodec; explicitfsst with sufficiently large max length can be superseded. This branch bypasses offset-width validation."
+        ],
+        [
+          824,
+          842,
+          "Remaining variable per-value path validates offsets32/64 and buildsrawVariableEncoder. FSST only explicitfsst or automaticmissingcompression with nonbinary field and max/data thresholds; else raw. Consequently explicit general requests on payloads smaller than32768 fall back raw without parsing, including unknown names; configured levels affect only exactzstd large branch. Default encoder choice is feature-dependent, not alwayszstd. (rust/lance-encoding/src/encodings/physical/block.rs:471-489)"
+        ],
+        [
+          843,
+          871,
+          "Public fixed-u8/adaptive RLE block wrappers type-guardFixedWidth and propagate Result; public bitpacking block type-guards and calls ungated helper. No version or compression=none bypass inside these entry points. Version strategy ordering determines whether they run."
+        ],
+        [
+          872,
+          895,
+          "Public try_general_block drops config half of private return while boxedencoder retains it. Public try_raw_block supports FixedWidth->ValueEncoder and VariableWidth->VariableEncoder only; unlike rawpervalue it does not acceptFixedSizeList. NonmatchingkindNone."
+        ],
+        [
+          896,
+          909,
+          "Public MiniBlockDecompressor:Debug+Send+Sync requires decode(Vec<LanceBuffer>,external count)->Result<DataBlock>. Optional decoded_size_bytes defaultsNone; documentation requires exact aggregate data_size for a single FixedWidth allocation and says multibuffer/layout-dependent outputs shouldNone. This is a contract, not enforced by trait."
+        ],
+        [
+          910,
+          933,
+          "Public FixedPerValueDecompressor requiresdecode(FixedWidthDataBlock,external count) and bits_per_value, with exact optional decoded_size defaultNone; comment requires byte-multiplewidth but trait has no check. Public VariablePerValueDecompressor requiresdecode(VariableWidthBlock), with no separatecount orsize estimator. All requireDebug+Send+Sync."
+        ],
+        [
+          934,
+          950,
+          "Public BlockDecompressor requiresdecode(Optionpayload,externalcount). requires_payload defaulttrue; infer_num_values(payload) defaultsOk(None), documented to avoid materializing decoded payload. These hooks support metadata-only and recoverable-count child codecs; no automatic enforcement at trait level."
+        ],
+        [
+          951,
+          961,
+          "Crate-internal require_block_payload rejectsNone asInvalidInput namingcodec, acceptsSomeempty. require_no_block_payload rejects everySome includingempty with metadata-only message, acceptsNone. They distinguish payload presence from byte length."
+        ],
+        [
+          962,
+          987,
+          "Public DecompressionStrategy requires mini,fixedpervalue,variablepervalue,block factories. Mini receives an extra dyn DecompressionStrategy for nested dispatch; other methods onlyself. Public empty DefaultDecompressionStrategy derivesDebug/Default; no state/cache/config/version fields."
+        ],
+        [
+          988,
+          1030,
+          "Default mini factory unwraps outer compression (missing panics). Flat->ValueDecompressor. Inline bitpacking uses feature if enabled elseNotSupported. Variable unwraps offsets descriptor/inner compression, requiresFlat orpanics, casts bits to u8 before BinaryMini constructor validation; values subdescriptor ignored here. FSST recursively invokes suppliedstrategy for nestedvalues then wraps table."
+        ],
+        [
+          1031,
+          1079,
+          "Default mini supports FixedPacked, rejectsVariablePacked asNotSupported, handlesFSL fallibly, buildsRLE using suppliedstrategy and BSS only with nestedFlat (unwrap/panic; castswidth). General requires values/configInvalidInput, recurses through self mini factory while passing suppliedstrategy onward, converts scheme/level and wraps GeneralMini. Other tags todo! panic, includingConstant/Dictionary/OutOfLine. No version/recursion-depth gate."
+        ],
+        [
+          1080,
+          1100,
+          "Default fixed per-value supportsConstant(optionalbytes copied to LanceBuffer alignment1),Flat,FSL andPackedStructFixed. Missing outer descriptor unwraps, unsupported tags todo! panic withdebug. No generic General/FSST/RLE fixed per-value support."
+        ],
+        [
+          1101,
+          1126,
+          "Default variable per-value Variable unwraps offsetsFlat, asserts width<255 rather than validating32/64, then returns passthroughVariableDecoder; valuesdescriptor ignored. FSST wraps cloned symbol table around hardcodedVariableDecoder, ignoring nestedFSSTvalues. General requires compressionconfig and chooses CompressedBufferEncoder::from_scheme, ignoring descriptorvalues andlevel for read."
+        ],
+        [
+          1127,
+          1170,
+          "VariablePacked variable factory loops descriptors requiring values andlayout, recursively uses self fixed/variable factory per BitsPerValue/BitsPerLength, retains configuredwidth and Arc decoder, then creates packedvariable decoder. No nonempty/layout-width agreement/recursion-depth validation here. Unsupportedtags todo! panic. Child factory errors propagate."
+        ],
+        [
+          1171,
+          1237,
+          "Blockfactory supportsInline,Flat,Constant,Variable(header-drivenBinaryBlock),FSL,OutOfLine,General,RLE. OutOfLine requires nestedFlat but unwraps missingvalue/compression, uses compressedinnerwidth anduncompressedouterwidth. General requires values/config, recurses selfblock, convertsconfig and invokes fallibleGeneralBlockconstructor. Others todo! panic. Inline/OutOfLine arms reference cfg-imported types without cfg; no-feature build remains unverified. Variabledescriptorcontents unused."
+        ],
+        [
+          1238,
+          1290,
+          "Crate-internal create_rle_decompressor requires values/run_lengths descriptors, constructs both child readers before width/dependency checks, requires valuebits8/16/32/64 and run-lengthbits8/16/32, and rejects both children requiringnum_values because neither could infer run count. Bothidentity ->rawRleDecompressor; otherwise child-aware. Errors InvalidInput with contextual widths/roles; errors from childfactory propagate first."
+        ],
+        [
+          1291,
+          1313,
+          "Private create_rle_child_decompressor requires compression, validates grammar to(bits,requirescount,needsdecoder), uses suppliedstrategy.create_block_decompressor only for nonflatchildren, else buildsidentityflat. Flat child descriptor optionaldata compression is not inspected by thisvalidator."
+        ],
+        [
+          1314,
+          1362,
+          "RLE child grammar acceptsFlat(bits,false,false),General(config required,values and innercompression required) with allowedinner checked below, andOutOfLine with mandatory nestedFlat. OutOfLine requires external run count and returns uncompressedwidth; General needsblockdecoder and inherits innercountneed. Othertags includingInline rejected with named InvalidInput. Flatcompressedwidth/optionaldata not validated here."
+        ],
+        [
+          1363,
+          1390,
+          "General RLE inner grammar permits onlyFlat (count-independent) orOutOfLine->Flat (count-dependent). NestedGeneral/RLE/Inline/Constant/etc rejected. Custom strategy cannot bypass this syntactic gate. Width validity checked by outerRLE after child construction; no versioncapability check."
+        ],
+        [
+          1391,
+          1408,
+          "Private compression_name maps all13 protobuf compression variants to stable human-readable labels for errors: flat,variable,fsst,out-of-line bitpacking,inline bitpacking,general,constant,dictionary,byte stream split,packed struct,fixed-size list,variable packed struct,rle. No payload/descriptor introspection."
+        ],
+        [
+          1409,
+          1449,
+          "cfg(test) module importsHashMap,Arc,Arrowfields,parameters,physicalBssMode/ComputeStat/TestEncoding/extractchain. Helpers strategy delegates toTestEncoding; baseline alwaysStructuralU16; selected_block_codec creates/compressesclone and returnscodec+descriptor discardingpayload; context is new(0,true,true) regardlessmode; testfield nullabletrue/id=-1. None are runtime evidence."
+        ],
+        [
+          1450,
+          1490,
+          "Fixed-run fixture allocates count*floor(width/8), sets values_per_run=max(count/run_count,1), increments byte by17 everygroup and writes byte+j per word; computes realstats. run_count0 dividesbyzero; requestedrun_count can differ from realized transitions due integerdivision. No manualstat injection despite helpername/comment."
+        ],
+        [
+          1491,
+          1549,
+          "Ordinary fixedfixture zeroallocates and writes only first byte i%256 pervalue, leaves higherbyteszero, computesstats. rle_run_length_bits unwraps directRLE/runlengthFlat; expect_rle_encoding acceptsdirectRLE oroneGeneralwrapper containingRLE and panicsotherwise. Not recursive arbitrarywrapper support."
+        ],
+        [
+          1550,
+          1614,
+          "Variablefixture creates offsets from varying lengths: avg0->1, else max(avg+i%8-4,1) capped2*avg. Fills everybyte with rowindex+j wrapping, casts offsets to signed32 or keeps64, unsupportedwidthpanics; initializesstats. Capacity/casts unchecked. FSSTcandidate is4096values,width32,average FSSTleastmax+16. No actual NULL payload despite nullablefieldmetadata."
+        ],
+        [
+          1615,
+          1673,
+          "Two tests configure columnpattern *_id or typeInt32, disableBSS, set lowrunthreshold and lz4/zstd; fixture1000rows with100/50runs. AssertdebugGeneral+RLE orRLE respectively, not roundtrip or exactratio/codecbytes. baselineStructuralU16 policy."
+        ],
+        [
+          1674,
+          1716,
+          "Bitpacking-gated regression #6626 uses1024zeros then1024ones u16, assertsOutOfLine debug. Parameterized full-width rejection uses1600(runt) and2048(whole) signed64 -1values, asserts try_bitpacking_blockNone. Tests coverzero statsegment andfullbitwidthskip, no direct malformedstatcase."
+        ],
+        [
+          1717,
+          1771,
+          "Sparse RLE block header test uses two i32 repeated42, expectsrawValueEncoder/Flat since8-byteheader defeats savings. Bitpacking-gated sparse test uses2048u16 alternatingruns length2 and assertsOutOfLine selected/descriptor. Both create actualcompressed data but discardpayload; no decoding."
+        ],
+        [
+          1772,
+          1823,
+          "Bitpacking-gated mini test uses256u64,64runs each4 alternating3/4/5 and assertsInline, notRLE. check_uncompressed_encoding requires chain variable->flat oflength2 orflat length1; it examines descriptors, not payload equality."
+        ],
+        [
+          1824,
+          1866,
+          "test_none_compression configures embeddings columnnone and tests fixed32/1000 plus variable32/10 average32768 for bothmini andpervalue. Compresses and assertsraw descriptorchains only; no roundtrip/count/bytecomparison orwholeblockcase."
+        ],
+        [
+          1867,
+          1907,
+          "Metadata-none test repeats bothinterfaces forBinaryfield metadata exactnone andsamefixed/variablefixtures. Verifies strategy metadata path throughdescriptornames; mismatchedfielddatatype/fixedpayload accepted bytest."
+        ],
+        [
+          1908,
+          1961,
+          "AutomaticFSST tests same4096-rowcandidate: Binaryfield selectsBinaryMini+VariableEncoder and excludesFSSTdebug, Utf8 selectsFsstMini+FsstPerValue. They inspect factories only, do not compress/decode orcoverLargeBinary/thresholdboundaries."
+        ],
+        [
+          1962,
+          2017,
+          "ExplicitFSST Binaryfield test overridesexclusion andexpectsFSSTbothfactories. zstd-gated largepervalue test uses64values average40KiB andlevel19, assertsdebugZstdBufferCompressor andcompression_level19; no actualpayloadroundtrip orlz4/unknownrequestcase."
+        ],
+        [
+          2018,
+          2082,
+          "Parameter merge test setsInt32type lz4/threshold.5 anduser_idcolumn zstd/level6/threshold.2; assertscolumnwins plusotherfieldtypefallback. Pattern test log_* matcheslog_messages but notmessages_log. These test parameter APIs, not metadata invalidvaluebehavior orfullpatternprecedence."
+        ],
+        [
+          2083,
+          2116,
+          "Legacy_metadata_support name means fieldmetadata exactnone, not legacyfileformat; assertsValueEncoder. Defaultbehavior fixture requests600runs/1000 but integer helperrealizes1000runs; acceptsrawValue orInline. Comments naming600runs are inaccurate for fixturealgorithm."
+        ],
+        [
+          2117,
+          2159,
+          "Metadata compression zstdlevel6 test assertsGeneralMini only, notlevelorinnercodec. MetadataRLEthreshold.8 withBSSoff and100runs/1000 assertsRLEdebug. No malformedmetadata/rangevalidation tests."
+        ],
+        [
+          2160,
+          2210,
+          "Sparse mini1000repeated7 i32 withthreshold1/BSSoff encodesu16runlength. Samefixture underStructuralU16/U32 preservesu8. These tests inspect directRLE descriptorFlat child width without roundtrip."
+        ],
+        [
+          2211,
+          2260,
+          "Sparse4096zeroi32 fixture assertsRLE andu16width, exercising selectedwidthcost beforebitpacking. Sparse sorted dictionaryindices four300-value runs likewiseexpectu16. No explicitraw bytecostassertion."
+        ],
+        [
+          2261,
+          2340,
+          "Sparse10runs each128values keepsu8. Feature-gated lz4-or-zstd request over8192 distinctu32 runs of4 withBSSoff/threshold1 underStructuralU16/U32 assertsbothRLEchildrenFlat; helper toleratesGeneralouterwrapper. Confirms released-mode childgrammar, notabsenceofoutergeneralcompression."
+        ],
+        [
+          2341,
+          2382,
+          "Bitpacking-gated sparse8192i32 runs of4 assertsRLE, valueschildOutOfLine andrunlengthchildFlat. Doesnotdecode, anddoesnotassertallchildmetadatawidths/payloadcost."
+        ],
+        [
+          2383,
+          2430,
+          "Bitpacking-gated sparse8192u64 runs of8 cycling3/4/5 assertsRLE survivescomparisonwithInline afterchildselection; valuesOutOfLine andlengthsFlat. No actualroundtrip orprecisesizethresholdassertion."
+        ],
+        [
+          2431,
+          2490,
+          "Metadata override test replaces columnlz4/threshold.3 withmetadata none andexpectsValueEncoder. Mixedconfiguration leaves typelz4/threshold.5, addsmetadatalevel3, assertsGeneralMini only; despitecomment it doesnotassertlevel3."
+        ],
+        [
+          2491,
+          2533,
+          "BSSmetadata testsFloat32/100 andFloat64/100 withon+lz4; assertBSS orGeneralMini+BSS debug. Fixtures are bytepatterns, not numerictemperature/distribution. No automaticheuristicboundaryoractualroundtrip here."
+        ],
+        [
+          2534,
+          2586,
+          "Feature-gated generalblockStructuralU32 test FixedSizeBinary3 =>24bits/1024values requests availablelz4preferelsezstd, assertGeneraldescriptor,defaultdecode andexactbits,count,allpayloadbytes. This isactualtestcode forroundtrip butnotexecuted inKBtask."
+        ],
+        [
+          2587,
+          2640,
+          "Private gated assert_general_block_preserves_compression_level builds24-bit1024fixture andcomparesentireBufferCompression descriptor againstrequested scheme/Optionlevel. zstdcaseassertsNone retained; lz4caseassertsSome7 retained. Testsdescriptorconfiguration, not runtimecodec honoring of level."
+        ],
+        [
+          2641,
+          2698,
+          "Feature-gated StructuralU16 explicitgeneralrequest test assertsnoGeneralblockdescriptor. StructuralU32 none over24bits/20000 (>32768bytes) confirmsautomaticgeneraldisabled. Neither assertswhichalternativecodec exceptnonGeneral."
+        ],
+        [
+          2699,
+          2750,
+          "Sparse70000repeated42 i32 block choosesu32runlength, defaultdecoderroundtripsallvalues. StructuralU32 samefixturekeepsu8 andchecksdescriptoronly. No directu16blockcasehere. Testmodegatesmustbecrosscheckedagainstproductionstrategies."
+        ],
+        [
+          2751,
+          2821,
+          "Two blockpolicytests create1000u16values as10runs of100: StructuralU32 assertsRLEdebug; StructuralU16 assertsnotRLE. File ends 40 test functions (oneparameterizedtwocases), helpers andmodulebrace. Local gaps: decoder malformed/missingmetadata,customnestedstrategy,negative/nonfiniteparams,invalidstatmaps,per-valuefallback edgecases,no-bitpacking builds andstrictthresholdboundary. Alltestsread,noneexecuted."
+        ]
+      ]
+    }
+  ]
+}

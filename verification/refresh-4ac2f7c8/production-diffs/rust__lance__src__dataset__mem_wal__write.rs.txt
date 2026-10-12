@@ -1,0 +1,486 @@
+@@ -37,10 +37,7 @@ use tokio_util::sync::CancellationToken;
+   37  use tracing::instrument;
+   38  use uuid::Uuid;
+   39  
+   40 -pub use super::index::{
+   41 -    BTreeIndexConfig, BTreeMemIndex, FtsIndexConfig, HnswIndexConfig, IndexStore, MemIndexConfig,
+   42 -    MemIndexKind, validate_index_configs,
+   43 -};
+   40 +pub use super::index::{BTreeMemIndex, IndexStore, MemIndexSpec, validate_index_specs};
+   41  pub use super::memtable::CacheConfig;
+   42  pub use super::memtable::MemTable;
+   43  pub use super::memtable::batch_store::{BatchStore, StoreFull, StoredBatch};
+
+@@ -49,6 +46,7 @@ pub use super::memtable::scanner::MemTableScanner;
+   46  pub use super::util::{WatchableOnceCell, WatchableOnceCellReader};
+   47  pub use super::wal::{WalEntry, WalEntryData, WalFlushFailure, WalFlushResult, WalFlusher};
+   48  
+   49 +use super::index::{MemIndexPlugin, MemIndexRegistry};
+   50  use super::memtable::flush::TriggerMemTableFlush;
+   51  use super::observer::WalObserver;
+   52  use super::scanner::InMemoryMemTableRef;
+
+@@ -195,7 +193,7 @@ pub struct ShardWriterConfig {
+  193      ///
+  194      /// When `false`, the writer skips the MemTable layer entirely:
+  195      /// - No MemTable / BatchStore / IndexStore is allocated.
+  198 -    /// - `index_configs` must be empty (validated at open time).
+  196 +    /// - `index_specs` must be empty (validated at open time).
+  197      /// - No MemTable freezing or Lance file flushing happens.
+  198      /// - `max_unflushed_memtable_bytes` is reused as the backpressure
+  199      ///   budget for the WAL-only pending-batch queue: `put` blocks while
+
+@@ -219,13 +217,28 @@ pub struct ShardWriterConfig {
+  217      /// MemTable (and, on flush, the on-disk graph serialized from it). They are
+  218      /// a property of the writer that builds the MemTable, not of the index
+  219      /// definition: each SSTable is independent, so different writers
+  222 -    /// may use different parameters. An index without an entry uses the default
+  223 -    /// build parameters. `num_edges` is the HNSW graph degree (level 0 retains
+  220 +    /// may use different parameters. An index with no entry here or in
+  221 +    /// [`index_overrides`](Self::index_overrides) uses the default build
+  222 +    /// parameters. `num_edges` is the HNSW graph degree (level 0 retains
+  223      /// `2 * num_edges`), equivalent to FAISS's `M`.
+  224      ///
+  225      /// Default: empty.
+  226      pub hnsw_params: HashMap<String, HnswBuildParams>,
+  227  
+  228 +    /// Settings for the plugin maintaining an index, by index name, as the
+  229 +    /// type the plugin reads through
+  230 +    /// [`ResolveContext::overrides`](super::index::ResolveContext::overrides).
+  231 +    /// Naming an index here and in [`hnsw_params`](Self::hnsw_params) is an
+  232 +    /// error. Each writer passes its own: these are not recorded as writer
+  233 +    /// defaults.
+  234 +    ///
+  235 +    /// Default: empty.
+  236 +    pub index_overrides: HashMap<String, Arc<dyn std::any::Any + Send + Sync>>,
+  237 +
+  238 +    /// The memtable index plugins this writer can maintain. Defaults to the
+  239 +    /// kinds Lance builds in.
+  240 +    pub mem_index_registry: MemIndexRegistry,
+  241 +
+  242      /// Optional warmer fired pre-commit for each new generation (zero cold reads
+  243      /// on first query). Wired to the flusher; supplied by the consumer (e.g. the
+  244      /// WAL pod). Default: `None`.
+
+@@ -281,6 +294,8 @@ impl Default for ShardWriterConfig {
+  294              frozen_memtable_grace: Duration::ZERO,
+  295              enable_memtable: true,
+  296              hnsw_params: HashMap::new(),
+  297 +            index_overrides: HashMap::new(),
+  298 +            mem_index_registry: MemIndexRegistry::default(),
+  299              warmer: None,
+  300              observer: None,
+  301              store_params: None,
+
+@@ -400,6 +415,31 @@ impl ShardWriterConfig {
+  415          self
+  416      }
+  417  
+  418 +    /// Register a memtable index plugin. Fails if another plugin already
+  419 +    /// maintains the same base-table index.
+  420 +    pub fn with_mem_index_plugin(mut self, plugin: Arc<dyn MemIndexPlugin>) -> Result<Self> {
+  421 +        self.mem_index_registry.add_plugin(plugin)?;
+  422 +        Ok(self)
+  423 +    }
+  424 +
+  425 +    /// The plugins this writer maintains indexes with.
+  426 +    pub fn with_mem_index_registry(mut self, registry: MemIndexRegistry) -> Self {
+  427 +        self.mem_index_registry = registry;
+  428 +        self
+  429 +    }
+  430 +
+  431 +    /// Give the plugin maintaining `index_name` these settings, replacing any
+  432 +    /// given before.
+  433 +    pub fn with_index_override(
+  434 +        mut self,
+  435 +        index_name: impl Into<String>,
+  436 +        settings: impl std::any::Any + Send + Sync,
+  437 +    ) -> Self {
+  438 +        self.index_overrides
+  439 +            .insert(index_name.into(), Arc::new(settings));
+  440 +        self
+  441 +    }
+  442 +
+  443      /// Override the HNSW build parameters for a maintained vector index.
+  444      ///
+  445      /// Applies to the in-memory HNSW graph this writer builds for `index_name`
+
+@@ -1439,7 +1479,7 @@ async fn replay_memtable_from_wal(
+ 1479      pk_columns: &[String],
+ 1480      flusher: &MemTableFlusher,
+ 1481      wal_flusher: &WalFlusher,
+ 1442 -    index_configs: &[MemIndexConfig],
+ 1482 +    index_specs: &[MemIndexSpec],
+ 1483      max_memtable_size: usize,
+ 1484      max_memtable_rows: usize,
+ 1485      max_resident_bytes: usize,
+
+@@ -1496,7 +1536,7 @@ async fn replay_memtable_from_wal(
+ 1536                              our_epoch,
+ 1537                              position.saturating_sub(1),
+ 1538                              global_end,
+ 1499 -                            index_configs,
+ 1539 +                            index_specs,
+ 1540                          )
+ 1541                          .await?;
+ 1542                          active = make_memtable(generation, global_end, None)?;
+
+@@ -1529,7 +1569,7 @@ async fn replay_memtable_from_wal(
+ 1569                                  our_epoch,
+ 1570                                  position.saturating_sub(1),
+ 1571                                  global_end,
+ 1532 -                                index_configs,
+ 1572 +                                index_specs,
+ 1573                              )
+ 1574                              .await?;
+ 1575                          }
+
+@@ -1614,7 +1654,7 @@ async fn replay_memtable_from_wal(
+ 1654                              our_epoch,
+ 1655                              covered,
+ 1656                              global_end,
+ 1617 -                            index_configs,
+ 1657 +                            index_specs,
+ 1658                          )
+ 1659                          .await?;
+ 1660  
+
+@@ -1785,30 +1825,33 @@ async fn flush_replayed_memtable(
+ 1825      epoch: u64,
+ 1826      covered: u64,
+ 1827      durable: usize,
+ 1788 -    index_configs: &[MemIndexConfig],
+ 1828 +    index_specs: &[MemIndexSpec],
+ 1829  ) -> Result<()> {
+ 1830      index_replayed_batches(memtable).await?;
+ 1791 -    if index_configs.is_empty() {
+ 1831 +    if index_specs.is_empty() {
+ 1832          flusher.flush(memtable, epoch, covered, durable).await?;
+ 1833      } else {
+ 1794 -        Box::pin(flusher.flush_with_indexes(memtable, epoch, index_configs, covered, durable))
+ 1834 +        Box::pin(flusher.flush_with_indexes(memtable, epoch, index_specs, covered, durable))
+ 1835              .await?;
+ 1836      }
+ 1837      Ok(())
+ 1838  }
+ 1839  
+ 1840  /// Whether two maintained sets describe the same indexes.
+ 1801 -fn same_index_set(current: &[MemIndexConfig], next: &[MemIndexConfig]) -> bool {
+ 1841 +fn same_index_set(current: &[MemIndexSpec], next: &[MemIndexSpec]) -> bool {
+ 1842      if current.len() != next.len() {
+ 1843          return false;
+ 1844      }
+ 1845      // Names are unique within a set, so ordering by name is canonical.
+ 1806 -    fn by_name(configs: &[MemIndexConfig]) -> Vec<&MemIndexConfig> {
+ 1807 -        let mut configs: Vec<&MemIndexConfig> = configs.iter().collect();
+ 1808 -        configs.sort_unstable_by_key(|config| config.name());
+ 1809 -        configs
+ 1846 +    fn by_name(specs: &[MemIndexSpec]) -> Vec<&MemIndexSpec> {
+ 1847 +        let mut specs: Vec<&MemIndexSpec> = specs.iter().collect();
+ 1848 +        specs.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+ 1849 +        specs
+ 1850      }
+ 1811 -    by_name(current) == by_name(next)
+ 1851 +    by_name(current)
+ 1852 +        .into_iter()
+ 1853 +        .zip(by_name(next))
+ 1854 +        .all(|(a, b)| a.same_index(b))
+ 1855  }
+ 1856  
+ 1857  /// Pair each primary-key column name with its field id (both derived from the
+
+@@ -1961,19 +2004,19 @@ struct WriterSchema {
+ 2004      /// `storage` with Blob v2 payload columns replaced by their prepared
+ 2005      /// descriptors. Memtables are created under this one.
+ 2006      prepared: Arc<ArrowSchema>,
+ 1964 -    /// `storage` as a Lance schema, for validating index configs and resolving
+ 2007 +    /// `storage` as a Lance schema, for validating index specs and resolving
+ 2008      /// FTS field ids.
+ 2009      lance_schema: Schema,
+ 2010      pk_field_ids: Vec<i32>,
+ 2011      /// Primary-key column names, for each memtable's PK-position index.
+ 2012      pk_columns: Vec<String>,
+ 1970 -    index_configs: Arc<[MemIndexConfig]>,
+ 2013 +    index_specs: Arc<[MemIndexSpec]>,
+ 2014  }
+ 2015  
+ 2016  impl WriterSchema {
+ 2017      /// Derive the writer's schemas from the caller's, which should carry field
+ 2018      /// ids under `lance:field_id`.
+ 1976 -    fn try_new(schema: &ArrowSchema, index_configs: Vec<MemIndexConfig>) -> Result<Self> {
+ 2019 +    fn try_new(schema: &ArrowSchema, index_specs: Vec<MemIndexSpec>) -> Result<Self> {
+ 2020          // lance owns `_tombstone` and appends it here — idempotent across reopens.
+ 2021          let tombstoned = schema_with_tombstone(schema);
+ 2022          let pk_fields = Schema::try_from(tombstoned.as_ref())?;
+
+@@ -1993,24 +2036,24 @@ impl WriterSchema {
+ 2036              prepared,
+ 2037              pk_field_ids,
+ 2038              pk_columns,
+ 1996 -            index_configs: Arc::from([]),
+ 2039 +            index_specs: Arc::from([]),
+ 2040          }
+ 1998 -        .with_index_configs(index_configs)
+ 2041 +        .with_index_specs(index_specs)
+ 2042      }
+ 2043  
+ 2001 -    /// The same schema with `index_configs` instead.
+ 2044 +    /// The same schema with `index_specs` instead.
+ 2045      ///
+ 2046      /// A bad config is rejected before any row is accepted, since it would
+ 2047      /// fail every insert, including WAL replay.
+ 2005 -    fn with_index_configs(&self, index_configs: Vec<MemIndexConfig>) -> Result<Self> {
+ 2006 -        validate_index_configs(
+ 2007 -            &index_configs,
+ 2048 +    fn with_index_specs(&self, index_specs: Vec<MemIndexSpec>) -> Result<Self> {
+ 2049 +        validate_index_specs(
+ 2050 +            &index_specs,
+ 2051              self.storage.as_ref(),
+ 2052              &self.lance_schema,
+ 2053              &self.pk_columns,
+ 2054          )?;
+ 2055          Ok(Self {
+ 2013 -            index_configs: index_configs.into(),
+ 2056 +            index_specs: index_specs.into(),
+ 2057              ..self.clone()
+ 2058          })
+ 2059      }
+
+@@ -2025,7 +2068,7 @@ impl WriterSchema {
+ 2068      fn is_equivalent(&self, other: &Self) -> bool {
+ 2069          self.storage == other.storage
+ 2070              && self.logical == other.logical
+ 2028 -            && same_index_set(&self.index_configs, &other.index_configs)
+ 2071 +            && same_index_set(&self.index_specs, &other.index_specs)
+ 2072      }
+ 2073  
+ 2074      /// A new memtable under this schema at the given generation and offset.
+
+@@ -2062,8 +2105,12 @@ impl WriterSchema {
+ 2105              global_offset,
+ 2106              target,
+ 2107          )?;
+ 2065 -        let mut indexes =
+ 2066 -            IndexStore::from_configs(&self.index_configs, max_memtable_rows, batch_capacity)?;
+ 2108 +        let mut indexes = IndexStore::from_specs(
+ 2109 +            &self.index_specs,
+ 2110 +            &self.lance_schema,
+ 2111 +            max_memtable_rows,
+ 2112 +            batch_capacity,
+ 2113 +        )?;
+ 2114          if !self.pk_columns.is_empty() {
+ 2115              indexes.enable_pk_index(&pk_index_columns(&self.pk_columns, &self.pk_field_ids));
+ 2116          }
+
+@@ -2374,7 +2421,7 @@ impl SharedWriterState {
+ 2421  
+ 2422          let _ = self.memtable_flush_tx.send(TriggerMemTableFlush::Flush {
+ 2423              memtable: frozen_memtable,
+ 2377 -            index_configs: Arc::clone(&old_schema.index_configs),
+ 2424 +            index_specs: Arc::clone(&old_schema.index_specs),
+ 2425              done: None,
+ 2426          });
+ 2427  
+
+@@ -2617,14 +2664,14 @@ impl ShardWriter {
+ 2664      /// `schema` should carry each field's id under `lance:field_id` in its
+ 2665      /// field metadata; without them a replayed entry is matched by name, which
+ 2666      /// a rename loses.
+ 2620 -    #[instrument(name = "sw_open", level = "info", skip_all, fields(shard_id = %config.shard_id, index_count = index_configs.len()))]
+ 2667 +    #[instrument(name = "sw_open", level = "info", skip_all, fields(shard_id = %config.shard_id, index_count = index_specs.len()))]
+ 2668      pub async fn open(
+ 2669          object_store: Arc<ObjectStore>,
+ 2670          base_path: Path,
+ 2671          base_uri: impl Into<String>,
+ 2672          config: ShardWriterConfig,
+ 2673          schema: Arc<ArrowSchema>,
+ 2627 -        index_configs: Vec<MemIndexConfig>,
+ 2674 +        index_specs: Vec<MemIndexSpec>,
+ 2675      ) -> Result<Self> {
+ 2676          Box::pin(Self::open_inner(
+ 2677              object_store,
+
+@@ -2632,7 +2679,7 @@ impl ShardWriter {
+ 2679              base_uri.into(),
+ 2680              config,
+ 2681              schema,
+ 2635 -            index_configs,
+ 2682 +            index_specs,
+ 2683          ))
+ 2684          .await
+ 2685      }
+
+@@ -2643,9 +2690,9 @@ impl ShardWriter {
+ 2690          base_uri: String,
+ 2691          config: ShardWriterConfig,
+ 2692          schema: Arc<ArrowSchema>,
+ 2646 -        index_configs: Vec<MemIndexConfig>,
+ 2693 +        index_specs: Vec<MemIndexSpec>,
+ 2694      ) -> Result<Self> {
+ 2648 -        if !config.enable_memtable && !index_configs.is_empty() {
+ 2695 +        if !config.enable_memtable && !index_specs.is_empty() {
+ 2696              return Err(Error::invalid_input(
+ 2697                  "indexes require enable_memtable = true; \
+ 2698                   WAL-only mode does not maintain in-memory indexes",
+
+@@ -2678,11 +2725,11 @@ impl ShardWriter {
+ 2725          // Derive PK metadata and run every side-effect-free validation *before*
+ 2726          // claiming the epoch. `claim_epoch` durably bumps the stored epoch and,
+ 2727          // for a successor, `write_fence_sentinel` fences the predecessor — so an
+ 2681 -        // open doomed by purely local input (an index config that disagrees with
+ 2728 +        // open doomed by purely local input (an index spec that disagrees with
+ 2729          // the schema) must fail here, before it can knock the healthy incumbent off
+ 2730          // the shard. Memtable-only: WAL-only mode has no indexes to validate.
+ 2731          let writer_schema = if config.enable_memtable {
+ 2685 -            let writer_schema = WriterSchema::try_new(&schema, index_configs)?;
+ 2732 +            let writer_schema = WriterSchema::try_new(&schema, index_specs)?;
+ 2733  
+ 2734              // An HNSW graph reserves its whole capacity before the first insert,
+ 2735              // but the seal trigger only measures row bytes. A reservation with no
+
+@@ -2709,8 +2756,9 @@ impl ShardWriter {
+ 2756  
+ 2757                  // Built the way `make_bound_memtable` builds it below, so this is
+ 2758                  // the figure the controller will actually read.
+ 2712 -                let mut indexes = IndexStore::from_configs(
+ 2713 -                    &writer_schema.index_configs,
+ 2759 +                let mut indexes = IndexStore::from_specs(
+ 2760 +                    &writer_schema.index_specs,
+ 2761 +                    &writer_schema.lance_schema,
+ 2762                      config.max_memtable_rows,
+ 2763                      config.max_memtable_batches,
+ 2764                  )?;
+
+@@ -2915,7 +2963,7 @@ impl ShardWriter {
+ 2963              &schema.pk_columns,
+ 2964              &flusher,
+ 2965              &wal_flusher,
+ 2918 -            &schema.index_configs,
+ 2966 +            &schema.index_specs,
+ 2967              config.max_memtable_size,
+ 2968              config.max_memtable_rows,
+ 2969              config.max_unflushed_memtable_bytes,
+
+@@ -3715,9 +3763,9 @@ impl ShardWriter {
+ 3763                      .read()
+ 3764                      .await
+ 3765                      .schema
+ 3718 -                    .index_configs
+ 3766 +                    .index_specs
+ 3767                      .iter()
+ 3720 -                    .map(|config| config.name().to_string())
+ 3768 +                    .map(|spec| spec.name.clone())
+ 3769                      .collect();
+ 3770                  names.sort_unstable();
+ 3771                  names
+
+@@ -3915,7 +3963,7 @@ impl ShardWriter {
+ 3963          }))
+ 3964      }
+ 3965  
+ 3918 -    /// Switch this writer to `schema` and `index_configs` without reopening it.
+ 3966 +    /// Switch this writer to `schema` and `index_specs` without reopening it.
+ 3967      ///
+ 3968      /// The active memtable is sealed and flushed under its old schema. Reads
+ 3969      /// match columns by field id, so older rows show up under the new names.
+
+@@ -3941,10 +3989,10 @@ impl ShardWriter {
+ 3989      pub async fn evolve_schema(
+ 3990          &self,
+ 3991          schema: Arc<ArrowSchema>,
+ 3944 -        index_configs: Vec<MemIndexConfig>,
+ 3992 +        index_specs: Vec<MemIndexSpec>,
+ 3993      ) -> Result<Option<SealFence>> {
+ 3994          self.replace_writer_schema("evolve_schema", |_current| {
+ 3947 -            WriterSchema::try_new(&schema, index_configs)
+ 3995 +            WriterSchema::try_new(&schema, index_specs)
+ 3996          })
+ 3997          .await
+ 3998      }
+
+@@ -4016,20 +4064,20 @@ impl ShardWriter {
+ 4064      /// rows answer neither search until compaction.
+ 4065      ///
+ 4066      /// `Ok(None)` when the set is already current; nothing is sealed.
+ 4019 -    #[instrument(name = "sw_replace_index_configs", level = "info", skip_all, fields(shard_id = %self.config.shard_id, epoch = self.epoch, index_count = configs.len()))]
+ 4067 +    #[instrument(name = "sw_replace_index_configs", level = "info", skip_all, fields(shard_id = %self.config.shard_id, epoch = self.epoch, index_count = specs.len()))]
+ 4068      pub async fn replace_index_configs(
+ 4069          &self,
+ 4022 -        configs: Vec<MemIndexConfig>,
+ 4070 +        specs: Vec<MemIndexSpec>,
+ 4071      ) -> Result<Option<SealFence>> {
+ 4072          // Usually already current: check under the read lock and skip the
+ 4073          // fence check, which reads the manifest.
+ 4074          if let WriterMode::MemTable { state, .. } = &self.mode
+ 4027 -            && same_index_set(&state.read().await.schema.index_configs, &configs)
+ 4075 +            && same_index_set(&state.read().await.schema.index_specs, &specs)
+ 4076          {
+ 4077              return Ok(None);
+ 4078          }
+ 4079          self.replace_writer_schema("replace_index_configs", |current| {
+ 4032 -            current.with_index_configs(configs)
+ 4080 +            current.with_index_specs(specs)
+ 4081          })
+ 4082          .await
+ 4083      }
+
+@@ -4756,10 +4804,10 @@ impl MessageHandler<TriggerMemTableFlush> for MemTableFlushHandler {
+ 4804          match message {
+ 4805              TriggerMemTableFlush::Flush {
+ 4806                  memtable,
+ 4759 -                index_configs,
+ 4807 +                index_specs,
+ 4808                  done,
+ 4809              } => {
+ 4762 -                let result = self.flush_memtable(memtable, &index_configs).await;
+ 4810 +                let result = self.flush_memtable(memtable, &index_specs).await;
+ 4811                  if let Some(tx) = done {
+ 4812                      // Send result through the channel - caller is waiting for it
+ 4813                      let _ = tx.send(result);
+
+@@ -4785,13 +4833,13 @@ impl MemTableFlushHandler {
+ 4833      /// for this memtable. Otherwise `wait_for_flush_drain` would observe a
+ 4834      /// dropped watch channel and return `Err` instead of the actual outcome.
+ 4835      ///
+ 4788 -    /// `index_configs` are the indexes the memtable was built with. They are
+ 4836 +    /// `index_specs` are the indexes the memtable was built with. They are
+ 4837      /// rebuilt on the generation, without which `fast_search` misses its rows.
+ 4838      #[instrument(name = "mt_flush", level = "info", skip_all, fields(generation = memtable.generation(), row_count = memtable.row_count()))]
+ 4839      async fn flush_memtable(
+ 4840          &mut self,
+ 4841          memtable: Arc<MemTable>,
+ 4794 -        index_configs: &[MemIndexConfig],
+ 4842 +        index_specs: &[MemIndexSpec],
+ 4843      ) -> Result<super::memtable::flush::FlushResult> {
+ 4844          let start = Instant::now();
+ 4845  
+
+@@ -4830,7 +4878,7 @@ impl MemTableFlushHandler {
+ 4878              // `batch_count` is fixed at freeze, so this waits for a target that
+ 4879              // cannot move, and the watcher surfaces a poisoned writer rather
+ 4880              // than blocking on a cursor that will never arrive.
+ 4833 -            if !index_configs.is_empty()
+ 4881 +            if !index_specs.is_empty()
+ 4882                  && let Some(indexes) = memtable.indexes_arc()
+ 4883              {
+ 4884                  let target_indexed = memtable.batch_count();
+
+@@ -4862,7 +4910,7 @@ impl MemTableFlushHandler {
+ 4910              // short of it and trip the flush precondition.
+ 4911              let durable = self.wal_flusher.durable();
+ 4912  
+ 4865 -            if index_configs.is_empty() {
+ 4913 +            if index_specs.is_empty() {
+ 4914                  self.flusher
+ 4915                      .flush(&memtable, self.epoch, covered_wal_entry_position, durable)
+ 4916                      .await
+
+@@ -4870,7 +4918,7 @@ impl MemTableFlushHandler {
+ 4918                  Box::pin(self.flusher.flush_with_indexes(
+ 4919                      &memtable,
+ 4920                      self.epoch,
+ 4873 -                    index_configs,
+ 4921 +                    index_specs,
+ 4922                      covered_wal_entry_position,
+ 4923                      durable,
+ 4924                  ))

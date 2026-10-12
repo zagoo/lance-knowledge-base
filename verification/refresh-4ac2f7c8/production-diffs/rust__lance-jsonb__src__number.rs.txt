@@ -1,0 +1,1320 @@
+@@ -0,0 +1,1717 @@
+    1 +// SPDX-License-Identifier: Apache-2.0
+    2 +// SPDX-FileCopyrightText: Copyright The Lance Authors
+    3 +// SPDX-FileCopyrightText: Copyright 2023 Datafuse Labs
+    4 +// Adapted from databendlabs/jsonb at commit fba895c5ebe77ce2539e187f9c652f51cbf195c3.
+    5 +
+    6 +use std::cmp::Ordering;
+    7 +use std::convert::TryFrom;
+    8 +use std::fmt::Debug;
+    9 +use std::fmt::Display;
+   10 +use std::fmt::Formatter;
+   11 +
+   12 +use crate::Error;
+   13 +use crate::error::Result;
+   14 +
+   15 +use ethnum::U256;
+   16 +use ethnum::i256;
+   17 +use num_traits::AsPrimitive;
+   18 +use num_traits::Bounded;
+   19 +use ordered_float::OrderedFloat;
+   20 +use serde::de;
+   21 +use serde::de::Deserialize;
+   22 +use serde::de::Deserializer;
+   23 +use serde::de::Visitor;
+   24 +use serde::ser::Serialize;
+   25 +use serde::ser::Serializer;
+   26 +
+   27 +// Pre-calculate powers of 10 for common scales to avoid repeated computation
+   28 +const I128_POWERS_OF_10: [i128; 39] = [
+   29 +    1,
+   30 +    10,
+   31 +    100,
+   32 +    1000,
+   33 +    10000,
+   34 +    100000,
+   35 +    1000000,
+   36 +    10000000,
+   37 +    100000000,
+   38 +    1000000000,
+   39 +    10000000000,
+   40 +    100000000000,
+   41 +    1000000000000,
+   42 +    10000000000000,
+   43 +    100000000000000,
+   44 +    1000000000000000,
+   45 +    10000000000000000,
+   46 +    100000000000000000,
+   47 +    1000000000000000000,
+   48 +    10000000000000000000,
+   49 +    100000000000000000000,
+   50 +    1000000000000000000000,
+   51 +    10000000000000000000000,
+   52 +    100000000000000000000000,
+   53 +    1000000000000000000000000,
+   54 +    10000000000000000000000000,
+   55 +    100000000000000000000000000,
+   56 +    1000000000000000000000000000,
+   57 +    10000000000000000000000000000,
+   58 +    100000000000000000000000000000,
+   59 +    1000000000000000000000000000000,
+   60 +    10000000000000000000000000000000,
+   61 +    100000000000000000000000000000000,
+   62 +    1000000000000000000000000000000000,
+   63 +    10000000000000000000000000000000000,
+   64 +    100000000000000000000000000000000000,
+   65 +    1000000000000000000000000000000000000,
+   66 +    10000000000000000000000000000000000000,
+   67 +    100000000000000000000000000000000000000,
+   68 +];
+   69 +
+   70 +// Pre-calculate leading zeros to avoid repeated computation
+   71 +const LEADING_ZEROS: [&str; 38] = [
+   72 +    "",
+   73 +    "0",
+   74 +    "00",
+   75 +    "000",
+   76 +    "0000",
+   77 +    "00000",
+   78 +    "000000",
+   79 +    "0000000",
+   80 +    "00000000",
+   81 +    "000000000",
+   82 +    "0000000000",
+   83 +    "00000000000",
+   84 +    "000000000000",
+   85 +    "0000000000000",
+   86 +    "00000000000000",
+   87 +    "000000000000000",
+   88 +    "0000000000000000",
+   89 +    "00000000000000000",
+   90 +    "000000000000000000",
+   91 +    "0000000000000000000",
+   92 +    "00000000000000000000",
+   93 +    "000000000000000000000",
+   94 +    "0000000000000000000000",
+   95 +    "00000000000000000000000",
+   96 +    "000000000000000000000000",
+   97 +    "0000000000000000000000000",
+   98 +    "00000000000000000000000000",
+   99 +    "000000000000000000000000000",
+  100 +    "0000000000000000000000000000",
+  101 +    "00000000000000000000000000000",
+  102 +    "000000000000000000000000000000",
+  103 +    "0000000000000000000000000000000",
+  104 +    "00000000000000000000000000000000",
+  105 +    "000000000000000000000000000000000",
+  106 +    "0000000000000000000000000000000000",
+  107 +    "00000000000000000000000000000000000",
+  108 +    "000000000000000000000000000000000000",
+  109 +    "0000000000000000000000000000000000000",
+  110 +];
+  111 +
+  112 +const I128_SCALE: usize = 38;
+  113 +
+  114 +static I256_DIVIDE_SCALE: std::sync::LazyLock<i256> =
+  115 +    std::sync::LazyLock::new(|| i256::from(100000000000000000000000000000000000000_i128));
+  116 +
+  117 +/// Represents a decimal number with 64-bit precision.
+  118 +///
+  119 +/// This structure stores a decimal value as an integer with a scale factor,
+  120 +/// allowing for precise representation of decimal numbers without floating-point errors.
+  121 +/// The scale indicates how many decimal places the value has (e.g., scale=2 means 2 decimal places).
+  122 +#[derive(Debug, Clone)]
+  123 +pub struct Decimal64 {
+  124 +    /// Number of decimal places (e.g., 2 for values like 123.45)
+  125 +    pub scale: u8,
+  126 +    /// The actual value, scaled by 10^scale (e.g., 12345 for 123.45 with scale=2)
+  127 +    pub value: i64,
+  128 +}
+  129 +
+  130 +impl Decimal64 {
+  131 +    /// Converts the decimal value to a floating-point representation.
+  132 +    ///
+  133 +    /// This is useful when you need to perform floating-point operations,
+  134 +    /// but note that it may introduce precision loss inherent to floating-point arithmetic.
+  135 +    pub(crate) fn to_float64(&self) -> f64 {
+  136 +        let div = 10_f64.powi(self.scale as i32);
+  137 +        self.value as f64 / div
+  138 +    }
+  139 +}
+  140 +
+  141 +/// Represents a decimal number with 128-bit precision.
+  142 +///
+  143 +/// Similar to Decimal64 but with a larger range, this structure can represent
+  144 +/// very large decimal numbers with high precision, suitable for financial calculations
+  145 +/// and other domains requiring exact decimal arithmetic beyond 64-bit limits.
+  146 +#[derive(Debug, Clone)]
+  147 +pub struct Decimal128 {
+  148 +    /// Number of decimal places
+  149 +    pub scale: u8,
+  150 +    /// The actual value, scaled by 10^scale
+  151 +    pub value: i128,
+  152 +}
+  153 +
+  154 +impl Decimal128 {
+  155 +    /// Converts the decimal value to a floating-point representation.
+  156 +    ///
+  157 +    /// Note that for very large values, this conversion may lose precision
+  158 +    /// as f64 has limited precision compared to i128.
+  159 +    pub(crate) fn to_float64(&self) -> f64 {
+  160 +        let div = 10_f64.powi(self.scale as i32);
+  161 +        self.value as f64 / div
+  162 +    }
+  163 +}
+  164 +
+  165 +/// Represents a decimal number with 256-bit precision.
+  166 +///
+  167 +/// This structure provides the highest level of precision for decimal numbers,
+  168 +/// capable of representing extremely large values with exact decimal precision.
+  169 +/// Useful for cryptographic applications, high-precision scientific calculations,
+  170 +/// or any domain requiring arithmetic beyond 128-bit precision.
+  171 +#[derive(Debug, Clone)]
+  172 +pub struct Decimal256 {
+  173 +    /// Number of decimal places
+  174 +    pub scale: u8,
+  175 +    /// The actual value, scaled by 10^scale
+  176 +    pub value: i256,
+  177 +}
+  178 +
+  179 +impl Decimal256 {
+  180 +    /// Converts the decimal value to a floating-point representation.
+  181 +    ///
+  182 +    /// For extremely large values, significant precision loss may occur
+  183 +    /// as f64 has much lower precision than i256.
+  184 +    pub(crate) fn to_float64(&self) -> f64 {
+  185 +        let div = 10_f64.powi(self.scale as i32);
+  186 +        self.value.as_f64() / div
+  187 +    }
+  188 +}
+  189 +
+  190 +/// Represents a JSON number with multiple possible internal representations.
+  191 +///
+  192 +/// This enum provides a unified type for JSON numbers while supporting various
+  193 +/// internal representations to optimize for different use cases:
+  194 +/// - Integer types (signed/unsigned) for whole numbers
+  195 +/// - Floating-point for scientific notation or fractional values
+  196 +/// - Decimal types for exact decimal representation with different precision levels
+  197 +///
+  198 +/// The parser automatically selects the most appropriate representation based on
+  199 +/// the input value's characteristics, allowing for both performance and precision.
+  200 +#[derive(Debug, Clone)]
+  201 +pub enum Number {
+  202 +    /// 64-bit signed integer, suitable for most whole numbers
+  203 +    Int64(i64),
+  204 +    /// 64-bit unsigned integer, for large positive whole numbers
+  205 +    UInt64(u64),
+  206 +    /// 64-bit floating-point, for scientific notation and approximate decimals
+  207 +    Float64(f64),
+  208 +    /// 64-bit decimal with exact precision, for financial calculations
+  209 +    Decimal64(Decimal64),
+  210 +    /// 128-bit decimal with extended precision, for larger exact decimals
+  211 +    Decimal128(Decimal128),
+  212 +    /// 256-bit decimal with maximum precision, for extremely large exact decimals
+  213 +    Decimal256(Decimal256),
+  214 +}
+  215 +
+  216 +impl<'de> Deserialize<'de> for Number {
+  217 +    /// Deserializes a JSON number into the Number enum.
+  218 +    ///
+  219 +    /// This implementation supports deserialization from JSON integers and floats.
+  220 +    /// It automatically selects the most suitable internal representation based on the input value.
+  221 +    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+  222 +    where
+  223 +        D: Deserializer<'de>,
+  224 +    {
+  225 +        struct NumberVisitor;
+  226 +
+  227 +        impl Visitor<'_> for NumberVisitor {
+  228 +            type Value = Number;
+  229 +
+  230 +            /// Returns a string describing the expected input format.
+  231 +            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+  232 +                formatter.write_str("a number (int64, uint64, or float64)")
+  233 +            }
+  234 +
+  235 +            /// Visits an i64 value and returns a Number::Int64 variant.
+  236 +            fn visit_i64<E>(self, v: i64) -> std::result::Result<Self::Value, E>
+  237 +            where
+  238 +                E: de::Error,
+  239 +            {
+  240 +                Ok(Number::Int64(v))
+  241 +            }
+  242 +
+  243 +            /// Visits a u64 value and returns a Number::UInt64 variant.
+  244 +            fn visit_u64<E>(self, v: u64) -> std::result::Result<Self::Value, E>
+  245 +            where
+  246 +                E: de::Error,
+  247 +            {
+  248 +                Ok(Number::UInt64(v))
+  249 +            }
+  250 +
+  251 +            /// Visits an f64 value and returns a Number::Float64 variant.
+  252 +            fn visit_f64<E>(self, v: f64) -> std::result::Result<Self::Value, E>
+  253 +            where
+  254 +                E: de::Error,
+  255 +            {
+  256 +                Ok(Number::Float64(v))
+  257 +            }
+  258 +        }
+  259 +        deserializer.deserialize_any(NumberVisitor)
+  260 +    }
+  261 +}
+  262 +
+  263 +impl Serialize for Number {
+  264 +    /// Serializes the Number enum into a JSON number.
+  265 +    ///
+  266 +    /// This implementation supports serialization to JSON integers and floats.
+  267 +    /// Decimal types are converted to f64.
+  268 +    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+  269 +    where
+  270 +        S: Serializer,
+  271 +    {
+  272 +        match self {
+  273 +            Self::Int64(v) => serializer.serialize_i64(*v),
+  274 +            Self::UInt64(v) => serializer.serialize_u64(*v),
+  275 +            Self::Float64(v) => serializer.serialize_f64(*v),
+  276 +            Self::Decimal64(_) | Self::Decimal128(_) | Self::Decimal256(_) => {
+  277 +                let (value, scale) = match self {
+  278 +                    Self::Decimal64(v) => (v.value as f64, v.scale as i32),
+  279 +                    Self::Decimal128(v) => (v.value as f64, v.scale as i32),
+  280 +                    Self::Decimal256(v) => (v.value.as_f64(), v.scale as i32),
+  281 +                    _ => unreachable!(),
+  282 +                };
+  283 +                let scaled_value = value / 10f64.powi(scale);
+  284 +                serializer.serialize_f64(scaled_value)
+  285 +            }
+  286 +        }
+  287 +    }
+  288 +}
+  289 +
+  290 +impl Number {
+  291 +    /// Returns the i64 representation of the number, if possible.
+  292 +    ///
+  293 +    /// Decimal values are converted only when their fractional part is zero.
+  294 +    /// Floating-point values are converted only when they already represent an
+  295 +    /// integer value. This method returns `None` if the value cannot be
+  296 +    /// represented as an `i64`.
+  297 +    pub(crate) fn as_i64(&self) -> Option<i64> {
+  298 +        match self {
+  299 +            Self::Int64(v) => Some(*v),
+  300 +            Self::UInt64(v) => {
+  301 +                if *v <= i64::MAX as u64 {
+  302 +                    Some(*v as i64)
+  303 +                } else {
+  304 +                    None
+  305 +                }
+  306 +            }
+  307 +            Self::Float64(v) => exact_float_to_int(*v),
+  308 +            Self::Decimal64(v) => exact_decimal_i128(v.value as i128, v.scale)
+  309 +                .and_then(|value| i64::try_from(value).ok()),
+  310 +            Self::Decimal128(v) => {
+  311 +                exact_decimal_i128(v.value, v.scale).and_then(|value| i64::try_from(value).ok())
+  312 +            }
+  313 +            Self::Decimal256(v) => {
+  314 +                exact_decimal_i256(v.value, v.scale).and_then(|value| i64::try_from(value).ok())
+  315 +            }
+  316 +        }
+  317 +    }
+  318 +
+  319 +    /// Returns the i128 representation of the number after rounding if needed.
+  320 +    ///
+  321 +    /// Decimal and floating-point values are rounded to the nearest integer
+  322 +    /// before conversion. This method returns `None` if the rounded value
+  323 +    /// cannot be represented as an `i128`.
+  324 +    pub(crate) fn to_i128(&self) -> Option<i128> {
+  325 +        match self {
+  326 +            Self::Int64(v) => Some(*v as i128),
+  327 +            Self::UInt64(v) => Some(*v as i128),
+  328 +            Self::Float64(v) => round_float_to_int(*v),
+  329 +            Self::Decimal64(v) => round_decimal_i128(v.value as i128, v.scale),
+  330 +            Self::Decimal128(v) => round_decimal_i128(v.value, v.scale),
+  331 +            Self::Decimal256(v) => {
+  332 +                round_decimal_i256(v.value, v.scale).and_then(|value| i128::try_from(value).ok())
+  333 +            }
+  334 +        }
+  335 +    }
+  336 +
+  337 +    /// Returns the i64 representation of the number after rounding if needed.
+  338 +    ///
+  339 +    /// Decimal and floating-point values are rounded to the nearest integer
+  340 +    /// before conversion. This method returns `None` if the rounded value
+  341 +    /// cannot be represented as an `i64`.
+  342 +    pub(crate) fn to_i64(&self) -> Option<i64> {
+  343 +        self.to_i128().and_then(|value| i64::try_from(value).ok())
+  344 +    }
+  345 +
+  346 +    /// Returns the f64 representation of the number.
+  347 +    ///
+  348 +    /// This method always returns a value, but may lose precision for very large numbers.
+  349 +    pub(crate) fn as_f64(&self) -> f64 {
+  350 +        match self {
+  351 +            Self::Int64(v) => *v as f64,
+  352 +            Self::UInt64(v) => *v as f64,
+  353 +            Self::Float64(v) => *v,
+  354 +            Self::Decimal64(v) => v.to_float64(),
+  355 +            Self::Decimal128(v) => v.to_float64(),
+  356 +            Self::Decimal256(v) => v.to_float64(),
+  357 +        }
+  358 +    }
+  359 +
+  360 +    /// Returns the negation of the number.
+  361 +    ///
+  362 +    /// This method returns an error if the negation would overflow.
+  363 +    pub(crate) fn neg(&self) -> Result<Self> {
+  364 +        match self {
+  365 +            Self::Int64(v) => v
+  366 +                .checked_neg()
+  367 +                .map(Number::Int64)
+  368 +                .ok_or(Error::Message("Int64 overflow".to_string())),
+  369 +            Self::UInt64(v) => {
+  370 +                if let Ok(v) = i64::try_from(*v) {
+  371 +                    v.checked_neg()
+  372 +                        .map(Number::Int64)
+  373 +                        .ok_or(Error::Message("Int64 overflow".to_string()))
+  374 +                } else {
+  375 +                    Err(Error::Message("Int64 overflow".to_string()))
+  376 +                }
+  377 +            }
+  378 +            Self::Float64(v) => Ok(Self::Float64(*v * -1.0)),
+  379 +            Self::Decimal64(v) => {
+  380 +                let neg_dec = Decimal64 {
+  381 +                    scale: v.scale,
+  382 +                    value: -v.value,
+  383 +                };
+  384 +                Ok(Self::Decimal64(neg_dec))
+  385 +            }
+  386 +            Self::Decimal128(v) => {
+  387 +                let neg_dec = Decimal128 {
+  388 +                    scale: v.scale,
+  389 +                    value: -v.value,
+  390 +                };
+  391 +                Ok(Self::Decimal128(neg_dec))
+  392 +            }
+  393 +            Self::Decimal256(v) => {
+  394 +                let Some(neg_value) = v.value.checked_neg() else {
+  395 +                    return Err(Error::Message("Decimal256 overflow".to_string()));
+  396 +                };
+  397 +                let neg_dec = Decimal256 {
+  398 +                    scale: v.scale,
+  399 +                    value: neg_value,
+  400 +                };
+  401 +                Ok(Self::Decimal256(neg_dec))
+  402 +            }
+  403 +        }
+  404 +    }
+  405 +
+  406 +    /// Returns the sum of the number and another number.
+  407 +    ///
+  408 +    /// This method returns an error if the sum would overflow.
+  409 +    pub(crate) fn add(&self, other: Self) -> Result<Self> {
+  410 +        match (self, other) {
+  411 +            (Self::Int64(a), Self::Int64(b)) => a
+  412 +                .checked_add(b)
+  413 +                .map(Number::Int64)
+  414 +                .ok_or(Error::Message("Int64 overflow".to_string())),
+  415 +            (Self::UInt64(a), Self::UInt64(b)) => a
+  416 +                .checked_add(b)
+  417 +                .map(Number::UInt64)
+  418 +                .ok_or(Error::Message("UInt64 overflow".to_string())),
+  419 +            (Self::Int64(a), Self::UInt64(b)) => {
+  420 +                if *a < 0 {
+  421 +                    a.checked_add(b as i64)
+  422 +                        .map(Number::Int64)
+  423 +                        .ok_or(Error::Message("Int64 overflow".to_string()))
+  424 +                } else {
+  425 +                    (*a as u64)
+  426 +                        .checked_add(b)
+  427 +                        .map(Number::UInt64)
+  428 +                        .ok_or(Error::Message("UInt64 overflow".to_string()))
+  429 +                }
+  430 +            }
+  431 +            (Self::UInt64(a), Self::Int64(b)) => {
+  432 +                if b < 0 {
+  433 +                    (*a as i64)
+  434 +                        .checked_add(b)
+  435 +                        .map(Number::Int64)
+  436 +                        .ok_or(Error::Message("Int64 overflow".to_string()))
+  437 +                } else {
+  438 +                    a.checked_add(b as u64)
+  439 +                        .map(Number::UInt64)
+  440 +                        .ok_or(Error::Message("UInt64 overflow".to_string()))
+  441 +                }
+  442 +            }
+  443 +            (Self::Float64(a), Self::Float64(b)) => Ok(Self::Float64(a + b)),
+  444 +            (a, b) => {
+  445 +                let a_float = a.as_f64();
+  446 +                let b_float = b.as_f64();
+  447 +                Ok(Self::Float64(a_float + b_float))
+  448 +            }
+  449 +        }
+  450 +    }
+  451 +
+  452 +    /// Returns the difference of the number and another number.
+  453 +    ///
+  454 +    /// This method returns an error if the difference would overflow.
+  455 +    pub(crate) fn sub(&self, other: Self) -> Result<Self> {
+  456 +        match (self, other) {
+  457 +            (Self::Int64(a), Self::Int64(b)) => a
+  458 +                .checked_sub(b)
+  459 +                .map(Number::Int64)
+  460 +                .ok_or(Error::Message("Int64 overflow".to_string())),
+  461 +            (Self::UInt64(a), Self::UInt64(b)) => (*a as i64)
+  462 +                .checked_sub(b as i64)
+  463 +                .map(Number::Int64)
+  464 +                .ok_or(Error::Message("UInt64 overflow".to_string())),
+  465 +            (Self::Int64(a), Self::UInt64(b)) => a
+  466 +                .checked_sub(b as i64)
+  467 +                .map(Number::Int64)
+  468 +                .ok_or(Error::Message("Int64 overflow".to_string())),
+  469 +            (Self::UInt64(a), Self::Int64(b)) => (*a as i64)
+  470 +                .checked_sub(b)
+  471 +                .map(Number::Int64)
+  472 +                .ok_or(Error::Message("Int64 overflow".to_string())),
+  473 +            (Self::Float64(a), Self::Float64(b)) => Ok(Self::Float64(a - b)),
+  474 +            (a, b) => {
+  475 +                let a_float = a.as_f64();
+  476 +                let b_float = b.as_f64();
+  477 +                Ok(Self::Float64(a_float - b_float))
+  478 +            }
+  479 +        }
+  480 +    }
+  481 +
+  482 +    /// Returns the product of the number and another number.
+  483 +    ///
+  484 +    /// This method returns an error if the product would overflow.
+  485 +    pub(crate) fn mul(&self, other: Self) -> Result<Self> {
+  486 +        match (self, other) {
+  487 +            (Self::Int64(a), Self::Int64(b)) => a
+  488 +                .checked_mul(b)
+  489 +                .map(Number::Int64)
+  490 +                .ok_or(Error::Message("Int64 overflow".to_string())),
+  491 +            (Self::UInt64(a), Self::UInt64(b)) => a
+  492 +                .checked_mul(b)
+  493 +                .map(Number::UInt64)
+  494 +                .ok_or(Error::Message("UInt64 overflow".to_string())),
+  495 +            (Self::Int64(a), Self::UInt64(b)) => {
+  496 +                if *a < 0 {
+  497 +                    a.checked_mul(b as i64)
+  498 +                        .map(Number::Int64)
+  499 +                        .ok_or(Error::Message("Int64 overflow".to_string()))
+  500 +                } else {
+  501 +                    (*a as u64)
+  502 +                        .checked_mul(b)
+  503 +                        .map(Number::UInt64)
+  504 +                        .ok_or(Error::Message("UInt64 overflow".to_string()))
+  505 +                }
+  506 +            }
+  507 +            (Self::UInt64(a), Self::Int64(b)) => {
+  508 +                if b < 0 {
+  509 +                    (*a as i64)
+  510 +                        .checked_mul(b)
+  511 +                        .map(Number::Int64)
+  512 +                        .ok_or(Error::Message("Int64 overflow".to_string()))
+  513 +                } else {
+  514 +                    a.checked_mul(b as u64)
+  515 +                        .map(Number::UInt64)
+  516 +                        .ok_or(Error::Message("UInt64 overflow".to_string()))
+  517 +                }
+  518 +            }
+  519 +            (Self::Float64(a), Self::Float64(b)) => Ok(Self::Float64(a * b)),
+  520 +            (a, b) => {
+  521 +                let a_float = a.as_f64();
+  522 +                let b_float = b.as_f64();
+  523 +                Ok(Self::Float64(a_float * b_float))
+  524 +            }
+  525 +        }
+  526 +    }
+  527 +
+  528 +    /// Returns the quotient of the number and another number.
+  529 +    ///
+  530 +    /// This method returns an error if the divisor is zero.
+  531 +    pub(crate) fn div(&self, other: Self) -> Result<Self> {
+  532 +        let a_float = self.as_f64();
+  533 +        let b_float = other.as_f64();
+  534 +        if b_float == 0.0 {
+  535 +            return Err(Error::Message("Division by zero".to_string()));
+  536 +        }
+  537 +        Ok(Self::Float64(a_float / b_float))
+  538 +    }
+  539 +
+  540 +    /// Returns the remainder of the number divided by another number.
+  541 +    ///
+  542 +    /// This method returns an error if the divisor is zero.
+  543 +    pub(crate) fn rem(&self, other: Self) -> Result<Self> {
+  544 +        match (self, other) {
+  545 +            (Self::Int64(a), Self::Int64(b)) => {
+  546 +                if b == 0 {
+  547 +                    return Err(Error::Message("Division by zero".to_string()));
+  548 +                }
+  549 +                a.checked_rem(b)
+  550 +                    .map(Number::Int64)
+  551 +                    .ok_or(Error::Message("Int64 overflow".to_string()))
+  552 +            }
+  553 +            (Self::UInt64(a), Self::UInt64(b)) => {
+  554 +                if b == 0 {
+  555 +                    return Err(Error::Message("Division by zero".to_string()));
+  556 +                }
+  557 +                a.checked_rem(b)
+  558 +                    .map(Number::UInt64)
+  559 +                    .ok_or(Error::Message("UInt64 overflow".to_string()))
+  560 +            }
+  561 +            (Self::Int64(a), Self::UInt64(b)) => {
+  562 +                if b == 0 {
+  563 +                    return Err(Error::Message("Division by zero".to_string()));
+  564 +                }
+  565 +                if *a < 0 {
+  566 +                    a.checked_rem(b as i64)
+  567 +                        .map(Number::Int64)
+  568 +                        .ok_or(Error::Message("Int64 overflow".to_string()))
+  569 +                } else {
+  570 +                    (*a as u64)
+  571 +                        .checked_rem(b)
+  572 +                        .map(Number::UInt64)
+  573 +                        .ok_or(Error::Message("UInt64 overflow".to_string()))
+  574 +                }
+  575 +            }
+  576 +            (Self::UInt64(a), Self::Int64(b)) => {
+  577 +                if b == 0 {
+  578 +                    return Err(Error::Message("Division by zero".to_string()));
+  579 +                }
+  580 +                if b < 0 {
+  581 +                    (*a as i64)
+  582 +                        .checked_rem(b)
+  583 +                        .map(Number::Int64)
+  584 +                        .ok_or(Error::Message("Int64 overflow".to_string()))
+  585 +                } else {
+  586 +                    a.checked_rem(b as u64)
+  587 +                        .map(Number::UInt64)
+  588 +                        .ok_or(Error::Message("UInt64 overflow".to_string()))
+  589 +                }
+  590 +            }
+  591 +            (Self::Float64(a), Self::Float64(b)) => {
+  592 +                if b == 0.0 {
+  593 +                    return Err(Error::Message("Division by zero".to_string()));
+  594 +                }
+  595 +                Ok(Self::Float64(a % b))
+  596 +            }
+  597 +            (a, b) => {
+  598 +                let a_float = a.as_f64();
+  599 +                let b_float = b.as_f64();
+  600 +                if b_float == 0.0 {
+  601 +                    return Err(Error::Message("Division by zero".to_string()));
+  602 +                }
+  603 +                Ok(Self::Float64(a_float % b_float))
+  604 +            }
+  605 +        }
+  606 +    }
+  607 +}
+  608 +
+  609 +fn exact_float_to_int<T>(value: f64) -> Option<T>
+  610 +where
+  611 +    T: Bounded + AsPrimitive<f64>,
+  612 +    f64: AsPrimitive<T>,
+  613 +{
+  614 +    if !value.is_finite() || value.fract() != 0.0 {
+  615 +        return None;
+  616 +    }
+  617 +
+  618 +    if fits_float_target_range::<T>(value) {
+  619 +        Some(value.as_())
+  620 +    } else {
+  621 +        None
+  622 +    }
+  623 +}
+  624 +
+  625 +fn round_float_to_int<T>(value: f64) -> Option<T>
+  626 +where
+  627 +    T: Bounded + AsPrimitive<f64>,
+  628 +    f64: AsPrimitive<T>,
+  629 +{
+  630 +    if !value.is_finite() {
+  631 +        return None;
+  632 +    }
+  633 +
+  634 +    let rounded = value.round();
+  635 +    if fits_float_target_range::<T>(rounded) {
+  636 +        Some(rounded.as_())
+  637 +    } else {
+  638 +        None
+  639 +    }
+  640 +}
+  641 +
+  642 +// Use a half-open range so the positive bound can be expressed as `-min` for
+  643 +// signed integers, which avoids relying on an imprecise `MAX as f64`.
+  644 +#[inline]
+  645 +fn fits_float_target_range<T>(value: f64) -> bool
+  646 +where
+  647 +    T: Bounded + AsPrimitive<f64>,
+  648 +{
+  649 +    let lower = T::min_value().as_();
+  650 +    let upper_exclusive = if lower < 0.0 {
+  651 +        -lower
+  652 +    } else {
+  653 +        T::max_value().as_() + 1.0
+  654 +    };
+  655 +
+  656 +    value >= lower && value < upper_exclusive
+  657 +}
+  658 +
+  659 +fn exact_decimal_i128(value: i128, scale: u8) -> Option<i128> {
+  660 +    if scale == 0 {
+  661 +        return Some(value);
+  662 +    }
+  663 +
+  664 +    let Some(divisor) = I128_POWERS_OF_10.get(scale as usize) else {
+  665 +        return if value == 0 { Some(0) } else { None };
+  666 +    };
+  667 +
+  668 +    if value % divisor == 0 {
+  669 +        Some(value / divisor)
+  670 +    } else {
+  671 +        None
+  672 +    }
+  673 +}
+  674 +
+  675 +fn round_decimal_i128(value: i128, scale: u8) -> Option<i128> {
+  676 +    if scale == 0 {
+  677 +        return Some(value);
+  678 +    }
+  679 +
+  680 +    let Some(divisor) = I128_POWERS_OF_10.get(scale as usize) else {
+  681 +        // 10^scale no longer fits in i128, so any i128-backed decimal rounds to 0.
+  682 +        return Some(0);
+  683 +    };
+  684 +
+  685 +    let quotient = value / divisor;
+  686 +    let remainder = value % divisor;
+  687 +    let abs_remainder = remainder.unsigned_abs();
+  688 +    let divisor = *divisor as u128;
+  689 +    let round_up = abs_remainder >= divisor - abs_remainder;
+  690 +
+  691 +    if !round_up {
+  692 +        Some(quotient)
+  693 +    } else if value >= 0 {
+  694 +        quotient.checked_add(1)
+  695 +    } else {
+  696 +        quotient.checked_sub(1)
+  697 +    }
+  698 +}
+  699 +
+  700 +#[inline]
+  701 +fn signed_i256_from_abs(abs: U256, negative: bool) -> Option<i256> {
+  702 +    let value = i256::try_from(abs).ok()?;
+  703 +    if negative {
+  704 +        i256::ZERO.checked_sub(value)
+  705 +    } else {
+  706 +        Some(value)
+  707 +    }
+  708 +}
+  709 +
+  710 +fn exact_decimal_i256(value: i256, scale: u8) -> Option<i256> {
+  711 +    if scale == 0 {
+  712 +        return Some(value);
+  713 +    }
+  714 +
+  715 +    let Some(divisor) = U256::new(10).checked_pow(scale as u32) else {
+  716 +        return if value == i256::ZERO {
+  717 +            Some(i256::ZERO)
+  718 +        } else {
+  719 +            None
+  720 +        };
+  721 +    };
+  722 +
+  723 +    let negative = value < i256::ZERO;
+  724 +    let abs_value = value.unsigned_abs();
+  725 +    let quotient = abs_value / divisor;
+  726 +    let remainder = abs_value % divisor;
+  727 +    if remainder != U256::ZERO {
+  728 +        return None;
+  729 +    }
+  730 +
+  731 +    signed_i256_from_abs(quotient, negative)
+  732 +}
+  733 +
+  734 +fn round_decimal_i256(value: i256, scale: u8) -> Option<i256> {
+  735 +    if scale == 0 {
+  736 +        return Some(value);
+  737 +    }
+  738 +
+  739 +    let Some(divisor) = U256::new(10).checked_pow(scale as u32) else {
+  740 +        // 10^scale exceeds the i256 range by enough that the rounded result is always 0.
+  741 +        return Some(i256::ZERO);
+  742 +    };
+  743 +
+  744 +    let negative = value < i256::ZERO;
+  745 +    let abs_value = value.unsigned_abs();
+  746 +    let quotient = abs_value / divisor;
+  747 +    let remainder = abs_value % divisor;
+  748 +    let round_up = remainder >= divisor - remainder;
+  749 +    let rounded = if round_up {
+  750 +        quotient.checked_add(U256::new(1))?
+  751 +    } else {
+  752 +        quotient
+  753 +    };
+  754 +
+  755 +    signed_i256_from_abs(rounded, negative)
+  756 +}
+  757 +
+  758 +impl Default for Number {
+  759 +    /// Returns the default value for the Number enum.
+  760 +    ///
+  761 +    /// The default value is Number::UInt64(0).
+  762 +    #[inline]
+  763 +    fn default() -> Self {
+  764 +        Self::UInt64(0)
+  765 +    }
+  766 +}
+  767 +
+  768 +impl PartialEq for Number {
+  769 +    /// Returns true if the number is equal to another number.
+  770 +    ///
+  771 +    /// This method compares the numbers using their internal representations.
+  772 +    #[inline]
+  773 +    fn eq(&self, other: &Self) -> bool {
+  774 +        self.cmp(other) == Ordering::Equal
+  775 +    }
+  776 +}
+  777 +
+  778 +impl PartialEq<&Self> for Number {
+  779 +    /// Returns true if the number is equal to another number.
+  780 +    ///
+  781 +    /// This method compares the numbers using their internal representations.
+  782 +    #[inline]
+  783 +    fn eq(&self, other: &&Self) -> bool {
+  784 +        self.eq(*other)
+  785 +    }
+  786 +}
+  787 +
+  788 +impl PartialEq<Number> for &Number {
+  789 +    /// Returns true if the number is equal to another number.
+  790 +    ///
+  791 +    /// This method compares the numbers using their internal representations.
+  792 +    #[inline]
+  793 +    fn eq(&self, other: &Number) -> bool {
+  794 +        (*self).eq(other)
+  795 +    }
+  796 +}
+  797 +
+  798 +impl Eq for Number {}
+  799 +
+  800 +impl PartialOrd for Number {
+  801 +    /// Returns the ordering of the number compared to another number.
+  802 +    ///
+  803 +    /// This method compares the numbers using their internal representations.
+  804 +    #[inline]
+  805 +    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+  806 +        Some(self.cmp(other))
+  807 +    }
+  808 +}
+  809 +
+  810 +impl PartialOrd<&Self> for Number {
+  811 +    /// Returns the ordering of the number compared to another number.
+  812 +    ///
+  813 +    /// This method compares the numbers using their internal representations.
+  814 +    #[inline]
+  815 +    fn partial_cmp(&self, other: &&Self) -> Option<Ordering> {
+  816 +        self.partial_cmp(*other)
+  817 +    }
+  818 +}
+  819 +
+  820 +impl PartialOrd<Number> for &Number {
+  821 +    /// Returns the ordering of the number compared to another number.
+  822 +    ///
+  823 +    /// This method compares the numbers using their internal representations.
+  824 +    #[inline]
+  825 +    fn partial_cmp(&self, other: &Number) -> Option<Ordering> {
+  826 +        (*self).partial_cmp(other)
+  827 +    }
+  828 +}
+  829 +
+  830 +impl Ord for Number {
+  831 +    /// Returns the ordering of the number compared to another number.
+  832 +    ///
+  833 +    /// This method implements precise comparison between different number types:
+  834 +    /// - When comparing decimal types with other types, it converts the non-decimal type
+  835 +    ///   to a decimal representation to preserve precision
+  836 +    /// - When comparing between decimal types of different precision, it upgrades the lower
+  837 +    ///   precision decimal to match the higher precision one
+  838 +    /// - Only falls back to floating-point comparison as a last resort
+  839 +    #[inline]
+  840 +    fn cmp(&self, other: &Self) -> Ordering {
+  841 +        match (self, other) {
+  842 +            // Same type comparisons - use native comparison
+  843 +            (Self::Int64(l), Self::Int64(r)) => l.cmp(r),
+  844 +            (Self::UInt64(l), Self::UInt64(r)) => l.cmp(r),
+  845 +            (Self::Float64(l), Self::Float64(r)) => OrderedFloat(*l).cmp(&OrderedFloat(*r)),
+  846 +            (Self::Decimal64(l), Self::Decimal64(r)) => {
+  847 +                // Compare decimal values with the same scale
+  848 +                if l.scale == r.scale {
+  849 +                    l.value.cmp(&r.value)
+  850 +                } else {
+  851 +                    // Adjust scales to match for proper comparison
+  852 +                    if let Some((l_val, r_val)) =
+  853 +                        adjust_decimal_scales(l.value as i128, l.scale, r.value as i128, r.scale)
+  854 +                    {
+  855 +                        l_val.cmp(&r_val)
+  856 +                    } else {
+  857 +                        let l = OrderedFloat(self.as_f64());
+  858 +                        let r = OrderedFloat(other.as_f64());
+  859 +                        l.cmp(&r)
+  860 +                    }
+  861 +                }
+  862 +            }
+  863 +            (Self::Decimal128(l), Self::Decimal128(r)) => {
+  864 +                // Compare decimal values with the same scale
+  865 +                if l.scale == r.scale {
+  866 +                    l.value.cmp(&r.value)
+  867 +                } else {
+  868 +                    // Adjust scales to match for proper comparison
+  869 +                    if let Some((l_val, r_val)) =
+  870 +                        adjust_decimal_scales(l.value, l.scale, r.value, r.scale)
+  871 +                    {
+  872 +                        l_val.cmp(&r_val)
+  873 +                    } else {
+  874 +                        let l = OrderedFloat(self.as_f64());
+  875 +                        let r = OrderedFloat(other.as_f64());
+  876 +                        l.cmp(&r)
+  877 +                    }
+  878 +                }
+  879 +            }
+  880 +            (Self::Decimal256(l), Self::Decimal256(r)) => {
+  881 +                // Compare decimal values with the same scale
+  882 +                if l.scale == r.scale {
+  883 +                    l.value.cmp(&r.value)
+  884 +                } else {
+  885 +                    // For i256 comparison with different scales, we need to adjust manually
+  886 +                    let scale_diff = l.scale as i32 - r.scale as i32;
+  887 +                    if scale_diff > 0 {
+  888 +                        // l has more decimal places, scale up r
+  889 +                        let scale_factor = i256::from(10).pow(scale_diff as u32);
+  890 +                        if let Some(r_val) = r.value.checked_mul(scale_factor) {
+  891 +                            return l.value.cmp(&r_val);
+  892 +                        }
+  893 +                    } else {
+  894 +                        // r has more decimal places, scale up l
+  895 +                        let scale_factor = i256::from(10).pow((-scale_diff) as u32);
+  896 +                        if let Some(l_val) = l.value.checked_mul(scale_factor) {
+  897 +                            return l_val.cmp(&r.value);
+  898 +                        }
+  899 +                    }
+  900 +                    // multiply overflow, fallback to used float compare
+  901 +                    let l = OrderedFloat(self.as_f64());
+  902 +                    let r = OrderedFloat(other.as_f64());
+  903 +                    l.cmp(&r)
+  904 +                }
+  905 +            }
+  906 +
+  907 +            // Integer to integer comparisons
+  908 +            (Self::Int64(l), Self::UInt64(r)) => {
+  909 +                if *l < 0 {
+  910 +                    Ordering::Less
+  911 +                } else {
+  912 +                    (*l as u64).cmp(r)
+  913 +                }
+  914 +            }
+  915 +            (Self::UInt64(l), Self::Int64(r)) => {
+  916 +                if *r < 0 {
+  917 +                    Ordering::Greater
+  918 +                } else {
+  919 +                    l.cmp(&(*r as u64))
+  920 +                }
+  921 +            }
+  922 +
+  923 +            // Decimal64 comparisons with other types
+  924 +            (Self::Decimal64(_), Self::Int64(r)) => {
+  925 +                // Convert Int64 to Decimal64 with scale 0
+  926 +                let r_decimal = Decimal64 {
+  927 +                    scale: 0,
+  928 +                    value: *r,
+  929 +                };
+  930 +                self.cmp(&Self::Decimal64(r_decimal))
+  931 +            }
+  932 +            (Self::Int64(l), Self::Decimal64(_)) => {
+  933 +                // Convert Int64 to Decimal64 with scale 0
+  934 +                let l_decimal = Decimal64 {
+  935 +                    scale: 0,
+  936 +                    value: *l,
+  937 +                };
+  938 +                Self::Decimal64(l_decimal).cmp(other)
+  939 +            }
+  940 +            (Self::Decimal64(_), Self::UInt64(r)) => {
+  941 +                // Check if the value fits in i64
+  942 +                if *r <= i64::MAX as u64 {
+  943 +                    // Convert UInt64 to Decimal64 with scale 0
+  944 +                    let r_decimal = Decimal64 {
+  945 +                        scale: 0,
+  946 +                        value: *r as i64,
+  947 +                    };
+  948 +                    self.cmp(&Self::Decimal64(r_decimal))
+  949 +                } else {
+  950 +                    // If it doesn't fit, Convert UInt64 to Decimal128 with scale 0
+  951 +                    let r_decimal = Decimal128 {
+  952 +                        scale: 0,
+  953 +                        value: *r as i128,
+  954 +                    };
+  955 +                    self.cmp(&Self::Decimal128(r_decimal))
+  956 +                }
+  957 +            }
+  958 +            (Self::UInt64(l), Self::Decimal64(_)) => {
+  959 +                // Check if the value fits in i64
+  960 +                if *l <= i64::MAX as u64 {
+  961 +                    // Convert UInt64 to Decimal64 with scale 0
+  962 +                    let l_decimal = Decimal64 {
+  963 +                        scale: 0,
+  964 +                        value: *l as i64,
+  965 +                    };
+  966 +                    Self::Decimal64(l_decimal).cmp(other)
+  967 +                } else {
+  968 +                    // If it doesn't fit, Convert UInt64 to Decimal128 with scale 0
+  969 +                    let l_decimal = Decimal128 {
+  970 +                        scale: 0,
+  971 +                        value: *l as i128,
+  972 +                    };
+  973 +                    Self::Decimal128(l_decimal).cmp(other)
+  974 +                }
+  975 +            }
+  976 +
+  977 +            // Decimal128 comparisons with other types
+  978 +            (Self::Decimal128(_), Self::Int64(r)) => {
+  979 +                // Convert Int64 to Decimal128 with scale 0
+  980 +                let r_decimal = Decimal128 {
+  981 +                    scale: 0,
+  982 +                    value: *r as i128,
+  983 +                };
+  984 +                self.cmp(&Self::Decimal128(r_decimal))
+  985 +            }
+  986 +            (Self::Int64(l), Self::Decimal128(_)) => {
+  987 +                // Convert Int64 to Decimal128 with scale 0
+  988 +                let l_decimal = Decimal128 {
+  989 +                    scale: 0,
+  990 +                    value: *l as i128,
+  991 +                };
+  992 +                Self::Decimal128(l_decimal).cmp(other)
+  993 +            }
+  994 +            (Self::Decimal128(_), Self::UInt64(r)) => {
+  995 +                // Convert UInt64 to Decimal128 with scale 0
+  996 +                let r_decimal = Decimal128 {
+  997 +                    scale: 0,
+  998 +                    value: *r as i128,
+  999 +                };
+ 1000 +                self.cmp(&Self::Decimal128(r_decimal))
+ 1001 +            }
+ 1002 +            (Self::UInt64(l), Self::Decimal128(_)) => {
+ 1003 +                // Convert UInt64 to Decimal128 with scale 0
+ 1004 +                let l_decimal = Decimal128 {
+ 1005 +                    scale: 0,
+ 1006 +                    value: *l as i128,
+ 1007 +                };
+ 1008 +                Self::Decimal128(l_decimal).cmp(other)
+ 1009 +            }
+ 1010 +
+ 1011 +            // Decimal256 comparisons with other types
+ 1012 +            (Self::Decimal256(_), Self::Int64(r)) => {
+ 1013 +                // Convert Int64 to Decimal256 with scale 0
+ 1014 +                let r_decimal = Decimal256 {
+ 1015 +                    scale: 0,
+ 1016 +                    value: i256::from(*r),
+ 1017 +                };
+ 1018 +                self.cmp(&Self::Decimal256(r_decimal))
+ 1019 +            }
+ 1020 +            (Self::Int64(l), Self::Decimal256(_)) => {
+ 1021 +                // Convert Int64 to Decimal256 with scale 0
+ 1022 +                let l_decimal = Decimal256 {
+ 1023 +                    scale: 0,
+ 1024 +                    value: i256::from(*l),
+ 1025 +                };
+ 1026 +                Self::Decimal256(l_decimal).cmp(other)
+ 1027 +            }
+ 1028 +            (Self::Decimal256(_), Self::UInt64(r)) => {
+ 1029 +                // Convert UInt64 to Decimal256 with scale 0
+ 1030 +                let r_decimal = Decimal256 {
+ 1031 +                    scale: 0,
+ 1032 +                    value: i256::from(*r),
+ 1033 +                };
+ 1034 +                self.cmp(&Self::Decimal256(r_decimal))
+ 1035 +            }
+ 1036 +            (Self::UInt64(l), Self::Decimal256(_)) => {
+ 1037 +                // Convert UInt64 to Decimal256 with scale 0
+ 1038 +                let l_decimal = Decimal256 {
+ 1039 +                    scale: 0,
+ 1040 +                    value: i256::from(*l),
+ 1041 +                };
+ 1042 +                Self::Decimal256(l_decimal).cmp(other)
+ 1043 +            }
+ 1044 +
+ 1045 +            // Cross-decimal comparisons - upgrade to the higher precision
+ 1046 +            (Self::Decimal64(l), Self::Decimal128(_)) => {
+ 1047 +                // Upgrade Decimal64 to Decimal128
+ 1048 +                let l_decimal = Decimal128 {
+ 1049 +                    scale: l.scale,
+ 1050 +                    value: l.value as i128,
+ 1051 +                };
+ 1052 +                Self::Decimal128(l_decimal).cmp(other)
+ 1053 +            }
+ 1054 +            (Self::Decimal128(_), Self::Decimal64(r)) => {
+ 1055 +                // Upgrade Decimal64 to Decimal128
+ 1056 +                let r_decimal = Decimal128 {
+ 1057 +                    scale: r.scale,
+ 1058 +                    value: r.value as i128,
+ 1059 +                };
+ 1060 +                self.cmp(&Self::Decimal128(r_decimal))
+ 1061 +            }
+ 1062 +            (Self::Decimal64(l), Self::Decimal256(_)) => {
+ 1063 +                // Upgrade Decimal64 to Decimal256
+ 1064 +                let l_decimal = Decimal256 {
+ 1065 +                    scale: l.scale,
+ 1066 +                    value: i256::from(l.value),
+ 1067 +                };
+ 1068 +                Self::Decimal256(l_decimal).cmp(other)
+ 1069 +            }
+ 1070 +            (Self::Decimal256(_), Self::Decimal64(r)) => {
+ 1071 +                // Upgrade Decimal64 to Decimal256
+ 1072 +                let r_decimal = Decimal256 {
+ 1073 +                    scale: r.scale,
+ 1074 +                    value: i256::from(r.value),
+ 1075 +                };
+ 1076 +                self.cmp(&Self::Decimal256(r_decimal))
+ 1077 +            }
+ 1078 +            (Self::Decimal128(l), Self::Decimal256(_)) => {
+ 1079 +                // Upgrade Decimal128 to Decimal256
+ 1080 +                let l_decimal = Decimal256 {
+ 1081 +                    scale: l.scale,
+ 1082 +                    value: i256::from(l.value),
+ 1083 +                };
+ 1084 +                Self::Decimal256(l_decimal).cmp(other)
+ 1085 +            }
+ 1086 +            (Self::Decimal256(_), Self::Decimal128(r)) => {
+ 1087 +                // Upgrade Decimal128 to Decimal256
+ 1088 +                let r_decimal = Decimal256 {
+ 1089 +                    scale: r.scale,
+ 1090 +                    value: i256::from(r.value),
+ 1091 +                };
+ 1092 +                self.cmp(&Self::Decimal256(r_decimal))
+ 1093 +            }
+ 1094 +
+ 1095 +            // Fall back to float comparison for any other combinations
+ 1096 +            (_, _) => {
+ 1097 +                let l = OrderedFloat(self.as_f64());
+ 1098 +                let r = OrderedFloat(other.as_f64());
+ 1099 +                l.cmp(&r)
+ 1100 +            }
+ 1101 +        }
+ 1102 +    }
+ 1103 +}
+ 1104 +
+ 1105 +/// Helper function to adjust decimal scales for comparison
+ 1106 +///
+ 1107 +/// Given two decimal values with potentially different scales,
+ 1108 +/// this function adjusts them to have the same scale for accurate comparison.
+ 1109 +fn adjust_decimal_scales(
+ 1110 +    l_val: i128,
+ 1111 +    l_scale: u8,
+ 1112 +    r_val: i128,
+ 1113 +    r_scale: u8,
+ 1114 +) -> Option<(i128, i128)> {
+ 1115 +    let scale_diff = l_scale as i32 - r_scale as i32;
+ 1116 +
+ 1117 +    match scale_diff.cmp(&0) {
+ 1118 +        Ordering::Greater => {
+ 1119 +            // l has more decimal places, scale up r
+ 1120 +            let scale_factor = 10_i128.pow(scale_diff as u32);
+ 1121 +            let r_val = r_val.checked_mul(scale_factor)?;
+ 1122 +            Some((l_val, r_val))
+ 1123 +        }
+ 1124 +        Ordering::Less => {
+ 1125 +            // r has more decimal places, scale up l
+ 1126 +            let scale_factor = 10_i128.pow((-scale_diff) as u32);
+ 1127 +            let l_val = l_val.checked_mul(scale_factor)?;
+ 1128 +            Some((l_val, r_val))
+ 1129 +        }
+ 1130 +        Ordering::Equal => {
+ 1131 +            // Same scale, no adjustment needed
+ 1132 +            Some((l_val, r_val))
+ 1133 +        }
+ 1134 +    }
+ 1135 +}
+ 1136 +
+ 1137 +impl Display for Number {
+ 1138 +    /// Formats the number as a string.
+ 1139 +    ///
+ 1140 +    /// This method returns a string representation of the number in its internal format.
+ 1141 +    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+ 1142 +        match self {
+ 1143 +            Self::Int64(v) => {
+ 1144 +                let mut buffer = itoa::Buffer::new();
+ 1145 +                let s = buffer.format(*v);
+ 1146 +                write!(f, "{}", s)
+ 1147 +            }
+ 1148 +            Self::UInt64(v) => {
+ 1149 +                let mut buffer = itoa::Buffer::new();
+ 1150 +                let s = buffer.format(*v);
+ 1151 +                write!(f, "{}", s)
+ 1152 +            }
+ 1153 +            Self::Float64(v) => {
+ 1154 +                let mut buffer = zmij::Buffer::new();
+ 1155 +                let s = buffer.format(*v);
+ 1156 +                write!(f, "{}", s)
+ 1157 +            }
+ 1158 +            Self::Decimal64(v) => format_decimal_i128(f, v.value as i128, v.scale as usize),
+ 1159 +            Self::Decimal128(v) => format_decimal_i128(f, v.value, v.scale as usize),
+ 1160 +            Self::Decimal256(v) => format_decimal_i256(f, v.value, v.scale as usize),
+ 1161 +        }
+ 1162 +    }
+ 1163 +}
+ 1164 +
+ 1165 +/// Helper function to format a decimal i128 value to a formatter without string allocations
+ 1166 +///
+ 1167 +/// This function efficiently formats a decimal number with the following optimizations:
+ 1168 +/// 1. Uses stack-allocated buffers instead of heap allocations
+ 1169 +/// 2. Handles the sign separately to simplify the formatting logic
+ 1170 +/// 3. Uses the fast itoa library for integer-to-string conversion
+ 1171 +/// 4. Pre-computed zero strings for padding fractional parts
+ 1172 +fn format_decimal_i128(
+ 1173 +    f: &mut impl std::fmt::Write,
+ 1174 +    value: i128,
+ 1175 +    scale: usize,
+ 1176 +) -> std::fmt::Result {
+ 1177 +    let mut itoa_buf = itoa::Buffer::new();
+ 1178 +    if scale == 0 {
+ 1179 +        f.write_str(itoa_buf.format(value))
+ 1180 +    } else {
+ 1181 +        // Handle negative numbers by writing the minus sign and working with absolute value
+ 1182 +        let value = if value < 0 {
+ 1183 +            f.write_str("-")?;
+ 1184 +            -value
+ 1185 +        } else {
+ 1186 +            value
+ 1187 +        };
+ 1188 +        let pow_scale = I128_POWERS_OF_10[scale];
+ 1189 +        // Split the value into integer and fractional parts
+ 1190 +        let integer_part = value / pow_scale;
+ 1191 +        f.write_str(itoa_buf.format(integer_part))?;
+ 1192 +        f.write_str(".")?;
+ 1193 +
+ 1194 +        // Format the fractional part with leading zeros if needed
+ 1195 +        let fractional_part = (value % pow_scale).abs();
+ 1196 +        let fractional_str = itoa_buf.format(fractional_part);
+ 1197 +
+ 1198 +        let leading_zeros_count = scale - fractional_str.len();
+ 1199 +        if leading_zeros_count > 0 {
+ 1200 +            let zeros = LEADING_ZEROS[leading_zeros_count];
+ 1201 +            f.write_str(zeros)?;
+ 1202 +        }
+ 1203 +        f.write_str(fractional_str)
+ 1204 +    }
+ 1205 +}
+ 1206 +
+ 1207 +/// Formats a decimal i256 value to a formatter without heap allocations.
+ 1208 +///
+ 1209 +/// This function efficiently formats a 256-bit decimal number with the specified scale
+ 1210 +/// (number of decimal places) by splitting it into high and low 128-bit parts.
+ 1211 +fn format_decimal_i256(
+ 1212 +    f: &mut impl std::fmt::Write,
+ 1213 +    value: i256,
+ 1214 +    scale: usize,
+ 1215 +) -> std::fmt::Result {
+ 1216 +    // Handle negative values by writing the minus sign and negating the value
+ 1217 +    let value = if value < i256::ZERO {
+ 1218 +        f.write_str("-")?;
+ 1219 +        -value
+ 1220 +    } else {
+ 1221 +        value
+ 1222 +    };
+ 1223 +
+ 1224 +    // Split the i256 value into high and low parts for easier formatting
+ 1225 +    let high_part = (value / *I256_DIVIDE_SCALE).as_i128();
+ 1226 +    let low_part = (value % *I256_DIVIDE_SCALE).as_i128();
+ 1227 +    let mut itoa_buf = itoa::Buffer::new();
+ 1228 +
+ 1229 +    // Case 1: Integer-only formatting (no decimal places)
+ 1230 +    if scale == 0 {
+ 1231 +        if high_part > 0 {
+ 1232 +            // Format high part first (most significant digits)
+ 1233 +            f.write_str(itoa_buf.format(high_part))?;
+ 1234 +
+ 1235 +            // Format low part with proper zero padding to maintain place value
+ 1236 +            let low_str = itoa_buf.format(low_part);
+ 1237 +            let zeros_count = I128_SCALE - low_str.len();
+ 1238 +            if zeros_count > 0 {
+ 1239 +                let zeros = LEADING_ZEROS[zeros_count];
+ 1240 +                f.write_str(zeros)?;
+ 1241 +            }
+ 1242 +            f.write_str(low_str)
+ 1243 +        } else {
+ 1244 +            // Only low part has non-zero value
+ 1245 +            f.write_str(itoa_buf.format(low_part))
+ 1246 +        }
+ 1247 +    }
+ 1248 +    // Case 2: Decimal point falls within the high part (large scale)
+ 1249 +    else if scale >= I128_SCALE {
+ 1250 +        // Calculate how many decimal places are in the high part
+ 1251 +        let high_scale = scale - I128_SCALE;
+ 1252 +        let pow_scale = I128_POWERS_OF_10[high_scale];
+ 1253 +
+ 1254 +        // Format the integer portion from the high part
+ 1255 +        let int_part = high_part / pow_scale;
+ 1256 +        f.write_str(itoa_buf.format(int_part))?;
+ 1257 +        f.write_str(".")?;
+ 1258 +
+ 1259 +        // Format the fractional portion from the high part
+ 1260 +        if high_scale > 0 {
+ 1261 +            let high_frac_part = high_part % pow_scale;
+ 1262 +            let high_frac_str = itoa_buf.format(high_frac_part);
+ 1263 +
+ 1264 +            // Add leading zeros if needed
+ 1265 +            let high_zeros_count = high_scale - high_frac_str.len();
+ 1266 +            if high_zeros_count > 0 {
+ 1267 +                let zeros = LEADING_ZEROS[high_zeros_count];
+ 1268 +                f.write_str(zeros)?;
+ 1269 +            }
+ 1270 +            f.write_str(high_frac_str)?;
+ 1271 +        }
+ 1272 +
+ 1273 +        // Format the low part with proper zero padding
+ 1274 +        let mut low_buf = itoa::Buffer::new();
+ 1275 +        let low_frac_str = low_buf.format(low_part);
+ 1276 +        let low_zeros_count = I128_SCALE - low_frac_str.len();
+ 1277 +        if low_zeros_count > 0 {
+ 1278 +            let low_zeros = LEADING_ZEROS[low_zeros_count];
+ 1279 +            f.write_str(low_zeros)?;
+ 1280 +        }
+ 1281 +        f.write_str(low_frac_str)
+ 1282 +    }
+ 1283 +    // Case 3: Decimal point falls within the low part
+ 1284 +    else {
+ 1285 +        // Format high part if it exists (integer portion)
+ 1286 +        if high_part > 0 {
+ 1287 +            f.write_str(itoa_buf.format(high_part))?;
+ 1288 +        }
+ 1289 +        let pow_scale = I128_POWERS_OF_10[scale];
+ 1290 +
+ 1291 +        // Calculate integer part from low component
+ 1292 +        let int_part = low_part / pow_scale;
+ 1293 +        let int_str = itoa_buf.format(int_part);
+ 1294 +
+ 1295 +        // If high part exists, we need to ensure proper place value with padding
+ 1296 +        if high_part > 0 {
+ 1297 +            let int_zeros_count = I128_SCALE - scale - int_str.len();
+ 1298 +            if int_zeros_count > 0 {
+ 1299 +                let int_zeros = LEADING_ZEROS[int_zeros_count];
+ 1300 +                f.write_str(int_zeros)?;
+ 1301 +            }
+ 1302 +        }
+ 1303 +        f.write_str(int_str)?;
+ 1304 +        f.write_str(".")?;
+ 1305 +
+ 1306 +        // Format fractional part from low component with proper zero padding
+ 1307 +        let frac_part = low_part % pow_scale;
+ 1308 +        let mut frac_buf = itoa::Buffer::new();
+ 1309 +        let frac_str = frac_buf.format(frac_part);
+ 1310 +
+ 1311 +        let frac_zeros_count = scale - frac_str.len();
+ 1312 +        if frac_zeros_count > 0 {
+ 1313 +            let frac_zeros = LEADING_ZEROS[frac_zeros_count];
+ 1314 +            f.write_str(frac_zeros)?;
+ 1315 +        }
+ 1316 +        f.write_str(frac_str)
+ 1317 +    }
+ 1318 +}
+ 1319 +

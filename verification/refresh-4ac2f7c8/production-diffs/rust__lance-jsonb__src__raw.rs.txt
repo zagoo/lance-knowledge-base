@@ -1,0 +1,309 @@
+@@ -0,0 +1,308 @@
+    1 +// SPDX-License-Identifier: Apache-2.0
+    2 +// SPDX-FileCopyrightText: Copyright The Lance Authors
+    3 +// SPDX-FileCopyrightText: Copyright 2023 Datafuse Labs
+    4 +// Adapted from databendlabs/jsonb at commit fba895c5ebe77ce2539e187f9c652f51cbf195c3.
+    5 +
+    6 +use std::cmp::Ordering;
+    7 +
+    8 +use serde::Serialize;
+    9 +
+   10 +use crate::OwnedJsonb;
+   11 +use crate::core::ArrayIterator;
+   12 +use crate::core::Deserializer;
+   13 +use crate::core::JsonbItemType;
+   14 +use crate::core::ObjectIterator;
+   15 +use crate::error::*;
+   16 +
+   17 +/// Represents JSONB data wrapped around a raw, immutable slice of bytes.
+   18 +///
+   19 +/// It does not own the underlying data, allowing various operations to be performed on the JSONB data *without copying*.
+   20 +/// This is critical for performance when dealing with large JSONB values.
+   21 +/// `RawJsonb` provides various methods to inspect and manipulate the JSONB data efficiently.
+   22 +#[derive(Debug, Clone, Copy)]
+   23 +pub struct RawJsonb<'a> {
+   24 +    /// The underlying byte slice representing the JSONB data.
+   25 +    pub(crate) data: &'a [u8],
+   26 +}
+   27 +
+   28 +impl<'a> RawJsonb<'a> {
+   29 +    /// Creates a new RawJsonb from a byte slice.
+   30 +    ///
+   31 +    /// # Arguments
+   32 +    ///
+   33 +    /// * `data` - The byte slice containing the JSONB data.
+   34 +    ///
+   35 +    /// # Returns
+   36 +    ///
+   37 +    /// A new `RawJsonb` instance.
+   38 +    pub fn new(data: &'a [u8]) -> Self {
+   39 +        Self { data }
+   40 +    }
+   41 +
+   42 +    /// Returns the length of the JSONB data in bytes.
+   43 +    ///
+   44 +    /// # Returns
+   45 +    ///
+   46 +    /// The length of the data in bytes.
+   47 +    pub(crate) fn len(&self) -> usize {
+   48 +        self.data.len()
+   49 +    }
+   50 +
+   51 +    /// Creates an `OwnedJsonb` from the `RawJsonb` by copying the underlying data.
+   52 +    ///
+   53 +    /// This method converts a `RawJsonb`, which holds a reference to JSONB data,
+   54 +    /// into an `OwnedJsonb`, which owns its own copy of the JSONB data. This is
+   55 +    /// achieved by cloning the byte slice held by the `RawJsonb` into a new `Vec<u8>`.
+   56 +    ///
+   57 +    /// # Returns
+   58 +    ///
+   59 +    /// An `OwnedJsonb` instance containing a copy of the JSONB data from the `RawJsonb`.
+   60 +    pub(crate) fn to_owned(self) -> OwnedJsonb {
+   61 +        OwnedJsonb::new(self.data.to_vec())
+   62 +    }
+   63 +
+   64 +    /// Converts the JSONB value to a JSON string.
+   65 +    ///
+   66 +    /// This function serializes the JSONB value into a human-readable JSON string representation.
+   67 +    /// If the JSONB data is invalid, treat it as a text JSON string and return directly.
+   68 +    /// If the JSONB data is empty, return a JSON null for compatibility.
+   69 +    ///
+   70 +    /// # Returns
+   71 +    ///
+   72 +    /// * `String` - The JSON string representation of the value.
+   73 +    ///
+   74 +    /// # Examples
+   75 +    ///
+   76 +    /// ```rust
+   77 +    /// use lance_jsonb::OwnedJsonb;
+   78 +    ///
+   79 +    /// let arr_jsonb = "[1, 2, 3]".parse::<OwnedJsonb>().unwrap();
+   80 +    /// let raw_jsonb = arr_jsonb.as_raw();
+   81 +    /// assert_eq!(raw_jsonb.to_string(), "[1,2,3]");
+   82 +    ///
+   83 +    /// let obj_jsonb = r#"{"a": 1, "b": "hello"}"#.parse::<OwnedJsonb>().unwrap();
+   84 +    /// let raw_jsonb = obj_jsonb.as_raw();
+   85 +    /// assert_eq!(raw_jsonb.to_string(), r#"{"a":1,"b":"hello"}"#);
+   86 +    ///
+   87 +    /// let num_jsonb = "123.45".parse::<OwnedJsonb>().unwrap();
+   88 +    /// let raw_jsonb = num_jsonb.as_raw();
+   89 +    /// assert_eq!(raw_jsonb.to_string(), "123.45");
+   90 +    ///
+   91 +    /// let string_jsonb = r#""hello, world!""#.parse::<OwnedJsonb>().unwrap();
+   92 +    /// let raw_jsonb = string_jsonb.as_raw();
+   93 +    /// assert_eq!(raw_jsonb.to_string(), r#""hello, world!""#);
+   94 +    ///
+   95 +    /// let true_jsonb = "true".parse::<OwnedJsonb>().unwrap();
+   96 +    /// let raw_jsonb = true_jsonb.as_raw();
+   97 +    /// assert_eq!(raw_jsonb.to_string(), "true");
+   98 +    ///
+   99 +    /// // Example with invalid JSONB data (fallback to treat as text JSON string)
+  100 +    /// let invalid_jsonb = OwnedJsonb::from(vec![1, 2, 3, 4]); // Invalid binary JSONB
+  101 +    /// let invalid_raw_jsonb = invalid_jsonb.as_raw();
+  102 +    ///
+  103 +    /// // It will treat as text JSON string.
+  104 +    /// assert_eq!(invalid_raw_jsonb.to_string(), "\u{1}\u{2}\u{3}\u{4}");
+  105 +    /// ```
+  106 +    #[allow(clippy::inherent_to_string)]
+  107 +    pub fn to_string(&self) -> String {
+  108 +        let mut buf = Vec::with_capacity(self.len());
+  109 +        let formatter = serde_json::ser::CompactFormatter {};
+  110 +        let mut ser = serde_json::Serializer::with_formatter(&mut buf, formatter);
+  111 +        match self.serialize(&mut ser) {
+  112 +            Ok(_) => String::from_utf8(buf).unwrap(),
+  113 +            Err(_) => {
+  114 +                if self.data.is_empty() {
+  115 +                    "null".to_string()
+  116 +                } else {
+  117 +                    String::from_utf8_lossy(self.data).to_string()
+  118 +                }
+  119 +            }
+  120 +        }
+  121 +    }
+  122 +}
+  123 +
+  124 +/// Converts a borrowed byte slice into a RawJsonb.
+  125 +/// This provides a convenient way to create a RawJsonb from existing data without copying.
+  126 +impl<'a> From<&'a [u8]> for RawJsonb<'a> {
+  127 +    fn from(data: &'a [u8]) -> Self {
+  128 +        Self { data }
+  129 +    }
+  130 +}
+  131 +
+  132 +/// Allows accessing the underlying byte slice as a reference.
+  133 +/// This enables easy integration with functions that expect a &[u8].
+  134 +impl AsRef<[u8]> for RawJsonb<'_> {
+  135 +    fn as_ref(&self) -> &[u8] {
+  136 +        self.data
+  137 +    }
+  138 +}
+  139 +
+  140 +impl Eq for RawJsonb<'_> {}
+  141 +
+  142 +impl PartialEq for RawJsonb<'_> {
+  143 +    fn eq(&self, other: &Self) -> bool {
+  144 +        self.partial_cmp(other) == Some(Ordering::Equal)
+  145 +    }
+  146 +}
+  147 +
+  148 +/// Implements `PartialOrd` for `RawJsonb`, allowing comparison of two `RawJsonb` values.
+  149 +///
+  150 +/// The comparison logic handles different JSONB types (scalar, array, object) and considers null values.
+  151 +/// The ordering is defined as follows:
+  152 +///
+  153 +/// 1. Null is considered greater than any other type.
+  154 +/// 2. Scalars are compared based on their type and value (String > Number > Boolean > ExtensionValue).
+  155 +/// 3. Arrays are compared element by element.
+  156 +/// 4. Objects are compared based on their keys and values.
+  157 +/// 5. Arrays are greater than objects and scalars.
+  158 +/// 6. Objects are greater than scalars.
+  159 +/// 7. If the types are incompatible, None is returned.
+  160 +#[allow(clippy::non_canonical_partial_ord_impl)]
+  161 +impl PartialOrd for RawJsonb<'_> {
+  162 +    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+  163 +        let self_type = self.jsonb_item_type().ok()?;
+  164 +        let other_type = other.jsonb_item_type().ok()?;
+  165 +
+  166 +        // First use JSONB type to determine the order,
+  167 +        // different types must have different orders.
+  168 +        if let Some(ord) = self_type.partial_cmp(&other_type) {
+  169 +            return Some(ord);
+  170 +        }
+  171 +
+  172 +        match (self_type, other_type) {
+  173 +            (JsonbItemType::Array(self_len), JsonbItemType::Array(other_len)) => {
+  174 +                let self_array_iter = ArrayIterator::new(*self).ok()?.unwrap();
+  175 +                let mut other_array_iter = ArrayIterator::new(*other).ok()?.unwrap();
+  176 +                for (self_res, other_res) in &mut self_array_iter.zip(&mut other_array_iter) {
+  177 +                    let self_item = self_res.ok()?;
+  178 +                    let other_item = other_res.ok()?;
+  179 +
+  180 +                    let ord = self_item.partial_cmp(&other_item)?;
+  181 +                    if ord != Ordering::Equal {
+  182 +                        return Some(ord);
+  183 +                    }
+  184 +                }
+  185 +                Some(self_len.cmp(&other_len))
+  186 +            }
+  187 +            (JsonbItemType::Object(self_len), JsonbItemType::Object(other_len)) => {
+  188 +                let self_object_iter = ObjectIterator::new(*self).ok()?.unwrap();
+  189 +                let mut other_object_iter = ObjectIterator::new(*other).ok()?.unwrap();
+  190 +                for (self_res, other_res) in &mut self_object_iter.zip(&mut other_object_iter) {
+  191 +                    let (self_key, self_val) = self_res.ok()?;
+  192 +                    let (other_key, other_val) = other_res.ok()?;
+  193 +
+  194 +                    let key_ord = self_key.partial_cmp(other_key)?;
+  195 +                    if key_ord != Ordering::Equal {
+  196 +                        return Some(key_ord);
+  197 +                    }
+  198 +                    let val_ord = self_val.partial_cmp(&other_val)?;
+  199 +                    if val_ord != Ordering::Equal {
+  200 +                        return Some(val_ord);
+  201 +                    }
+  202 +                }
+  203 +                Some(self_len.cmp(&other_len))
+  204 +            }
+  205 +            (JsonbItemType::String, JsonbItemType::String) => {
+  206 +                let self_val = self.as_str();
+  207 +                let other_val = other.as_str();
+  208 +                match (self_val, other_val) {
+  209 +                    (Ok(Some(self_val)), Ok(Some(other_val))) => self_val.partial_cmp(&other_val),
+  210 +                    (_, _) => None,
+  211 +                }
+  212 +            }
+  213 +            (JsonbItemType::Number, JsonbItemType::Number) => {
+  214 +                let self_val = self.as_number();
+  215 +                let other_val = other.as_number();
+  216 +                match (self_val, other_val) {
+  217 +                    (Ok(Some(self_val)), Ok(Some(other_val))) => self_val.partial_cmp(&other_val),
+  218 +                    (_, _) => None,
+  219 +                }
+  220 +            }
+  221 +            (JsonbItemType::Boolean, JsonbItemType::Boolean) => {
+  222 +                let self_val = self.as_bool();
+  223 +                let other_val = other.as_bool();
+  224 +                match (self_val, other_val) {
+  225 +                    (Ok(Some(self_val)), Ok(Some(other_val))) => self_val.partial_cmp(&other_val),
+  226 +                    (_, _) => None,
+  227 +                }
+  228 +            }
+  229 +            (JsonbItemType::Extension, JsonbItemType::Extension) => {
+  230 +                let self_val = self.as_extension_value();
+  231 +                let other_val = other.as_extension_value();
+  232 +                match (self_val, other_val) {
+  233 +                    (Ok(Some(self_val)), Ok(Some(other_val))) => self_val.partial_cmp(&other_val),
+  234 +                    (_, _) => None,
+  235 +                }
+  236 +            }
+  237 +            (_, _) => None,
+  238 +        }
+  239 +    }
+  240 +}
+  241 +
+  242 +/// Implements `Ord` for `RawJsonb`, allowing comparison of two `RawJsonb` values using the total ordering.
+  243 +/// This implementation leverages the `PartialOrd` implementation, returning `Ordering::Equal` for incomparable values.
+  244 +impl Ord for RawJsonb<'_> {
+  245 +    fn cmp(&self, other: &Self) -> Ordering {
+  246 +        match self.partial_cmp(other) {
+  247 +            Some(ordering) => ordering,
+  248 +            None => Ordering::Equal,
+  249 +        }
+  250 +    }
+  251 +}
+  252 +
+  253 +/// Deserializes a `RawJsonb` into a Rust data structure using Serde.
+  254 +///
+  255 +/// This function takes a `RawJsonb` (a borrowed slice of JSONB data) and attempts
+  256 +/// to deserialize it into a Rust type `T` that implements the `Deserialize` trait.
+  257 +/// It uses a custom `Deserializer` to handle the JSONB data.
+  258 +///
+  259 +/// # Arguments
+  260 +///
+  261 +/// * `raw_jsonb`: A reference to the `RawJsonb` containing the JSONB data to deserialize.
+  262 +///
+  263 +/// # Type Parameters
+  264 +///
+  265 +/// * `T`: The Rust type to deserialize the JSONB data into.  This type must implement
+  266 +///   the `serde::de::Deserialize` trait.
+  267 +///
+  268 +/// # Returns
+  269 +///
+  270 +/// * `Ok(t)`: If the deserialization is successful, returns the deserialized value of type `T`.
+  271 +/// * `Err(Error::InvalidJsonb)`: If the deserialization fails due to invalid JSONB data
+  272 +///   (e.g., trailing characters after the expected JSONB structure).
+  273 +/// * `Err(e)`: If any other Serde deserialization error occurs.
+  274 +///
+  275 +/// # Examples
+  276 +///
+  277 +/// ```
+  278 +/// use lance_jsonb::from_raw_jsonb;
+  279 +/// use lance_jsonb::OwnedJsonb;
+  280 +/// use lance_jsonb::RawJsonb;
+  281 +/// use serde::Deserialize;
+  282 +///
+  283 +/// #[derive(Deserialize, Debug, PartialEq, Eq)]
+  284 +/// struct Person {
+  285 +///     name: String,
+  286 +///     age: u32,
+  287 +/// }
+  288 +///
+  289 +/// let owned_jsonb = r#"{"name": "Alice", "age": 20}"#.parse::<OwnedJsonb>().unwrap();
+  290 +/// let raw_jsonb = owned_jsonb.as_raw();
+  291 +///
+  292 +/// let person: Person = from_raw_jsonb(&raw_jsonb).unwrap();
+  293 +/// assert_eq!(person, Person { name: "Alice".to_string(), age: 20 });
+  294 +/// println!("{:?}", person); // Output: Person { name: "Alice", age: 20 }
+  295 +/// ```
+  296 +pub fn from_raw_jsonb<'de, T>(raw_jsonb: &'de RawJsonb) -> Result<T>
+  297 +where
+  298 +    T: serde::de::Deserialize<'de>,
+  299 +{
+  300 +    let mut deserializer = Deserializer::new(raw_jsonb);
+  301 +    let t = T::deserialize(&mut deserializer)?;
+  302 +    if deserializer.end() {
+  303 +        Ok(t)
+  304 +    } else {
+  305 +        // Trailing characters
+  306 +        Err(Error::InvalidJsonb)
+  307 +    }
+  308 +}

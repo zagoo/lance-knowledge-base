@@ -1,0 +1,93 @@
+@@ -0,0 +1,92 @@
+    1 +// SPDX-License-Identifier: Apache-2.0
+    2 +// SPDX-FileCopyrightText: Copyright The Lance Authors
+    3 +
+    4 +use crate::Dataset;
+    5 +use lance_core::utils::address::RowAddress;
+    6 +use lance_core::{Error, Result};
+    7 +use lance_select::{RowAddrSelection, RowAddrTreeMap};
+    8 +use roaring::RoaringBitmap;
+    9 +use std::collections::BTreeMap;
+   10 +
+   11 +/// A physical row range in a fragment of a particular dataset snapshot.
+   12 +///
+   13 +/// Use with [`super::scanner::Scanner::with_fragment_slices`]. For example,
+   14 +/// `FragmentSlice { fragment_id: 0, row_offset: 10, row_count: 5 }` selects
+   15 +/// physical offsets 10 through 14, omitting deleted rows during ordinary scans.
+   16 +#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+   17 +pub struct FragmentSlice {
+   18 +    /// Fragment identifier in the scanner's dataset snapshot.
+   19 +    pub fragment_id: u32,
+   20 +    /// Zero-based physical offset; deletions do not compact this coordinate.
+   21 +    pub row_offset: u64,
+   22 +    /// Number of physical slots. Zero selects no rows but still validates the offset.
+   23 +    pub row_count: u64,
+   24 +}
+   25 +
+   26 +pub(super) async fn physical_rows_from_slices(
+   27 +    dataset: &Dataset,
+   28 +    slices: &[FragmentSlice],
+   29 +) -> Result<RowAddrTreeMap> {
+   30 +    let mut grouped = BTreeMap::<u32, Vec<&FragmentSlice>>::new();
+   31 +    for slice in slices {
+   32 +        grouped.entry(slice.fragment_id).or_default().push(slice);
+   33 +    }
+   34 +    let mut rows = RowAddrTreeMap::new();
+   35 +    for (fragment_id, slices) in grouped {
+   36 +        let fragment = dataset.get_fragment(fragment_id as usize).ok_or_else(|| Error::invalid_input(format!(
+   37 +            "fragment slice references fragment_id={fragment_id}, which is not present in dataset version={}", dataset.version().version
+   38 +        )))?;
+   39 +        let physical_row_count = fragment.physical_rows().await? as u64;
+   40 +        let mut offsets = RoaringBitmap::new();
+   41 +        for slice in slices {
+   42 +            let FragmentSlice {
+   43 +                row_offset,
+   44 +                row_count,
+   45 +                ..
+   46 +            } = *slice;
+   47 +            let end = row_offset.checked_add(row_count).ok_or_else(|| Error::invalid_input(format!(
+   48 +                "fragment slice end overflow: fragment_id={fragment_id}, row_offset={row_offset}, row_count={row_count}, physical_row_count={physical_row_count}, dataset_version={}", dataset.version().version
+   49 +            )))?;
+   50 +            if end > physical_row_count || end > RowAddress::FRAGMENT_SIZE {
+   51 +                return Err(Error::invalid_input(format!(
+   52 +                    "fragment slice is outside fragment bounds: fragment_id={fragment_id}, row_offset={row_offset}, row_count={row_count}, physical_row_count={physical_row_count}, dataset_version={}",
+   53 +                    dataset.version().version
+   54 +                )));
+   55 +            }
+   56 +            if row_count != 0 {
+   57 +                // Nonempty, validated ranges start strictly below FRAGMENT_SIZE.
+   58 +                // Bitmap insertion unions overlapping ranges without enumerating rows.
+   59 +                offsets.insert_range(row_offset as u32..=(end - 1) as u32);
+   60 +            }
+   61 +        }
+   62 +        if !offsets.is_empty() {
+   63 +            rows.insert_bitmap(fragment_id, offsets);
+   64 +        }
+   65 +    }
+   66 +    Ok(rows)
+   67 +}
+   68 +
+   69 +pub async fn validate_physical_rows(dataset: &Dataset, rows: &RowAddrTreeMap) -> Result<()> {
+   70 +    for (fragment_id, selection) in rows.iter() {
+   71 +        let fragment = dataset
+   72 +                .get_fragment(*fragment_id as usize)
+   73 +                .ok_or_else(|| {
+   74 +                    Error::invalid_input(format!(
+   75 +                        "physical row selection references fragment_id={fragment_id}, which is not present in dataset version={}",
+   76 +                        dataset.version().version
+   77 +                    ))
+   78 +                })?;
+   79 +        if let RowAddrSelection::Partial(offsets) = selection
+   80 +            && let Some(max_offset) = offsets.max()
+   81 +        {
+   82 +            let physical_row_count = fragment.physical_rows().await? as u64;
+   83 +            if u64::from(max_offset) >= physical_row_count {
+   84 +                return Err(Error::invalid_input(format!(
+   85 +                    "physical row selection for fragment_id={fragment_id} contains row_offset={max_offset}, but the fragment has physical_row_count={physical_row_count} in dataset version={}",
+   86 +                    dataset.version().version
+   87 +                )));
+   88 +            }
+   89 +        }
+   90 +    }
+   91 +    Ok(())
+   92 +}

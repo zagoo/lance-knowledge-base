@@ -1,0 +1,311 @@
+{
+  "iteration": 60,
+  "previous_goal_turn_classification": "progress",
+  "files": [
+    {
+      "path": "rust/lance-file/src/versions/v1/mod.rs",
+      "module": "L1-modules/rust-lance-file-v1-foundation.md",
+      "role": "Public frozen V1 module facade and physical-column projection/mapping helpers. Declares encoding, format, page_table, reader and writer; maps core Field/Schema trees to shared ReaderProjection without IO or modern metadata grammar.",
+      "reviewed": true,
+      "limits": "All physical lines of this file were read during ANALYZE60. Tests were inspected, not executed. Source remains read-only and offline; no build, test, benchmark, fixture generation or dependency installation was run. Frozen V1 behavior is recorded for compatibility, not proposed as the basis for new features. Concrete V1 codecs, reader/writer lifecycle and statistics remain pending whole-file analysis; narrow caller/helper context is recorded separately. Arithmetic, malformed-input, allocation and cancellation consequences are source-level observations, not executed reproductions. No unsafe block or global mutable state is declared in this file.",
+      "ranges": [
+        [
+          1,
+          24,
+          "SPDX and module documentation identify the canonical V1 reader/writer/metadata/page-table home, historical accepted footer identities(0,0..=2) and emitted(0,2). Those numbers are a declared contract here; exact version parsing/constants and writer call sites are elsewhere. Five child modules are public. BTreeMap, Arc, core Field/Schema/Result and shared ReaderProjection are the local dependencies."
+        ],
+        [
+          25,
+          39,
+          "Private append_field_ids walks supplied fields preorder. Cast each signed field.id to u32, append a mapped column if present, silently skip an unmapped node, then recurse into children unless the node is Blob or packed struct. A missing parent does not block ordinary children. Supplied map values are neither bounds-checked nor deduplicated; negative IDs wrap to u32. Blob/packed descendants never contribute separately."
+        ],
+        [
+          40,
+          55,
+          "Public projection_from_field_ids allocates an index vector, uses the above traversal, and deep-clones the supplied schema into a fresh Arc. It returns ReaderProjection directly, even for empty schema/indices, absent mappings or repeated physical values. It preserves the full supplied schema rather than removing unmapped fields; validation is a consumer responsibility. No IO or fallible Result."
+        ],
+        [
+          56,
+          59,
+          "projection_from_whole_schema builds the private full-schema ID-to-column map, then applies the same projection helper. Map creation uses two temporary vectors and a BTreeMap; duplicated field IDs collapse to the last assigned column in the map and may be repeated again in traversal. This is not a one-to-one mapping validator."
+        ],
+        [
+          60,
+          71,
+          "projection_from_column_names builds physical mapping from the original full schema before calling Schema::project. Projection errors propagate; otherwise compute indices from projected preorder using original physical columns. It does not renumber the selected subset or validate uniqueness/bounds beyond delegated schema projection."
+        ],
+        [
+          72,
+          84,
+          "physical_column_count returns1 for any Blob or packed struct without visiting descendants; otherwise returns1 plus recursive child counts. Ordinary struct/container parents count even when they have no data page. Addition/sum are unchecked usize arithmetic; recursive depth is not bounded."
+        ],
+        [
+          85,
+          92,
+          "data_file_columns creates parallel Vec<i32> IDs/indices and calls private preorder appender with a temporary counter0. Empty schema yields two empty vectors. Field IDs remain their original signed values, while physical indices are assigned consecutively."
+        ],
+        [
+          93,
+          101,
+          "Private field_id_to_column_index zips the parallel vectors, casts both sides to u32 and collects BTreeMap. Duplicate IDs overwrite earlier entries; negative IDs/overflowed signed columns are not rejected. The map is only a projection helper, not persisted itself here."
+        ],
+        [
+          102,
+          116,
+          "append_physical_fields emits every visited node ID and current physical counter before ordinary i32 increment and recursive descent. Blob/packed struct stop recursion; other parent/child nodes each occupy a slot. No overflow, duplicate-ID, negative-ID or schema validation. File ends without a local test module; compatibility/projection tests in other analyzed files do not constitute exhaustive edge-case coverage of these helpers."
+        ]
+      ]
+    },
+    {
+      "path": "rust/lance-file/src/versions/v1/encoding.rs",
+      "module": "L1-modules/rust-lance-file-v1-foundation.md",
+      "role": "Public V1 value-decoding dispatch and persisted schema dictionary write/load helpers. Concrete binary/plain/dictionary codecs are child modules; this facade separates frozen V1 grammar from version-free IO and modern encodings.",
+      "reviewed": true,
+      "limits": "All physical lines of this file were read during ANALYZE60. Tests were inspected, not executed. Source remains read-only and offline; no build, test, benchmark, fixture generation or dependency installation was run. Frozen V1 behavior is recorded for compatibility, not proposed as the basis for new features. Concrete V1 codecs, reader/writer lifecycle and statistics remain pending whole-file analysis; narrow caller/helper context is recorded separately. Arithmetic, malformed-input, allocation and cancellation consequences are source-level observations, not executed reproductions. No unsafe block or global mutable state is declared in this file.",
+      "ranges": [
+        [
+          1,
+          34,
+          "SPDX and module contract place V1 wire layout and schema dictionary payloads in this versioned module. Public binary,dictionary,plain children; Arrow arrays/types/DataType, async_recursion, local DataTypeExt, core schema/errors, Reader/Writer and ReadBatchParams dependencies. Only binary/plain concrete codecs are used by these dictionary-value helpers; dictionary child handles keys elsewhere."
+        ],
+        [
+          35,
+          52,
+          "read_binary_array is public async with borrowed Reader/DataType, nullable, byte position, logical length and generic Into<ReadBatchParams>. It converts params first, then Utf8 instantiates BinaryDecoder<Utf8Type> and awaits get. Offset/range/null/layout validation and IO are delegated to the concrete decoder, not added here."
+        ],
+        [
+          53,
+          73,
+          "Binary,LargeUtf8,LargeBinary dispatch to their corresponding Arrow generic BinaryDecoder. Any other type gives InvalidInput with displayed data_type. This exact four-type set is narrower than local DataTypeExt::is_binary_like, which also includes Utf8View/BinaryView; therefore passing the broad binary-like predicate does not guarantee successful dispatch."
+        ],
+        [
+          74,
+          91,
+          "read_fixed_stride_array first checks DataTypeExt::is_fixed_stride and returns Schema error with type if false. Then PlainDecoder::new may fail before params.into; successful constructor awaits get. It has no nullable argument or local bounds check. The broad fixed-stride predicate does not itself prove every nested layout is supported by the pending concrete decoder."
+        ],
+        [
+          92,
+          102,
+          "write_schema_dictionaries mutably borrows writer and schema. It computes maximum field ID once, defaults to-1, then iterates every integer0..=max, looks up a mutable field and skips holes or nondictionary types. Runtime work depends on ID span, not only field count; negative-only/empty schemas iterate nothing. Field data_type conversion uses the core schema contract and may panic for malformed logical metadata."
+        ],
+        [
+          103,
+          115,
+          "For a dictionary field, absent dictionary metadata is IO error naming field; absent in-memory values is InvalidInput naming field. Existing dictionary values are borrowed, not removed. Checks occur per field during traversal, so a later field failure does not undo earlier writes or schema mutations."
+        ],
+        [
+          116,
+          132,
+          "Choose encoder using actual values.data_type(): is_numeric -> PlainEncoder, otherwise is_binary_like -> BinaryEncoder, otherwise Schema error. Await encode on a one-array slice; after success store returned position and values.len in dictionary offset/length. No local comparison to schema dictionary value type, flush/shutdown, rollback or all-fields preflight. Numeric write predicate is not the explicit eight-integer read whitelist; broad binary-like predicate includes views that read_binary_array rejects. Exact lower-codec support remains pending."
+        ],
+        [
+          133,
+          152,
+          "Private async_recursion populate_field_dictionary branches on schema-declared DataType::Dictionary, requires metadata(IO error), and for binary-like values calls read_binary_array(nullable=true,stored offset/length,full range). Existing in-memory values do not bypass this load. IO can occur before later fields fail; helper holds mutable field state across await."
+        ],
+        [
+          153,
+          176,
+          "Only Int8/16/32/64 and UInt8/16/32/64 dictionary value types enter fixed-stride loading with full range. Other nonbinary types produce Schema error with value_type, even though writer selection uses the broader numeric predicate. Binary view types enter the preceding branch but fail the four-type binary dispatcher as InvalidInput. No type fallback/migration is implemented."
+        ],
+        [
+          177,
+          185,
+          "After successful load replace dict_info.values with Some(array). A dictionary node does not recurse into children; nondictionary nodes recursively process children in stored order. Error stops traversal after any prior successful mutations. async_recursion boxes recursive futures; no task is explicitly spawned, and no rollback or cancellation guard appears."
+        ],
+        [
+          186,
+          192,
+          "populate_schema_dictionaries is public async, processes roots sequentially through the recursive helper, then returns unit. Empty schemas succeed without reads. File ends without tests, so local dictionary type asymmetry, invalid IDs, partial failure and view behavior have no unit oracles here; other modules must be checked separately."
+        ]
+      ]
+    },
+    {
+      "path": "rust/lance-file/src/versions/v1/format/mod.rs",
+      "module": "L1-modules/rust-lance-file-v1-foundation.md",
+      "role": "Public V1 format namespace forwarding to its metadata implementation; no generated protobuf include or behavior in this four-line facade.",
+      "reviewed": true,
+      "limits": "All physical lines of this file were read during ANALYZE60. Tests were inspected, not executed. Source remains read-only and offline; no build, test, benchmark, fixture generation or dependency installation was run. Frozen V1 behavior is recorded for compatibility, not proposed as the basis for new features. Concrete V1 codecs, reader/writer lifecycle and statistics remain pending whole-file analysis; narrow caller/helper context is recorded separately. Arithmetic, malformed-input, allocation and cancellation consequences are source-level observations, not executed reproductions. No unsafe block or global mutable state is declared in this file.",
+      "ranges": [
+        [
+          1,
+          4,
+          "Two SPDX comments, one blank line and public metadata module declaration. No type, function, constant, IO, initialization or test behavior; child Metadata and StatisticsMetadata are available through this namespace."
+        ]
+      ]
+    },
+    {
+      "path": "rust/lance-file/src/versions/v1/format/metadata.rs",
+      "module": "L1-modules/rust-lance-file-v1-foundation.md",
+      "role": "Public V1 metadata containers, protobuf object conversion and logical-row-to-batch mapping. Maintains signed cumulative batch offsets and page-table/schema/statistics locations; it does not read or write bytes itself.",
+      "reviewed": true,
+      "limits": "All physical lines of this file were read during ANALYZE60. Tests were inspected, not executed. Source remains read-only and offline; no build, test, benchmark, fixture generation or dependency installation was run. Frozen V1 behavior is recorded for compatibility, not proposed as the basis for new features. Concrete V1 codecs, reader/writer lifecycle and statistics remain pending whole-file analysis; narrow caller/helper context is recorded separately. Arithmetic, malformed-input, allocation and cancellation consequences are source-level observations, not executed reproductions. No unsafe block or global mutable state is declared in this file.",
+      "ranges": [
+        [
+          1,
+          13,
+          "SPDX/imports: BTreeMap makes grouped batch IDs ordered; Range describes half-open selections; file Fields/FieldsWithMeta and shared pb convert flat schemas; core Schema, DeepSizeOf and errors plus IO ProtoStruct provide metadata integration."
+        ],
+        [
+          14,
+          33,
+          "Metadata derives Debug,Default,DeepSizeOf,PartialEq; public fields batch_offsets:Vec<i32>,page_table_position:usize,manifest_position:Option<usize>,stats_metadata:Option<StatisticsMetadata>. Defaults are empty/0/None/None. ProtoStruct associates pb::Metadata. The type imposes no nonnegative/monotone offsets or valid file-position invariant at construction."
+        ],
+        [
+          34,
+          55,
+          "From<&Metadata> for pb::Metadata clones offsets and optional statistics leaf IDs, flattens stats schema via FieldsWithMeta but persists only fields, casts positions to u64, and maps absent manifest_position to0. Statistics Some(empty schema) remains Some; None remains None. Schema-level metadata is omitted from this stats encoding. No IO or validation."
+        ],
+        [
+          56,
+          78,
+          "TryFrom<pb::Metadata> clones incoming batch_offsets despite owning message, casts all positions to usize without checked conversion and always produces Some(manifest_position), including Some(0). Statistics schema is reconstructed with empty schema-level metadata and can fail through Schema conversion; IDs/position are copied without checks. Thus Metadata None manifest location roundtrips as Some(0), while wire0 retains its external-manifest sentinel meaning for consumers. Offset order/count and page ranges are not validated here."
+        ],
+        [
+          79,
+          84,
+          "BatchOffsets is public Debug/PartialEq with batch_id:i32 and offsets:Vec<u32>. Values describe one batch and in-batch row offsets; there is no constructor validation or ownership-sharing wrapper."
+        ],
+        [
+          85,
+          103,
+          "num_batches returns0 for an empty offsets vector, otherwise len-1. len returns final signed offset cast to usize, default0; negative final values become large unsigned lengths. is_empty compares that result to0. These methods assume a cumulative sentinel vector; a singleton nonzero vector reports0batches but nonzero length."
+        ],
+        [
+          104,
+          112,
+          "push_batch_length inserts initial0 only if offsets is empty, then appends ordinary i32 sum of supplied length and last offset. Zero or negative lengths are accepted; overflow is not checked. Existing malformed offset vectors are not repaired. Nonempty guarantee makes the last unwrap structurally safe after initialization."
+        ],
+        [
+          113,
+          123,
+          "get_offset casts signed batch_id to usize and uses bounds-checked Vec::get. get_batch_length first gets offset(batch_id+1), then subtracts offset(batch_id) or default0. IDs are not explicitly validated: for batch_id=-1, next0 may yield the first offset while current negative lookup misses. Signed increment/subtraction are unchecked. Terminal sentinel is accessible by get_offset even though it is not a batch start."
+        ],
+        [
+          124,
+          147,
+          "group_indices_to_batches documents sorted input but actually clones and sort_unstable sorts it. It scans increasing batch_id across cumulative ends and groups original absolute indices into an ordered BTreeMap, preserving duplicate values. Out-of-range IDs can advance to batch_id==num_batches and are retained there; no error is returned. A zero-length batch is skipped while its end<=index. Sorting changes caller ordering without a permutation result. The comment labels sort_unstable quick sort; that implementation claim is only a comment, not established by this file."
+        ],
+        [
+          148,
+          164,
+          "Map iteration yields increasing batch IDs. Each group reads batch_offsets[batch_id] and subtracts that offset cast to u32, collecting BatchOffsets. Nonempty indices with entirely empty batch_offsets panic on this indexing; a nonempty sentinel vector permits a terminal pseudo-batch for out-of-file rows. Unsigned subtraction is unchecked on malformed offsets. An empty indices slice yields no groups. The observed V1 take consumer rejects batch_id>=num_batches later."
+        ],
+        [
+          165,
+          182,
+          "range_to_batches returns Result but first unwraps final offset, so empty metadata panics. Only range.end>last_as_usize is explicitly rejected as InvalidInput with range/bound. It casts start to i32 and binary-searches offsets, using insertion_point-1 on a miss. Unsorted/nonzero-first offsets, large casts and underflow are not checked; duplicate cumulative offsets permit binary_search to select any matching entry. It does not reject start>end."
+        ],
+        [
+          183,
+          196,
+          "Iterate from chosen batch while below num_batches; stop once batch_start>=range.end. Append clamped(relative start..end) using unchecked usize subtraction, then return vector. Reversed ranges can yield reversed subranges; an empty range inside a nonempty batch can produce an empty subrange, while an empty range at its start stops immediately. The V1 reader short-circuits Range::is_empty before invoking this helper, so these helper-level observations are not claims that that caller exposes them."
+        ],
+        [
+          197,
+          208,
+          "StatisticsMetadata derives Debug,PartialEq,DeepSizeOf and exposes schema:Schema,leaf_field_ids:Vec<i32>,page_table_position:usize. Documentation describes per-field i.null_count/min_value/max_value names; this container does not enforce those names, schema/ID cardinality or statistics completeness."
+        ],
+        [
+          209,
+          235,
+          "Private cfg(test) module imports parent. test_group_indices_to_batch pushes20twice, groups[6,24], requires two groups exactly(batch0,[6])and(batch1,[4]). It does not test sorting, duplicates, empty metadata, boundaries, invalid indices, negative offsets or conversion presence."
+        ],
+        [
+          236,
+          255,
+          "test_range_to_batches builds lengths[5,10,15,20], cumulative[0,5,15,30,50]. Asserts0..10->[0:0..5,1:0..5],2..10->[0:2..5,1:0..5],15..33->[2:0..15,3:0..3],14..33->[1:9..10,2:0..15,3:0..3]. No error, empty/reversed range, duplicate-offset or overflow oracle. File ends with two tests; protobuf/schema conversion has no direct unit roundtrip here."
+        ]
+      ]
+    },
+    {
+      "path": "rust/lance-file/src/versions/v1/page_table.rs",
+      "module": "L1-modules/rust-lance-file-v1-foundation.md",
+      "role": "Public frozen V1 page lookup structures and dense field-ID-major page-table load/write. Converts sparse in-memory BTreeMaps into an implicit-dimension signed64 pair matrix; dimensions come from external schema/metadata.",
+      "reviewed": true,
+      "limits": "All physical lines of this file were read during ANALYZE60. Tests were inspected, not executed. Source remains read-only and offline; no build, test, benchmark, fixture generation or dependency installation was run. Frozen V1 behavior is recorded for compatibility, not proposed as the basis for new features. Concrete V1 codecs, reader/writer lifecycle and statistics remain pending whole-file analysis; narrow caller/helper context is recorded separately. Arithmetic, malformed-input, allocation and cancellation consequences are source-level observations, not executed reproductions. No unsafe block or global mutable state is declared in this file.",
+      "ranges": [
+        [
+          1,
+          15,
+          "SPDX/imports bring Arrow Int64 builder/array/DataType, core DeepSizeOf/errors, BTreeMap, Tokio AsyncWriteExt, Reader/Writer and V1 PlainDecoder. This writer emits an Arrow values buffer directly, while loader delegates array decoding to the concrete PlainDecoder."
+        ],
+        [
+          16,
+          27,
+          "PageInfo is public Clone/Debug/PartialEq/DeepSizeOf with position:usize and length:usize. new stores both without validation. Observed fixed/binary/dictionary writer callers pass logical array length, not encoded byte size; length interpretation belongs to the page encoding."
+        ],
+        [
+          28,
+          35,
+          "PageTable is public Debug/Default/Clone/PartialEq/DeepSizeOf; private pages maps signed field_id -> signed batch_id -> PageInfo in sorted BTreeMaps. Default is empty. Clone duplicates maps and values; no Arc/cache or interior mutation is owned here."
+        ],
+        [
+          36,
+          66,
+          "Public async load accepts borrowed reader, table position, signed inclusive min/max IDs and signed number of batches. Documentation requires caller dimensions and explains0/0 for absent/struct pages. Only max<min is explicitly rejected, as Internal with both values; negative IDs or num_batches are not rejected."
+        ],
+        [
+          67,
+          74,
+          "Count inclusive field-ID range, compute ordinary usize length=num_columns*(num_batches as usize)*2, construct Int64 PlainDecoder and await decode, then unwrap Int64 downcast. Multiplication/casts, decoded length and values are not independently checked here. Negative batch count can imply a huge requested length; concrete IO/decode failures are delegated. Whole raw table is decoded before map expansion."
+        ],
+        [
+          75,
+          93,
+          "For every field in the inclusive range insert an inner map; for batch0..num_batches use signed idx=field_pos_as_i32*num_batches+batch and read pair at2idx,2idx+1. Convert each signed64 position/length to usize unchecked and insert, including0/0 holes. Map lookup unwrap follows local insertion; array indexing relies on decoded shape. Negative values are not rejected. num_batches0 returns nonempty outer maps with empty inner maps, a state the writer does not safely handle."
+        ],
+        [
+          94,
+          117,
+          "write documents dense placeholders. Reject completely empty outer map with InvalidInput source empty page table. Then reject supplied min_field_id>observed minimum with InvalidInput whose message uses field_id_offset. Take observed max and build inclusive[min,max]. Lower min is allowed to include ancestor/hole fields; all checks here precede writer.tell."
+        ],
+        [
+          118,
+          128,
+          "Await writer.tell for start position, then find maximum batch key across all inner maps, unwrap it, and add1. Nonempty outer/all-empty inner maps panic at unwrap after tell; batch-ID max overflow and casts are unchecked. Int64Builder capacity is field_count*num_batches, although two values will be appended per cell, so it underestimates final element count. No dimensions are persisted in this method."
+        ],
+        [
+          129,
+          146,
+          "Iterate field-major then batch0..num_batches. Existing PageInfo appends position and length cast to i64; missing pair appends[0,0]. Finish Int64Array and write_all its first Arrow buffer directly, then return prior tell position. No explicit endian conversion, alignment, length prefix, footer, flush/shutdown or atomic/abort guard appears. A partial write/error/cancellation can leave output bytes; successful return is not publication/durability. A table whose only batch key is-1 derives0batches and writes an empty buffer; more negative/overflowed dimensions remain unchecked."
+        ],
+        [
+          147,
+          154,
+          "set inserts/creates field map and overwrites an existing same(field,batch) entry, discarding the old value. Accepts negative field/batch IDs and arbitrary PageInfo. Struct/hole zero entries are not automatically added in memory."
+        ],
+        [
+          155,
+          161,
+          "get returns borrowed Option<&PageInfo> via two map lookups. A missing entry is None; an explicit or loaded0/0 entry is Some, so sparse pre-write and dense post-load maps need not compare equal. No IO or normalization."
+        ],
+        [
+          162,
+          180,
+          "Private cfg(test) module imports temp file, pretty equality and LocalObjectReader. test_set_page_info creates PageInfo(1,2), stores at(10,20), unwraps get and compares. No overwrite/missing/negative-key tests."
+        ],
+        [
+          181,
+          221,
+          "Roundtrip fixture sets populated cells(10,2),(11,1),(13,0..3) to(1,2), leaves field12 absent, supplies leading struct field9, writes to local tempfile, explicitly shuts down, then loads fields9..13 with4batches. Read/write success is unwrapped; fixture spans20cells."
+        ],
+        [
+          222,
+          247,
+          "Test expected is actual.clone(), not original sparse fixture. It overwrites14 known missing cells with(0,0), then compares expected==actual. Therefore it verifies those holes/ancestor rows were decoded as zeros, but does not independently assert the six populated cells retain(1,2), table byte length/order or all expected shape. The test name alone does not establish full roundtrip correctness."
+        ],
+        [
+          248,
+          273,
+          "Error test first requires empty write error to be InvalidInput with empty-page substring, then inserts(0,0)->(1,2) and requires write(min1) InvalidInput with exact offset/min substring. Files are recreated/truncated between calls; no read/write failure injection or offset-state assertions."
+        ],
+        [
+          274,
+          287,
+          "Error test writes valid min0 table, opens reader without explicit shutdown of this last writer, calls load(min1,max0,batches1) and asserts Internal/message before any decoding. No reversed batch count, zero-batch rewrite, signed-size, overflow, corrupt table or partial IO test. File ends with three tests."
+        ]
+      ]
+    }
+  ]
+}

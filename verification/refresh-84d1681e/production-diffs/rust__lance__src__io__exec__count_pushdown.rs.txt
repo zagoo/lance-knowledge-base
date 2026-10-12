@@ -1,0 +1,101 @@
+@@ -46,14 +46,12 @@ use datafusion::common::tree_node::{Transformed, TreeNode};
+   46  use datafusion::config::ConfigOptions;
+   47  use datafusion::error::Result as DFResult;
+   48  use datafusion::physical_optimizer::PhysicalOptimizerRule;
+   49 -#[allow(deprecated)]
+   50 -use datafusion::physical_plan::coalesce_batches::CoalesceBatchesExec;
+   49 +use datafusion::physical_plan::execution_plan::CardinalityEffect;
+   50  use datafusion::physical_plan::{
+   51      ExecutionPlan, ExecutionPlanProperties,
+   52      aggregates::{AggregateExec, AggregateMode, PhysicalGroupBy},
+   53      coalesce_partitions::CoalescePartitionsExec,
+   54      projection::ProjectionExec,
+   56 -    repartition::RepartitionExec,
+   55      union::UnionExec,
+   56  };
+   57  use datafusion_physical_expr::aggregate::AggregateFunctionExpr;
+
+@@ -378,52 +376,44 @@ fn build_scan_branch(
+  376      Ok(Arc::new(partial))
+  377  }
+  378  
+  381 -/// Walk through row-preserving wrappers (`RepartitionExec`,
+  382 -/// `CoalesceBatchesExec`, and identity-or-empty `ProjectionExec`) that
+  383 -/// DataFusion's planner inserts between an `AggregateExec` and the leaf, and
+  384 -/// return the underlying `FilteredReadExec` if one is reached.
+  379 +/// Walk through row-preserving wrappers between an `AggregateExec` and the
+  380 +/// leaf, and return the underlying `FilteredReadExec` if one is reached.
+  381  ///
+  386 -/// "Row-preserving" here means the wrapper changes neither the number of rows
+  387 -/// nor the predicate applied to them — it may reshape partitions, batches, or
+  388 -/// drop unused columns, but the row population at the bottom is what reaches
+  389 -/// the aggregate. That's all the rule needs from these layers, so it's safe to
+  390 -/// look past them.
+  382 +/// A wrapper qualifies by reporting [`CardinalityEffect::Equal`] with no fetch:
+  383 +/// DataFusion's `RepartitionExec` and `CoalesceBatchesExec`, or a custom node a
+  384 +/// `TableProvider` wraps around the scan. `CoalescePartitionsExec` and
+  385 +/// `CoalesceBatchesExec` report `Equal` even when a fetch caps their rows,
+  386 +/// hence the fetch check. Projections must also be identity-or-empty, so no
+  387 +/// expression is skipped.
+  388  fn strip_row_preserving_wrappers(plan: &Arc<dyn ExecutionPlan>) -> Option<&FilteredReadExec> {
+  389      let mut current: &dyn ExecutionPlan = plan.as_ref();
+  390      loop {
+  391          if let Some(filtered_read) = current.downcast_ref::<FilteredReadExec>() {
+  392              return Some(filtered_read);
+  393          }
+  397 -        let next: &Arc<dyn ExecutionPlan> =
+  398 -            if let Some(inner) = current.downcast_ref::<RepartitionExec>() {
+  399 -                inner.input()
+  400 -            } else if let Some(inner) = {
+  401 -                #[allow(deprecated)]
+  402 -                current.downcast_ref::<CoalesceBatchesExec>()
+  403 -            } {
+  404 -                inner.input()
+  405 -            } else if let Some(inner) = current.downcast_ref::<CoalescePartitionsExec>() {
+  406 -                inner.input()
+  407 -            } else {
+  408 -                let proj = current.downcast_ref::<ProjectionExec>()?;
+  409 -                // Only walk through projections that are row-preserving: every
+  410 -                // output expression is a direct column reference back to the
+  411 -                // input. (Empty projections trivially qualify — DataFusion uses
+  412 -                // one when a `COUNT(*)`'s argument no longer needs any actual
+  413 -                // columns.)
+  414 -                let input_schema = proj.input().schema();
+  415 -                let identity = proj.expr().iter().all(|projection_expr| {
+  416 -                    projection_expr
+  417 -                        .expr
+  418 -                        .downcast_ref::<Column>()
+  419 -                        .is_some_and(|c| c.name() == input_schema.field(c.index()).name())
+  420 -                });
+  421 -                if !identity {
+  422 -                    return None;
+  423 -                }
+  424 -                proj.input()
+  425 -            };
+  426 -        current = next.as_ref();
+  394 +        if let Some(proj) = current.downcast_ref::<ProjectionExec>() {
+  395 +            // Empty projections qualify: DataFusion uses one when a `COUNT(*)`'s
+  396 +            // argument no longer needs any columns.
+  397 +            let input_schema = proj.input().schema();
+  398 +            let identity = proj.expr().iter().all(|projection_expr| {
+  399 +                projection_expr
+  400 +                    .expr
+  401 +                    .downcast_ref::<Column>()
+  402 +                    .is_some_and(|c| c.name() == input_schema.field(c.index()).name())
+  403 +            });
+  404 +            if !identity {
+  405 +                return None;
+  406 +            }
+  407 +        }
+  408 +        if current.fetch().is_some()
+  409 +            || !matches!(current.cardinality_effect(), CardinalityEffect::Equal)
+  410 +        {
+  411 +            return None;
+  412 +        }
+  413 +        let [input] = current.children()[..] else {
+  414 +            return None;
+  415 +        };
+  416 +        current = input.as_ref();
+  417      }
+  418  }
+  419  

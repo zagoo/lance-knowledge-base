@@ -1,0 +1,313 @@
+[
+  {
+    "path": "rust/lance-file/src/writer/structural.rs",
+    "start": 938,
+    "end": 956,
+    "claims": [
+      3
+    ],
+    "read_at": "2026-10-03T23:10:02.648Z",
+    "evidence": "938 |     fn analysis(parent_valid: Vec<bool>, changed: Vec<Option<bool>>) -> (ArrayRef, Schema) {\n939 |         let child = Arc::new(BooleanArray::from(changed)) as ArrayRef;\n940 |         let array = Arc::new(StructArray::new(\n941 |             Fields::from(vec![ArrowField::new(\"changed\", DataType::Boolean, true)]),\n942 |             vec![child],\n943 |             Some(NullBuffer::from(parent_valid)),\n944 |         )) as ArrayRef;\n945 |         let declared = ArrowSchema::new(vec![ArrowField::new(\n946 |             \"analysis\",\n947 |             DataType::Struct(Fields::from(vec![ArrowField::new(\n948 |                 \"changed\",\n949 |                 DataType::Boolean,\n950 |                 false,\n951 |             )])),\n952 |             true,\n953 |         )]);\n954 |         (array, Schema::try_from(&declared).unwrap())\n955 |     }\n956 | "
+  },
+  {
+    "path": "rust/lance-core/src/lib.rs",
+    "start": 22,
+    "end": 65,
+    "claims": [
+      4
+    ],
+    "read_at": "2026-10-03T23:10:02.649Z",
+    "evidence": "22 | /// Wildcard to indicate all non-system columns\n23 | pub const WILDCARD: &str = \"*\";\n24 | /// Column name for the meta row ID.\n25 | pub const ROW_ID: &str = \"_rowid\";\n26 | /// Column name for the meta row address.\n27 | pub const ROW_ADDR: &str = \"_rowaddr\";\n28 | /// Column name for the meta row offset.\n29 | pub const ROW_OFFSET: &str = \"_rowoffset\";\n30 | /// Column name for the row's last updated at dataset version.\n31 | pub const ROW_LAST_UPDATED_AT_VERSION: &str = \"_row_last_updated_at_version\";\n32 | /// Column name for the row's created at dataset version.\n33 | pub const ROW_CREATED_AT_VERSION: &str = \"_row_created_at_version\";\n34 | \n35 | /// Row ID field. This is nullable because its validity bitmap is sometimes used\n36 | /// as a selection vector.\n37 | pub static ROW_ID_FIELD: LazyLock<ArrowField> =\n38 |     LazyLock::new(|| ArrowField::new(ROW_ID, DataType::UInt64, true));\n39 | /// Row address field. This is nullable because its validity bitmap is sometimes used\n40 | /// as a selection vector.\n41 | pub static ROW_ADDR_FIELD: LazyLock<ArrowField> =\n42 |     LazyLock::new(|| ArrowField::new(ROW_ADDR, DataType::UInt64, true));\n43 | /// Row offset field. This is nullable merely for compatibility with the other\n44 | /// fields.\n45 | pub static ROW_OFFSET_FIELD: LazyLock<ArrowField> =\n46 |     LazyLock::new(|| ArrowField::new(ROW_OFFSET, DataType::UInt64, true));\n47 | /// Row last updated at version field.\n48 | pub static ROW_LAST_UPDATED_AT_VERSION_FIELD: LazyLock<ArrowField> =\n49 |     LazyLock::new(|| ArrowField::new(ROW_LAST_UPDATED_AT_VERSION, DataType::UInt64, true));\n50 | /// Row created at version field.\n51 | pub static ROW_CREATED_AT_VERSION_FIELD: LazyLock<ArrowField> =\n52 |     LazyLock::new(|| ArrowField::new(ROW_CREATED_AT_VERSION, DataType::UInt64, true));\n53 | \n54 | /// Field id of the hidden `_rowid` column a spilled row id sequence lives in.\n55 | ///\n56 | /// Field ids are `i32` and every negative value is reserved for system use:\n57 | /// `-1` is the unassigned sentinel, `-2` the tombstone for a field superseded by\n58 | /// a later data file, and `-3..=-5` the three row lineage columns.\n59 | pub const ROW_ID_FIELD_ID: i32 = -3;\n60 | /// Field id of the hidden `_row_created_at_version` column a spilled created-at\n61 | /// version sequence lives in.\n62 | pub const ROW_CREATED_AT_VERSION_FIELD_ID: i32 = -4;\n63 | /// Field id of the hidden `_row_last_updated_at_version` column a spilled\n64 | /// last-updated-at version sequence lives in.\n65 | pub const ROW_LAST_UPDATED_AT_VERSION_FIELD_ID: i32 = -5;"
+  },
+  {
+    "path": "rust/lance-file/src/versions/v1/writer/mod.rs",
+    "start": 627,
+    "end": 638,
+    "claims": [
+      5
+    ],
+    "read_at": "2026-10-03T23:10:02.649Z",
+    "evidence": "627 |     async fn write_footer(&mut self) -> Result<()> {\n628 |         // Step 1. Write page table.\n629 |         let field_id_offset = *self.schema.field_ids().iter().min().unwrap();\n630 |         let pos = self\n631 |             .page_table\n632 |             .write(self.object_writer.as_mut(), field_id_offset)\n633 |             .await?;\n634 |         self.metadata.page_table_position = pos;\n635 | \n636 |         // Step 2. Write statistics.\n637 |         self.metadata.stats_metadata = self.write_statistics().await?;\n638 | "
+  },
+  {
+    "path": "rust/lance-file/src/versions/v1/encoding.rs",
+    "start": 92,
+    "end": 131,
+    "claims": [
+      5
+    ],
+    "read_at": "2026-10-03T23:10:02.649Z",
+    "evidence": "92 | /// Persist every schema dictionary using the v1 value codecs.\n93 | pub async fn write_schema_dictionaries(writer: &mut dyn Writer, schema: &mut Schema) -> Result<()> {\n94 |     let max_field_id = schema.max_field_id().unwrap_or(-1);\n95 |     for field_id in 0..=max_field_id {\n96 |         let Some(field) = schema.mut_field_by_id(field_id) else {\n97 |             continue;\n98 |         };\n99 |         if !field.data_type().is_dictionary() {\n100 |             continue;\n101 |         }\n102 | \n103 |         let dict_info = field.dictionary.as_mut().ok_or_else(|| {\n104 |             Error::io(format!(\n105 |                 \"v1 dictionary field '{}' is missing dictionary metadata\",\n106 |                 field.name\n107 |             ))\n108 |         })?;\n109 |         let values = dict_info.values.as_ref().ok_or_else(|| {\n110 |             Error::invalid_input(format!(\n111 |                 \"v1 dictionary field '{}' is missing dictionary values\",\n112 |                 field.name\n113 |             ))\n114 |         })?;\n115 | \n116 |         let data_type = values.data_type();\n117 |         let position = if data_type.is_numeric() {\n118 |             PlainEncoder::new(writer, data_type)\n119 |                 .encode(&[values])\n120 |                 .await?\n121 |         } else if data_type.is_binary_like() {\n122 |             BinaryEncoder::new(writer).encode(&[values]).await?\n123 |         } else {\n124 |             return Err(Error::schema(format!(\n125 |                 \"v1 dictionary values do not support data type {data_type}\"\n126 |             )));\n127 |         };\n128 |         dict_info.offset = position;\n129 |         dict_info.length = values.len();\n130 |     }\n131 |     Ok(())"
+  },
+  {
+    "path": "rust/lance-io/src/traits.rs",
+    "start": 83,
+    "end": 107,
+    "claims": [
+      5
+    ],
+    "read_at": "2026-10-03T23:10:02.649Z",
+    "evidence": "83 | impl<W: Writer + ?Sized> WriteExt for W {\n84 |     async fn write_protobuf(&mut self, msg: &impl Message) -> Result<usize> {\n85 |         let offset = self.tell().await?;\n86 | \n87 |         let len = msg.encoded_len();\n88 | \n89 |         self.write_u32_le(len as u32).await?;\n90 |         self.write_all(&msg.encode_to_vec()).await?;\n91 | \n92 |         Ok(offset)\n93 |     }\n94 | \n95 |     async fn write_magics(\n96 |         &mut self,\n97 |         pos: usize,\n98 |         major_version: i16,\n99 |         minor_version: i16,\n100 |         magic: &[u8],\n101 |     ) -> Result<()> {\n102 |         self.write_i64_le(pos as i64).await?;\n103 |         self.write_i16_le(major_version).await?;\n104 |         self.write_i16_le(minor_version).await?;\n105 |         self.write_all(magic).await?;\n106 |         Ok(())\n107 |     }"
+  },
+  {
+    "path": "rust/lance-file/src/format.rs",
+    "start": 30,
+    "end": 33,
+    "claims": [
+      5
+    ],
+    "read_at": "2026-10-03T23:10:02.649Z",
+    "evidence": "30 | /// These version/magic values are written at the end of Lance files (e.g. versions/1.version)\n31 | pub const MAJOR_VERSION: i16 = 0;\n32 | pub const MINOR_VERSION: i16 = 2;\n33 | pub const MAGIC: &[u8; 4] = b\"LANC\";"
+  },
+  {
+    "path": "rust/lance-table/src/rowids.rs",
+    "start": 1533,
+    "end": 1558,
+    "claims": [
+      6
+    ],
+    "read_at": "2026-10-03T23:10:02.649Z",
+    "evidence": "1533 |     }\n1534 | \n1535 |     #[test]\n1536 |     fn test_selection() {\n1537 |         let sequence = RowIdSequence(vec![\n1538 |             U64Segment::Range(0..5),\n1539 |             U64Segment::RangeWithHoles {\n1540 |                 range: 10..16,\n1541 |                 holes: vec![12].into(),\n1542 |             },\n1543 |             U64Segment::RangeWithBitmap {\n1544 |                 range: 20..28,\n1545 |                 bitmap: [true, false, true, true, false, true, false, true]\n1546 |                     .as_slice()\n1547 |                     .into(),\n1548 |             },\n1549 |             U64Segment::SortedArray(vec![40, 42, 45].into()),\n1550 |             U64Segment::Array(vec![60, 50, 70].into()),\n1551 |         ]);\n1552 |         let live = sequence.iter().collect::<Vec<_>>();\n1553 |         let selection = sequence.select(vec![2, 4, 13, 14, 57].into_iter());\n1554 |         assert_eq!(\n1555 |             selection.collect::<Vec<_>>(),\n1556 |             vec![live[2], live[4], live[13], live[14]]\n1557 |         );\n1558 | "
+  },
+  {
+    "path": "rust/lance-core/src/utils/row_addr_remap.rs",
+    "start": 391,
+    "end": 418,
+    "claims": [
+      7
+    ],
+    "read_at": "2026-10-03T23:10:02.650Z",
+    "evidence": "391 |     fn new_with_old_frags(\n392 |         rewritten_old_row_addrs: RoaringTreemap,\n393 |         old_frags: impl IntoIterator<Item = (u32, Option<u32>)>,\n394 |         new_frags: Vec<(u32, u32)>,\n395 |         group_idx: usize,\n396 |     ) -> Result<(Self, Vec<(u32, OldFragmentRemap)>)> {\n397 |         // `compute_new_addr` maps a rewritten row's group-local index by\n398 |         // accumulating `physical_rows` in the caller-provided write order.\n399 |         let mut new_frag_row_ranges = Vec::with_capacity(new_frags.len());\n400 |         let mut rewritten_rows_before = 0u64;\n401 |         for (frag_id, physical_rows) in new_frags {\n402 |             if physical_rows == 0 {\n403 |                 continue;\n404 |             }\n405 |             new_frag_row_ranges.push((frag_id, rewritten_rows_before, physical_rows));\n406 |             rewritten_rows_before += physical_rows as u64;\n407 |         }\n408 |         let total_new_rows = rewritten_rows_before;\n409 | \n410 |         let mut per_frag: IntMap<u32, RoaringBitmap> = rewritten_old_row_addrs\n411 |             .bitmaps()\n412 |             .map(|(frag_id, bitmap)| (frag_id, bitmap.clone()))\n413 |             .collect();\n414 |         let old_frags = old_frags.into_iter().collect::<Vec<_>>();\n415 |         let mut frags = Vec::with_capacity(old_frags.len());\n416 |         let mut seen_frag_ids = HashSet::with_capacity(old_frags.len());\n417 |         let mut rewritten_rows_before = 0u64;\n418 |         for &(frag_id, physical_rows) in &old_frags {"
+  },
+  {
+    "path": "rust/lance-file/src/reader.rs",
+    "start": 710,
+    "end": 754,
+    "claims": [
+      8
+    ],
+    "read_at": "2026-10-03T23:10:13.694Z",
+    "evidence": "710 |             let rel_start = (range.start - tail_offset) as usize;\n711 |             let rel_end = (range.end - tail_offset) as usize;\n712 |             Ok(tail_bytes.slice(rel_start..rel_end))\n713 |         } else {\n714 |             scheduler.submit_single(range, 0).await\n715 |         }\n716 |     }\n717 | \n718 |     fn retained_global_buffers_from_tail(\n719 |         gbo_table: &[BufferDescriptor],\n720 |         tail_bytes: &Bytes,\n721 |         tail_offset: u64,\n722 |         file_len: u64,\n723 |     ) -> Result<BTreeMap<u32, Bytes>> {\n724 |         let tail_end = tail_offset\n725 |             .checked_add(tail_bytes.len() as u64)\n726 |             .ok_or_else(|| Error::invalid_input_source(\"Tail byte range overflows\".into()))?;\n727 |         let mut retained_buffers = BTreeMap::new();\n728 |         for (index, buffer) in gbo_table.iter().enumerate().skip(1) {\n729 |             let range = buffer.checked_range(index, file_len)?;\n730 |             if range.start >= tail_offset && range.end <= tail_end {\n731 |                 let rel_start = (range.start - tail_offset) as usize;\n732 |                 let rel_end = (range.end - tail_offset) as usize;\n733 |                 let bytes = Bytes::copy_from_slice(&tail_bytes[rel_start..rel_end]);\n734 |                 retained_buffers.insert(index as u32, bytes);\n735 |             }\n736 |         }\n737 |         Ok(retained_buffers)\n738 |     }\n739 | \n740 |     // Checks to make sure the footer is written correctly and returns the\n741 |     // position of the file descriptor (which comes from the footer)\n742 |     fn decode_footer(footer_bytes: &Bytes) -> Result<Footer> {\n743 |         let len = footer_bytes.len();\n744 |         if len < FOOTER_LEN {\n745 |             return Err(Error::invalid_input(format!(\n746 |                 \"does not have sufficient data, len: {}, bytes: {:?}\",\n747 |                 len, footer_bytes\n748 |             )));\n749 |         }\n750 |         let mut cursor = Cursor::new(footer_bytes.slice(len - FOOTER_LEN..));\n751 | \n752 |         let column_meta_start = cursor.read_u64::<LittleEndian>()?;\n753 |         let column_meta_offsets_start = cursor.read_u64::<LittleEndian>()?;\n754 |         let global_buff_offsets_start = cursor.read_u64::<LittleEndian>()?;"
+  },
+  {
+    "path": "rust/lance-file/src/reader.rs",
+    "start": 954,
+    "end": 1032,
+    "claims": [
+      8
+    ],
+    "read_at": "2026-10-03T23:10:13.695Z",
+    "evidence": "954 |     pub(crate) async fn read_raw_metadata_for_dispatch(\n955 |         scheduler: &FileScheduler,\n956 |     ) -> Result<RawFileMetadataOpen> {\n957 |         let (tail_bytes, file_len) = Self::read_tail(scheduler).await?;\n958 |         let tail_offset = file_len - tail_bytes.len() as u64;\n959 |         let footer = Self::decode_footer(&tail_bytes)?;\n960 |         let version =\n961 |             ConcreteFileVersion::from_footer_numbers(footer.major_version, footer.minor_version)?;\n962 |         if version == ConcreteFileVersion::V1 {\n963 |             return Ok(RawFileMetadataOpen::Legacy {\n964 |                 major_version: footer.major_version,\n965 |                 minor_version: footer.minor_version,\n966 |             });\n967 |         }\n968 | \n969 |         let gbo_table =\n970 |             Self::decode_gbo_table(&tail_bytes, file_len, scheduler, &footer, version).await?;\n971 |         if gbo_table.is_empty() {\n972 |             return Err(Error::internal(\n973 |                 \"File did not contain any global buffers, schema expected\".to_string(),\n974 |             ));\n975 |         }\n976 |         let schema_start = gbo_table[0].position;\n977 |         let schema_size = gbo_table[0].size;\n978 |         let num_footer_bytes = file_len.checked_sub(schema_start).ok_or_else(|| {\n979 |             Error::invalid_input_source(\n980 |                 format!(\n981 |                     \"Schema position {} is outside file of size {}\",\n982 |                     schema_start, file_len\n983 |                 )\n984 |                 .into(),\n985 |             )\n986 |         })?;\n987 |         let all_metadata_bytes =\n988 |             Self::optimistic_tail_read(&tail_bytes, schema_start, scheduler, file_len).await?;\n989 |         let schema_bytes = all_metadata_bytes.slice(0..schema_size as usize);\n990 |         let (num_rows, schema) = Self::decode_schema(schema_bytes)?;\n991 | \n992 |         let column_metadata_start = (footer.column_meta_start - schema_start) as usize;\n993 |         let column_metadata_end = (footer.global_buff_offsets_start - schema_start) as usize;\n994 |         let column_metadata_bytes =\n995 |             all_metadata_bytes.slice(column_metadata_start..column_metadata_end);\n996 |         let column_metadatas = Self::read_all_column_metadata(column_metadata_bytes, &footer)?;\n997 | \n998 |         let num_global_buffer_bytes = gbo_table.iter().map(|buf| buf.size).sum::<u64>();\n999 |         let num_data_bytes = footer.column_meta_start - num_global_buffer_bytes;\n1000 |         let num_column_metadata_bytes = footer.global_buff_offsets_start - footer.column_meta_start;\n1001 |         // The tail read above already pulled in any global buffer that lives within\n1002 |         // the captured window. Copy those user buffers (index >= 1; the schema at 0\n1003 |         // is decoded above and never fetched via read_global_buffer) out of the tail\n1004 |         // so read_global_buffer can serve them without I/O. We copy rather than slice\n1005 |         // so the much larger tail allocation can be released once decoding is done.\n1006 |         let retained_global_buffers = Self::retained_global_buffers_from_tail(\n1007 |             &gbo_table,\n1008 |             &tail_bytes,\n1009 |             tail_offset,\n1010 |             file_len,\n1011 |         )?;\n1012 | \n1013 |         Ok(RawFileMetadataOpen::Current {\n1014 |             version,\n1015 |             metadata: RawFileMetadata {\n1016 |                 file_schema: Arc::new(schema),\n1017 |                 column_metadatas,\n1018 |                 num_rows,\n1019 |                 file_buffers: gbo_table,\n1020 |                 num_data_bytes,\n1021 |                 num_column_metadata_bytes,\n1022 |                 num_global_buffer_bytes,\n1023 |                 num_footer_bytes,\n1024 |                 footer,\n1025 |                 file_size_bytes: file_len,\n1026 |                 retained_global_buffers,\n1027 |             },\n1028 |         })\n1029 |     }\n1030 | \n1031 |     async fn read_raw_metadata_index_with_known_schema(\n1032 |         scheduler: &FileScheduler,"
+  },
+  {
+    "path": "rust/lance-file/src/versions/v2_2/compression.rs",
+    "start": 22,
+    "end": 40,
+    "claims": [
+      10
+    ],
+    "read_at": "2026-10-03T23:10:13.695Z",
+    "evidence": "22 | #[derive(Debug, Clone)]\n23 | pub(super) struct Strategy {\n24 |     params: CompressionParams,\n25 | }\n26 | \n27 | impl Strategy {\n28 |     pub(super) fn new(params: CompressionParams) -> Self {\n29 |         Self { params }\n30 |     }\n31 | \n32 |     fn field_params(&self, field: &Field) -> CompressionFieldParams {\n33 |         let mut params = self\n34 |             .params\n35 |             .get_field_params(&field.name, &field.data_type());\n36 |         params.merge(&field_metadata_params(field));\n37 |         params\n38 |     }\n39 | }\n40 | "
+  },
+  {
+    "path": "rust/lance-core/src/levenshtein.rs",
+    "start": 30,
+    "end": 46,
+    "claims": [
+      12
+    ],
+    "read_at": "2026-10-03T23:10:13.695Z",
+    "evidence": "30 |     // Use two rows instead of full matrix for space efficiency\n31 |     let mut prev_row: Vec<usize> = (0..=n).collect();\n32 |     let mut curr_row: Vec<usize> = vec![0; n + 1];\n33 | \n34 |     for (i, s1_char) in s1_chars.iter().enumerate() {\n35 |         curr_row[0] = i + 1;\n36 |         for (j, s2_char) in s2_chars.iter().enumerate() {\n37 |             let cost = if s1_char == s2_char { 0 } else { 1 };\n38 |             curr_row[j + 1] = (prev_row[j + 1] + 1)\n39 |                 .min(curr_row[j] + 1)\n40 |                 .min(prev_row[j] + cost);\n41 |         }\n42 |         std::mem::swap(&mut prev_row, &mut curr_row);\n43 |     }\n44 | \n45 |     prev_row[n]\n46 | }"
+  },
+  {
+    "path": "rust/lance-table/src/utils/stream.rs",
+    "start": 28,
+    "end": 40,
+    "claims": [
+      13
+    ],
+    "read_at": "2026-10-03T23:10:13.695Z",
+    "evidence": "28 | use crate::rowids::{RowIdSequence, RowIdSequenceCursor};\n29 | \n30 | pub type ReadBatchFut = BoxFuture<'static, Result<RecordBatch>>;\n31 | /// A task, emitted by a file reader, that will produce a batch (of the\n32 | /// given size)\n33 | pub struct ReadBatchTask {\n34 |     pub task: ReadBatchFut,\n35 |     pub num_rows: u32,\n36 | }\n37 | pub type ReadBatchTaskStream = BoxStream<'static, ReadBatchTask>;\n38 | pub type ReadBatchFutStream = BoxStream<'static, ReadBatchFut>;\n39 | \n40 | type SharedReadBatchFut = Shared<BoxFuture<'static, std::result::Result<RecordBatch, Arc<Error>>>>;"
+  },
+  {
+    "path": "rust/lance-table/src/utils/stream.rs",
+    "start": 63,
+    "end": 127,
+    "claims": [
+      13
+    ],
+    "read_at": "2026-10-03T23:10:13.695Z",
+    "evidence": "63 | \n64 | impl PendingReadBatch {\n65 |     fn new(task: ReadBatchTask) -> Self {\n66 |         Self {\n67 |             task: Some(task.task),\n68 |             shared_task: None,\n69 |             offset: 0,\n70 |             num_rows: task.num_rows,\n71 |         }\n72 |     }\n73 | \n74 |     fn take(&mut self, num_rows: u32) -> ReadBatchFut {\n75 |         debug_assert!(num_rows <= self.num_rows);\n76 | \n77 |         if self.offset == 0 && num_rows == self.num_rows && self.shared_task.is_none() {\n78 |             self.num_rows = 0;\n79 |             let Some(task) = self.task.take() else {\n80 |                 return async {\n81 |                     Err(Error::internal(\n82 |                         \"missing read task while merging aligned streams\".to_string(),\n83 |                     ))\n84 |                 }\n85 |                 .boxed();\n86 |             };\n87 |             return task;\n88 |         }\n89 | \n90 |         let shared_task = self\n91 |             .shared_task\n92 |             .get_or_insert_with(|| {\n93 |                 let task = self.task.take();\n94 |                 async move {\n95 |                     let Some(task) = task else {\n96 |                         return Err(Arc::new(Error::internal(\n97 |                             \"missing read task while splitting a merged stream\".to_string(),\n98 |                         )));\n99 |                     };\n100 |                     task.await.map_err(Arc::new)\n101 |                 }\n102 |                 .boxed()\n103 |                 .shared()\n104 |             })\n105 |             .clone();\n106 |         let offset = self.offset;\n107 |         self.offset += num_rows;\n108 |         self.num_rows -= num_rows;\n109 | \n110 |         async move {\n111 |             match shared_task.await {\n112 |                 Ok(batch) => Ok(batch.slice(offset as usize, num_rows as usize)),\n113 |                 Err(error) => Err(Error::wrapped(Box::new(SharedReadError(error)))),\n114 |             }\n115 |         }\n116 |         .boxed()\n117 |     }\n118 | }\n119 | \n120 | struct MergeStream {\n121 |     streams: Vec<ReadBatchTaskStream>,\n122 |     pending: Vec<Option<PendingReadBatch>>,\n123 |     index: usize,\n124 | }\n125 | \n126 | impl MergeStream {\n127 |     fn emit(&mut self) -> ReadBatchTask {"
+  },
+  {
+    "path": "rust/lance-file/src/reader.rs",
+    "start": 3618,
+    "end": 3689,
+    "claims": [
+      15
+    ],
+    "read_at": "2026-10-03T23:10:27.472Z",
+    "evidence": "3618 |         fs.object_store.io_stats_incremental();\n3619 |         let tasks = lazy_reader\n3620 |             .read_tasks(\n3621 |                 lance_io::ReadBatchParams::Range(0..0),\n3622 |                 127,\n3623 |                 None,\n3624 |                 FilterExpression::no_filter(),\n3625 |             )\n3626 |             .await\n3627 |             .unwrap();\n3628 |         assert!(collect_read_tasks(tasks, 1).await.is_empty());\n3629 |         let metadata_stats = fs.object_store.io_stats_incremental();\n3630 |         assert!(\n3631 |             metadata_stats.read_bytes < total_metadata_bytes / 2,\n3632 |             \"lazy {shape} read fetched too much metadata: read {} bytes, requested column metadata is {} bytes, total column metadata is {} bytes\",\n3633 |             metadata_stats.read_bytes,\n3634 |             requested_metadata_bytes,\n3635 |             total_metadata_bytes\n3636 |         );\n3637 | \n3638 |         let tasks = lazy_reader\n3639 |             .read_tasks(\n3640 |                 lance_io::ReadBatchParams::RangeFull,\n3641 |                 127,\n3642 |                 None,\n3643 |                 FilterExpression::no_filter(),\n3644 |             )\n3645 |             .await\n3646 |             .unwrap();\n3647 |         let actual = collect_read_tasks(tasks, 16).await;\n3648 |         assert_eq!(expected, actual);\n3649 |         actual\n3650 |     }\n3651 | \n3652 |     #[tokio::test]\n3653 |     async fn test_lazy_reader_fixed_size_list_projection_matches_eager_reader() {\n3654 |         let fs = FsFixture::default();\n3655 |         let written_file = create_wide_fixed_size_list_file(&fs, 512).await;\n3656 |         let projection = versions::reader_projection_from_column_names(\n3657 |             ConcreteFileVersion::V2_1,\n3658 |             &written_file.schema,\n3659 |             &[\"c17\", \"c509\"],\n3660 |         )\n3661 |         .unwrap();\n3662 |         assert!(projection.prefers_indexed_metadata(512));\n3663 |         assert_lazy_projection_matches_eager_and_reads_metadata_subset(\n3664 |             &fs,\n3665 |             projection,\n3666 |             \"fixed-size-list\",\n3667 |         )\n3668 |         .await;\n3669 |     }\n3670 | \n3671 |     #[tokio::test]\n3672 |     async fn test_v2_0_rejects_indexed_metadata_reader() {\n3673 |         let fs = FsFixture::default();\n3674 |         let written_file = create_some_file(&fs, ConcreteFileVersion::V2_0).await;\n3675 |         let projection = versions::reader_projection_from_column_names(\n3676 |             ConcreteFileVersion::V2_0,\n3677 |             &written_file.schema,\n3678 |             &[\"score\"],\n3679 |         )\n3680 |         .unwrap();\n3681 |         assert!(projection.prefers_indexed_metadata(100));\n3682 | \n3683 |         let file_scheduler = fs\n3684 |             .scheduler\n3685 |             .open_file(&fs.tmp_path, &CachedFileSize::unknown())\n3686 |             .await\n3687 |             .unwrap();\n3688 |         let err = ProjectedFileReader::try_open(\n3689 |             file_scheduler,"
+  },
+  {
+    "path": "rust/lance-file/src/versions/v1/page_table.rs",
+    "start": 94,
+    "end": 146,
+    "claims": [
+      16
+    ],
+    "read_at": "2026-10-03T23:10:27.472Z",
+    "evidence": "94 |     /// Write [PageTable] to disk.\n95 |     ///\n96 |     /// `min_field_id` is the smallest field_id that is present in the schema.\n97 |     /// This might be a struct field, which has no data pages, but it still must\n98 |     /// be serialized to the page table per the format spec.\n99 |     ///\n100 |     /// Any (field_id, batch_id) combinations that are not present in the page table\n101 |     /// will be written as (0, 0) to indicate an empty page. This includes any\n102 |     /// holes in the field ids as well as struct fields which have no data pages.\n103 |     pub async fn write(&self, writer: &mut dyn Writer, min_field_id: i32) -> Result<usize> {\n104 |         if self.pages.is_empty() {\n105 |             return Err(Error::invalid_input_source(\"empty page table\".into()));\n106 |         }\n107 | \n108 |         let observed_min = *self.pages.keys().min().unwrap();\n109 |         if min_field_id > *self.pages.keys().min().unwrap() {\n110 |             return Err(Error::invalid_input(format!(\n111 |                 \"field_id_offset {} is greater than the minimum field_id {}\",\n112 |                 min_field_id, observed_min\n113 |             )));\n114 |         }\n115 |         let max_field_id = *self.pages.keys().max().unwrap();\n116 |         let field_ids = min_field_id..=max_field_id;\n117 | \n118 |         let pos = writer.tell().await?;\n119 |         let num_batches = self\n120 |             .pages\n121 |             .values()\n122 |             .flat_map(|c_map| c_map.keys().max())\n123 |             .max()\n124 |             .unwrap()\n125 |             + 1;\n126 | \n127 |         let mut builder =\n128 |             Int64Builder::with_capacity(field_ids.clone().count() * num_batches as usize);\n129 |         for field_id in field_ids {\n130 |             for batch in 0..num_batches {\n131 |                 if let Some(page_info) = self.get(field_id, batch) {\n132 |                     builder.append_value(page_info.position as i64);\n133 |                     builder.append_value(page_info.length as i64);\n134 |                 } else {\n135 |                     builder.append_slice(&[0, 0]);\n136 |                 }\n137 |             }\n138 |         }\n139 |         let arr = builder.finish();\n140 |         writer\n141 |             .write_all(arr.into_data().buffers()[0].as_slice())\n142 |             .await?;\n143 | \n144 |         Ok(pos)\n145 |     }\n146 | "
+  },
+  {
+    "path": "rust/lance-table/src/system_index/frag_reuse/gate.rs",
+    "start": 236,
+    "end": 284,
+    "claims": [
+      17
+    ],
+    "read_at": "2026-10-03T23:10:27.472Z",
+    "evidence": "236 |     use std::collections::HashMap;\n237 |     use std::sync::Arc;\n238 | \n239 |     /// What the table looks like: fragment 0 carries field 0 in `a.lance`;\n240 |     /// a tagged table also has the entry (lineage {0, 5}: fragment 5 was\n241 |     /// rewritten into fragment 0) and, optionally, a user index on field 0.\n242 |     #[derive(Clone, Copy, Debug, PartialEq, Eq)]\n243 |     enum Table {\n244 |         Untagged,\n245 |         Tagged,\n246 |         /// A segment built from fragment 5, translating to fragment 0.\n247 |         TaggedWithTranslatingIndex,\n248 |         /// A segment built on fragment 0 directly.\n249 |         TaggedWithDirectIndex,\n250 |     }\n251 | \n252 |     fn table(state: Table) -> (Manifest, Vec<IndexMetadata>) {\n253 |         let mut manifest = sample_manifest();\n254 |         manifest.fragments = Arc::new(vec![Fragment::new(0).with_file(\n255 |             \"a.lance\",\n256 |             vec![0],\n257 |             vec![0],\n258 |             ConcreteFileVersion::V2_0,\n259 |             None,\n260 |         )]);\n261 |         let mut indices = Vec::new();\n262 |         if state != Table::Untagged {\n263 |             manifest.reader_feature_flags |= FLAG_FRAGMENT_REUSE_INDEX;\n264 |             manifest.writer_feature_flags |= FLAG_FRAGMENT_REUSE_INDEX;\n265 |             let mut entry = sample_index_metadata(FRAG_REUSE_INDEX_NAME);\n266 |             entry.fields.clear();\n267 |             entry.fragment_bitmap = Some([0u32, 5].into_iter().collect());\n268 |             indices.push(entry);\n269 |         }\n270 |         match state {\n271 |             Table::TaggedWithTranslatingIndex => {\n272 |                 let mut segment = sample_index_metadata(\"id_idx\");\n273 |                 segment.fragment_bitmap = Some([5u32].into_iter().collect());\n274 |                 indices.push(segment);\n275 |             }\n276 |             Table::TaggedWithDirectIndex => indices.push(sample_index_metadata(\"id_idx\")),\n277 |             _ => {}\n278 |         }\n279 |         (manifest, indices)\n280 |     }\n281 | \n282 |     fn update(fields_modified: Vec<u32>) -> Operation {\n283 |         let mut update = crate::transaction::test_support::update_txn(vec![]);\n284 |         let Operation::Update {"
+  },
+  {
+    "path": "rust/lance-core/src/utils/deletion.rs",
+    "start": 12,
+    "end": 31,
+    "claims": [
+      18
+    ],
+    "read_at": "2026-10-03T23:10:27.473Z",
+    "evidence": "12 | // TODO: Benchmark to find a better value.\n13 | \n14 | /// Represents a set of deleted row offsets in a single fragment.\n15 | #[derive(Debug, Clone, Default)]\n16 | pub enum DeletionVector {\n17 |     #[default]\n18 |     NoDeletions,\n19 |     Set(HashSet<u32>),\n20 |     Bitmap(RoaringBitmap),\n21 | }\n22 | \n23 | impl DeepSizeOf for DeletionVector {\n24 |     fn deep_size_of_children(&self, context: &mut Context) -> usize {\n25 |         match self {\n26 |             Self::NoDeletions => 0,\n27 |             Self::Set(set) => set.deep_size_of_children(context),\n28 |             // Inexact but probably close enough\n29 |             Self::Bitmap(bitmap) => bitmap.serialized_size(),\n30 |         }\n31 |     }"
+  },
+  {
+    "path": "rust/lance-file/src/writer_tests.rs",
+    "start": 1508,
+    "end": 1597,
+    "claims": [
+      20
+    ],
+    "read_at": "2026-10-03T23:10:27.473Z",
+    "evidence": "1508 |         // Configure compression parameters\n1509 |         let mut params = CompressionParams::new();\n1510 | \n1511 |         // RLE for ID columns (ends with _id)\n1512 |         params.columns.insert(\n1513 |             \"*_id\".to_string(),\n1514 |             CompressionFieldParams {\n1515 |                 rle_threshold: Some(0.5), // Lower threshold to trigger RLE more easily\n1516 |                 compression: None,        // Will use default compression if any\n1517 |                 compression_level: None,\n1518 |                 bss: Some(lance_encoding::compression_config::BssMode::Off), // Explicitly disable BSS to ensure RLE is used\n1519 |                 minichunk_size: None,\n1520 |             },\n1521 |         );\n1522 | \n1523 |         // For now, we'll skip Zstd compression since it's not imported\n1524 |         // In a real implementation, you could add other compression types here\n1525 | \n1526 |         // Configure file writer options\n1527 |         let options = FileWriterOptions {\n1528 |             max_page_bytes: Some(64 * 1024), // 64KB pages\n1529 |             ..Default::default()\n1530 |         };\n1531 | \n1532 |         // Write the file\n1533 |         let path = TempObjFile::default();\n1534 |         let object_store = ObjectStore::local();\n1535 | \n1536 |         let mut writer = create_v2_1_writer_with_compression(\n1537 |             object_store.create(&path).await.unwrap(),\n1538 |             lance_schema.clone(),\n1539 |             options,\n1540 |             params,\n1541 |         )\n1542 |         .unwrap();\n1543 | \n1544 |         writer.write_batch(&batch).await.unwrap();\n1545 |         writer.add_schema_metadata(\"compression_test\", \"configured_compression\");\n1546 |         writer.finish().await.unwrap();\n1547 | \n1548 |         // Now write the same data without compression overrides for comparison\n1549 |         let path_no_compression = TempObjFile::default();\n1550 |         let default_options = FileWriterOptions {\n1551 |             max_page_bytes: Some(64 * 1024),\n1552 |             ..Default::default()\n1553 |         };\n1554 | \n1555 |         let mut writer_no_compression = create_writer(\n1556 |             object_store.create(&path_no_compression).await.unwrap(),\n1557 |             lance_schema.clone(),\n1558 |             ConcreteFileVersion::V2_1,\n1559 |             default_options,\n1560 |         )\n1561 |         .unwrap();\n1562 | \n1563 |         writer_no_compression.write_batch(&batch).await.unwrap();\n1564 |         writer_no_compression.finish().await.unwrap();\n1565 | \n1566 |         // Note: With our current data patterns and RLE compression, the compressed file\n1567 |         // might actually be slightly larger due to compression metadata overhead.\n1568 |         // This is expected and the test is mainly to verify the system works end-to-end.\n1569 | \n1570 |         // Read back the compressed file and verify data integrity\n1571 |         let fs = FsFixture::default();\n1572 |         let file_scheduler = fs\n1573 |             .scheduler\n1574 |             .open_file(&path, &CachedFileSize::unknown())\n1575 |             .await\n1576 |             .unwrap();\n1577 | \n1578 |         let file_reader = FileReader::try_open(\n1579 |             file_scheduler,\n1580 |             None,\n1581 |             Arc::<DecoderPlugins>::default(),\n1582 |             &LanceCache::no_cache(),\n1583 |             FileReaderOptions::default(),\n1584 |         )\n1585 |         .await\n1586 |         .unwrap();\n1587 | \n1588 |         // Verify metadata\n1589 |         let metadata = file_reader.metadata();\n1590 |         assert_eq!(metadata.version(), ConcreteFileVersion::V2_1);\n1591 | \n1592 |         let schema = file_reader.schema();\n1593 |         assert_eq!(\n1594 |             schema.metadata.get(\"compression_test\"),\n1595 |             Some(&\"configured_compression\".to_string())\n1596 |         );\n1597 | "
+  },
+  {
+    "path": "rust/lance-table/src/io/commit/external_manifest.rs",
+    "start": 2256,
+    "end": 2283,
+    "claims": [
+      1
+    ],
+    "read_at": "2026-10-03T23:10:27.473Z",
+    "evidence": "2256 |     /// Version 1 committed through `store`, plus what a conditioned commit of\n2257 |     /// version 2 needs.\n2258 |     async fn identified_fixture(\n2259 |         store: &Arc<IdentifiedStore>,\n2260 |     ) -> (\n2261 |         ExternalManifestCommitHandler,\n2262 |         ObjectStore,\n2263 |         Path,\n2264 |         PredecessorIdentity,\n2265 |     ) {\n2266 |         let handler = store.handler();\n2267 |         let object_store = ObjectStore::memory();\n2268 |         let base_path = Path::from(\"dataset\");\n2269 |         handler\n2270 |             .commit(\n2271 |                 &mut test_manifest(),\n2272 |                 None,\n2273 |                 &base_path,\n2274 |                 &object_store,\n2275 |                 write_manifest_file_to_path,\n2276 |                 ManifestNamingScheme::V2,\n2277 |                 None,\n2278 |             )\n2279 |             .await\n2280 |             .unwrap();\n2281 |         let predecessor = handler\n2282 |             .resolve_latest_identity(&base_path, &object_store)\n2283 |             .await"
+  },
+  {
+    "path": "rust/lance-file/src/reader.rs",
+    "start": 1948,
+    "end": 2013,
+    "claims": [
+      8,
+      15
+    ],
+    "read_at": "2026-10-03T23:11:15.899Z",
+    "evidence": "1948 |     pub async fn try_open(\n1949 |         scheduler: FileScheduler,\n1950 |         base_projection: Option<ReaderProjection>,\n1951 |         decoder_plugins: Arc<DecoderPlugins>,\n1952 |         cache: &LanceCache,\n1953 |         options: FileReaderOptions,\n1954 |     ) -> Result<Self> {\n1955 |         match Self::try_open_for_dispatch(\n1956 |             scheduler,\n1957 |             base_projection,\n1958 |             decoder_plugins,\n1959 |             cache,\n1960 |             options,\n1961 |         )\n1962 |         .await?\n1963 |         {\n1964 |             versions::OpenedFileReader::V1 {\n1965 |                 major_version,\n1966 |                 minor_version,\n1967 |             } => Err(Error::version_conflict(\n1968 |                 \"Attempt to use the Lance current-format reader to read a v1 file\".to_string(),\n1969 |                 major_version,\n1970 |                 minor_version,\n1971 |             )),\n1972 |             versions::OpenedFileReader::Current(reader) => Ok(reader),\n1973 |         }\n1974 |     }\n1975 | \n1976 |     pub(crate) async fn try_open_for_dispatch(\n1977 |         scheduler: FileScheduler,\n1978 |         base_projection: Option<ReaderProjection>,\n1979 |         decoder_plugins: Arc<DecoderPlugins>,\n1980 |         cache: &LanceCache,\n1981 |         options: FileReaderOptions,\n1982 |     ) -> Result<versions::OpenedFileReader> {\n1983 |         let metadata = match Self::read_raw_metadata_for_dispatch(&scheduler).await? {\n1984 |             RawFileMetadataOpen::Legacy {\n1985 |                 major_version,\n1986 |                 minor_version,\n1987 |             } => {\n1988 |                 return Ok(versions::OpenedFileReader::V1 {\n1989 |                     major_version,\n1990 |                     minor_version,\n1991 |                 });\n1992 |             }\n1993 |             RawFileMetadataOpen::Current { version, metadata } => {\n1994 |                 Arc::new(versions::finish_metadata(version, metadata)?)\n1995 |             }\n1996 |         };\n1997 |         let path = scheduler.reader().path().clone();\n1998 |         let io = Arc::new(\n1999 |             LanceEncodingsIo::new(scheduler).with_read_chunk_size(options.read_chunk_size),\n2000 |         );\n2001 |         Self::try_open_with_file_metadata(\n2002 |             io,\n2003 |             path,\n2004 |             base_projection,\n2005 |             decoder_plugins,\n2006 |             metadata,\n2007 |             cache,\n2008 |             options,\n2009 |         )\n2010 |         .await\n2011 |         .map(versions::OpenedFileReader::Current)\n2012 |     }\n2013 | "
+  },
+  {
+    "path": "rust/lance-file/src/writer_tests.rs",
+    "start": 1470,
+    "end": 1507,
+    "claims": [
+      20
+    ],
+    "read_at": "2026-10-03T23:11:15.900Z",
+    "evidence": "1470 |         // - product_id: moderately repetitive (good for RLE)\n1471 |         // - quantity: random values (not good for RLE)\n1472 |         // - price: some repetition\n1473 |         // - description: long strings (good for Zstd)\n1474 |         for i in 0..10000 {\n1475 |             // Customer ID repeats every 100 rows (100 unique customers)\n1476 |             // This creates runs of 100 identical values\n1477 |             customer_ids.append_value(i / 100);\n1478 | \n1479 |             // Product ID has only 5 unique values with long runs\n1480 |             product_ids.append_value(i / 2000);\n1481 | \n1482 |             // Quantity is mostly 1 with occasional other values\n1483 |             quantities.append_value(if i % 10 == 0 { 5 } else { 1 });\n1484 | \n1485 |             // Price has only 3 unique values\n1486 |             prices.append_value(match i % 3 {\n1487 |                 0 => 9.99,\n1488 |                 1 => 19.99,\n1489 |                 _ => 29.99,\n1490 |             });\n1491 | \n1492 |             // Descriptions are repetitive but we'll keep them simple\n1493 |             descriptions.push(format!(\"Product {}\", i / 2000));\n1494 |         }\n1495 | \n1496 |         let batch = RecordBatch::try_new(\n1497 |             arrow_schema.clone(),\n1498 |             vec![\n1499 |                 Arc::new(customer_ids.finish()),\n1500 |                 Arc::new(product_ids.finish()),\n1501 |                 Arc::new(quantities.finish()),\n1502 |                 Arc::new(prices.finish()),\n1503 |                 Arc::new(StringArray::from(descriptions)),\n1504 |             ],\n1505 |         )\n1506 |         .unwrap();\n1507 | "
+  },
+  {
+    "path": "rust/lance-table/src/system_index/frag_reuse/gate.rs",
+    "start": 180,
+    "end": 223,
+    "claims": [
+      17
+    ],
+    "read_at": "2026-10-03T23:11:15.900Z",
+    "evidence": "180 |     // rewrite and rebased across it by the conflict resolver lands with its\n181 |     // provenance and translates. Only a `CreateIndex` touching the entry\n182 |     // itself has no tagged semantics here.\n183 |     if let Operation::CreateIndex {\n184 |         new_indices,\n185 |         removed_indices,\n186 |         ..\n187 |     } = operation\n188 |         && new_indices\n189 |             .iter()\n190 |             .chain(removed_indices.iter())\n191 |             .all(|idx| idx.name != FRAG_REUSE_INDEX_NAME)\n192 |     {\n193 |         return Ok(Admission::MaintainsUserIndices);\n194 |     }\n195 | \n196 |     match operation {\n197 |         // Deletion vectors, new fragments, the config, the schema\n198 |         // (`retain_relevant_indices` still drops an index on a removed\n199 |         // field) or the whole table (Overwrite discards every index, the\n200 |         // entry included; the sticky flag keeps the tagged record form).\n201 |         Operation::Append { .. }\n202 |         | Operation::ReserveFragments { .. }\n203 |         | Operation::Delete { .. }\n204 |         | Operation::Update { .. }\n205 |         | Operation::UpdateConfig { .. }\n206 |         | Operation::Overwrite { .. }\n207 |         | Operation::Project { .. }\n208 |         | Operation::Merge { .. }\n209 |         | Operation::DataReplacement { .. } => Ok(Admission::MovesNoRows),\n210 |         Operation::Restore { .. } => Ok(Admission::RestoresManifest),\n211 |         // A bare rewrite of covered fragments or a v0 snapshot would\n212 |         // misinterpret the history; MemWAL state, overlays, clones and base\n213 |         // changes have no tagged semantics yet. A CreateIndex reaching here\n214 |         // touches the entry itself.\n215 |         Operation::Rewrite { .. }\n216 |         | Operation::CreateIndex { .. }\n217 |         | Operation::UpdateMemWalState { .. }\n218 |         | Operation::DataOverlay { .. }\n219 |         | Operation::Clone { .. }\n220 |         | Operation::UpdateBases { .. } => Err(Error::not_supported(\n221 |             \"Tagged FRI history maintenance is not implemented for this operation; upgrade to a writer supporting tagged histories\",\n222 |         )),\n223 |     }"
+  },
+  {
+    "path": "rust/lance-table/src/io/commit/external_manifest.rs",
+    "start": 2363,
+    "end": 2383,
+    "claims": [
+      1
+    ],
+    "read_at": "2026-10-03T23:11:15.900Z",
+    "evidence": "2363 |         let (handler, object_store, base_path, _) = identified_fixture(&store).await;\n2364 |         let stale = PredecessorIdentity {\n2365 |             version: 1,\n2366 |             identity: \"identity-from-a-dropped-dataset\".to_string(),\n2367 |         };\n2368 |         let err = commit_after_v2(&handler, &object_store, &base_path, &stale)\n2369 |             .await\n2370 |             .unwrap_err();\n2371 |         assert!(\n2372 |             matches!(\n2373 |                 err,\n2374 |                 CommitError::OtherError(Error::PrerequisiteFailed { .. })\n2375 |             ),\n2376 |             \"{err:?}\"\n2377 |         );\n2378 |         assert!(store.identity_of(2).is_none());\n2379 |         assert_eq!(\n2380 |             versions_dir_files(&object_store, &base_path).await,\n2381 |             v2_names(&[1])\n2382 |         );\n2383 |     }"
+  },
+  {
+    "path": "rust/lance-table/src/system_index/frag_reuse/gate.rs",
+    "start": 46,
+    "end": 179,
+    "claims": [
+      17
+    ],
+    "read_at": "2026-10-03T23:11:36.767Z",
+    "evidence": "46 | pub fn classify(\n47 |     operation: &Operation,\n48 |     current_manifest: Option<&Manifest>,\n49 |     current_indices: &[IndexMetadata],\n50 |     frag_reuse: &FragReuseUpdate,\n51 |     migration_next_row_id: Option<u64>,\n52 | ) -> Result<Admission> {\n53 |     // A tagged entry may only reach the manifest through the commit path's\n54 |     // assembly, which merges the records the operation's entry adds onto\n55 |     // the CURRENT entry at every attempt and validates them; the assembly\n56 |     // rides in `FragReuseUpdate::Rewrite`. A tagged `frag_reuse_index`\n57 |     // arriving without one is a pre-assembled snapshot: it has bypassed\n58 |     // binding, conservation, folding and ledger validation, may be stale,\n59 |     // and splicing it would silently drop records a concurrent writer\n60 |     // appended.\n61 |     let appends_transitions = matches!(operation, Operation::Rewrite { .. })\n62 |         && matches!(frag_reuse, FragReuseUpdate::Rewrite(_));\n63 |     if let Operation::Rewrite {\n64 |         frag_reuse_index: Some(entry),\n65 |         ..\n66 |     } = operation\n67 |         && is_tagged(entry)\n68 |         && !appends_transitions\n69 |     {\n70 |         return Err(Error::invalid_input(\n71 |             \"tagged fragment reuse entries must be assembled by the commit path, which \\\n72 |              merges the records the entry adds onto the current entry; a pre-assembled \\\n73 |              tagged snapshot bypasses validation and may splice away concurrent records\",\n74 |         ));\n75 |     }\n76 | \n77 |     let replaces_entry = matches!(\n78 |         operation,\n79 |         Operation::Rewrite {\n80 |             frag_reuse_index: Some(_),\n81 |             ..\n82 |         }\n83 |     ) && !appends_transitions;\n84 |     if !current_indices.iter().any(is_tagged) {\n85 |         // The sticky flag is the final authority on the record form\n86 |         // (`uses_tagged_fri`): once a manifest carries\n87 |         // FLAG_FRAGMENT_REUSE_INDEX every fragment reuse write is tagged,\n88 |         // even after a trim removed a fully drained entry. A v0 snapshot\n89 |         // would silently downgrade the table back to whole-history\n90 |         // replacement; the commit path converts a stale v0 intent into\n91 |         // transitions before this point (`finish_rewrite`), so only a\n92 |         // writer that skipped that conversion arrives here.\n93 |         if replaces_entry\n94 |             && current_manifest.is_some_and(|manifest| {\n95 |                 uses_tagged_fri(\n96 |                     manifest,\n97 |                     current_indices\n98 |                         .iter()\n99 |                         .find(|index| index.name == FRAG_REUSE_INDEX_NAME),\n100 |                 )\n101 |             })\n102 |         {\n103 |             return Err(Error::invalid_input(\n104 |                 \"a v0 fragment reuse snapshot cannot be published onto a table using \\\n105 |                  the tagged fragment reuse format: the sticky feature flag makes the \\\n106 |                  tagged format permanent, even after a drained entry is trimmed away, \\\n107 |                  so the rewrite must append transitions instead\",\n108 |             ));\n109 |         }\n110 |         return Ok(Admission::Untagged);\n111 |     }\n112 | \n113 |     // The history's own maintenance operation.\n114 |     if appends_transitions {\n115 |         return Ok(Admission::AppendsTransitions);\n116 |     }\n117 | \n118 |     // A rewrite that carries neither an entry nor transition intent is still\n119 |     // safe when no current index, the entry included (its bitmap holds the\n120 |     // recorded lineage), covers any rewritten fragment: it cannot invalidate\n121 |     // stored provenance or the lineage, and bitmap maintenance is a no-op for\n122 |     // fragments no bitmap contains. Deferred compaction of never-covered data\n123 |     // commits this shape instead of growing the history with untrimmable\n124 |     // transitions. Fragment ids beyond the row-address range can never appear\n125 |     // in an index bitmap, so they are uncovered by definition. Only histories\n126 |     // this writer understands (index_version 1) qualify: a future entry\n127 |     // version may change what its bitmap means. Empty rewrites stay refused.\n128 |     if let Operation::Rewrite {\n129 |         frag_reuse_index: None,\n130 |         rewritten_indices,\n131 |         groups,\n132 |     } = operation\n133 |         && rewritten_indices.is_empty()\n134 |         && !groups.is_empty()\n135 |         && current_indices\n136 |             .iter()\n137 |             .filter(|index| index.name == FRAG_REUSE_INDEX_NAME)\n138 |             .all(|index| matches!(index.index_version, 0 | 1))\n139 |     {\n140 |         let rewritten: RoaringBitmap = groups\n141 |             .iter()\n142 |             .flat_map(|group| group.old_fragments.iter())\n143 |             .filter_map(|fragment| u32::try_from(fragment.id).ok())\n144 |             .collect();\n145 |         // Unknown coverage is not empty coverage: without a bitmap the\n146 |         // entry could cover anything, so refuse.\n147 |         if current_indices.iter().all(|index| {\n148 |             index\n149 |                 .fragment_bitmap\n150 |                 .as_ref()\n151 |                 .is_some_and(|bitmap| bitmap.is_disjoint(&rewritten))\n152 |         }) {\n153 |             return Ok(Admission::RewritesUncoveredFragments);\n154 |         }\n155 |     }\n156 | \n157 |     // A tagged history translates row ADDRESSES; stable row ids replace\n158 |     // them, so the migration (a `Merge` committed with\n159 |     // `migration_next_row_id`) is refused while an entry exists. The other\n160 |     // direction is refused where a transition is recorded.\n161 |     if migration_next_row_id.is_some() {\n162 |         return Err(Error::not_supported(\n163 |             \"stable row id migration is not supported on a table with a tagged fragment \\\n164 |              reuse history: tagged histories translate row addresses, which stable row ids \\\n165 |              replace. Trim the history first\",\n166 |         ));\n167 |     }\n168 | \n169 |     // An in-place column rewrite (an update with `fields_modified`, that is\n170 |     // `MergeInsertWriteMode::RewriteColumns`; a merge that swaps a column's\n171 |     // data file, as `alter_columns` does; a data replacement) is admitted:\n172 |     // the commit preparation withdraws every affected segment's\n173 |     // contribution (`Transaction::withdraw_in_place_rewrites`, fed by\n174 |     // `Transaction::rewritten_physical_columns`), a whole transition's\n175 |     // sources for a translating segment, so the reader scans those rows\n176 |     // until `optimize_indices` rebuilds them.\n177 |     // Creating, replacing or dropping user indices leaves the tagged entry\n178 |     // untouched (it is carried through unchanged). An index built on a\n179 |     // tagged table covers live fragments directly; one built before a"
+  },
+  {
+    "path": "rust/lance-file/src/writer_tests.rs",
+    "start": 1430,
+    "end": 1469,
+    "claims": [
+      20
+    ],
+    "read_at": "2026-10-03T23:11:36.768Z",
+    "evidence": "1430 |         .unwrap();\n1431 | \n1432 |         for col_metadata in file_reader.metadata().column_metadatas.iter() {\n1433 |             for page in col_metadata.pages.iter() {\n1434 |                 let total_size: u64 = page.buffer_sizes.iter().sum();\n1435 |                 assert!(\n1436 |                     total_size <= 2 * 1024 * 1024,\n1437 |                     \"Page size {} exceeds 2MB limit\",\n1438 |                     total_size\n1439 |                 );\n1440 |             }\n1441 |         }\n1442 | \n1443 |         unsafe {\n1444 |             std::env::set_var(ENV_LANCE_FILE_WRITER_MAX_PAGE_BYTES, \"\");\n1445 |         }\n1446 |     }\n1447 | \n1448 |     #[tokio::test]\n1449 |     async fn test_compression_overrides_end_to_end() {\n1450 |         // Create test schema with different column types\n1451 |         let arrow_schema = Arc::new(ArrowSchema::new(vec![\n1452 |             ArrowField::new(\"customer_id\", DataType::Int32, false),\n1453 |             ArrowField::new(\"product_id\", DataType::Int32, false),\n1454 |             ArrowField::new(\"quantity\", DataType::Int32, false),\n1455 |             ArrowField::new(\"price\", DataType::Float32, false),\n1456 |             ArrowField::new(\"description\", DataType::Utf8, false),\n1457 |         ]));\n1458 | \n1459 |         let lance_schema = LanceSchema::try_from(arrow_schema.as_ref()).unwrap();\n1460 | \n1461 |         // Create test data with patterns suitable for different compression\n1462 |         let mut customer_ids = Int32Builder::new();\n1463 |         let mut product_ids = Int32Builder::new();\n1464 |         let mut quantities = Int32Builder::new();\n1465 |         let mut prices = Float32Builder::new();\n1466 |         let mut descriptions = Vec::new();\n1467 | \n1468 |         // Generate data with specific patterns:\n1469 |         // - customer_id: highly repetitive (good for RLE)"
+  },
+  {
+    "path": "rust/lance-file/src/testing.rs",
+    "start": 72,
+    "end": 84,
+    "claims": [
+      15
+    ],
+    "read_at": "2026-10-03T23:11:53.663Z",
+    "evidence": "72 |         schema: Arc::new(lance_schema),\n73 |         data,\n74 |         field_id_mapping,\n75 |     }\n76 | }\n77 | \n78 | pub fn test_cache() -> Arc<LanceCache> {\n79 |     Arc::new(LanceCache::with_capacity(128 * 1024 * 1024))\n80 | }\n81 | \n82 | pub async fn read_lance_file(\n83 |     fs: &FsFixture,\n84 |     decoder_middleware: Arc<DecoderPlugins>,"
+  },
+  {
+    "path": "rust/lance-table/src/transaction/test_support.rs",
+    "start": 57,
+    "end": 79,
+    "claims": [
+      17
+    ],
+    "read_at": "2026-10-03T23:11:53.663Z",
+    "evidence": "57 |         created_at: Some(Utc::now()),\n58 |         base_id: None,\n59 |         files: None,\n60 |     }\n61 | }\n62 | \n63 | pub fn overlay_with_field(field: i32, committed_version: u64) -> DataOverlayFile {\n64 |     DataOverlayFile {\n65 |         data_file: DataFile::new_legacy_from_fields(\"o.lance\", vec![field], None),\n66 |         coverage: OverlayCoverage::dense(roaring::RoaringBitmap::from_iter([0u32])),\n67 |         committed_version,\n68 |     }\n69 | }\n70 | \n71 | /// Existing fragments use id >= 1 to avoid collision with `Fragment::new(0)`\n72 | /// used by `sample_manifest`. New (updated) fragments use id = 10.\n73 | pub fn make_stable_row_id_manifest(fragments: Vec<Fragment>) -> Manifest {\n74 |     let schema = ArrowSchema::new(vec![ArrowField::new(\"id\", DataType::Int32, false)]);\n75 |     let mut manifest = Manifest::new(\n76 |         LanceSchema::try_from(&schema).unwrap(),\n77 |         Arc::new(fragments),\n78 |         DataStorageFormat::new(ConcreteFileVersion::V2_0),\n79 |         HashMap::new(),"
+  },
+  {
+    "path": "rust/lance-file/src/reader.rs",
+    "start": 1609,
+    "end": 1668,
+    "claims": [
+      8
+    ],
+    "read_at": "2026-10-03T23:12:01.457Z",
+    "evidence": "1609 |                 ))\n1610 |             })?;\n1611 |         let end = position.checked_add(length).ok_or_else(|| {\n1612 |             Error::invalid_input(format!(\n1613 |                 \"column metadata range overflows for column index {}, position={}, length={}\",\n1614 |                 column_index, position, length\n1615 |             ))\n1616 |         })?;\n1617 |         Ok(position..end)\n1618 |     }\n1619 | \n1620 |     pub(crate) async fn load_indexed_column_infos<F>(\n1621 |         metadata_index: &FileMetadataIndex,\n1622 |         io: &Arc<dyn EncodingsIo>,\n1623 |         cache: &Arc<LanceCache>,\n1624 |         column_indices: &[u32],\n1625 |         decode_column: F,\n1626 |     ) -> Result<Vec<Arc<ColumnInfo>>>\n1627 |     where\n1628 |         F: Fn(u32, &pbfile::ColumnMetadata) -> Result<Arc<ColumnInfo>>,\n1629 |     {\n1630 |         let mut column_infos = vec![None; column_indices.len()];\n1631 |         let mut missing_columns = Vec::new();\n1632 | \n1633 |         for (result_index, column_index) in column_indices.iter().copied().enumerate() {\n1634 |             let cache_key = ColumnMetadataCacheKey { column_index };\n1635 |             if let Some(cached) = cache.get_with_key(&cache_key).await {\n1636 |                 column_infos[result_index] = Some(cached.column_info.clone());\n1637 |             } else {\n1638 |                 let range = Self::column_metadata_range(metadata_index, column_index)?;\n1639 |                 missing_columns.push((result_index, column_index, range));\n1640 |             }\n1641 |         }\n1642 | \n1643 |         missing_columns.sort_by_key(|(_, _, range)| range.start);\n1644 |         if !missing_columns.is_empty() {\n1645 |             let ranges = missing_columns\n1646 |                 .iter()\n1647 |                 .map(|(_, _, range)| range.clone())\n1648 |                 .collect::<Vec<_>>();\n1649 |             let metadata_bytes = io.submit_request(ranges, 0).await?;\n1650 |             for ((result_index, column_index, _), bytes) in\n1651 |                 missing_columns.into_iter().zip(metadata_bytes)\n1652 |             {\n1653 |                 let column_metadata = pbfile::ColumnMetadata::decode(bytes)?;\n1654 |                 let column_info = decode_column(column_index, &column_metadata)?;\n1655 |                 let cached = Arc::new(CachedColumnMetadata {\n1656 |                     column_metadata,\n1657 |                     column_info: column_info.clone(),\n1658 |                 });\n1659 |                 let cache_key = ColumnMetadataCacheKey { column_index };\n1660 |                 cache.insert_with_key(&cache_key, cached).await;\n1661 |                 column_infos[result_index] = Some(column_info);\n1662 |             }\n1663 |         }\n1664 | \n1665 |         column_infos\n1666 |             .into_iter()\n1667 |             .enumerate()\n1668 |             .map(|(idx, column_info)| {"
+  },
+  {
+    "path": "rust/lance/src/dataset/fragment.rs",
+    "start": 2110,
+    "end": 2131,
+    "claims": [
+      8
+    ],
+    "read_at": "2026-10-03T23:12:31.779Z",
+    "evidence": "2110 |     /// Get the file metadata for this fragment, using the cache if available.\n2111 |     pub async fn get_file_metadata(\n2112 |         &self,\n2113 |         file_scheduler: &FileScheduler,\n2114 |     ) -> Result<Arc<CachedFileMetadata>> {\n2115 |         let path = file_scheduler.reader().path();\n2116 |         let cache = self.dataset.metadata_cache.file_metadata_cache(path);\n2117 | \n2118 |         let file_metadata = cache\n2119 |             .get_or_insert_with_key(FileMetadataCacheKey, || async {\n2120 |                 let file_metadata: CachedFileMetadata =\n2121 |                     lance_file::reader::FileReader::read_all_metadata(file_scheduler).await?;\n2122 |                 Ok(file_metadata)\n2123 |             })\n2124 |             .await?;\n2125 |         Ok(file_metadata)\n2126 |     }\n2127 | \n2128 |     pub async fn get_file_metadata_index(\n2129 |         &self,\n2130 |         file_scheduler: &FileScheduler,\n2131 |         known_schema: Option<(Arc<Schema>, u64)>,"
+  },
+  {
+    "path": "rust/lance/src/dataset/fragment.rs",
+    "start": 3077,
+    "end": 3100,
+    "claims": [
+      8
+    ],
+    "read_at": "2026-10-03T23:12:31.780Z",
+    "evidence": "3077 | struct FileMetadataCacheKey;\n3078 | \n3079 | impl CacheKey for FileMetadataCacheKey {\n3080 |     type ValueType = CachedFileMetadata;\n3081 | \n3082 |     fn key(&self) -> std::borrow::Cow<'_, str> {\n3083 |         \"\".into()\n3084 |     }\n3085 | \n3086 |     fn type_name() -> &'static str {\n3087 |         \"FileMetadata\"\n3088 |     }\n3089 | \n3090 |     fn schema() -> CacheKeySchema {\n3091 |         CacheKeySchema::new(\"lance.dataset.fragment-file-metadata-key\", 1)\n3092 |     }\n3093 | \n3094 |     fn write_key(&self, _builder: &mut KeyBuilder) {}\n3095 | }\n3096 | \n3097 | #[derive(Debug, Clone)]\n3098 | struct FileMetadataIndexCacheKey;\n3099 | \n3100 | impl CacheKey for FileMetadataIndexCacheKey {"
+  }
+]

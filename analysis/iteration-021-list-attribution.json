@@ -1,0 +1,119 @@
+{
+  "iteration": 21,
+  "files": [
+    {
+      "path": "rust/lance-core/src/container/list.rs",
+      "module": "L1-modules/rust-lance-core-storage.md",
+      "reviewed": true,
+      "role": "Public generic exponentially growing linked blocks, borrowed/owned iterators, equality and memory-estimation implementations; private block state and local tests.",
+      "ranges": [
+        [
+          1,
+          6,
+          "SPDX metadata and imports bind the implementation to std::collections::LinkedList and the local DeepSizeOf trait. No allocator or concurrency abstraction is introduced."
+        ],
+        [
+          7,
+          21,
+          "ExpLinkedList<T> derives Debug, Clone and Default and privately stores LinkedList<Vec<T>>, an explicit element count, and a u16 capacity limit. Documentation describes exponentially larger blocks to reduce allocation frequency. Limit zero means unlimited; its u16 representation is explicitly intended to keep the limit compact. This is a limit on newly chosen block capacities, not a total-element bound."
+        ],
+        [
+          22,
+          41,
+          "`new` starts with no blocks, len=0, limit=0. `with_capacity(capacity)` always pushes one Vec::with_capacity(capacity), even for zero, and starts len=0, limit=0. Consequently preallocated empty and newly constructed empty have different block-presence states; no elements are initialized by reserving."
+        ],
+        [
+          42,
+          49,
+          "The consuming builder with_capacity_limit(mut self, limit:u16)->Self only replaces limit and returns self. It does not shrink existing blocks or reject zero/large existing capacity. Its documentation defines limit as the maximum capacity of one node and zero as no limit; these lines do not give a performance guarantee or measured allocation result."
+        ],
+        [
+          50,
+          75,
+          "push checks the last Vec: if full, it doubles capacity unless a positive limit is reached or exceeded, then appends a Vec with the capped capacity; with no last Vec it appends capacity one. do_push unwraps the now-present last block, pushes the value, then increments len. Doubling and len increment have no overflow guard. A pre-existing zero-capacity block computes another zero capacity and delegates actual growth to Vec::push; the configured limit is not validated against this dependency-selected growth. Setting a smaller limit cannot change an existing larger block."
+        ],
+        [
+          76,
+          91,
+          "pop examines the last block; an empty block is removed and pop recursively retries. A nonempty block decrements len and pops one value; no block means None. Removing a last value does not immediately remove its now-empty block. Ordering is LIFO across blocks and within each Vec. Repeated empty blocks cost recursive retries."
+        ],
+        [
+          92,
+          108,
+          "clear drops all LinkedList blocks and resets len, preserving limit. len returns the stored count. is_empty calls inner.is_empty rather than len==0: with_capacity creates a zero-length list for which is_empty is false, and popping the last element leaves the same discrepancy until an extra pop or clear removes the block."
+        ],
+        [
+          109,
+          124,
+          "size returns (len + spare capacity in the last Vec)*size_of::<T>() + size_of::<Self>() + number_of_blocks*size_of::<Vec<T>>(). The comments describe allocated element capacity and warn that nested heap contents such as String data are absent. The formula counts the complete inline T representation, not a String allocation. It omits LinkedList link-node overhead and allocator overhead; it is an estimate, not exact total retained memory. The formula assumes earlier blocks contribute their live length, not all earlier spare capacity."
+        ],
+        [
+          125,
+          134,
+          "iter returns ExpLinkedListIter::new(self). block_iter maps LinkedList iteration to each Vec slice, preserving block and element insertion order and exposing empty blocks as empty slices. Neither creates copies of T."
+        ],
+        [
+          135,
+          143,
+          "The DeepSizeOf implementation sums each Vec::deep_size_of_children using one mutable context. It includes Vec allocated element capacity and descendant heap estimates, but no explicit Vec-header or LinkedList-node accounting. The default trait method separately adds size_of_val(self). See the Vec rule and trait default in rust/lance-core/src/deepsize.rs:38-44 and rust/lance-core/src/deepsize.rs:166-174."
+        ],
+        [
+          144,
+          156,
+          "FromIterator takes the iterator lower size_hint bound as first block capacity when positive, otherwise one, then pushes each item. It always allocates a block through with_capacity, so even collecting an empty iterator yields len=0 but is_empty=false. The default growth limit remains zero. A misleading upstream lower bound can affect allocation size; no extra cap is applied."
+        ],
+        [
+          157,
+          167,
+          "PartialEq requires T:PartialEq, zips both borrowed iterators, and returns all element comparisons true. It never compares lengths: equal prefixes of different lengths compare equal, and any empty list compares equal to any other list. Eq is nevertheless implemented for T:Eq. Static consequence: [1,2]==[1] and [1]==[1,3], while [1,2]!=[1,3], violating equivalence transitivity. This is current code behavior, not the expected list-equality contract or an executed regression."
+        ],
+        [
+          168,
+          183,
+          "Public ExpLinkedListIter stores private linked-block iterator, optional current slice iterator and the initial total len. Its public new constructor borrows the list, starts without a current block and copies the element count. The borrow enforces source lifetime and forbids ordinary concurrent mutation through that shared reference."
+        ],
+        [
+          184,
+          204,
+          "Iterator Item is &'a T. next first tries the current slice, then installs the next block iterator and recursively retries, skipping exhausted/empty blocks; no more blocks returns None. It never decrements the saved len. size_hint always returns (original_len,Some(original_len)), including after yields and exhaustion, so its positive lower bound becomes inaccurate. No ExactSizeIterator implementation is declared here."
+        ],
+        [
+          205,
+          221,
+          "Public ExpLinkedListIntoIter privately owns linked-list IntoIter<Vec<T>>, an optional Vec IntoIter<T>, and the copied original len. Its public new consumes ExpLinkedList and moves the blocks into the iterator; it does not clone items."
+        ],
+        [
+          222,
+          242,
+          "The owned Iterator yields T. It follows the same current-block/next-block recursive progression as the borrowed version and also never updates len. Its size_hint therefore reports the original element count after consumption. Exhausted blocks are advanced past as owned iterators are replaced."
+        ],
+        [
+          243,
+          251,
+          "IntoIterator for ExpLinkedList<T> declares Item=T and IntoIter=ExpLinkedListIntoIter<T>; into_iter consumes self and delegates to the owned constructor. Borrowed traversal is provided by iter; no IntoIterator for &ExpLinkedList is declared in this file."
+        ],
+        [
+          252,
+          278,
+          "The cfg(test) module imports the list and defines shared helper test_exp_linked_list: require 100 elements/nonempty, pop 50 items from 99 down to 50, verify len=50 and forward iteration over 0..50, clear, then assert len=0/is_empty and pop=None. The helper is not itself marked test."
+        ],
+        [
+          279,
+          288,
+          "test_exp_linked_list_basic creates new, pushes 0..100 while checking length after every push, then invokes the shared helper. It exercises default block growth indirectly, not exact per-block capacities."
+        ],
+        [
+          289,
+          294,
+          "test_exp_linked_list_from collects 0..100 through FromIterator and invokes the helper, covering nonempty preallocation and retained element order."
+        ],
+        [
+          295,
+          306,
+          "test_exp_linked_list_with_capacity_limit sets ten, pushes 100 values with count checks, asserts the last Vec capacity equals ten, then invokes the helper. It does not test existing oversized/zero-capacity blocks, equality with unequal lengths, size_hint after advancement, or len=0 with retained blocks. All tests were read, not executed."
+        ]
+      ],
+      "limits": "Exact local API and calls are retained above and in the symbol index. Whole-repository list consumers remain unreviewed. The equality, emptiness and iterator-hint edge cases are deductions from this file, not confirmed production failures. Memory methods have different accounting formulas. (rust/lance-core/src/container/list.rs:92-167; rust/lance-core/src/container/list.rs:184-251)"
+    }
+  ]
+}

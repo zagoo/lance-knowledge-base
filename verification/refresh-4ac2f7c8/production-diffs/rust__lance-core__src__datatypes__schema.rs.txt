@@ -1,0 +1,96 @@
+@@ -21,6 +21,10 @@ use crate::{
+   21      ROW_OFFSET_FIELD, Result, WILDCARD,
+   22  };
+   23  
+   24 +/// Number of requested columns at which [`Schema::project`] and its variants
+   25 +/// look names up through a hash index instead of scanning the fields.
+   26 +const MIN_COLUMNS_FOR_NAME_INDEX: usize = 32;
+   27 +
+   28  /// Lance Schema.
+   29  #[derive(Default, Debug, Clone, DeepSizeOf)]
+   30  pub struct Schema {
+
+@@ -263,16 +267,35 @@ impl Schema {
+  267          preserve_system_columns: bool,
+  268      ) -> Result<Self> {
+  269          let mut candidates: Vec<Field> = vec![];
+  270 +        // A linear scan of the fields per requested column is quadratic when
+  271 +        // most of a wide schema is requested, so index the names once. For a
+  272 +        // few columns, hashing every name would cost more than the scans.
+  273 +        // `or_insert` keeps the first of duplicate names, like the scan.
+  274 +        let name_index: Option<HashMap<&str, usize>> =
+  275 +            (columns.len() >= MIN_COLUMNS_FOR_NAME_INDEX).then(|| {
+  276 +                let mut index = HashMap::with_capacity(self.fields.len());
+  277 +                for (i, f) in self.fields.iter().enumerate() {
+  278 +                    index.entry(f.name.as_str()).or_insert(i);
+  279 +                }
+  280 +                index
+  281 +            });
+  282 +        // Top-level field index -> position of its projection in `candidates`.
+  283 +        let mut candidate_pos: HashMap<usize, usize> = HashMap::new();
+  284          for col in columns {
+  285              let split = parse_field_path(col.as_ref())?;
+  286              let first = split[0].as_str();
+  269 -            if let Some(field) = self.field(first) {
+  287 +            let field_idx = match &name_index {
+  288 +                Some(index) => index.get(first).copied(),
+  289 +                None => self.fields.iter().position(|f| f.name == first),
+  290 +            };
+  291 +            if let Some(field_idx) = field_idx {
+  292                  let split_refs: Vec<&str> = split[1..].iter().map(|s| s.as_str()).collect();
+  271 -                let projected_field = field.project(&split_refs)?;
+  272 -                if let Some(candidate_field) = candidates.iter_mut().find(|f| f.name == first) {
+  273 -                    candidate_field.merge(&projected_field)?;
+  293 +                let projected_field = self.fields[field_idx].project(&split_refs)?;
+  294 +                if let Some(&pos) = candidate_pos.get(&field_idx) {
+  295 +                    candidates[pos].merge(&projected_field)?;
+  296                  } else {
+  275 -                    candidates.push(projected_field)
+  297 +                    candidate_pos.insert(field_idx, candidates.len());
+  298 +                    candidates.push(projected_field);
+  299                  }
+  300              } else if crate::is_system_column(first) {
+  301                  if preserve_system_columns {
+
+@@ -704,6 +727,31 @@ impl Schema {
+  727              .for_each(|f| f.set_id(-1, &mut current_id));
+  728      }
+  729  
+  730 +    /// Assign IDs to every unassigned field using checked arithmetic.
+  731 +    ///
+  732 +    /// Existing IDs are preserved. New IDs start after both this schema's
+  733 +    /// maximum ID and `max_existing_id`.
+  734 +    /// If allocation fails, discard the partially updated schema.
+  735 +    pub fn try_set_field_id(&mut self, max_existing_id: Option<i32>) -> Result<()> {
+  736 +        let schema_max_id = self.max_field_id().unwrap_or(-1);
+  737 +        let max_existing_id = max_existing_id.unwrap_or(-1);
+  738 +        let mut current_id = i64::from(schema_max_id.max(max_existing_id)) + 1;
+  739 +        for field in &mut self.fields {
+  740 +            field.try_set_id(-1, &mut current_id)?;
+  741 +        }
+  742 +        Ok(())
+  743 +    }
+  744 +
+  745 +    /// Replace every field ID with a fresh checked allocation.
+  746 +    ///
+  747 +    /// The first assigned ID is one greater than `max_existing_id`. Use this when
+  748 +    /// every input field must receive a new identity.
+  749 +    /// If allocation fails, discard the partially updated schema.
+  750 +    pub fn try_reassign_field_ids(&mut self, max_existing_id: Option<i32>) -> Result<()> {
+  751 +        self.reset_id();
+  752 +        self.try_set_field_id(max_existing_id)
+  753 +    }
+  754 +
+  755      fn reset_id(&mut self) {
+  756          self.fields.iter_mut().for_each(|f| f.reset_id());
+  757      }
+
+@@ -899,7 +947,7 @@ impl TryFrom<&ArrowSchema> for Schema {
+  947                  .collect::<Result<_>>()?,
+  948              metadata: schema.metadata.clone(),
+  949          };
+  902 -        schema.set_field_id(None);
+  950 +        schema.try_set_field_id(None)?;
+  951          schema.validate()?;
+  952  
+  953          schema.verify_primary_key()?;

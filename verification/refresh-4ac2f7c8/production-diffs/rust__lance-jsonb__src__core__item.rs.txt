@@ -1,0 +1,296 @@
+@@ -0,0 +1,295 @@
+    1 +// SPDX-License-Identifier: Apache-2.0
+    2 +// SPDX-FileCopyrightText: Copyright The Lance Authors
+    3 +// SPDX-FileCopyrightText: Copyright 2023 Datafuse Labs
+    4 +// Adapted from databendlabs/jsonb at commit fba895c5ebe77ce2539e187f9c652f51cbf195c3.
+    5 +
+    6 +use std::borrow::Cow;
+    7 +use std::cmp::Ordering;
+    8 +
+    9 +use crate::Number;
+   10 +use crate::OwnedJsonb;
+   11 +use crate::RawJsonb;
+   12 +use crate::error::*;
+   13 +use crate::extension::ExtensionValue;
+   14 +
+   15 +/// The value type of JSONB data.
+   16 +#[derive(Debug, Clone, Copy)]
+   17 +pub enum JsonbItemType {
+   18 +    /// The Null JSONB type.
+   19 +    Null,
+   20 +    /// The Boolean JSONB type.
+   21 +    Boolean,
+   22 +    /// The Number JSONB type.
+   23 +    Number,
+   24 +    /// The String JSONB type.
+   25 +    String,
+   26 +    /// The Extension JSONB type.
+   27 +    Extension,
+   28 +    /// The Array JSONB type with the length of items.
+   29 +    Array(usize),
+   30 +    /// The Object JSONB type with the length of key and value pairs.
+   31 +    Object(usize),
+   32 +}
+   33 +
+   34 +impl Eq for JsonbItemType {}
+   35 +
+   36 +impl PartialEq for JsonbItemType {
+   37 +    fn eq(&self, other: &Self) -> bool {
+   38 +        self.partial_cmp(other) == Some(Ordering::Equal)
+   39 +    }
+   40 +}
+   41 +
+   42 +impl PartialOrd for JsonbItemType {
+   43 +    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+   44 +        match (self, other) {
+   45 +            (Self::Null, Self::Null) => Some(Ordering::Equal),
+   46 +            (Self::Null, _) => Some(Ordering::Greater),
+   47 +            (_, Self::Null) => Some(Ordering::Less),
+   48 +
+   49 +            (Self::Array(_), Self::Array(_)) => None,
+   50 +            (Self::Array(_), _) => Some(Ordering::Greater),
+   51 +            (_, Self::Array(_)) => Some(Ordering::Less),
+   52 +
+   53 +            (Self::Object(_), Self::Object(_)) => None,
+   54 +            (Self::Object(_), _) => Some(Ordering::Greater),
+   55 +            (_, Self::Object(_)) => Some(Ordering::Less),
+   56 +
+   57 +            (Self::String, Self::String) => None,
+   58 +            (Self::String, _) => Some(Ordering::Greater),
+   59 +            (_, Self::String) => Some(Ordering::Less),
+   60 +
+   61 +            (Self::Number, Self::Number) => None,
+   62 +            (Self::Number, _) => Some(Ordering::Greater),
+   63 +            (_, Self::Number) => Some(Ordering::Less),
+   64 +
+   65 +            (Self::Boolean, Self::Boolean) => None,
+   66 +            (Self::Boolean, _) => Some(Ordering::Greater),
+   67 +            (_, Self::Boolean) => Some(Ordering::Less),
+   68 +
+   69 +            (Self::Extension, Self::Extension) => None,
+   70 +        }
+   71 +    }
+   72 +}
+   73 +
+   74 +#[derive(Debug, Clone)]
+   75 +pub enum NumberItem<'a> {
+   76 +    /// Represents a raw JSONB number, stored as a byte slice.
+   77 +    Raw(&'a [u8]),
+   78 +    /// Represents a JSONB number.
+   79 +    #[allow(dead_code)]
+   80 +    Number(Number),
+   81 +}
+   82 +
+   83 +impl NumberItem<'_> {
+   84 +    pub(crate) fn as_number(&self) -> Result<Number> {
+   85 +        match self {
+   86 +            NumberItem::Raw(data) => {
+   87 +                let num = Number::decode(data)?;
+   88 +                Ok(num)
+   89 +            }
+   90 +            NumberItem::Number(num) => Ok(num.clone()),
+   91 +        }
+   92 +    }
+   93 +}
+   94 +
+   95 +#[derive(Debug, Clone)]
+   96 +pub enum ExtensionItem<'a> {
+   97 +    /// Represents a raw JSONB extension value, stored as a byte slice.
+   98 +    Raw(&'a [u8]),
+   99 +    /// Represents a raw JSONB extension value.
+  100 +    #[allow(dead_code)]
+  101 +    Extension(ExtensionValue<'a>),
+  102 +}
+  103 +
+  104 +impl<'a> ExtensionItem<'a> {
+  105 +    pub(crate) fn as_extension_value(&self) -> Result<ExtensionValue<'a>> {
+  106 +        match self {
+  107 +            ExtensionItem::Raw(data) => {
+  108 +                let val = ExtensionValue::decode(data)?;
+  109 +                Ok(val)
+  110 +            }
+  111 +            ExtensionItem::Extension(val) => Ok(val.clone()),
+  112 +        }
+  113 +    }
+  114 +}
+  115 +
+  116 +/// `JsonbItem` is an internal enum used primarily within `ArrayIterator` and
+  117 +/// `ObjectIterator` to represent temporary values during iteration. It is also
+  118 +/// utilized by `ArrayBuilder` and `ObjectBuilder` to store intermediate variables
+  119 +/// during the construction of JSONB objects and arrays.
+  120 +///
+  121 +/// This enum encapsulates different types of JSONB values, allowing iterators and
+  122 +/// builders to handle various data types uniformly. It supports null values,
+  123 +/// booleans, numbers (represented as byte slices), strings (represented as byte slices),
+  124 +/// raw JSONB data (`RawJsonb`), and owned JSONB data (`OwnedJsonb`).
+  125 +#[derive(Debug, Clone)]
+  126 +pub enum JsonbItem<'a> {
+  127 +    /// Represents a JSONB null value.
+  128 +    Null,
+  129 +    /// Represents a JSONB boolean value.
+  130 +    Boolean(bool),
+  131 +    /// Represents a JSONB number, stored as a byte slice.
+  132 +    Number(NumberItem<'a>),
+  133 +    /// Represents a JSONB string.
+  134 +    String(Cow<'a, str>),
+  135 +    /// Represents a JSONB extension values, stored as a byte slice.
+  136 +    Extension(ExtensionItem<'a>),
+  137 +    /// Represents raw JSONB data, using a borrowed slice.
+  138 +    Raw(RawJsonb<'a>),
+  139 +    /// Represents owned JSONB data.
+  140 +    Owned(OwnedJsonb),
+  141 +}
+  142 +
+  143 +impl<'a> JsonbItem<'a> {
+  144 +    pub(crate) fn jsonb_item_type(&self) -> Result<JsonbItemType> {
+  145 +        match self {
+  146 +            JsonbItem::Null => Ok(JsonbItemType::Null),
+  147 +            JsonbItem::Boolean(_) => Ok(JsonbItemType::Boolean),
+  148 +            JsonbItem::Number(_) => Ok(JsonbItemType::Number),
+  149 +            JsonbItem::String(_) => Ok(JsonbItemType::String),
+  150 +            JsonbItem::Extension(_) => Ok(JsonbItemType::Extension),
+  151 +            JsonbItem::Raw(raw) => raw.jsonb_item_type(),
+  152 +            JsonbItem::Owned(owned) => owned.as_raw().jsonb_item_type(),
+  153 +        }
+  154 +    }
+  155 +}
+  156 +
+  157 +impl Eq for JsonbItem<'_> {}
+  158 +
+  159 +impl PartialEq for JsonbItem<'_> {
+  160 +    fn eq(&self, other: &Self) -> bool {
+  161 +        self.partial_cmp(other) == Some(Ordering::Equal)
+  162 +    }
+  163 +}
+  164 +
+  165 +#[allow(clippy::non_canonical_partial_ord_impl)]
+  166 +impl PartialOrd for JsonbItem<'_> {
+  167 +    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+  168 +        let self_type = self.jsonb_item_type().ok()?;
+  169 +        let other_type = other.jsonb_item_type().ok()?;
+  170 +
+  171 +        // First use JSONB type to determine the order,
+  172 +        // different types must have different orders.
+  173 +        if let Some(ord) = self_type.partial_cmp(&other_type) {
+  174 +            return Some(ord);
+  175 +        }
+  176 +
+  177 +        let self_item = if let JsonbItem::Owned(owned) = self {
+  178 +            &JsonbItem::Raw(owned.as_raw())
+  179 +        } else {
+  180 +            self
+  181 +        };
+  182 +        let other_item = if let JsonbItem::Owned(owned) = other {
+  183 +            &JsonbItem::Raw(owned.as_raw())
+  184 +        } else {
+  185 +            other
+  186 +        };
+  187 +
+  188 +        match (self_item, other_item) {
+  189 +            (JsonbItem::Raw(self_raw), JsonbItem::Raw(other_raw)) => {
+  190 +                self_raw.partial_cmp(other_raw)
+  191 +            }
+  192 +            // compare null, raw jsonb must not null
+  193 +            (JsonbItem::Raw(_), JsonbItem::Null) => Some(Ordering::Less),
+  194 +            (JsonbItem::Null, JsonbItem::Raw(_)) => Some(Ordering::Greater),
+  195 +            // compare extension
+  196 +            (JsonbItem::Extension(self_ext), JsonbItem::Extension(other_ext)) => {
+  197 +                let self_val = self_ext.as_extension_value().ok()?;
+  198 +                let other_val = other_ext.as_extension_value().ok()?;
+  199 +                self_val.partial_cmp(&other_val)
+  200 +            }
+  201 +            (JsonbItem::Raw(self_raw), JsonbItem::Extension(other_ext)) => {
+  202 +                let self_val = self_raw.as_extension_value();
+  203 +                let other_val = other_ext.as_extension_value().ok()?;
+  204 +                if let Ok(Some(self_val)) = self_val {
+  205 +                    self_val.partial_cmp(&other_val)
+  206 +                } else {
+  207 +                    None
+  208 +                }
+  209 +            }
+  210 +            (JsonbItem::Extension(self_ext), JsonbItem::Raw(other_raw)) => {
+  211 +                let self_val = self_ext.as_extension_value().ok()?;
+  212 +                let other_val = other_raw.as_extension_value();
+  213 +                if let Ok(Some(other_val)) = other_val {
+  214 +                    self_val.partial_cmp(&other_val)
+  215 +                } else {
+  216 +                    None
+  217 +                }
+  218 +            }
+  219 +            // compare boolean
+  220 +            (JsonbItem::Boolean(self_val), JsonbItem::Boolean(other_val)) => {
+  221 +                self_val.partial_cmp(other_val)
+  222 +            }
+  223 +            (JsonbItem::Raw(self_raw), JsonbItem::Boolean(other_val)) => {
+  224 +                let self_val = self_raw.as_bool();
+  225 +                if let Ok(Some(self_val)) = self_val {
+  226 +                    self_val.partial_cmp(other_val)
+  227 +                } else {
+  228 +                    None
+  229 +                }
+  230 +            }
+  231 +            (JsonbItem::Boolean(self_val), JsonbItem::Raw(other_raw)) => {
+  232 +                let other_val = other_raw.as_bool();
+  233 +                if let Ok(Some(other_val)) = other_val {
+  234 +                    self_val.partial_cmp(&other_val)
+  235 +                } else {
+  236 +                    None
+  237 +                }
+  238 +            }
+  239 +            // compare number
+  240 +            (JsonbItem::Number(self_num), JsonbItem::Number(other_num)) => {
+  241 +                let self_val = self_num.as_number().ok()?;
+  242 +                let other_val = other_num.as_number().ok()?;
+  243 +                self_val.partial_cmp(&other_val)
+  244 +            }
+  245 +            (JsonbItem::Raw(self_raw), JsonbItem::Number(other_num)) => {
+  246 +                let self_val = self_raw.as_number();
+  247 +                let other_val = other_num.as_number().ok()?;
+  248 +                if let Ok(Some(self_val)) = self_val {
+  249 +                    self_val.partial_cmp(&other_val)
+  250 +                } else {
+  251 +                    None
+  252 +                }
+  253 +            }
+  254 +            (JsonbItem::Number(self_num), JsonbItem::Raw(other_raw)) => {
+  255 +                let self_val = self_num.as_number().ok()?;
+  256 +                let other_val = other_raw.as_number();
+  257 +                if let Ok(Some(other_val)) = other_val {
+  258 +                    self_val.partial_cmp(&other_val)
+  259 +                } else {
+  260 +                    None
+  261 +                }
+  262 +            }
+  263 +            // compare string
+  264 +            (JsonbItem::String(self_str), JsonbItem::String(other_str)) => {
+  265 +                self_str.partial_cmp(other_str)
+  266 +            }
+  267 +            (JsonbItem::Raw(self_raw), JsonbItem::String(other_str)) => {
+  268 +                let self_str = self_raw.as_str();
+  269 +                if let Ok(Some(self_str)) = self_str {
+  270 +                    self_str.partial_cmp(other_str)
+  271 +                } else {
+  272 +                    None
+  273 +                }
+  274 +            }
+  275 +            (JsonbItem::String(self_str), JsonbItem::Raw(other_raw)) => {
+  276 +                let other_str = other_raw.as_str();
+  277 +                if let Ok(Some(other_str)) = other_str {
+  278 +                    self_str.partial_cmp(&other_str)
+  279 +                } else {
+  280 +                    None
+  281 +                }
+  282 +            }
+  283 +            (_, _) => None,
+  284 +        }
+  285 +    }
+  286 +}
+  287 +
+  288 +impl Ord for JsonbItem<'_> {
+  289 +    fn cmp(&self, other: &Self) -> Ordering {
+  290 +        match self.partial_cmp(other) {
+  291 +            Some(ordering) => ordering,
+  292 +            None => Ordering::Equal,
+  293 +        }
+  294 +    }
+  295 +}

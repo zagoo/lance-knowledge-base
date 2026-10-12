@@ -1,0 +1,159 @@
+{
+  "iteration": 25,
+  "files": [
+    {
+      "path": "rust/lance-core/src/utils/stable_partition.rs",
+      "module": "L1-modules/rust-lance-core-row-mapping.md",
+      "reviewed": true,
+      "role": "Public in-memory primitives and a private dense-counts byte codec for stable-partition row mapping: CountsMatrix, streaming builder, prefix rank, point translation and sweep translation. Labels are destination-list indices, not fragment IDs. Production label-column IO/cache ownership is outside this module. Private state prevents ordinary direct mutation but decode deliberately separates structural decoding from semantic count validation.",
+      "limits": "All 697 lines and local tests were inspected; none were executed. The comments locate label IO/cache responsibilities in lance-index, whose implementation remains pending. Do not infer a released stable file-format contract or dataset-version gate from this helper's local codec version1. Full FRI schema/reader selection and whether callers always call validate are unknown. (rust/lance-core/src/utils/stable_partition.rs:4-60; rust/lance-core/src/utils/stable_partition.rs:74-82; rust/lance-core/src/utils/stable_partition.rs:191-290) Local tests omit wrong-version decoding, excess live-row budgets, maximum destination count/overflow, short validity buffers and empty/excess-input sweeps. (rust/lance-core/src/utils/stable_partition.rs:484-697)",
+      "ranges": [
+        [
+          1,
+          32,
+          "License and design for reordered rewrites: one nullable u16 destination label per old physical row in caller scan order; NULL means deleted. Rows may interleave among destinations but each destination must preserve relative source order. Parallel writers must merge their output in that order. Arbitrary within-destination permutations cannot be represented by these labels alone and require explicit final offsets in another format. This is a correctness precondition rather than a runtime test here."
+        ],
+        [
+          33,
+          64,
+          "Cumulative counts are stored per destination at each fixed-size block end. Point translation combines count before the block with within-block exclusive prefix rank; a sequential sweep seeds all counters at a block boundary and increments by label. The block is also the documented label IO/cache unit, but that IO belongs to lance-index and is not implemented here. Approximate dense-grid footprint examples omit header/Vec overhead; exact payload size is ceil(total_rows/block_rows)*num_destinations*4. Imports supply core DeepSizeOf/Error/Result and Arrow NullBuffer."
+        ],
+        [
+          65,
+          86,
+          "Public defaults: DEFAULT_BLOCK_ROWS=64*1024 (65536), MAX_DESTINATIONS=u16::MAX+1 (65536). Private codec constants: magic LSPC, version1, fixed28-byte header, representation0 for dense little-endian u32 grid; unknown future tags are rejected. corrupt wraps messages as CorruptFile named stable_partition_counts. These local codec constants are not proof of a Lance dataset format version or released stability designation."
+        ],
+        [
+          87,
+          106,
+          "Public CountsMatrix derives Clone/Debug/PartialEq/Eq with private destination count, block rows, total old physical rows u64 (including deleted), and row-major cumulative Vec<u32>. Each matrix row is through the end of a block, unlike the exclusive count-before accessor. Deleted counts are implicit differences from physical row budgets."
+        ],
+        [
+          107,
+          140,
+          "Accessors return stored dimensions; num_blocks divides cumulative cell count by destination count, relying on construction/decode shape checks. block_of divides an arbitrary row by block_rows and casts to usize without range validation. block_range computes start=block*block_rows and end=min(start+block_rows,total_rows), with ordinary arithmetic and no bounds check: an invalid block can yield start>end or overflow. Private block_row slices the flattened grid and panics if its indices are invalid."
+        ],
+        [
+          141,
+          160,
+          "count_before(block,label) returns0 for block0 without label validation, otherwise indexes the preceding matrix row. counters_at_block similarly returns a newly allocated zero vector for block0 or clones the previous row. Both permit the end boundary block==num_blocks on a valid matrix; they do not return Result and callers own bounds validation."
+        ],
+        [
+          161,
+          190,
+          "total(label) returns0 for an empty matrix without checking the label, otherwise indexes the last row. total_live_rows sums that final row as u64 or returns0. deleted_through(block) subtracts the current cumulative live sum from the block end; it assumes valid monotonic/budget counts and a valid block. Using malformed decoded counts before validate can underflow ordinary arithmetic."
+        ],
+        [
+          191,
+          219,
+          "validate iterates all blocks, rejects any label count that decreases from the previous block, and rejects the increase in total live rows if it exceeds the current physical block length. It returns contextual CorruptFile through corrupt; The scan is O(blocks*destinations); decode leaves these content checks to a separate validate call. The source does not state the design rationale. Private shape invariants ensure complete matrix rows; validation does not compare counts against the actual label column or destination fragment metadata."
+        ],
+        [
+          220,
+          236,
+          "encode reserves header+cells*4 bytes and writes LSPC, version1, repr0, destination count, block_rows as little-endian u32, total_rows as little-endian u64, then every cumulative u32 in row-major order. Header offsets are0,4,8,12,16,20; payload begins28. It does not call validate or return Result; capacity arithmetic is unchecked in source."
+        ],
+        [
+          237,
+          263,
+          "decode first requires28 bytes, rejects wrong magic, unsupported version and representation tags other than0 via CorruptFile. Version and representation fields use exact byte slices after the header length check, so their array conversions are structurally guarded. Dimension/row-count extraction follows at rust/lance-core/src/utils/stable_partition.rs:264-266."
+        ],
+        [
+          264,
+          291,
+          "decode extracts destination count, block rows and total rows from little-endian header fields, then calls check_shape before division; invalid destination count or zero block rows yields InvalidInput, despite being read from persisted bytes. It computes ceil(total_rows/block_rows), checks block-count*destinations*4 for overflow and exact equality with remaining bytes, rejecting truncation and trailing bytes as CorruptFile. It reserves/reads the grid as u32 little-endian chunks and returns without validate. Structural success alone does not prove monotonic counts or per-block row budgets."
+        ],
+        [
+          292,
+          316,
+          "Private check_shape accepts destination counts1..=65536 and any positive block_rows; it returns descriptive InvalidInput otherwise. check_label compares a u16 label as u32 against destination count and also returns InvalidInput. The maximum valid label is65535; the default block size is advisory, not enforced."
+        ],
+        [
+          317,
+          334,
+          "CountsMatrix DeepSizeOf reports cumulative Vec capacity times sizeof(u32), excluding inline storage already accounted by the trait convention. Public CountsMatrixBuilder derives Debug with private shape, per-destination running u32 counters, cumulative cells, total physical-row count and rows-in-current-block. No shared mutable/concurrent state is exposed."
+        ],
+        [
+          335,
+          347,
+          "try_new validates shape, allocates zeroed running counters for each destination, initializes cumulative empty and both physical-row counters zero. Empty input is valid and will produce zero matrix rows at finish."
+        ],
+        [
+          348,
+          373,
+          "push accepts one Option<u16> per old physical row. For Some, reject out-of-range label and checked per-destination u32 increment overflow before advancing any physical counters; None only advances physical counters. total_rows increments as ordinary u64. When rows_in_block reaches block_rows, append a full snapshot of all running counters and reset rows_in_block to zero. A destination can hold at most u32::MAX rows, whose last zero-based offset is u32::MAX-1; this builder cannot represent count2^32."
+        ],
+        [
+          374,
+          386,
+          "finish consumes the builder, appends one final cumulative row only when the last block is partial, and moves cumulative/shape/total fields into CountsMatrix. Exact block multiples get no extra row; empty input keeps zero rows. No secondary validation pass occurs."
+        ],
+        [
+          387,
+          409,
+          "Public rank_label_prefix counts matching label values strictly before upto, ignoring positions invalid in NullBuffer. If validity is absent or reports no nulls, it skips per-element validity checks. Slicing values[..upto] enforces bounds by panic, not Result; no validity-length check exists, and counts cast usize to u32. In intended blocks limited to u32 rows the count fits; an arbitrary standalone oversized slice could truncate. Work is linear in prefix length with no output allocation."
+        ],
+        [
+          410,
+          433,
+          "translate_in_block first derives block length via block_range, then returns InvalidInput if values length differs or position is outside it. It does not separately validate the block index before block_range arithmetic. A supplied validity buffer is not length-checked. These checks establish the requested values slice size and position, not consistency of counts and labels."
+        ],
+        [
+          434,
+          445,
+          "For an invalid/NULL position return Ok(None) before reading or validating the underlying label, so arbitrary null payload values are allowed. Otherwise validate that label, compute count_before(block,label)+rank_label_prefix(values,validity,pos,label) using ordinary u32 addition, and return (label,offset). There is no destination-fragment-ID lookup, comparison with final destination totals, or validation that every supplied prefix label matches the stored counts."
+        ],
+        [
+          446,
+          468,
+          "Public SweepTranslator derives Debug and privately owns a Vec<u32> of per-destination counters. new rejects start_block >= max(num_blocks,1), allowing block0 for an empty matrix but not the end boundary for a nonempty matrix. It seeds counters from CountsMatrix::counters_at_block; only a block boundary is expressible."
+        ],
+        [
+          469,
+          483,
+          "advance(None) returns None and changes no counter. Some(label) checks counter-vector bounds, returns the old counter as offset and increments with ordinary u32 addition, unlike the builder's checked increment. It tracks neither processed physical rows nor remaining dataset length: an empty or exhausted sweep can accept further valid labels. Caller must feed the correct ordered row stream and avoid overflow; no matrix consistency validation happens here."
+        ],
+        [
+          484,
+          510,
+          "Tests use seeded StdRng and Rng/SeedableRng traits and NullBuffer. random_labels makes a NULL with probability1/8, otherwise a uniform destination label. build uses the public builder and unwraps each valid fixture operation. These helpers are local; runtime tests were not executed during KB analysis."
+        ],
+        [
+          511,
+          545,
+          "reference independently assigns monotonically increasing offsets per label using HashMap counters, preserving NULL positions. block_slices turns optional labels into a values vector with 0xBEEF garbage at NULL positions and creates a validity buffer only if any null exists. This explicitly tests null payload exclusion instead of relying on zero fill."
+        ],
+        [
+          546,
+          574,
+          "Hand example uses labels[0,2,NULL,2,1,1,0,2,NULL,0], three destinations and blocks of four. It validates the matrix, expects three blocks for ten physical rows and range8..10 for the last, and checks exclusive count-before values including the legal block3 end boundary."
+        ],
+        [
+          575,
+          595,
+          "The same fixture asserts destination totals3/2/3, total live8, deleted-through prefixes1 then2 and counters at block1=[1,0,2]. Exact first-eight-row input produces two blocks; empty input has zero blocks/rows/live/label totals and validates. These tests distinguish partial-final, exact-multiple and empty layouts."
+        ],
+        [
+          596,
+          633,
+          "Round trip uses seed7,1000 rows,five destinations,block64 and compares decoded equality before validate; empty also round-trips. Short bytes, corrupt magic, a one-byte truncation and repr9 fail decoding. A manually decreased cumulative cell is encoded and decoded successfully, then fails validate, demonstrating the intentional separation. Test assertions mostly check is_err, not exact categories/messages."
+        ],
+        [
+          634,
+          643,
+          "Builder rejects zero destinations, destination count aboveMAX_DESTINATIONS, zero block size and out-of-range label3 for m3; valid label2 then succeeds. The test does not assert exact error variants/messages, state after failed push or u32 counter overflow."
+        ],
+        [
+          644,
+          682,
+          "Seed42 fixture has1000 rows,five destinations,block64. Every point translation across every block is compared with the independent per-label reference using garbage null payloads; sweeps beginning at every valid block boundary are compared over the entire remaining label stream. This verifies point/sweep order agreement on one seeded mixed-null input, not arbitrary within-destination permutation support."
+        ],
+        [
+          683,
+          697,
+          "Input checks use one four-row block and assert errors for wrong values length, out-of-range position, live label9 for m2, invalid sweep block1 and advance label9. Although a comment calls an out-of-range data label corruption, check_label actually returns InvalidInput (rust/lance-core/src/utils/stable_partition.rs:306-314). Short validity buffers, overflow and extra sweep input are not tested here; module ends."
+        ]
+      ]
+    }
+  ]
+}

@@ -1,0 +1,36 @@
+@@ -435,9 +435,16 @@ async fn do_commit_new_dataset(
+  435      manifest_naming_scheme: ManifestNamingScheme,
+  436      metadata_cache: &DSMetadataCache,
+  437      session: Arc<Session>,
+  438 +    keep_field_ids: bool,
+  439  ) -> Result<(Manifest, ManifestLocation)> {
+  440      let mut transaction = transaction.clone();
+  440 -    canonicalize_non_reusable_field_ids(None, &mut transaction.operation, None)?;
+  441 +    if !keep_field_ids {
+  442 +        canonicalize_non_reusable_field_ids(None, &mut transaction.operation, None)?;
+  443 +    } else if let Operation::Overwrite { schema, .. } = &transaction.operation {
+  444 +        // Canonicalization would have checked the schema it renumbered.
+  445 +        schema.validate()?;
+  446 +        schema.verify_primary_key()?;
+  447 +    }
+  448      let transaction = &transaction;
+  449      validate_operation(None, &transaction.operation)?;
+  450      let pb_transaction = pb::Transaction::try_from(transaction)?;
+
+@@ -781,6 +788,7 @@ pub(crate) async fn commit_new_dataset(
+  788      manifest_naming_scheme: ManifestNamingScheme,
+  789      metadata_cache: &crate::session::caches::DSMetadataCache,
+  790      session: Arc<Session>,
+  791 +    keep_field_ids: bool,
+  792  ) -> Result<(Manifest, ManifestLocation)> {
+  793      do_commit_new_dataset(
+  794          object_store,
+
+@@ -793,6 +801,7 @@ pub(crate) async fn commit_new_dataset(
+  801          manifest_naming_scheme,
+  802          metadata_cache,
+  803          session,
+  804 +        keep_field_ids,
+  805      )
+  806      .await
+  807  }

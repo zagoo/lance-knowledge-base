@@ -1,0 +1,124 @@
+@@ -1,12 +1,13 @@
+    1  // SPDX-License-Identifier: Apache-2.0
+    2  // SPDX-FileCopyrightText: Copyright The Lance Authors
+    3  
+    4 -//! VectorIndexExec - HNSW vector search with MVCC visibility.
+    4 +//! VectorIndexExec - a vector search answered by a memtable index, with MVCC
+    5 +//! visibility.
+    6  
+    7  use std::fmt::{Debug, Formatter};
+    8  use std::sync::Arc;
+    9  
+    9 -use arrow_array::{FixedSizeListArray, Float32Array, RecordBatch, UInt64Array, cast::AsArray};
+   10 +use arrow_array::{Float32Array, RecordBatch, UInt64Array};
+   11  use arrow_schema::{DataType, Field, Schema, SchemaRef};
+   12  use datafusion::common::stats::Precision;
+   13  use datafusion::error::Result as DataFusionResult;
+
+@@ -23,14 +24,15 @@ use futures::stream::{self, StreamExt};
+   24  use lance_core::{Error, Result};
+   25  
+   26  use super::super::builder::VectorQuery;
+   27 +use crate::dataset::mem_wal::index::{MemMatches, SearchContext};
+   28  use crate::dataset::mem_wal::memtable::scanner::exec::{scan_record_batch, take_projected_columns};
+   29  use crate::dataset::mem_wal::write::{BatchStore, IndexStore};
+   30  
+   31  /// Distance column name in output.
+   32  pub const DISTANCE_COLUMN: &str = "_distance";
+   33  
+   32 -/// ExecutionPlan node that queries the in-memory HNSW vector index with
+   33 -/// MVCC visibility.
+   34 +/// ExecutionPlan node that answers a vector search from the memtable index
+   35 +/// planning chose, with MVCC visibility.
+   36  pub struct VectorIndexExec {
+   37      batch_store: Arc<BatchStore>,
+   38      indexes: Arc<IndexStore>,
+
+@@ -71,7 +73,7 @@ impl VectorIndexExec {
+   73      /// # Arguments
+   74      ///
+   75      /// * `batch_store` - Lock-free batch store containing data
+   74 -    /// * `indexes` - Index registry with HNSW vector indexes
+   76 +    /// * `indexes` - The memtable's indexes, one of which answers `query`
+   77      /// * `query` - Vector query parameters
+   78      /// * `readable_count` - Exclusive count of batch positions this scan may read
+   79      /// * `projection` - Optional column indices to project
+
+@@ -87,10 +89,12 @@ impl VectorIndexExec {
+   89          with_row_id: bool,
+   90      ) -> Result<Self> {
+   91          let column = &query.column;
+   90 -        if indexes.get_hnsw_by_column(column).is_none() {
+   92 +        if indexes
+   93 +            .index_answering(column, &query.mem_query()?)
+   94 +            .is_none()
+   95 +        {
+   96              return Err(Error::invalid_input(format!(
+   92 -                "No HNSW vector index found for column '{}'",
+   93 -                column
+   97 +                "no index on column '{column}' answers this vector search"
+   98              )));
+   99          }
+  100  
+
+@@ -147,36 +151,36 @@ impl VectorIndexExec {
+  151          }
+  152      }
+  153  
+  150 -    /// Query the HNSW index and return matching rows with exact distances.
+  151 -    ///
+  152 -    /// Distances are exact because the in-memory HNSW is backed by FLAT
+  153 -    /// (uncompressed) vectors; no refine step is needed.
+  154 +    /// Search the index planning chose and return `(distance, position)` pairs.
+  155 +    /// Planning chose an index that accepted this query, so none now, or a
+  156 +    /// decline, is an error.
+  157      fn query_index(&self) -> Result<Vec<(f32, u64)>> {
+  155 -        let Some(index) = self.indexes.get_hnsw_by_column(&self.query.column) else {
+  156 -            return Ok(vec![]);
+  157 -        };
+  158 -
+  158          let Some(max_readable_row) = self.compute_max_readable_row() else {
+  159              return Ok(vec![]);
+  160          };
+  162 -
+  163 -        // Normalize the query vector to a single-row FixedSizeListArray.
+  164 -        let query_array = self.query.query_vector.as_ref();
+  165 -        let fsl = if let Some(fsl) = query_array.as_fixed_size_list_opt() {
+  166 -            fsl.clone()
+  167 -        } else {
+  168 -            let values = self.query.query_vector.clone();
+  169 -            let dim = values.len() as i32;
+  170 -            let field = Arc::new(Field::new("item", values.data_type().clone(), true));
+  171 -            FixedSizeListArray::try_new(field, dim, values, None).map_err(|e| {
+  172 -                Error::invalid_input(format!(
+  173 -                    "Failed to wrap vector query into FixedSizeListArray (dim={}): {}",
+  174 -                    dim, e
+  161 +        let query = self.query.mem_query()?;
+  162 +        let column = &self.query.column;
+  163 +        let index = self
+  164 +            .indexes
+  165 +            .index_answering(column, &query)
+  166 +            .ok_or_else(|| {
+  167 +                Error::internal(format!(
+  168 +                    "no index on '{column}' answers the vector search planning routed to it"
+  169                  ))
+  176 -            })?
+  170 +            })?;
+  171 +        let Some(MemMatches::Ranked(matches)) =
+  172 +            index.search(&query, &SearchContext::new(max_readable_row))?
+  173 +        else {
+  174 +            return Err(Error::internal(format!(
+  175 +                "the index on '{column}' accepted a vector search, then did not answer it"
+  176 +            )));
+  177          };
+  178 -
+  179 -        let mut results = index.search(&fsl, self.query.k, self.query.ef, max_readable_row)?;
+  178 +        // A row past the readable count may still fail its append.
+  179 +        let mut results: Vec<(f32, u64)> = matches
+  180 +            .into_iter()
+  181 +            .filter(|m| m.position <= max_readable_row)
+  182 +            .map(|m| (m.score, m.position))
+  183 +            .collect();
+  184  
+  185          if self.query.distance_lower_bound.is_some() || self.query.distance_upper_bound.is_some() {
+  186              results.retain(|&(dist, _)| {

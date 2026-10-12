@@ -1,0 +1,371 @@
+{
+  "iteration": 12,
+  "files": [
+    {
+      "path": "rust/lance-core/src/cache/key.rs",
+      "module": "L1-modules/rust-lance-core-cache.md",
+      "reviewed": true,
+      "role": "Canonical cache identity primitives: deterministic hierarchical namespaces, versioned logical schemas, typed streaming key construction and opaque128-bit backend keys.",
+      "limits": "This is the local cache-key protocol, not a Lance data-file-format version. Its source explicitly describes stable framing and a cache identity rather than authentication. Namespace/type/schema selection by LanceCache and cache persistence remain pending. Tests are source evidence only, not executed. BLAKE3 dependency implementation is outside this file. (rust/lance-core/src/cache/key.rs:4-15; rust/lance-core/src/cache/key.rs:19-28; rust/lance-core/src/cache/key.rs:316-476)",
+      "ranges": [
+        [
+          1,
+          18,
+          "SPDX, module contract and fmt import. Fields use explicit tags, fixed-width little-endian integers and length framing for cross-process/platform/build stability. Namespace derivation keys are deterministic and public in effect, not secrets; docs state generic birthday resistance about64 bits for128-bit truncated digest and no FIPS mode. This is a design contract, not a cryptographic proof or external compliance assessment."
+        ],
+        [
+          19,
+          29,
+          "Public CACHE_KEY_FORMAT is exactly blake3-128-v1; persistent physical namespaces should include it so future protocols cold-miss. Private key-format version is u32=1. Root derivation context is exactly lance-format/lance 2026-07-17 cache namespace v1. Namespace and entry domains are the bytes lance-cache-namespace\\0 and lance-cache-entry\\0, including terminal NUL."
+        ],
+        [
+          30,
+          55,
+          "Private repr(u8), Clone/Copy FieldTag has exact tags U8=1,U16=2,U32=3,U64=4,I32=5,I64=6,Bool=7,Str=8,Bytes=9,FixedBytes=10,None=11,Some=12,Variant=13,Sequence=14. as_u8 is a direct cast. Changing these discriminants changes canonical hash input."
+        ],
+        [
+          56,
+          69,
+          "Public Clone/Copy/Debug/Eq/PartialEq CacheKeySchema stores private static id string and u32 version. The contract requires a stable globally unique logical-layout id and a version bump when emitted fields or meaning change. LEGACY_TEXT is id lance.cache.legacy-text/version1 for the documented default string bridge; bridge implementation itself is elsewhere."
+        ],
+        [
+          70,
+          85,
+          "CacheKeySchema::new is const and stores id/version without validation; empty ids or version0 are accepted here and uniqueness is not enforced. Const by-value id() and version() return the two fields. No allocation is performed by these methods."
+        ],
+        [
+          86,
+          109,
+          "Public InternalCacheKey wraps private[16]u8 and derives Clone/Copy/Eq/Hash/Ord/PartialEq/PartialOrd. Canonical bytes are independent of integer endianness. Const from_bytes accepts arbitrary16 bytes without verification, as_bytes borrows the array and into_bytes consumes the copyable wrapper. No digest-to-logical-field decoder exists."
+        ],
+        [
+          110,
+          119,
+          "Manual Debug writes InternalCacheKey( followed by each byte as two lowercase hexadecimal digits, then ). Formatter errors propagate through ?. It exposes the entire digest, with no alternate formatting or redaction."
+        ],
+        [
+          120,
+          129,
+          "Public Clone/Copy/Debug CacheNamespace wraps private32 bytes; root recomputes blake3::derive_key with the fixed context and empty material on each call. No process randomness, secret input, memoization or raw-byte public constructor is declared here."
+        ],
+        [
+          130,
+          139,
+          "child consumes copyable namespace, initializes a keyed BLAKE3 hasher with its32 bytes, appends framed namespace domain, raw little-endian u32 key version, and framed UTF-8 segment, then retains all32 output bytes. A hierarchy is repeated keyed derivation, not slash concatenation. Empty segments are accepted and create a derived child rather than explicitly returning the parent."
+        ],
+        [
+          140,
+          165,
+          "KeyBuilder docs specify fixed-width LE integers and type-tagged length-prefixed variable fields, deliberately excluding usize to avoid target-width identity. The public example derives dataset namespace, uses example.Page/example.page-key-v1, writes7u32 and values string, and asserts16-byte output. Struct contains a private BLAKE3 Hasher; example was read, not compiled."
+        ],
+        [
+          166,
+          181,
+          "KeyBuilder::new(namespace, stable_type_id:static str, schema) creates a keyed hasher, writes framed entry domain, raw LEu32 format version, framed UTF-8 stable value type id, framed schema id, then raw LEu32 schema version. It accepts empty or duplicate type/schema identifiers without validation; callers own logical uniqueness and field meanings."
+        ],
+        [
+          182,
+          205,
+          "write_u8 emits tag1 then one raw value byte. write_u16/write_u32 construct stack arrays3/5 bytes: tag2/3 plus fixed-width LE integer. These methods update the streaming hasher immediately and return unit. No textual formatting, payload-length prefix or heap buffer is introduced by these bodies."
+        ],
+        [
+          206,
+          232,
+          "write_u64/write_i32/write_i64 use stack arrays9/5/9 bytes, tags4/5/6 and respective to_le_bytes. Signed values preserve fixed-width signed bit representation; widths and signedness are distinguished by tags even if payload bytes match."
+        ],
+        [
+          233,
+          251,
+          "write_bool emits tag7 then u8::from(bool), i.e.0/1. write_str uses tag8 and UTF-8 bytes; write_bytes uses tag9. The latter two delegate to the shared variable writer whose framing is defined at298-302, so equal payloads have distinct types. No Unicode normalization occurs."
+        ],
+        [
+          252,
+          269,
+          "write_fixed_bytes<const N:usize> accepts a borrowed[u8;N], uses tag10 and the same length-prefix routine despite compile-time width. N=0 is valid. write_none/write_some emit only tag11/12; they do not enforce that a following value exists, that None has no payload, or that option nesting balances."
+        ],
+        [
+          270,
+          287,
+          "write_variant emits tag13 plus LEu32 ordinal in5 bytes; write_sequence_len emits tag14 plus LEu64 length in9 bytes. They do not inspect variant schema or count subsequent fields; sequence/option/enum grammar consistency is the caller's obligation."
+        ],
+        [
+          288,
+          304,
+          "finish consumes builder, finalizes BLAKE3, copies its first16 bytes into InternalCacheKey, discarding remaining hash bytes. Private write_variable appends one tag byte, encoded_len and payload in order. Digest collisions remain possible; no collision-resolution logical payload is retained here."
+        ],
+        [
+          305,
+          315,
+          "write_framed appends untagged8-byte length then bytes. encoded_len casts slice length to u64 and writes LE; it contains no checked conversion for a hypothetical wider-than64-bit usize. All current protocol fields must match exact UTF-8/raw payload bytes and order."
+        ],
+        [
+          316,
+          341,
+          "cfg(test) imports parent definitions, defines SCHEMA test.key/v1, builds namespace root.child(s3://bucket/dataset) and stable value type test.Value. key_with takes FnOnce(&mut KeyBuilder), writes fields and finishes. Fixed-size test asserts key16/namespace32/tag1 bytes."
+        ],
+        [
+          342,
+          355,
+          "Keyed-empty-hash fixture uses the32-byte key whats the Elvish word for friend and compares all32 bytes against92b2b75604ed3c761f9d6f62392c8a9227ad0ea3f09573e7f83f14980d6d0d26. It is labeled official in source but no external vector was fetched."
+        ],
+        [
+          356,
+          397,
+          "A BTreeSet cardinality assertion distinguishes17 emitted sequences: ab+c versus a+bc strings; empty string/bytes/fixed bytes; six integer forms of1; both booleans; None/Some markers; variants0/1. Separate assertion distinguishes an explicit two-element sequence prefix from the same two u32 values without a sequence prefix. This checks examples, not injectivity of a finite digest or validation of caller grammar."
+        ],
+        [
+          398,
+          440,
+          "Domain-separation tests distinguish nested dataset/index from one dataset/index segment; stable value type, schema id and schema version changes; tenant-a versus tenant-b memory namespace; and same tenant memory versus persistent namespace. No path normalization or access-control assertion is made."
+        ],
+        [
+          441,
+          460,
+          "Little-endian test manually rebuilds a key preamble using the same framing helpers and a literal u32 payload04,03,02,01 after tag3; compares first16 reference hash bytes with KeyBuilder output. Shared helper use means it does not independently prove those helpers' framing."
+        ],
+        [
+          461,
+          476,
+          "Golden key fixture writes7u32,page string,Some marker,16 AB bytes under the test builder and expects c438ff22305530fc741638e97d45a568. This freezes the combined current protocol for one complete vector; no tests were run during extraction."
+        ]
+      ]
+    },
+    {
+      "path": "rust/lance-core/src/cache/backend.rs",
+      "module": "L1-modules/rust-lance-core-cache.md",
+      "reviewed": true,
+      "role": "Public async object-safe-style backend interface and type-erased Arc entry alias. It defines storage, eviction/accounting and optional codec contracts consumed by the higher-level cache.",
+      "limits": "Trait declarations and default methods establish requirements only. Actual deduplicated-load result flags, entry sizing and persistent error handling must be established from concrete backends and LanceCache, still pending. Removed-symbol migration text is current documentation, not an implementation of legacy methods. (rust/lance-core/src/cache/backend.rs:11-31; rust/lance-core/src/cache/backend.rs:45-145)",
+      "ranges": [
+        [
+          1,
+          32,
+          "SPDX/module overview directs most callers to LanceCache. Migration docs require opaque16-byte physical keys plus CACHE_KEY_FORMAT namespace and permit codec type-id routing. Prefix invalidation/key inventory are intentionally absent because digests discard logical strings. Documented migrations use with_backend then with_key_prefix, shared-backend clear or namespace rotation, and removal of prefix/keys/inventory methods; none of these higher-level bodies is defined here."
+        ],
+        [
+          33,
+          47,
+          "Imports Any/Pin/Arc, async_trait, futures::Future, crate Result/deepsize Context, sibling codec/key. Public CacheEntry=Arc<dyn Any+Send+Sync> erases type while retaining thread-safe shared ownership. Lifetime is the trait-object default rather than a named borrowed payload lifetime."
+        ],
+        [
+          48,
+          66,
+          "Public #[async_trait] CacheBackend requires Send+Sync+Debug. get takes &InternalCacheKey and Option<CacheCodec>, returns Option<CacheEntry> with no Result error channel. Docs permit memory backends to ignore codec; None requires in-memory storage because serialization unsupported. Proposed eventual removal of Option is aspiration only. Key construction and type safety are assigned to LanceCache."
+        ],
+        [
+          67,
+          77,
+          "Required async insert takes key, owned CacheEntry, declared size_bytes:usize and optional codec and returns unit. Declared size is for eviction; interface does not itself measure, validate, persist or expose insertion errors."
+        ],
+        [
+          78,
+          94,
+          "Required async get_or_insert has loader lifetime a separate from self/key: Pin<Box<dyn Future<Output=Result<(CacheEntry,usize)>>+Send+a>>. Result returns(entry,was_cached). Docs expect deduplication for same key unless cache disabled, and define was_cached as entry already present/loader not invoked. Whether waiting on another load is flagged cached must be checked per backend. Errors originate via Result; no cancellation or retry guarantee is specified here."
+        ],
+        [
+          95,
+          103,
+          "clear,num_entries,size_bytes are required async methods. clear removes all entries; counts and weighted bytes may flush pending operations according to docs. No prefix/key-specific deletion or key enumeration methods exist."
+        ],
+        [
+          104,
+          119,
+          "Synchronous approx_num_entries and approx_size_bytes default to0, explicitly meaning cannot cheaply report, not proof of an empty backend. Approximate bytes is also the DeepSizeOf fallback and can overcount buffers shared between entries."
+        ],
+        [
+          120,
+          126,
+          "capacity_bytes defaults None: no fixed capacity or unavailable report. Some capacity can inform callers to skip values that cannot be retained, but this default method neither rejects nor enforces size limits."
+        ],
+        [
+          127,
+          145,
+          "deep_size_of_entries takes a mutable shared Context plus borrowed callback(&CacheEntry,&mut Context)->Option<usize>, defaults None. Contract: traversal-capable backends include physical key footprint; callback tracks shared allocations, returning None for unregistered concrete types, in which case backend should use declared eviction size. Default causes LanceCache to use approx_size_bytes. Interface contains no tests or concrete entry traversal."
+        ]
+      ]
+    },
+    {
+      "path": "rust/lance-core/src/cache/backend_uri.rs",
+      "module": "L1-modules/rust-lance-core-cache.md",
+      "reviewed": true,
+      "role": "Public compact URI parser into BackendConfig and synchronous registered-backend construction, with private framing and percent-decoding helpers.",
+      "limits": "The syntax is explicitly a URI subset, not a full URL parser. Registry implementation is analyzed alongside it; built-in constructor option validation and bindings remain pending. Tests were read only. No external RFC was consulted. (rust/lance-core/src/cache/backend_uri.rs:4-36; rust/lance-core/src/cache/backend_uri.rs:44-171; rust/lance-core/src/cache/backend_uri.rs:173-265)",
+      "ranges": [
+        [
+          1,
+          37,
+          "SPDX/docs motivate one-string config for bindings and give a subset grammar. Scheme maps to kind; nonempty hierarchy stripped of initial// becomes path option; query pairs percent-decode and reject duplicate keys. Doc phrase path wins means a conflicting query path errors, not successful precedence replacement. Host/port/path remains one backend-defined string."
+        ],
+        [
+          38,
+          55,
+          "Imports Arc, backend trait, BackendConfig/build_from_config/normalizer and core Error/Result. Public build_from_uri parses then builds synchronously using ?, returning Arc<dyn CacheBackend> or parse/unknown-constructor/constructor errors without another wrapper here."
+        ],
+        [
+          56,
+          69,
+          "parse_backend_uri splits scheme and first? then constructs a normalized BackendConfig. normalize_path result is inserted as path only if nonempty. Path bytes are not percent-decoded, canonicalized or validated here. Scheme normalization occurs once in split_scheme and again through BackendConfig::new."
+        ],
+        [
+          70,
+          80,
+          "If query exists, split on&, skipping every empty pair (including leading/trailing/repeated separators). Each nonempty pair requires first= delimiter; extra= bytes stay in value. Empty key and empty value are accepted when delimiter exists. Missing= returns InvalidInput including full URI and offending raw pair."
+        ],
+        [
+          81,
+          104,
+          "Percent-decode key then value, wrapping decoder failures as InvalidInput with full URI, raw component and decoder text. Reject duplicate decoded keys, including a nonempty hierarchy's reserved path key; no second value replaces first. Options are case-sensitive HashMap strings. Successful parse has no registry lookup; arbitrary valid schemes/options are retained. Error text can echo sensitive URI query values."
+        ],
+        [
+          105,
+          115,
+          "split_scheme finds first colon, errors if absent, normalizes prefix using registry syntax (ASCII-letter first, allowed subsequent ASCII alnum/+-.) and nests normalization errors with full URI. Remainder after colon is borrowed unchanged, including an empty remainder. No whitespace trimming occurs."
+        ],
+        [
+          116,
+          136,
+          "split_path_query uses first? only; later? stays in query. normalize_path removes exactly one leading//, returns empty when that consumes the whole hierarchy, otherwise copies rest. Despite helper comment saying strip authority boilerplate, authority itself is preserved: //host/x becomes host/x; ///tmp becomes /tmp. A hierarchy without// is copied unchanged. No# fragment parsing or path percent decoding occurs."
+        ],
+        [
+          137,
+          160,
+          "percent_decode preallocates up to input byte length, scans bytes; percent requires exactly two available hex digits, inserts decoded byte and advances3; all other bytes copy literally including+. Truncated escape reports byte offset; invalid UTF-8 after decoding errors via String::from_utf8. Multi-byte UTF-8 passes if final output valid; %00 can produce NUL. It does not recursively decode a resulting percent sign."
+        ],
+        [
+          161,
+          172,
+          "decode_hex_digit accepts0-9,a-f,A-F and reports invalid byte formatted as char otherwise. Invalid hex error lacks explicit numeric offset; the outer parser adds URI and raw key/value context."
+        ],
+        [
+          173,
+          198,
+          "cfg(test) imports parent. Authority-only moka URI yields kind moka/capacity raw decimal string and no path. example:///var/lance/cache retains absolute path and capacity10G string; parser does not establish acceptance of10G by any constructor."
+        ],
+        [
+          199,
+          221,
+          "Host-style fixture preserves localhost:6379/0 as one path and prefix=lance. Uppercase MOKA fixture lowercases kind. These are parse-only tests with no backend registration or construction."
+        ],
+        [
+          222,
+          239,
+          "Percent fixture decodes%2F and%20; a+b%2Bc becomes a+b+c, demonstrating literal+. Trailing& test leaves one capacity option. The implementation also skips interior empty pairs though only trailing case asserted here."
+        ],
+        [
+          240,
+          253,
+          "Missing-colon and digit-leading scheme tests assert diagnostic substrings. Empty/non-ASCII/whitespace schemes are not exercised by these tests."
+        ],
+        [
+          254,
+          265,
+          "Duplicate raw capacity key and a pair without= assert corresponding errors. No local tests cover percent-decoding failures, decoded-key collisions, path conflict, empty key/value, fragment-looking input or build_from_uri success/failure. These are coverage observations, not reproduced bugs."
+        ]
+      ]
+    },
+    {
+      "path": "rust/lance-core/src/cache/registry.rs",
+      "module": "L1-modules/rust-lance-core-cache.md",
+      "reviewed": true,
+      "role": "Global process-local registry of synchronous backend constructor function pointers, validated BackendConfig, lazy built-in Moka installation, override rules and isolated registry tests.",
+      "limits": "Constructor discovery/locking is established; build_moka option parsing and backend operations remain pending. Public functions contain no unregister/enumerate API. Tests show source assertions only and were not run. The registry permits deliberate replacement of built-in moka independently of the root repository guidance for public API evolution. (rust/lance-core/src/cache/registry.rs:24-193; rust/lance-core/src/cache/registry.rs:218-372)",
+      "ranges": [
+        [
+          1,
+          23,
+          "SPDX/module overview assigns kind/options and startup registration to extensions, with HashMap<String,String> chosen for FFI representation. Imports global synchronization primitives, Moka built-in identifiers/constructor and Error/Result. Actual Python/Java bindings are not in this file."
+        ],
+        [
+          24,
+          35,
+          "Public BackendConfig derives Debug/Clone/PartialEq/Eq with mutable public kind:String and options:HashMap<String,String>. Direct struct construction bypasses new validation, so build_from_config normalizes again. HashMap order is unspecified."
+        ],
+        [
+          36,
+          51,
+          "new accepts impl AsRef<str>, validates/normalizes kind and creates empty map. with_option consumes self, converts key/value Into<String>, inserts and returns it; repeated keys overwrite unlike URI parser duplicate rejection. No option name/value validation or error return exists in this builder method."
+        ],
+        [
+          52,
+          79,
+          "normalize_backend_kind iterates chars; empty or non-ASCII-letter first errors with supplied kind. Subsequent chars must ASCII alphanumeric or+,-,.; anything else reports kind and invalid char. Returns lowercase ASCII without trimming. Thus case-insensitive registrations/config/URI converge while options remain untouched."
+        ],
+        [
+          80,
+          90,
+          "BackendBuildFn is a plain synchronous fn(&BackendConfig)->Result<Arc<dyn CacheBackend>>, not a capturing closure/async future. Docs suggest blocking shim for async initialization but no runtime shim is implemented. Private registry uses local-static OnceLock<Mutex<HashMap<String,BackendBuildFn>>> initialized empty."
+        ],
+        [
+          91,
+          103,
+          "Production registry_lock converts mutex poison to Error::internal with fixed message. Test-only lock helper recovers inner guard from poison instead; that does not clear the mutex poison flag. Global state and poisoning effects are process-wide."
+        ],
+        [
+          104,
+          130,
+          "Public register_backend normalizes kind then calls insert_backend with allow_replace determined by builtin_backend existence. Non-built-in duplicate names error; built-in moka may be repeatedly replaced even before lazy registration. Doc example wraps a1024-byte Moka backend under my-backend; exact constructor behavior remains elsewhere."
+        ],
+        [
+          131,
+          142,
+          "insert_backend holds registry mutex only while checking duplicate policy and inserting owned kind/function pointer. Disallowed replacement errors InvalidInput with kind, preserves existing registration; allowed insert replaces old pointer. Lock acquisition can return poison Internal error first."
+        ],
+        [
+          143,
+          149,
+          "builtin_backend recognizes only MOKA_BACKEND_KIND and returns build_moka; all other kinds None. No dynamic plugin scan, aliases or additional built-ins are declared here. Literal identifier value is supplied by the sibling Moka module, while local docs/tests call it moka."
+        ],
+        [
+          150,
+          172,
+          "build_from_config first ensures built-ins (so even an invalid requested kind may have the side effect of populating registry), then normalizes public kind again and clones whole option map into a new config. Copies constructor pointer under a short mutex guard, drops guard before invocation, returns constructor Result unchanged or InvalidInput unknown kind. Constructors may reenter registry without this lookup guard causing self-deadlock; concurrent replacement can race but copied pointer remains the selected constructor."
+        ],
+        [
+          173,
+          194,
+          "ensure_builtin_backends checks current map on every call, inserts built-in only if absent, preserving overrides. It intentionally uses no process-once installed flag so test snapshot/restore remains valid. Initialization of the registry itself remains OnceLock. No constructors run while this helper holds mutex."
+        ],
+        [
+          195,
+          209,
+          "cfg(test) parent-visible take_registry_for_test swaps map with empty; restore replaces map with supplied saved state. Both recover poisoned lock through test helper. These mutate global state and require separate test serialization discipline."
+        ],
+        [
+          210,
+          218,
+          "cfg(test) parent-visible registry_test_lock uses an independent OnceLock<Mutex<()>> and recovers poisoned inner guard. Returned static guard serializes tests for its holding lifetime. It does not automatically wrap production APIs."
+        ],
+        [
+          219,
+          243,
+          "Test module imports async_trait/Pin/Future and cache entry/key/codec. Private Debug/Default NullBackend get always returns None. It provides an operational dummy for registry construction, not a stored cache."
+        ],
+        [
+          244,
+          271,
+          "NullBackend insert/clear no-op, get_or_insert awaits caller loader, discards declared size, returns(entry,false) and propagates loader errors; num_entries/size_bytes return0. Approximation/capacity/deep-size use trait defaults. Contrary to the broad no-op comment, loader can have effects or fail."
+        ],
+        [
+          272,
+          294,
+          "build_null returns new Arc<NullBackend>. RegistryGuard holds serialization guard plus saved map; new acquires serialization lock before taking registry. Drop restores saved state via mem::take. Lock remains held through drop body then releases with fields. This is test isolation, not public state rollback."
+        ],
+        [
+          295,
+          320,
+          "Tests register/build custom null, reject duplicate dup, and register moka override before building. Success assertions only check Arc strong_count1, so the built-in override case does not independently distinguish NullBackend from another single-owner backend. They do not invoke cache methods."
+        ],
+        [
+          321,
+          350,
+          "Unknown-kind test checks message. Mixed-case registration then lowercase lookup tests normalization. Direct BackendConfig ECHO.Backend is passed to an inner constructor that asserts normalized echo.backend, proving normalization despite bypassing new. RegistryGuard scopes each state-changing test."
+        ],
+        [
+          351,
+          372,
+          "Invalid-kind test rejects a space-containing registration before insertion and digit-leading config; it needs no guard because these fail before mutation. Final test registers local build_echo that checks capacity string42 reaches it unchanged. No poison, recursive constructor, concurrent replacement or repeated built-in override test is present."
+        ]
+      ]
+    }
+  ]
+}

@@ -1,0 +1,61 @@
+@@ -3163,15 +3163,34 @@ class LanceDataset(pa.dataset.Dataset):
+ 3163          """
+ 3164          versions = self._ds.versions()
+ 3165          for v in versions:
+ 3166 -            # TODO: python datetime supports only microsecond precision. When a
+ 3167 -            # separate Version object is implemented, expose the precise timestamp
+ 3168 -            # (ns) to python.
+ 3169 -            ts_nanos = v["timestamp"]
+ 3170 -            v["timestamp"] = datetime.fromtimestamp(ts_nanos // 1e9) + timedelta(
+ 3171 -                microseconds=(ts_nanos % 1e9) // 1e3
+ 3172 -            )
+ 3166 +            _convert_version_timestamp(v)
+ 3167          return versions
+ 3168  
+ 3169 +    def get_version(self) -> Version:
+ 3170 +        """
+ 3171 +        Return the currently checked out version, with its timestamp and the
+ 3172 +        summary of its manifest.
+ 3173 +
+ 3174 +        The summary is in ``metadata``. It counts the fragments, data files,
+ 3175 +        deletion files, rows and bytes of the version, and is computed from the
+ 3176 +        manifest that is already loaded, so nothing is read from storage.
+ 3177 +
+ 3178 +        Use :attr:`version` instead when only the version number is needed.
+ 3179 +
+ 3180 +        Examples
+ 3181 +        --------
+ 3182 +        >>> import lance
+ 3183 +        >>> import pyarrow as pa
+ 3184 +        >>> data = pa.table({"x": [1, 2, 3]})
+ 3185 +        >>> dataset = lance.write_dataset(data, "memory://get_version")
+ 3186 +        >>> version = dataset.get_version()
+ 3187 +        >>> version["version"]
+ 3188 +        1
+ 3189 +        >>> version["metadata"]["total_rows"]
+ 3190 +        '3'
+ 3191 +        """
+ 3192 +        return _convert_version_timestamp(self._ds.current_version())
+ 3193 +
+ 3194      def version_refs(self) -> List[VersionRef]:
+ 3195          """
+ 3196          Return lightweight references to all attached versions in the current branch.
+
+@@ -6111,6 +6130,17 @@ class Version(TypedDict):
+ 6130      metadata: Dict[str, str]
+ 6131  
+ 6132  
+ 6133 +def _convert_version_timestamp(version: Version) -> Version:
+ 6134 +    # TODO: python datetime supports only microsecond precision. When a
+ 6135 +    # separate Version object is implemented, expose the precise timestamp
+ 6136 +    # (ns) to python.
+ 6137 +    ts_nanos = version["timestamp"]
+ 6138 +    version["timestamp"] = datetime.fromtimestamp(ts_nanos // 1e9) + timedelta(
+ 6139 +        microseconds=(ts_nanos % 1e9) // 1e3
+ 6140 +    )
+ 6141 +    return version
+ 6142 +
+ 6143 +
+ 6144  class VersionRef(TypedDict):
+ 6145      version: int
+ 6146  

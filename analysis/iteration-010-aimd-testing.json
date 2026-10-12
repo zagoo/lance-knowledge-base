@@ -1,0 +1,276 @@
+{
+  "iteration": 10,
+  "files": [
+    {
+      "path": "rust/lance-core/src/utils/aimd.rs",
+      "module": "L1-modules/rust-lance-core-control-testing.md",
+      "reviewed": true,
+      "role": "Public validated configuration and thread-safe additive-increase/multiplicative-decrease rate estimator. The controller aggregates request outcomes in lazy time windows and returns a rate; it does not acquire tokens, delay requests, perform IO or classify external errors. Private state and deterministic-time unit helpers implement the update policy.",
+      "limits": "All679 lines were read; tests were not executed. Actual object-store integration, token-bucket behavior mentioned by comments, external classification of throttling and callers remain pending. Public current_rate does not expire windows. Mutex poison handling, u64 counter overflow, unlimited f64 growth overflow, threshold equality and multiple idle-window catch-up are not explicitly tested locally. (rust/lance-core/src/utils/aimd.rs:102-184; rust/lance-core/src/utils/aimd.rs:187-290; rust/lance-core/src/utils/aimd.rs:292-679)",
+      "ranges": [
+        [
+          1,
+          19,
+          "SPDX/module docs define discrete-window AIMD: strict throttle_ratio>threshold decreases with a minimum floor; at/below increases with an optional maximum ceiling. Imports are std Mutex/Duration and core Result. Documentation describes rate adjustment, not an implemented request-admission mechanism."
+        ],
+        [
+          20,
+          57,
+          "Public AimdConfig derives Debug/Clone and exposes seven mutable fields. Default is initial2000,min1,max5000 requests/second,decrease0.5,additive300 per successful window,window1second,threshold0. The about40%-of-max and10seconds ramp comments assume active successful windows reaching evaluation boundaries; elapsed time alone does not update the rate (rust/lance-core/src/utils/aimd.rs:238-289)."
+        ],
+        [
+          58,
+          101,
+          "Seven consuming with_* builders replace exactly one field using struct update, returning Self without validation: initial/min/max rates, decrease factor, increment, duration and threshold. Invalid intermediate or directly constructed configs are possible; explicit validate or controller new establishes legality."
+        ],
+        [
+          102,
+          123,
+          "validate first rejects every nonfinite f64 field, in order initial,min,max,decrease,increment,threshold, with InvalidInput naming field/value. Comments explain that NaN evades comparisons and can disable a downstream token bucket or panic duration conversion; those downstream behaviors are rationale, not code implemented here. NaN and infinities are rejected even for the optional maximum ceiling; finite zero disables it."
+        ],
+        [
+          124,
+          147,
+          "Validation requires initial_rate>0, min_rate>0, max_rate>=0, and when max>0 requires min<=max. Each failure returns descriptive InvalidInput. Both signed floating zero values satisfy max>=0 and max>0 is false, so either represents no ceiling; initial/min zero fail. No clamping occurs during validation."
+        ],
+        [
+          148,
+          170,
+          "decrease_factor must be strictly between0 and1, additive_increment strictly positive, window_duration nonzero, and throttle_threshold within inclusive[0,1]. Errors identify invalid values except the fixed zero-duration message. Finiteness has already been checked."
+        ],
+        [
+          171,
+          185,
+          "Finally require initial<=max if the ceiling is enabled and initial>=min, then return Ok. This ordering selects which error appears for multiply invalid configs; controller construction delegates rather than repairing values."
+        ],
+        [
+          186,
+          203,
+          "Public RequestOutcome derives Debug/Clone/Copy/PartialEq/Eq with Success and Throttled. Docs instruct callers to map non-throttle errors such as404/timeouts to Success because they do not indicate capacity trouble; no classifier is implemented. Private AimdState holds rate f64, window_start std::time::Instant and separate u64 success/throttle counts."
+        ],
+        [
+          204,
+          221,
+          "Public AimdController owns private config and Mutex<AimdState>. Docs promise thread-safe short critical sections; no measured latency is established. Custom Debug formats config and current_rate, which acquires the same mutex and unwraps poisoning. No Clone implementation, mutable config accessor or async lock appears."
+        ],
+        [
+          222,
+          237,
+          "new validates the entire config, starts rate at initial_rate, stores config immutably within the controller, initializes window_start to Instant::now and zeroes both counters. Invalid config returns before state construction. Mutex protects only state, while config can be read through shared self."
+        ],
+        [
+          238,
+          252,
+          "record_outcome locks the mutex with unwrap and invokes private record_outcome_inner using Instant::now after the lock is acquired. Private helper receives explicit mutable state/outcome/time so tests advance windows without sleeping. Poisoned mutex therefore panics in the public method rather than returning Result. The lock covers time comparison, arithmetic and count update."
+        ],
+        [
+          253,
+          270,
+          "On elapsed>=window_duration, compute total=success_count+throttle_count with ordinary u64 arithmetic. If nonzero, ratio=throttles as f64/total as f64. Strict ratio>threshold sets max(rate*decrease_factor,min_rate); equality/below adds increment and, only when max_rate>0, caps via min(max_rate). Threshold1 never decreases for ordinary nonoverflowed counts, even for an all-throttle window. Finite validated settings can still overflow unlimited additive growth to infinity; no runtime finiteness recheck occurs."
+        ],
+        [
+          271,
+          290,
+          "An expired window resets its start to now and both counters to zero, even if it contained no outcomes; only one adjustment occurs regardless of how many durations elapsed. Then increment the incoming outcome in the fresh/current window and return the rate. The boundary-triggering outcome does not affect the window just evaluated. current_rate only reads under mutex and does not advance time or adjust rate. Counter increments/sums use unchecked-in-source u64 arithmetic. There is no background timer or sleep."
+        ],
+        [
+          291,
+          349,
+          "The private cfg(test) module imports rstest. Named invalid-config cases cover zero initial,negative min/max,min>max,decrease0/1/>1,zero increment,zero duration,threshold>1/<0,initial>max andinitial<min. Each parameter changes defaults through the same nonvalidating builders. Error-category/text assertions appear after the remaining cases (rust/lance-core/src/utils/aimd.rs:382-398)."
+        ],
+        [
+          350,
+          399,
+          "Additional invalid-config cases supply NaN to every floating field and positive infinity to initial/max. The parameterized test calls validate, asserts InvalidInput and requires the expected message substring. It does not enumerate negative infinity or positive infinity for every field, although the common finiteness loop handles them."
+        ],
+        [
+          400,
+          409,
+          "Two tests accept the unchanged defaults and max_rate0 unlimited configuration. They verify validation success only, not sustained throughput or rate enforcement."
+        ],
+        [
+          410,
+          435,
+          "Additive test uses initial100,increment10,window100ms. It records one success at a captured start through the private helper, then another150ms later and asserts current_rate110. New outcome triggers evaluation of the previous success window. No real sleep occurs."
+        ],
+        [
+          436,
+          459,
+          "Decrease test starts100,factor0.5,window100ms, records one throttle then a success150ms later and expects50. The success is placed in the new window rather than canceling the prior throttle."
+        ],
+        [
+          460,
+          491,
+          "Floor test starts2,min1,factor0.5. Two successive closed throttle windows move2→1 and stay1; a success at the second boundary triggers evaluation of the second throttle window. Each helper call occurs under the controller state mutex with explicit simulated time."
+        ],
+        [
+          492,
+          515,
+          "Ceiling fixture starts4990,max5000,increment20. A closed success window computes5010 then caps to5000. This tests rate-update clamping with a valid config, not silent adjustment of invalid input configuration."
+        ],
+        [
+          516,
+          545,
+          "Unlimited fixture starts100,max0,increment50; five evaluated successful windows plus a final trigger yield350. It demonstrates lack of a finite configured ceiling for these small values, not safe infinite-duration or f64-maximum growth."
+        ],
+        [
+          546,
+          564,
+          "Empty-window test advances150ms before the first outcome, leaving the expired window total zero. Rate remains100; the incoming success seeds the new window. This explicitly confirms idle elapsed time alone does not add an increment."
+        ],
+        [
+          565,
+          594,
+          "Threshold0.5 fixture records two successes and one throttle in a100ms window. A later success closes it and rate100 becomes110 because1/3<=0.5. The test does not use exact threshold equality."
+        ],
+        [
+          595,
+          622,
+          "A second threshold0.5 fixture records one success/two throttles and expects100→50 after a boundary trigger. The leading comment says >=50%, but actual algorithm uses strict > and this fixture has2/3, so it does not support decrease at equality. Keep the implementation rule rather than repeating the overbroad comment."
+        ],
+        [
+          623,
+          663,
+          "Recovery fixture begins100,halves after a throttle window to50, then adds10 for each of two success windows, ultimately70. Comments name the window to be evaluated by the following call; only the final current_rate70 is asserted."
+        ],
+        [
+          664,
+          679,
+          "Within-window test calls the public record_outcome100 times with Throttled and a10second window, then expects unchanged100. This assumes the test completes before the real window expires; unlike prior tests it uses actual Instant::now per call. It proves intended within-window holding, not concurrent fairness, poisoned-lock behavior or rate enforcement. Module ends."
+        ]
+      ]
+    },
+    {
+      "path": "rust/lance-core/src/utils/testing.rs",
+      "module": "L1-modules/rust-lance-core-control-testing.md",
+      "reviewed": true,
+      "role": "Public test-support ObjectStore wrappers: named before-operation and metadata-transform policies, plus atomic listing-call counts. Despite testing name, the module is exported without a cfg(test) gate. Synchronous policy closures can inject core errors or transform metadata around delegated async/stream operations.",
+      "limits": "All300 lines were read; this file defines no local test module. Dependency ObjectStore default-method behavior, concrete store IO and whole-repository test consumers remain pending. The blanket all-calls wording overstates policy coverage: list bypasses before policies, list_with_delimiter bypasses both policy types, returned MultipartUpload is not wrapped, and CountingObjectStore does not explicitly override rename_opts. Policies execute under a synchronous Mutex and must not recursively acquire it; transformed-list errors panic through unwrap while head transforms return errors. (rust/lance-core/src/utils.rs:22-22; rust/lance-core/src/utils/testing.rs:89-120; rust/lance-core/src/utils/testing.rs:165-300)",
+      "ranges": [
+        [
+          1,
+          26,
+          "SPDX/testing module docs precede core Result, async_trait, Bytes, boxed streams/stream combinators, object-store options/results/payload/path/metadata interfaces, HashMap/Debug/future/Range/Pin and shared Mutex/AtomicUsize imports. These imports expose external IO abstractions; this file does not implement a storage backend."
+        ],
+        [
+          27,
+          48,
+          "Public PolicyFnT is Fn(&str,&Path)->core Result<()> plus Send+Sync, with blanket implementation for matching closures. Its dyn Debug prints literal PolicyFn. Private PolicyFn alias is Arc<dyn PolicyFnT>. Public ObjectMetaPolicyFnT similarly consumes ObjectMeta and returns transformed metadata in core Result, with its own blanket implementation/private Arc alias and the same Debug text. Neither trait adds a named method beyond Fn invocation."
+        ],
+        [
+          49,
+          67,
+          "Public ProxyObjectStorePolicy derives Debug/Default and owns two private HashMaps keyed by user-assigned policy name: before-operation closures and metadata transformations. Before closures can block a delegated operation by returning an error; metadata closures can alter a returned ObjectMeta. Documentation says source path is passed for copy-like operations. Map iteration does not guarantee policy execution order."
+        ],
+        [
+          68,
+          88,
+          "new returns Default empty maps. set_before_policy and set_obj_meta_policy replace any same-name entry; clear_before_policy silently removes if present. There is no corresponding public clear metadata-policy method here. These methods require &mut self, ordinarily obtained through the shared external Mutex. Public signatures use private Arc aliases whose underlying public trait bounds define closure compatibility."
+        ],
+        [
+          89,
+          112,
+          "ProxyObjectStore derives Debug and owns target Arc<dyn ObjectStore> plus shared Arc<Mutex<ProxyObjectStorePolicy>>; public new merely stores both. Private before_method locks with unwrap, iterates all before policies in unspecified HashMap order, converts core Error to object_store Error and short-circuits on first error. Closures run synchronously while the lock is held; recursive access can deadlock, panic can poison, and no target await occurs under this helper's guard. The all-calls documentation must be read against actual overrides below."
+        ],
+        [
+          113,
+          128,
+          "transform_meta takes ownership of metadata, locks the shared policy mutex, and chains each transform in unspecified map order, converting/returning the first error. Earlier transforms may already have side effects; no rollback exists. Display emits ProxyObjectStore(target-display), while derived Debug also includes policy state through dyn closure Debug text."
+        ],
+        [
+          129,
+          158,
+          "CountingObjectStore derives Debug and owns target plus shared Arc<AtomicUsize>. new preserves the caller's counter value rather than resetting it. record_listing adds one with SeqCst. Private delegate_list forwards target.list with an explicit pinned Send stream type; it does not itself increment. Counting concerns call attempts, not returned objects or completed listings."
+        ],
+        [
+          159,
+          185,
+          "Counting wrapper Display formats CountingObjectStore(target-display). async_trait Proxy ObjectStore implementation intercepts put_opts as policy operation string put and put_multipart_opts as put_multipart; a policy error returns before delegating. Successful multipart setup returns the target upload object directly, so subsequent part/complete/abort calls are not individually proxied here."
+        ],
+        [
+          186,
+          200,
+          "Proxy get_opts first invokes before policy with get_opts regardless of options.head. It awaits target get_opts; only when head was true does it transform result.meta using operation string head, propagating transform errors. Non-head GetResult metadata is unchanged. get_ranges applies before string get_ranges then forwards ranges and result. Returned payload streams/bytes are not transformed."
+        ],
+        [
+          201,
+          220,
+          "delete_stream clones the policy Arc and wraps each successful input Path with an and_then closure. At stream polling time it locks policy, invokes every before closure with delete/location using try_for_each, releases the lock and returns a ready result carrying the unchanged Path or first error. Existing input errors bypass the closure. The transformed stream is handed to target.delete_stream immediately; whether a target stops after a stream error is dependency behavior, not established here."
+        ],
+        [
+          221,
+          237,
+          "list clones target/policy and immediately obtains target.list(prefix), with no before policy for listing/prefix. As successful ObjectMeta items arrive, and_then locks policy, sequentially applies metadata policies with string list and unwraps each converted result. A metadata-policy error therefore panics while holding the lock, unlike transform_meta for head. Underlying list errors pass through without transformation. Successful transforms return ready Ok metadata; the stream owns cloned Arcs."
+        ],
+        [
+          238,
+          251,
+          "list_with_delimiter forwards directly with no before or metadata policies. copy_opts and rename_opts run before_method with strings copy/rename and source path only, then forward original source/destination/options. Destination-specific policy enforcement is not implemented; a failure prevents the target call but does not roll back side effects inside earlier policies."
+        ],
+        [
+          252,
+          279,
+          "CountingObjectStore async_trait implementation directly delegates put_opts, multipart creation, get_opts and get_ranges with unchanged arguments/results. No policy layer or count increment is added for these operations."
+        ],
+        [
+          280,
+          300,
+          "Counting delete_stream forwards directly. list increments the shared SeqCst counter synchronously before creating/delegating its stream, so an unpolled/failed list attempt still counts. list_with_delimiter increments when its async body is polled before awaiting target, so a never-polled future does not count. copy_opts forwards directly. No explicit rename_opts or other extra override, reset, decrement, object count, elapsed-time metric or local tests exist in this file; defaults are delegated to the external trait contract."
+        ]
+      ]
+    },
+    {
+      "path": "rust/lance-core/proptest-regressions/io/writer/statistics.txt",
+      "module": "L1-modules/rust-lance-core-control-testing.md",
+      "reviewed": true,
+      "role": "Checked-in property-test regression seed corpus with historical shrunk input comments. This text is test data, not executable code or a current test result. Full seed strings and literal shrunk examples are retained in the numbered appendix.",
+      "limits": "Only this corpus content is established. Current proptest persistence configuration and test consumer paths remain unverified; the directory name does not prove the same historical test still exists or that the seeds are loaded by current CI. No property tests were executed. (rust/lance-core/proptest-regressions/io/writer/statistics.txt:1-12)",
+      "ranges": [
+        [
+          1,
+          6,
+          "Header describes saved prior failure seeds, replay before novel generated cases, and advice to commit them so other test runs benefit. This is the corpus format's own operational description, not verification that a particular current harness consumes this file."
+        ],
+        [
+          7,
+          8,
+          "Two cc seed records preserve shrunk values consisting of one empty string and an empty collection, respectively. Exact64-hex identifiers in the appendix must remain unchanged for reproducibility; the comments give no assertion or root cause."
+        ],
+        [
+          9,
+          10,
+          "Two distinct cc seed IDs each annotate values as a single inner collection of65 zeros. Identical displayed shrunk inputs can arise from different generator seeds; they are not duplicate IDs. Width/cardinality observations come from the literal comments, not inferred data types or executed failures."
+        ],
+        [
+          11,
+          12,
+          "Final two cc seeds annotate Unicode/control-rich strings. The first has one string; the second two, beginning with escaped U+007F. Comments retain literal supplementary/BMP glyphs, escaped U+0080/U+000B and null escapes, spaces and ASCII text. Do not normalize or reinterpret these comments as a decoded byte encoding; they document shrunk shapes, while replay identity is the seed. The exact text is preserved below."
+        ]
+      ]
+    },
+    {
+      "path": "rust/lance-core/proptest-regressions/utils/mask.txt",
+      "module": "L1-modules/rust-lance-core-control-testing.md",
+      "reviewed": true,
+      "role": "Saved property-test regression seeds for a historical mask-related test, with one long shrunk left/right row-address fixture and one seed without a shrunk comment. Literal integer precision is preserved as text.",
+      "limits": "No present-day generator, set operation or mask implementation is identified by this corpus alone. Its source path and seed comments are evidence of historical test input, not proof of a current bug or replay success. All row integers are retained exactly, avoiding JavaScript Number precision loss during auxiliary counting. (rust/lance-core/proptest-regressions/utils/mask.txt:1-9)",
+      "ranges": [
+        [
+          1,
+          6,
+          "Standard proptest persistence header describes replaying saved failure seeds before novel cases and recommends source control. Current harness loading remains pending."
+        ],
+        [
+          7,
+          7,
+          "Seed53de4b75e19cb1722e4c49c4f6da7c5b128f2550e2bdb834dd2ef8204641ab5b records empty left/right full-fragment lists, left_rows containing6342742539488985088 and344 distinct right_rows. Exact integer counting finds no equal row in right_rows, but6342742543020814281 shares the left high32 fragment ID1476784828; left low32 offset is0. This is an input-shape observation using the core physical-address convention, not an assertion of the missing property's intended operation or root cause. (rust/lance-core/src/utils/address.rs:23-79)"
+        ],
+        [
+          8,
+          9,
+          "A second cc seed21cad309010e6125a7664e6e66502b28a2311f12378dbe8c39107acbb90225f7 has no shrunk-input description. The final line is blank. Both are included in exact line accountability; no input or failing condition is invented for the undocumented seed."
+        ]
+      ]
+    }
+  ]
+}

@@ -1,0 +1,53 @@
+@@ -41,7 +41,7 @@ use crate::dataset::rowids::get_row_id_index;
+   41  use crate::datatypes::Schema;
+   42  use crate::index::prefilter::DatasetPreFilter;
+   43  
+   44 -use super::utils::IoMetrics;
+   44 +use super::utils::{IoMetrics, estimated_bytes_per_row, estimated_total_byte_size};
+   45  
+   46  #[derive(Debug, Clone)]
+   47  struct TakeStreamMetrics {
+
+@@ -472,6 +472,8 @@ pub struct TakeExec {
+  472      schema_to_take: Arc<Schema>,
+  473      // The schema of the output
+  474      output_schema: SchemaRef,
+  475 +    /// Cached from the output schema and dataset blob metadata at construction.
+  476 +    bytes_per_row: Option<f64>,
+  477      input: Arc<dyn ExecutionPlan>,
+  478      properties: Arc<PlanProperties>,
+  479      metrics: ExecutionPlanMetricsSet,
+
+@@ -588,12 +590,16 @@ impl TakeExec {
+  590                  .with_eq_properties(eq_properties),
+  591          );
+  592  
+  593 +        let schema_to_take = projection.into_schema_ref();
+  594 +        let bytes_per_row = estimated_bytes_per_row(output_arrow.as_ref(), dataset.schema());
+  595 +
+  596          Ok(Some(Self {
+  597              dataset,
+  598              output_projection: original_projection,
+  594 -            schema_to_take: projection.into_schema_ref(),
+  599 +            schema_to_take,
+  600              input,
+  601              output_schema: output_arrow,
+  602 +            bytes_per_row,
+  603              properties,
+  604              metrics: ExecutionPlanMetricsSet::new(),
+  605              batch_size_bytes,
+
+@@ -777,8 +783,12 @@ impl ExecutionPlan for TakeExec {
+  783          &self,
+  784          partition: Option<usize>,
+  785      ) -> Result<Arc<datafusion::physical_plan::Statistics>> {
+  786 +        // Include fetched columns as well as carried columns when costing the
+  787 +        // output of a late-materialized plan.
+  788 +        let num_rows = self.input.partition_statistics(partition)?.num_rows;
+  789          Ok(Arc::new(Statistics {
+  781 -            num_rows: self.input.partition_statistics(partition)?.num_rows,
+  790 +            num_rows,
+  791 +            total_byte_size: estimated_total_byte_size(num_rows, self.bytes_per_row),
+  792              ..Statistics::new_unknown(self.schema().as_ref())
+  793          }))
+  794      }

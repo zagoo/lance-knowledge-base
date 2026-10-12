@@ -1,0 +1,61 @@
+@@ -44,20 +44,7 @@ pub fn overlay_exclusion_offsets(
+   44              continue;
+   45          }
+   46          for (field_pos, field_id) in overlay.data_file.fields.iter().enumerate() {
+   47 -            let overlay_ancestry = schema.field_ancestry_by_id(*field_id);
+   48 -            let affects_index = indexed_field_ids.iter().any(|indexed_field_id| {
+   49 -                indexed_field_id == field_id
+   50 -                    || overlay_ancestry.as_ref().is_some_and(|ancestry| {
+   51 -                        ancestry
+   52 -                            .iter()
+   53 -                            .any(|ancestor| ancestor.id == *indexed_field_id)
+   54 -                    })
+   55 -                    || schema
+   56 -                        .field_ancestry_by_id(*indexed_field_id)
+   57 -                        .is_some_and(|ancestry| {
+   58 -                            ancestry.iter().any(|ancestor| ancestor.id == *field_id)
+   59 -                        })
+   60 -            });
+   47 +            let affects_index = field_affects_index(*field_id, indexed_field_ids, schema);
+   48              if affects_index {
+   49                  excluded |= &*overlay.coverage_for_field(field_pos)?;
+   50              }
+
+@@ -66,6 +53,37 @@ pub fn overlay_exclusion_offsets(
+   53      Ok(excluded)
+   54  }
+   55  
+   56 +/// Whether `overlay` makes an index built at `index_version` stale.
+   57 +pub fn overlay_affects_index(
+   58 +    overlay: &DataOverlayFile,
+   59 +    indexed_field_ids: &[i32],
+   60 +    index_version: u64,
+   61 +    schema: &Schema,
+   62 +) -> bool {
+   63 +    overlay.committed_version > index_version
+   64 +        && overlay
+   65 +            .data_file
+   66 +            .fields
+   67 +            .iter()
+   68 +            .any(|field_id| field_affects_index(*field_id, indexed_field_ids, schema))
+   69 +}
+   70 +
+   71 +/// Whether `field_id` is, contains, or is nested in an indexed field.
+   72 +pub fn field_affects_index(field_id: i32, indexed_field_ids: &[i32], schema: &Schema) -> bool {
+   73 +    let field_ancestry = schema.field_ancestry_by_id(field_id);
+   74 +    indexed_field_ids.iter().any(|indexed_field_id| {
+   75 +        *indexed_field_id == field_id
+   76 +            || field_ancestry.as_ref().is_some_and(|ancestry| {
+   77 +                ancestry
+   78 +                    .iter()
+   79 +                    .any(|ancestor| ancestor.id == *indexed_field_id)
+   80 +            })
+   81 +            || schema
+   82 +                .field_ancestry_by_id(*indexed_field_id)
+   83 +                .is_some_and(|ancestry| ancestry.iter().any(|ancestor| ancestor.id == field_id))
+   84 +    })
+   85 +}
+   86 +
+   87  // Stale row offsets contributed by one fragment's overlays for a given index version.
+   88  // Applies a cheap version gate first: if every overlay predates the segment it is already
+   89  // incorporated by the index, so there is nothing stale and the field/bitmap work is skipped.

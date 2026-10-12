@@ -1,0 +1,455 @@
+{
+  "iteration": 3,
+  "files": [
+    {
+      "path": "rust/lance-core/src/utils/cpu.rs",
+      "module": "L1-modules/rust-lance-core.md",
+      "reviewed": true,
+      "role": "Architecture-conditioned SIMD capability detection and diagnostic reporting. This file selects a cached tier; it does not itself execute vector kernels or implement the CPU task pool.",
+      "ranges": [
+        [
+          1,
+          6,
+          "SPDX header and fmt/LazyLock imports. No IO runtime is imported."
+        ],
+        [
+          7,
+          35,
+          "Public non-exhaustive SimdSupport enum derives Debug, Clone, Copy, PartialEq and Eq. Variants are None, Neon, Sse, Avx, AvxFma, Avx2, Avx512, Avx512FP16, Lsx and Lasx. Comments separate AVX without FMA, AVX plus FMA without AVX2, and AVX2 plus FMA. AVX2 hardware lacking FMA falls back to Avx. External exhaustive matches must account for the non_exhaustive contract. Sse is representable but no initializer branch below selects it."
+        ],
+        [
+          36,
+          55,
+          "Display::fmt emits exact stable-looking diagnostic spellings none, neon, sse, avx, avx_fma, avx2, avx512, avx512_fp16, lsx and lasx through Formatter::write_str. The implementation returns fmt::Result and allocates no intermediate String; these are diagnostic labels, not serialized file-format discriminants."
+        ],
+        [
+          56,
+          73,
+          "Public SimdInfo derives Debug/Clone and exposes tier:SimdSupport, target_arch:&'static str, host_features:Vec<&'static str>. Documentation distinguishes selected Lance dispatch tier from raw host capabilities, with a Python-facing diagnostic motivation. host_features is x86-only; an empty list on other architectures does not mean no SIMD."
+        ],
+        [
+          74,
+          96,
+          "pub fn simd_info() -> SimdInfo reads the cached SIMD_SUPPORT, reports std::env::consts::ARCH and calls detect_host_features for each report. The example prints diagnostics but is documentation, not runtime logging. The structure is an owned snapshot; modifying its public fields does not change the cached dispatcher tier."
+        ],
+        [
+          97,
+          126,
+          "On x86_64, private detect_host_features allocates capacity 17 and tests sse2, sse3, ssse3, sse4.1, sse4.2, popcnt, avx and avx2, appending each detected string in that order. These per-feature checks use std architecture detection macros rather than assuming tier membership. The order is deterministic for a fixed host. The comment explains each detection call must stay inline because some toolchains reject feature names forwarded through a macro_rules :literal metavariable (rust/lance-core/src/utils/cpu.rs:100-102)."
+        ],
+        [
+          127,
+          156,
+          "The x86 feature list continues fma, f16c, bmi1, bmi2, avx512f, avx512bw, avx512cd, avx512dq, avx512vl, then returns the vector. This is a selected diagnostic list, not a complete CPUID dump: AVX512 FP16 is not listed here despite its separate tier detector."
+        ],
+        [
+          157,
+          162,
+          "The cfg(not(x86_64)) implementation of detect_host_features returns an empty vector. The duplicate function names are mutually exclusive compile configurations, not overloads."
+        ],
+        [
+          163,
+          181,
+          "Public static SIMD_SUPPORT:LazyLock<SimdSupport> performs detection once at first access. aarch64 iOS/tvOS selects Neon unconditionally. Other aarch64 targets call aarch64::has_neon_f16_support, selecting Neon if true and None otherwise; the helper's platform assumptions below determine support. These branches do not query individual kernel requirements."
+        ],
+        [
+          182,
+          206,
+          "x86_64 selection priority is AVX512F (then FP16 bit distinguishes Avx512FP16/Avx512), AVX2 AND FMA -> Avx2, AVX AND FMA -> AvxFma, AVX -> Avx, else None. FMA gating is explicit because kernels may execute FMA even with AVX2 host support. The last fallback does not select Sse. Feature checks are cached by this LazyLock independently of simd_info's fresh vector construction."
+        ],
+        [
+          207,
+          225,
+          "loongarch64 selects Lasx first, otherwise Lsx, otherwise None. Architectures outside aarch64/x86_64/loongarch64 return None. No user environment override or fallible Result is exposed by this initializer."
+        ],
+        [
+          226,
+          254,
+          "Private x86 module contains check_flag(x:usize,position:u32)->bool and pub-in-private-module has_avx512_f16_support()/has_avx512(). FP16 detection first requires has_avx512(), then uses unsafe __cpuid(7) and tests EDX bit 23; has_avx512 uses is_x86_feature_detected!(avx512f). The CPUID instruction is architecture-gated and the feature gate precedes the raw bit test; downstream kernel safety still depends on callers. allow(unused_unsafe) accommodates toolchains differing on intrinsic safety. External links are comments, not fetched evidence. These helpers are not publicly reachable through the private module."
+        ],
+        [
+          255,
+          266,
+          "Provenance comments cite a third-party implementation. On aarch64 macOS the private module's has_neon_f16_support returns true with a platform-support assumption; no runtime auxiliary-vector query occurs."
+        ],
+        [
+          267,
+          275,
+          "On aarch64 Linux, the helper calls unsafe libc::getauxval(AT_HWCAP) and tests libc::HWCAP_FPHP. It does not return or inspect errno; a false bit produces false. This is a platform capability query, not an unsafe memory dereference in this source."
+        ],
+        [
+          276,
+          283,
+          "On aarch64 Windows the helper returns false and includes an issue URL without an inline explanation or TODO. The linked issue was not accessed, so the reason for disabling this helper is not established here. The aarch64 initializer consequently selects None on this target (rust/lance-core/src/utils/cpu.rs:171-180); selected tier is Lance dispatch policy rather than a hardware inventory."
+        ],
+        [
+          284,
+          297,
+          "The private loongarch64 module exposes internally reachable has_lsx_support and has_lasx_support, each using unsafe getauxval(AT_HWCAP) and its respective libc feature bit. The module has an architecture cfg, not an additional OS cfg; this file alone does not prove every loongarch operating system compiles."
+        ],
+        [
+          298,
+          305,
+          "On aarch64 Android the helper returns false. Only the explicit platform combinations above supply aarch64 helper modules; support for other operating systems must not be inferred from the broad aarch64 call site."
+        ],
+        [
+          306,
+          333,
+          "Private test module imports the API and rstest. simd_info_exposes_tier checks ARCH and cached tier identity. x86-only simd_info_features_include_baseline checks sse2; the complementary non-x86 test checks an empty raw feature vector. These are host-conditioned tests, not simulated cross-platform coverage."
+        ],
+        [
+          334,
+          350,
+          "x86-only avx_fma_tiers_are_only_selected_when_fma_is_detected checks the implication selected Avx2/AvxFma => hardware FMA. It does not force each dispatcher branch or require FMA on unrelated tiers; the comments explain avoiding illegal instructions."
+        ],
+        [
+          351,
+          369,
+          "A ten-case rstest matrix covers Display for every currently declared variant against its expected lowercase label. No kernel is run. Tests and doctest were read, not executed; CPU-dependent branches remain unmeasured on other hosts."
+        ]
+      ],
+      "limits": "Local call edges are simd_info -> detect_host_features/SIMD_SUPPORT and SIMD_SUPPORT -> platform helpers (rust/lance-core/src/utils/cpu.rs:90-304). Complete external callers, feature-to-kernel requirement matching and all-target compilation remain pending. This analysis distinguishes represented enum variants, runtime-selected tiers and raw feature strings."
+    },
+    {
+      "path": "rust/lance-core/src/utils/tokio.rs",
+      "module": "L1-modules/rust-lance-core.md",
+      "reviewed": true,
+      "role": "Process-global CPU blocking pool, environment-driven sizing, child-after-fork reset, and spawn_cpu future/error/panic propagation. Public configuration is lazy and process-wide, not a per-dataset setting.",
+      "ranges": [
+        [
+          1,
+          11,
+          "SPDX and imports for AtomicBool/AtomicPtr/SeqCst, LazyLock, Duration, FutureExt, Tokio runtime builder and tracing Span. The atomics implement runtime publication rather than dataset synchronization."
+        ],
+        [
+          12,
+          22,
+          "Private NUM_COMPUTE_INTENSIVE_CPUS is a LazyLock<usize> initialized by calculate_num_compute_intensive_cpus; public get_num_compute_intensive_cpus()->usize dereferences it. Its first observation fixes the value for later calls. Environment changes after initialization are not reread."
+        ],
+        [
+          23,
+          43,
+          "A successful LANCE_CPU_THREADS env read is trimmed/parsed with minimum 1 and panics on invalid input, bypassing automatic IO reservation. Otherwise compute CPU count from num_cpus: if count <= cached IO_CORE_RESERVATION return 1, warning only when CPU count >2; else call num_cpus::get again and subtract reservation. The two num_cpus calls are distinct. The warning comment describes a custom-reservation situation, but the branch checks only count>2, not whether reservation was explicitly configured. Env read errors, including non-Unicode, take the automatic path."
+        ],
+        [
+          44,
+          62,
+          "Private parse_env_usize(name:&str,raw:&str,min:usize)->Result<usize,String> trims then parses usize, returning an error naming the variable, raw value and parse error if malformed, or variable/minimum/value if below min. It does not silently clamp. Accepted values return Ok. Its callers choose whether to panic, so the parser itself is independently testable without process-environment mutation."
+        ],
+        [
+          63,
+          77,
+          "Public IO_CORE_RESERVATION:LazyLock<usize> reads LANCE_IO_CORE_RESERVATION once, accepts zero (minimum 0), panics on malformed numeric input, and defaults to 2 on any env read error. Reserving more than available CPUs still leaves one compute thread through the automatic branch; an explicit CPU-thread override is independent of this reservation. Automatic minimum and explicit override control flow: rust/lance-core/src/utils/tokio.rs:23-46."
+        ],
+        [
+          78,
+          88,
+          "Private create_runtime()->Runtime uses a multi-thread Tokio builder named lance-cpu, max_blocking_threads equal to the computed count, one async worker thread, and Duration::from_secs(u64::MAX) keepalive, then build().unwrap(). No enable_all, timer or IO driver call appears here. Runtime build failure panics. One worker is separate from the bounded blocking-worker limit."
+        ],
+        [
+          89,
+          94,
+          "CPU_RUNTIME starts as a null AtomicPtr<Runtime>; RUNTIME_INSTALLED and ATFORK_INSTALLED start false. They are private process-global state. Published runtimes are boxed and intentionally leaked; no shutdown/drop path is provided here."
+        ],
+        [
+          95,
+          109,
+          "global_cpu_runtime()->&'static Runtime loops: SeqCst load pointer, return unsafe shared reference when non-null, otherwise fetch_or(true) on installation flag to elect one initializer; other callers yield their OS thread and retry. The comments justify pointer lifetime by heap allocation/leak and resetting in fork children. No lock or async suspension is used; waiting callers spin/yield."
+        ],
+        [
+          110,
+          119,
+          "The elected initializer installs the fork hook once, creates/boxes runtime, publishes pointer with SeqCst, and returns an unsafe shared reference. A panic during hook/runtime initialization occurs after RUNTIME_INSTALLED=true but before pointer publication; there is no reset guard in this file. If such a panic is caught and execution continues, a later call can loop indefinitely on a null pointer with flag set. This is a source-derived failure path, not a reproduced test result. The election flag and waiting loop are at rust/lance-core/src/utils/tokio.rs:89-109."
+        ],
+        [
+          120,
+          126,
+          "extern C child-after-fork callback resets CPU_RUNTIME to null and RUNTIME_INSTALLED to false with SeqCst. It leaves ATFORK_INSTALLED true and does not drop the inherited runtime, avoiding arbitrary destructor execution in that callback. Next pool access in the child initializes a fresh runtime. The implementation does not install a parent/before-fork callback or prove safety of arbitrary forking application code. Publication and hook registration are at rust/lance-core/src/utils/tokio.rs:95-134."
+        ],
+        [
+          127,
+          134,
+          "On non-Windows, install_atfork invokes unsafe libc::pthread_atfork(None,None,Some(callback)); its return status is ignored. On Windows the same private name is a no-op. Registration failure is therefore not surfaced, and this implementation is platform-dependent."
+        ],
+        [
+          135,
+          160,
+          "spawn_cpu documentation describes isolating CPU-heavy work, suggests roughly 100 microseconds as a cost threshold, and describes thread-count defaults. These are guidance, not measured guarantees. Prose mentions spawn_blocking plus a oneshot round trip, but executable code below returns a mapped JoinHandle and has no result oneshot. The simple CPU-count formula must be read with LANCE_CPU_THREADS override and configurable IO reservation above. Executable join handling is at rust/lance-core/src/utils/tokio.rs:180-208; sizing override/reservation are at rust/lance-core/src/utils/tokio.rs:23-43 and rust/lance-core/src/utils/tokio.rs:63-76."
+        ],
+        [
+          161,
+          179,
+          "The warning explains that blocking IO, synchronous channels, contended locks or block_on inside closures can deadlock, especially when only one compute worker exists. The function does not enforce CPU purity through its type system. The docs prohibit these operations transitively in callees, so callers must inspect closure behavior, not merely its immediate body."
+        ],
+        [
+          180,
+          193,
+          "pub fn spawn_cpu<E:std::error::Error+Send+'static,F:FnOnce()->Result<R,E>+Send+'static,R:Send+'static>(func:F)->impl Future<Output=Result<R,E>> captures Span::current, immediately submits to global_cpu_runtime().spawn_blocking, enters that span in the closure, then calls func. This is a regular function returning a future, not async fn: submission happens at call time, before awaiting. The closure result type and error E are preserved, not converted to Lance Error."
+        ],
+        [
+          194,
+          208,
+          "The returned mapped JoinHandle produces the original closure Result on a successful join. For JoinError, try_into_panic recovers and resume_unwind rethrows the original panic payload; non-panic join errors trigger a new explanatory panic. The closure may outlive the returned handle; this wrapper contains no explicit cancellation/abort API or cancellation token. Exact Tokio detach/shutdown semantics belong to the dependency and are not reconstructed here. Span entry is scoped to closure execution."
+        ],
+        [
+          209,
+          241,
+          "Private tests use FutureExt, PanicHookInfo and Tokio. spawn_cpu_reraises_the_closure_panic temporarily replaces the global panic hook, triggers an &str panic inside spawn_cpu, awaits through tokio::spawn, restores the hook, and checks the original payload. This confirms the intended contract in test source; there is no serial guard around the process-wide hook manipulation in this file. Test runtime execution was not performed."
+        ],
+        [
+          242,
+          259,
+          "A comment explains why tests exercise parse_env_usize rather than mutate env after process-wide LazyLock initialization. One test accepts whitespace-surrounded 8; another rejects a noninteger and asserts the error names LANCE_CPU_THREADS and explains integer parsing."
+        ],
+        [
+          260,
+          272,
+          "Remaining parser tests reject zero for min 1 and accept zero for min 0. The file has no full child-fork lifecycle test, environment-cache reset test or initializer-panic recovery test. Tests preserve validation semantics rather than silently adjusting input."
+        ]
+      ],
+      "limits": "Local call chain is spawn_cpu -> global_cpu_runtime -> install_atfork/create_runtime -> get_num_compute_intensive_cpus -> calculation/parser; explicit pool configuration and fork callback state are captured above (rust/lance-core/src/utils/tokio.rs:12-208). Full repository closure callers and dependency runtime implementation remain pending. No CPU benchmark, fork experiment or task runtime test was run."
+    },
+    {
+      "path": "rust/lance-core/src/utils/futures.rs",
+      "module": "L1-modules/rust-lance-core.md",
+      "reviewed": true,
+      "role": "Two-consumer stream replay with bounded/unbounded buffering and drop recovery, plus distinct end-of-stream and destruction callback wrappers. Private synchronized state coordinates only the two returned sides, not an arbitrary subscriber set.",
+      "ranges": [
+        [
+          1,
+          14,
+          "SPDX/imports provide VecDeque replay storage, Arc/Mutex, task Waker/Poll, futures Stream/BoxStream/StreamExt, pin_project/PinnedDrop, Tokio Semaphore and PollSemaphore. Mutex synchronization is synchronous; underlying stream polling is explicitly moved outside the lock below."
+        ],
+        [
+          15,
+          27,
+          "Private Side is Left/Right and derives Clone/Copy/Debug/PartialEq. Public Capacity has Bounded(u32) and Unbounded variants with the same derives. Bounded capacity counts outstanding cloned items for the lagging consumer, not total bytes or upstream prefetch."
+        ],
+        [
+          28,
+          46,
+          "Private InnerState<'a,T> stores optional boxed upstream, one VecDeque<T>, polling-side ownership, one waiting Waker, an exhausted flag, two u32 buffered counters, two dropped flags and optional PollSemaphore. Public SharedStream<'a,T:Clone> contains a private Arc<Mutex<InnerState>> and Side. Either side can lead; only the lagging side should own buffered items, an invariant asserted during Drop. No Clone implementation for SharedStream itself is declared."
+        ],
+        [
+          47,
+          80,
+          "Public SharedStream::new(inner:BoxStream<'a,T>,capacity:Capacity)->(Self,Self) creates optional Semaphore with capacity as usize, empty counters/queue, no poller/waker, non-exhausted state and two live side flags; both returned handles share one Arc. There is no validation of Bounded(0). Zero capacity prevents acquiring the first permit and therefore prevents polling upstream, even after the peer is dropped because acquisition still precedes the peer-liveness check."
+        ],
+        [
+          81,
+          99,
+          "Drop locks state but returns without cleanup if the mutex is poisoned. It marks its side dropped, takes its own buffered counter to zero and leaves the peer's pending items intact. The comments identify the deadlock risk when a dropped lagging consumer retains all permits."
+        ],
+        [
+          100,
+          112,
+          "Drop debug-asserts that its unread count is zero or equals the whole queue length, pops those unread clones, and adds one permit per removed element when bounded. Values are removed/dropped while the mutex guard is held. The invariant depends on the single shared queue belonging only to the lagging side; changing to multiple consumers requires a new representation."
+        ],
+        [
+          113,
+          126,
+          "If the dropped side owns polling, Drop clears polling ownership and takes the waiting peer waker. It releases the mutex before wake(), permitting callbacks that immediately repoll. When no explicit polling owner is relinquished, semaphore permit release may wake a capacity waiter through its own registration. Upstream is not explicitly polled or cancelled by this Drop path."
+        ],
+        [
+          127,
+          154,
+          "Stream<Item=T>::poll_next locks with unwrap (poison panics). If its side has buffered items, it decrements that side's counter, pops the oldest element, releases one bounded permit, and returns Ready(item). This fast path drains already-buffered items before consulting exhausted, preserving replay after upstream EOF. A counter/queue inconsistency could yield Ready(None), so the private invariant is semantically significant."
+        ],
+        [
+          155,
+          170,
+          "An exhausted stream returns Ready(None) repeatedly once its own buffer is empty. Otherwise bounded mode polls for one permit before claiming upstream ownership. Pending capacity returns Pending immediately; an acquired None is unwrapped because the private semaphore is never intentionally closed here. Unbounded mode carries no permit. Buffer-first control flow is at rust/lance-core/src/utils/futures.rs:127-157."
+        ],
+        [
+          171,
+          183,
+          "If the other side already owns polling, replace the single waiting waker with this context's clone and return Pending. Any temporarily acquired permit is released by its normal drop. Only two handles exist, so one parked peer waker suffices; adding independently cloneable handles would invalidate that assumption. Two-handle construction and permit acquisition are at rust/lance-core/src/utils/futures.rs:47-80 and rust/lance-core/src/utils/futures.rs:159-170."
+        ],
+        [
+          184,
+          195,
+          "The selected side records itself as polling, takes the boxed upstream from Option (expect explains a previous panic can lose it), releases the lock, polls upstream, then reacquires state. This avoids holding the mutex across arbitrary upstream polling and prevents simultaneous poll_next calls. On an upstream panic, restoration below is skipped; no unwind guard repairs inner/polling state."
+        ],
+        [
+          196,
+          224,
+          "Ready(None) marks exhausted and clears polling. Ready(Some(item)) also clears polling, then checks whether the opposite side is alive: if alive, forget the acquired permit, increment the peer's u32 counter and enqueue item.clone(); if dropped, skip clone/counter/queue and let the permit release normally. The original item goes directly to the polling side. A clone panic happens while holding the state mutex after permit/counter updates, so poisoning/recovery is not handled here. Unbounded queued counts still use u32, so capacity-independent integer overflow is possible at extreme backlog; no runtime reproduction is claimed."
+        ],
+        [
+          225,
+          247,
+          "Pending retains polling ownership and suppresses explicit peer wake. In every ordinary result path upstream is restored into state. A ready result takes the waiting waker, releases the mutex and wakes it, then returns the original Poll. A pending poll relies on upstream waking the owning task; if that handle is later dropped, its Drop hands ownership to the survivor. Stream cancellation behavior depends on dropping the handle as well as dropping a temporary next() future. Handle-drop ownership transfer is at rust/lance-core/src/utils/futures.rs:82-125."
+        ],
+        [
+          248,
+          276,
+          "Public SharedStreamExt<'a>:Stream+Send where Self::Item:Clone declares share(self,Capacity)->(SharedStream<'a,Self::Item>,SharedStream<'a,Self::Item>). The only implementation here is for BoxStream<'a,T>, forwarding to new. Docs require bounded consumers to advance together or deadlock; unbounded sharing permits independent draining by retaining the entire backlog. The new API accepts exactly a boxed Send stream, not every bare Stream type."
+        ],
+        [
+          277,
+          289,
+          "Public pin_project FinallyStream<S:Stream,F:FnOnce()> privately owns pinned stream and Option<F>. new(stream:S,f:F)->Self stores callback Some(f). There is no requirement that callback be Send or return Result, and no Drop callback implementation here."
+        ],
+        [
+          290,
+          308,
+          "FinallyStream's Stream<Item=S::Item>::poll_next projects the pinned upstream, forwards the poll, and takes/invokes callback only on Ready(None). Callback executes synchronously at first observed EOF, at most once even on repeated EOF. Pending and Some(Err(...)) do not count as EOF. Early wrapper drop simply destroys the closure without calling it. Callback panics are not caught."
+        ],
+        [
+          309,
+          323,
+          "Public FinallyStreamExt<S:Stream>:Stream+Sized exposes finally<F:FnOnce()>(self,f:F)->FinallyStream<Self,F>. Its default body directly constructs the wrapper fields; the blanket impl for S instead forwards through FinallyStream::new. The generic S is the underlying stream type; this is an extension method over owned self, not a callback registration on a borrowed stream."
+        ],
+        [
+          324,
+          341,
+          "Docs explicitly contrast on-drop behavior with finally. Public #[pin_project(PinnedDrop)] OnDropStream<S:Stream,F:FnOnce()> stores pinned stream and Option<F>; new stores Some(f). The constructor performs no poll and does not execute the callback."
+        ],
+        [
+          342,
+          362,
+          "OnDropStream's poll_next only forwards to the pinned stream and does not trigger cleanup at EOF. Its private PinnedDrop implementation takes f and invokes it when the wrapper is destroyed, including early drop and never-polled instances. The Option ensures single invocation; no panic catch or async cleanup exists. Calling user closure during drop can propagate a panic, with ordinary Rust unwind limitations."
+        ],
+        [
+          363,
+          371,
+          "Public StreamOnDropExt:Stream+Sized defines on_drop<F:FnOnce()>(self,f:F)->OnDropStream<Self,F>; a blanket impl covers all S:Stream. Pin-project handles projection/destruction mechanics; no explicit unsafe block exists in this file, and the macro expansion is dependency behavior rather than analyzed local source. Local pin projection and pinned destruction definitions: rust/lance-core/src/utils/futures.rs:329-361."
+        ],
+        [
+          372,
+          388,
+          "Private test module imports atomic booleans, Arc, Context/Poll, Duration, future polling/stream helpers, channel ReceiverStream and ArcWake. is_pending polls a mutable Unpin future once with a noop waker and returns whether Pending; this helper alone cannot prove a real executor will be awakened."
+        ],
+        [
+          389,
+          441,
+          "test_shared_stream preloads channel items 0..3, shares bounded capacity 2, advances left until backpressure, consumes from right to release permits, and checks replay ordering, shared pending state, later item 3 and repeated EOF after sender drop. It verifies asymmetric consumer advancement and self-fusing exhausted behavior with a small fixture. Tests were not run."
+        ],
+        [
+          442,
+          454,
+          "test_shared_stream_replaces_waiting_waker uses permanently pending upstream and polls left once/right twice. It asserts Pending, but does not assert waker identity or firing. Its name alone is not stronger coverage evidence than those assertions."
+        ],
+        [
+          455,
+          480,
+          "test_unbounded_shared_stream preloads ten items, closes sender, drains left fully and then right fully, checking each item and EOF. It demonstrates independent draining with retained clones; it is not a memory-usage benchmark."
+        ],
+        [
+          481,
+          512,
+          "stress_shared_stream repeats 100 times with bounded capacity 2, two spawned consumers and 1000 sent integers. Each consumer asserts consecutive values as received and the test joins both. It does not separately assert the final counters equal 1000, so an early EOF could evade the per-item order check; actual timeout/duration and robustness were not measured."
+        ],
+        [
+          513,
+          529,
+          "test_on_drop_fires_on_early_drop checks callback remains false after consuming one item, then becomes true on dropping wrapper. The callback state is an atomic bool, testing destruction rather than upstream EOF."
+        ],
+        [
+          530,
+          546,
+          "test_on_drop_fires_after_exhaustion consumes an item and observes None while callback remains false; explicit drop then sets it true. This pins the semantic distinction from FinallyStream."
+        ],
+        [
+          547,
+          561,
+          "test_on_drop_fires_without_polling creates the wrapper, asserts false and drops it without any poll, then asserts true. Together the three tests cover normal/early/unpolled destruction but not callback panic behavior."
+        ],
+        [
+          562,
+          600,
+          "test_shared_stream_survivor_progresses_after_drop fills a six-item channel, leads with right until bounded capacity 2 is exhausted, confirms Pending, drops lagging left, and requires survivor item 2 within five seconds before checking remaining 3..5. This targets releasing dead-side queued permits. Sender remains alive, so the test does not wait for EOF."
+        ],
+        [
+          601,
+          621,
+          "test_shared_stream_dropped_poller_releases_inner_stream makes left own a Pending upstream poll, drops its next future then left handle, sends 42 and requires right to receive it within five seconds. Dropping only the next future is distinct from releasing stream ownership through handle Drop."
+        ],
+        [
+          622,
+          629,
+          "Private FlagWaker wraps AtomicBool and implements ArcWake::wake_by_ref by setting true with SeqCst. This observes a wake rather than merely checking Pending."
+        ],
+        [
+          630,
+          664,
+          "test_shared_stream_dropped_poller_wakes_parked_survivor parks left, registers right using FlagWaker, confirms no initial wake, drops left, asserts the flag, sends 42 and checks right progresses with timeout. It targets explicit ownership-transfer wake after mutex release."
+        ],
+        [
+          665,
+          701,
+          "test_shared_stream_unbounded_stops_buffering_for_dropped_side leads right by two items, checks queue length 2, drops left, verifies queue cleared, consumes remaining values with timeouts, and asserts empty queue and zero left counter. It inspects private state to catch retained dead-consumer clones. The file contains no FinallyStream-specific unit test and no Bounded(0), upstream-panic, clone-panic or counter-overflow regression test."
+        ]
+      ],
+      "limits": "SharedStream local transitions and dependency call boundaries are fully described, but repository-wide share/finally/on_drop consumers remain pending. Backpressure is item-count based and clone cost may dominate memory, while lock poisoning/initialization panics are not recovered (rust/lance-core/src/utils/futures.rs:47-247). No concurrency stress run, macro expansion or Tokio dependency-source analysis has been performed."
+    },
+    {
+      "path": "rust/lance-core/src/utils/assume.rs",
+      "module": "L1-modules/rust-lance-core.md",
+      "reviewed": true,
+      "role": "Exported checked assertion macros retaining the assume names while preserving safe release-mode checks. Macro exports are reachable at the lance_core crate root, despite being defined in utils::assume.",
+      "ranges": [
+        [
+          1,
+          3,
+          "SPDX header and separator."
+        ],
+        [
+          4,
+          18,
+          "#[macro_export] macro_rules! assume accepts either one expression or an expression plus formatting tokens, forwarding to assert! in both arms. Documentation explicitly rejects undefined behavior from invalid assumptions in safe Rust and promises checks in release builds. This is not debug_assert or unchecked compiler assumption; false conditions panic with default or supplied assertion message."
+        ],
+        [
+          19,
+          29,
+          "#[macro_export] assume_eq accepts two expressions or those plus formatting tokens, forwarding to assert_eq!. Equality/debug-format trait requirements and evaluation details are inherited from that standard macro. It does not cast types, return a Result, or mark an impossible branch with unsafe code."
+        ],
+        [
+          30,
+          43,
+          "Private cfg(test) tests assume_rejects_false_conditions and assume_eq_rejects_unequal_values use catch_unwind to assert both plain and custom-message arms panic. They do not test successful assertions, message contents, argument side effects or compile-time trait errors. Tests are retained in exact evidence and were not executed."
+        ]
+      ],
+      "limits": "Changing these wrappers to unchecked assumptions would violate their explicit safe-code contract (rust/lance-core/src/utils/assume.rs:4-28). Repository invocation sites and downstream expectations remain to be indexed; macros call only assert!/assert_eq! locally."
+    },
+    {
+      "path": "rust/lance-core/src/utils/parse.rs",
+      "module": "L1-modules/rust-lance-core.md",
+      "reviewed": true,
+      "role": "Public permissive boolean-string and environment parsing helpers. The strict Option parser and defaulted environment parser deliberately have different handling of unknown strings and whitespace.",
+      "ranges": [
+        [
+          1,
+          12,
+          "SPDX and public str_is_truthy(val:&str)->bool: ASCII-case-insensitive matches for 1, true, on, yes and y. Comparisons use boolean bitwise OR, so all five are evaluated, not short-circuited. Input is not trimmed here; every unrecognized string, including recognized words with surrounding whitespace, returns false."
+        ],
+        [
+          13,
+          32,
+          "Public str_to_bool(val:&str)->Option<bool> returns Some(true) through str_is_truthy; otherwise recognizes 0, false, off, no, n case-insensitively via short-circuit OR and returns Some(false). Any other value returns None. No whitespace trimming, locale-specific comparison, error allocation or environment read occurs in this function."
+        ],
+        [
+          33,
+          44,
+          "Public parse_env_as_bool(env_var_name:&str,default_value:bool)->bool calls std::env::var().ok(); a successful value is trimmed then passed to str_is_truthy, and only an env read error uses default_value. A set-but-unrecognized string or empty/whitespace-only string returns false even when the default is true. Missing or non-Unicode env values use the default. This helper does not call str_to_bool and does not reject invalid settings."
+        ],
+        [
+          45,
+          62,
+          "Private test_str_to_bool_truthy loops over ten numeric/lowercase/uppercase/titlecase true spellings, checking Some(true). It exercises the helper indirectly through str_to_bool and does not test direct whitespace behavior."
+        ],
+        [
+          63,
+          76,
+          "test_str_to_bool_falsy loops over ten 0/false/off/no/n case variants and checks Some(false). These tests establish source intent for accepted negative words rather than treating any unknown as an explicit false token."
+        ],
+        [
+          77,
+          83,
+          "test_str_to_bool_unknown checks empty string, 2, maybe, truthy and nonsense yield None. No test here mutates process environment or checks parse_env_as_bool default/non-Unicode/trim behavior. Tests were read but not run."
+        ]
+      ],
+      "limits": "Local call edges are str_to_bool -> str_is_truthy and parse_env_as_bool -> std::env::var/trim/str_is_truthy (rust/lance-core/src/utils/parse.rs:5-42). Do not substitute the Option parser into the env helper without deciding whether invalid-but-present values must keep returning false. Whole-repository callers remain pending."
+    }
+  ]
+}

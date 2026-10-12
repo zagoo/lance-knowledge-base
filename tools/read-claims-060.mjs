@@ -1,0 +1,4 @@
+import fs from 'node:fs';import{root,linesOf}from'./inventory.mjs';
+const v=JSON.parse(fs.readFileSync('verification/iteration-060.json')),p='verification/iteration-060-fresh-claim-reads.json',old=fs.existsSync(p)?JSON.parse(fs.readFileSync(p)):[];
+for(const s of v.checks.accuracy.samples.filter(s=>s.id>=Number(process.argv[2])&&s.id<=Number(process.argv[3]))){const lines=linesOf(fs.readFileSync(root+'/'+s.path,'utf8'));const evidence=lines.slice(s.start-1,s.end).map((l,i)=>`${s.start+i} | ${l}`).join('\n');console.log(`\nCLAIM ${s.id} ${s.path}:${s.start}-${s.end}\n${s.claim}\n${evidence}`);const entry={id:s.id,path:s.path,start:s.start,end:s.end,read_at:new Date().toISOString(),evidence};const i=old.findIndex(e=>e.id===s.id);if(i<0)old.push(entry);else old[i]=entry;}
+fs.writeFileSync(p,JSON.stringify(old.sort((a,b)=>a.id-b.id),null,2)+'\n');

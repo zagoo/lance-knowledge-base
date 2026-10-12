@@ -1,0 +1,42 @@
+@@ -193,7 +193,7 @@ impl Transaction {
+  193      }
+  194  
+  195      /// `fields` plus every field nested under them, deduplicated.
+  196 -    fn with_descendants(schema: &Schema, fields: Vec<u32>) -> Vec<u32> {
+  196 +    pub fn with_descendants(schema: &Schema, fields: Vec<u32>) -> Vec<u32> {
+  197          let mut expanded = Vec::with_capacity(fields.len());
+  198          for id in fields {
+  199              expanded.push(id);
+
+@@ -403,6 +403,19 @@ impl Transaction {
+  403              return;
+  404          }
+  405  
+  406 +        let fragment_ids = updated_fragments.iter().map(|f| f.id as u32).collect();
+  407 +        Self::prune_updated_fragment_ids_from_indices(indices, &fragment_ids, fields_modified);
+  408 +    }
+  409 +
+  410 +    /// [`Self::prune_updated_fields_from_indices`] by fragment id.
+  411 +    pub fn prune_updated_fragment_ids_from_indices(
+  412 +        indices: &mut [IndexMetadata],
+  413 +        fragment_ids: &RoaringBitmap,
+  414 +        fields_modified: &[u32],
+  415 +    ) {
+  416 +        if fields_modified.is_empty() || fragment_ids.is_empty() {
+  417 +            return;
+  418 +        }
+  419          // If we modified any fields in the fragments then we need to remove those fragments
+  420          // from the index if the index covers one of those modified fields.
+  421          let fields_modified_set = fields_modified.iter().collect::<HashSet<_>>();
+
+@@ -413,9 +426,7 @@ impl Transaction {
+  426                  .any(|field_id| fields_modified_set.contains(&u32::try_from(*field_id).unwrap()))
+  427                  && let Some(fragment_bitmap) = &mut index.fragment_bitmap
+  428              {
+  416 -                for fragment_id in updated_fragments.iter().map(|f| f.id as u32) {
+  417 -                    fragment_bitmap.remove(fragment_id);
+  418 -                }
+  429 +                *fragment_bitmap -= fragment_ids;
+  430              }
+  431          }
+  432      }

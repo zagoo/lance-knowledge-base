@@ -1,0 +1,239 @@
+[
+  {
+    "path": "rust/lance-core/src/cache/mod.rs",
+    "read_at": "2026-10-04T02:02:02.537Z",
+    "ranges": [
+      {
+        "start": 48,
+        "end": 66,
+        "source": "48 | pub mod backend;\n49 | mod backend_uri;\n50 | pub mod codec;\n51 | mod entry_io;\n52 | mod key;\n53 | mod moka;\n54 | mod quick;\n55 | mod registry;\n56 | \n57 | pub use backend::{CacheBackend, CacheEntry};\n58 | pub use backend_uri::{build_from_uri, parse_backend_uri};\n59 | pub use codec::{\n60 |     CacheCodec, CacheCodecImpl, CacheDecode, CacheMissReason, MAGIC, has_cache_envelope,\n61 | };\n62 | pub use entry_io::{CacheEntryReader, CacheEntryWriter};\n63 | pub use key::{CACHE_KEY_FORMAT, CacheKeySchema, CacheNamespace, InternalCacheKey, KeyBuilder};\n64 | pub use moka::MokaCacheBackend;\n65 | pub use quick::{QuickCacheBackend, QuickCacheShardPolicy, recommended_cache_shards};\n66 | pub use registry::{BackendBuildFn, BackendConfig, build_from_config, register_backend};"
+      },
+      {
+        "start": 213,
+        "end": 266,
+        "source": "213 | struct CacheState {\n214 |     backend: Arc<dyn CacheBackend>,\n215 |     hits: AtomicU64,\n216 |     misses: AtomicU64,\n217 |     entry_size_accessors: RwLock<HashMap<TypeId, CacheEntrySizeAccessor>>,\n218 | }\n219 | \n220 | impl CacheState {\n221 |     fn new(backend: Arc<dyn CacheBackend>) -> Self {\n222 |         Self {\n223 |             backend,\n224 |             hits: AtomicU64::new(0),\n225 |             misses: AtomicU64::new(0),\n226 |             entry_size_accessors: RwLock::new(HashMap::new()),\n227 |         }\n228 |     }\n229 | \n230 |     fn entry_size<T>(&self, value: &T) -> usize\n231 |     where\n232 |         T: DeepSizeOf + Send + Sync + 'static,\n233 |     {\n234 |         let type_id = TypeId::of::<T>();\n235 |         let is_registered = self\n236 |             .entry_size_accessors\n237 |             .read()\n238 |             .unwrap_or_else(|poisoned| poisoned.into_inner())\n239 |             .contains_key(&type_id);\n240 |         if !is_registered {\n241 |             self.entry_size_accessors\n242 |                 .write()\n243 |                 .unwrap_or_else(|poisoned| poisoned.into_inner())\n244 |                 .entry(type_id)\n245 |                 .or_insert(cache_entry_size_with_context::<T>);\n246 |         }\n247 |         cache_entry_size(value)\n248 |     }\n249 | }\n250 | \n251 | // ---------------------------------------------------------------------------\n252 | // LanceCache — typed wrapper around dyn CacheBackend\n253 | // ---------------------------------------------------------------------------\n254 | \n255 | /// Typed cache wrapper that handles key construction and type safety.\n256 | ///\n257 | /// Internally delegates to a [`CacheBackend`]. The default backend is\n258 | /// [`MokaCacheBackend`]; pass a custom backend via [`LanceCache::with_backend`].\n259 | #[derive(Clone)]\n260 | pub struct LanceCache {\n261 |     state: Arc<CacheState>,\n262 |     namespace: key::CacheNamespace,\n263 | }\n264 | \n265 | impl std::fmt::Debug for LanceCache {\n266 |     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {"
+      },
+      {
+        "start": 314,
+        "end": 365,
+        "source": "314 |     /// Derive a child namespace for all keys in the returned cache handle.\n315 |     ///\n316 |     /// Each call adds one framed hierarchy segment. Consequently,\n317 |     /// `cache.with_key_prefix(\"a\").with_key_prefix(\"b\")` is deliberately\n318 |     /// distinct from `cache.with_key_prefix(\"a/b\")`.\n319 |     pub fn with_key_prefix(&self, prefix: &str) -> Self {\n320 |         Self {\n321 |             state: self.state.clone(),\n322 |             namespace: self.namespace.child(prefix),\n323 |         }\n324 |     }\n325 | \n326 |     pub async fn size(&self) -> usize {\n327 |         self.state.backend.num_entries().await\n328 |     }\n329 | \n330 |     pub fn approx_size(&self) -> usize {\n331 |         self.state.backend.approx_num_entries()\n332 |     }\n333 | \n334 |     pub async fn size_bytes(&self) -> usize {\n335 |         self.state.backend.size_bytes().await\n336 |     }\n337 | \n338 |     /// Weighted capacity in bytes, if the backend reports one.\n339 |     pub fn capacity_bytes(&self) -> Option<usize> {\n340 |         self.state.backend.capacity_bytes()\n341 |     }\n342 | \n343 |     // -- Stats / clear --------------------------------------------------------\n344 | \n345 |     pub async fn stats(&self) -> CacheStats {\n346 |         CacheStats {\n347 |             hits: self.state.hits.load(Ordering::Relaxed),\n348 |             misses: self.state.misses.load(Ordering::Relaxed),\n349 |             num_entries: self.state.backend.num_entries().await,\n350 |             size_bytes: self.state.backend.size_bytes().await,\n351 |         }\n352 |     }\n353 | \n354 |     pub async fn clear(&self) {\n355 |         self.state.backend.clear().await;\n356 |         self.state.hits.store(0, Ordering::Relaxed);\n357 |         self.state.misses.store(0, Ordering::Relaxed);\n358 |     }\n359 | \n360 |     // -- CacheKey-based methods -----------------------------------------------\n361 | \n362 |     pub async fn insert_with_key<K>(&self, cache_key: &K, metadata: Arc<K::ValueType>)\n363 |     where\n364 |         K: CacheKey,\n365 |         K::ValueType: DeepSizeOf + Send + Sync + 'static,"
+      }
+    ]
+  },
+  {
+    "path": "rust/lance-core/src/cache/key.rs",
+    "read_at": "2026-10-04T02:02:02.539Z",
+    "ranges": [
+      {
+        "start": 120,
+        "end": 148,
+        "source": "120 | /// Pre-derived namespace key shared by entries in one logical cache scope.\n121 | #[derive(Clone, Copy, Debug)]\n122 | pub struct CacheNamespace([u8; 32]);\n123 | \n124 | impl CacheNamespace {\n125 |     /// Construct the stable root namespace.\n126 |     pub fn root() -> Self {\n127 |         Self(blake3::derive_key(NAMESPACE_CONTEXT, b\"\"))\n128 |     }\n129 | \n130 |     /// Derive a child namespace from one framed hierarchy segment.\n131 |     pub fn child(self, segment: &str) -> Self {\n132 |         let mut hasher = blake3::Hasher::new_keyed(&self.0);\n133 |         write_framed(&mut hasher, NAMESPACE_DOMAIN);\n134 |         hasher.update(&KEY_FORMAT_VERSION.to_le_bytes());\n135 |         write_framed(&mut hasher, segment.as_bytes());\n136 |         Self(hasher.finalize().into())\n137 |     }\n138 | }\n139 | \n140 | /// Streams typed logical fields into a canonical cache key.\n141 | ///\n142 | /// Integer methods use little-endian fixed-width encoding. Variable-width\n143 | /// strings and bytes are type-tagged and length-prefixed. There is deliberately\n144 | /// no `usize` method because cache identities must not depend on target width.\n145 | ///\n146 | /// # Examples\n147 | ///\n148 | /// ```"
+      }
+    ]
+  },
+  {
+    "path": "rust/lance-table/src/io/commit.rs",
+    "read_at": "2026-10-04T02:02:02.539Z",
+    "ranges": [
+      {
+        "start": 114,
+        "end": 153,
+        "source": "114 |     pub fn parse_version(&self, filename: &str) -> Option<u64> {\n115 |         let file_number = filename\n116 |             .split_once('.')\n117 |             // Detached versions will fail the `parse` step, which is ok.\n118 |             .and_then(|(version_str, _)| version_str.parse::<u64>().ok());\n119 |         match self {\n120 |             Self::V1 => file_number,\n121 |             Self::V2 => file_number.map(|v| u64::MAX - v),\n122 |         }\n123 |     }\n124 | \n125 |     /// Parse a detached version from a filename like `d123456.manifest`.\n126 |     ///\n127 |     /// Returns the full version number with the detached mask bit set.\n128 |     pub fn parse_detached_version(filename: &str) -> Option<u64> {\n129 |         if !filename.starts_with(DETACHED_VERSION_PREFIX) {\n130 |             return None;\n131 |         }\n132 |         let without_prefix = &filename[DETACHED_VERSION_PREFIX.len()..];\n133 |         without_prefix\n134 |             .split_once('.')\n135 |             .and_then(|(version_str, _)| version_str.parse::<u64>().ok())\n136 |     }\n137 | \n138 |     pub fn detect_scheme(filename: &str) -> Option<Self> {\n139 |         if filename.starts_with(DETACHED_VERSION_PREFIX) {\n140 |             // Currently, detached versions must imply V2\n141 |             return Some(Self::V2);\n142 |         }\n143 |         if filename.ends_with(MANIFEST_EXTENSION) {\n144 |             const V2_LEN: usize = 20 + 1 + MANIFEST_EXTENSION.len();\n145 |             if filename.len() == V2_LEN {\n146 |                 Some(Self::V2)\n147 |             } else {\n148 |                 Some(Self::V1)\n149 |             }\n150 |         } else {\n151 |             None\n152 |         }\n153 |     }"
+      }
+    ]
+  },
+  {
+    "path": "rust/lance-file/src/reader/structural.rs",
+    "read_at": "2026-10-04T02:02:02.539Z",
+    "ranges": [
+      {
+        "start": 373,
+        "end": 398,
+        "source": "373 |     fn validate_indexed(\n374 |         &self,\n375 |         projection: &ReaderProjection,\n376 |         metadata_index: &FileMetadataIndex,\n377 |     ) -> Result<()> {\n378 |         FileMetadataProvider::validate_indexed_projection_structure(projection, metadata_index)?;\n379 |         if FileMetadataProvider::projection_matches_indexed_metadata(projection) {\n380 |             Ok(())\n381 |         } else {\n382 |             Err(FileMetadataProvider::indexed_projection_error(\n383 |                 projection,\n384 |                 metadata_index,\n385 |             ))\n386 |         }\n387 |     }\n388 | \n389 |     fn read_length(&self, prepared: &PreparedProjection) -> Result<u64> {\n390 |         prepared_read_length(prepared)\n391 |     }\n392 | \n393 |     async fn prepare(\n394 |         &self,\n395 |         metadata_provider: &FileMetadataProvider,\n396 |         projection: &ReaderProjection,\n397 |         io: &Arc<dyn EncodingsIo>,\n398 |         cache: &Arc<LanceCache>,"
+      }
+    ]
+  },
+  {
+    "path": "rust/lance-file/src/versions/v1/writer/mod.rs",
+    "read_at": "2026-10-04T02:02:02.539Z",
+    "ranges": [
+      {
+        "start": 654,
+        "end": 672,
+        "source": "654 | /// Walk through the schema and return arrays with their Lance field.\n655 | ///\n656 | /// This skips over nested arrays and fields within list arrays. It does walk\n657 | /// over the children of structs.\n658 | fn fields_in_batches<'a>(\n659 |     batches: &'a [RecordBatch],\n660 |     schema: &'a Schema,\n661 | ) -> impl Iterator<Item = (&'a Field, Vec<&'a ArrayRef>)> {\n662 |     let num_columns = batches[0].num_columns();\n663 |     let array_iters = (0..num_columns).map(|col_i| {\n664 |         batches\n665 |             .iter()\n666 |             .map(|batch| batch.column(col_i))\n667 |             .collect::<Vec<_>>()\n668 |     });\n669 |     let mut to_visit: Vec<(&'a Field, Vec<&'a ArrayRef>)> =\n670 |         schema.fields.iter().zip(array_iters).collect();\n671 | \n672 |     std::iter::from_fn(move || {"
+      }
+    ]
+  },
+  {
+    "path": "rust/lance-table/src/system_index/mem_wal.rs",
+    "read_at": "2026-10-04T02:02:02.539Z",
+    "ranges": [
+      {
+        "start": 125,
+        "end": 137,
+        "source": "125 | impl TryFrom<pb::CompactedSsTable> for CompactedSsTable {\n126 |     type Error = Error;\n127 | \n128 |     fn try_from(sstable: pb::CompactedSsTable) -> lance_core::Result<Self> {\n129 |         let shard_id = sstable\n130 |             .shard_id\n131 |             .as_ref()\n132 |             .map(Uuid::try_from)\n133 |             .ok_or_else(|| Error::invalid_input(\"Missing shard_id in CompactedSsTable\"))??;\n134 |         Ok(Self {\n135 |             shard_id,\n136 |             generation: sstable.generation,\n137 |         })"
+      },
+      {
+        "start": 180,
+        "end": 196,
+        "source": "180 | impl TryFrom<pb::IndexCatchupProgress> for IndexCatchupProgress {\n181 |     type Error = Error;\n182 | \n183 |     fn try_from(icp: pb::IndexCatchupProgress) -> lance_core::Result<Self> {\n184 |         Ok(Self {\n185 |             index_name: icp.index_name,\n186 |             caught_up_generations: icp\n187 |                 .caught_up_generations\n188 |                 .into_iter()\n189 |                 .map(CompactedSsTable::try_from)\n190 |                 .collect::<lance_core::Result<_>>()?,\n191 |         })\n192 |     }\n193 | }\n194 | \n195 | /// Lifecycle status of a WAL shard, persisted in [`ShardManifest`].\n196 | ///"
+      }
+    ]
+  },
+  {
+    "path": "rust/lance-file/src/writer.rs",
+    "read_at": "2026-10-04T02:02:02.540Z",
+    "ranges": [
+      {
+        "start": 23,
+        "end": 25,
+        "source": "23 | /// Page buffers in current Lance files are aligned to 64 bytes.\n24 | pub(crate) const PAGE_BUFFER_ALIGNMENT: usize = 64;\n25 | pub(crate) const ENV_LANCE_FILE_WRITER_MAX_PAGE_BYTES: &str = \"LANCE_FILE_WRITER_MAX_PAGE_BYTES\";"
+      }
+    ]
+  },
+  {
+    "path": "rust/lance-table/src/rowids.rs",
+    "read_at": "2026-10-04T02:02:02.540Z",
+    "ranges": [
+      {
+        "start": 690,
+        "end": 741,
+        "source": "690 |                                 let mut info = (0u64, 0u64);\n691 |                                 for segment in &self.0 {\n692 |                                     if let U64Segment::RangeWithBitmap { range, .. } = segment {\n693 |                                         info.0 += 1;\n694 |                                         info.1 += range.end - range.start;\n695 |                                     }\n696 |                                 }\n697 |                                 info\n698 |                             });\n699 |                         if num_selected <= bitmap_span {\n700 |                             // Rescanning the whole selection in every bitmap\n701 |                             // segment would cost O(segments x selected). With\n702 |                             // more than one bitmap segment, the sorted selection\n703 |                             // is materialized once so each segment only visits\n704 |                             // its own id range (binary search); a single bitmap\n705 |                             // segment streams the selection directly with no copy.\n706 |                             let offset_start = offset;\n707 |                             if bitmap_segments > 1 {\n708 |                                 let cached = shared_cache.get_or_insert_with(|| {\n709 |                                     allow_list\n710 |                                         .row_addrs()\n711 |                                         .map(|selected| selected.map(u64::from).collect())\n712 |                                 });\n713 |                                 if let Some(ids) = cached {\n714 |                                     offset += bitmap.count_ones() as u64;\n715 |                                     let start = ids.partition_point(|id| *id < range.start);\n716 |                                     let end = ids.partition_point(|id| *id < range.end);\n717 |                                     ranges.extend(bitmap_selected_offsets(\n718 |                                         ids[start..end].iter().copied(),\n719 |                                         range,\n720 |                                         bitmap,\n721 |                                         offset_start,\n722 |                                     ));\n723 |                                     continue;\n724 |                                 }\n725 |                             } else if let Some(selected) = allow_list.row_addrs() {\n726 |                                 offset += bitmap.count_ones() as u64;\n727 |                                 let in_range = selected.filter_map(|address| {\n728 |                                     let row_id = u64::from(address);\n729 |                                     range.contains(&row_id).then_some(row_id)\n730 |                                 });\n731 |                                 ranges.extend(bitmap_selected_offsets(\n732 |                                     in_range,\n733 |                                     range,\n734 |                                     bitmap,\n735 |                                     offset_start,\n736 |                                 ));\n737 |                                 continue;\n738 |                             }\n739 |                         }\n740 |                     }\n741 |                     let mut ids = RowAddrTreeMap::from(range.clone());"
+      },
+      {
+        "start": 303,
+        "end": 326,
+        "source": "303 |     pub fn extend(&mut self, other: Self) {\n304 |         // If the last element of this sequence and the first element of next\n305 |         // sequence are ranges, we might be able to combine them into a single\n306 |         // range.\n307 |         if let (Some(U64Segment::Range(range1)), Some(U64Segment::Range(range2))) =\n308 |             (self.0.last(), other.0.first())\n309 |             && range1.end == range2.start\n310 |         {\n311 |             let new_range = U64Segment::Range(range1.start..range2.end);\n312 |             self.0.pop();\n313 |             self.0.push(new_range);\n314 |             self.0.extend(other.0.into_iter().skip(1));\n315 |             return;\n316 |         }\n317 |         // TODO: add other optimizations, such as combining two RangeWithHoles.\n318 |         self.0.extend(other.0);\n319 |     }\n320 | \n321 |     /// Re-encode every segment that is smaller as a run of `Range` segments\n322 |     /// than as it is stored now (see [`U64Segment::as_ranges`]). Returns\n323 |     /// whether anything changed.\n324 |     ///\n325 |     /// The result is written as plain `Range` segments, which every reader\n326 |     /// understands, but a reader without the compact in-memory form handles"
+      },
+      {
+        "start": 17,
+        "end": 24,
+        "source": "17 | // These are all internal data structures, and are private.\n18 | mod bitmap;\n19 | mod encoded_array;\n20 | mod index;\n21 | mod runs;\n22 | pub mod segment;\n23 | mod serde;\n24 | pub mod version;"
+      },
+      {
+        "start": 834,
+        "end": 877,
+        "source": "834 |             }\n835 |         }\n836 |         self.cur_range.take()\n837 |     }\n838 | }\n839 | \n840 | /// Offsets of sorted `ids` (all within `range`) via incremental bitmap\n841 | /// prefix counts, grouped into ranges. Every id is visited once; the bitmap\n842 | /// slice between consecutive ids is popcounted exactly once overall.\n843 | fn bitmap_selected_offsets(\n844 |     ids: impl Iterator<Item = u64>,\n845 |     range: &Range<u64>,\n846 |     bitmap: &bitmap::Bitmap,\n847 |     offset_start: u64,\n848 | ) -> Vec<Range<u64>> {\n849 |     let mut previous_position = 0;\n850 |     let mut live_before = 0;\n851 |     let selected_offsets = ids.filter_map(|row_id| {\n852 |         let position = (row_id - range.start) as usize;\n853 |         if !bitmap.get(position) {\n854 |             return None;\n855 |         }\n856 |         live_before += bitmap\n857 |             .slice(previous_position, position - previous_position)\n858 |             .count_ones();\n859 |         previous_position = position;\n860 |         Some(offset_start + live_before as u64)\n861 |     });\n862 |     GroupingIterator::new(selected_offsets).collect()\n863 | }\n864 | \n865 | impl From<&RowIdSequence> for RowAddrTreeMap {\n866 |     fn from(row_ids: &RowIdSequence) -> Self {\n867 |         let mut tree_map = Self::new();\n868 |         for segment in &row_ids.0 {\n869 |             let mut seg = Self::new();\n870 |             match segment {\n871 |                 U64Segment::Range(range) => {\n872 |                     seg.insert_range(range.clone());\n873 |                 }\n874 |                 U64Segment::RangeWithBitmap { range, bitmap } => {\n875 |                     seg.insert_range(range.clone());\n876 |                     for (i, val) in range.clone().enumerate() {\n877 |                         if !bitmap.get(i) {"
+      }
+    ]
+  },
+  {
+    "path": "rust/lance-table/src/rowids/segment.rs",
+    "read_at": "2026-10-04T02:02:02.540Z",
+    "ranges": [
+      {
+        "start": 375,
+        "end": 395,
+        "source": "375 |         }\n376 |     }\n377 | \n378 |     pub fn slice(&self, offset: usize, len: usize) -> Self {\n379 |         if len == 0 {\n380 |             return Self::Range(0..0);\n381 |         }\n382 | \n383 |         let values: Vec<u64> = self.iter().skip(offset).take(len).collect();\n384 | \n385 |         // `from_slice` will compute stats and select the best representation.\n386 |         Self::from_slice(&values)\n387 |     }\n388 | \n389 |     pub fn position(&self, val: u64) -> Option<usize> {\n390 |         match self {\n391 |             Self::Range(range) => {\n392 |                 if range.contains(&val) {\n393 |                     Some((val - range.start) as usize)\n394 |                 } else {\n395 |                     None"
+      }
+    ]
+  },
+  {
+    "path": "rust/lance-table/benches/row_id_index.rs",
+    "read_at": "2026-10-04T02:02:02.540Z",
+    "ranges": [
+      {
+        "start": 399,
+        "end": 436,
+        "source": "399 | fn sample_segment(segment: &pb::U64Segment, rng: &mut SmallRng) -> Option<u64> {\n400 |     use pb::u64_segment::Segment::*;\n401 |     match segment.segment.as_ref().unwrap() {\n402 |         Range(range) => Some(rng.random_range(range.start..range.end)),\n403 |         RangeWithBitmap(bitmap) => {\n404 |             let offset = rng.random_range(0..(bitmap.end - bitmap.start)) as usize;\n405 |             (bitmap.bitmap[offset / 8] & (1 << (offset % 8)) != 0)\n406 |                 .then_some(bitmap.start + offset as u64)\n407 |         }\n408 |         RangeWithHoles(holes) => {\n409 |             let offset = rng.random_range(0..(holes.end - holes.start)) as u32;\n410 |             let Some(pb::encoded_u64_array::Array::U32Array(array)) =\n411 |                 holes.holes.as_ref().unwrap().array.as_ref()\n412 |             else {\n413 |                 unreachable!()\n414 |             };\n415 |             let is_hole = array\n416 |                 .offsets\n417 |                 .as_chunks::<4>()\n418 |                 .0\n419 |                 .iter()\n420 |                 .any(|hole| u32::from_le_bytes(*hole) == offset);\n421 |             (!is_hole).then_some(holes.start + offset as u64)\n422 |         }\n423 |         _ => unreachable!(),\n424 |     }\n425 | }\n426 | \n427 | /// Fragments shaped like the shot table after deletes and compaction: about\n428 | /// half keep one `Range`; the rest were compacted in groups of 16, and each\n429 | /// output fragment holds two dense (82%) slices taken from different source\n430 | /// fragments, so spans interleave and one id sits under up to 16 fragments.\n431 | /// One compacted slice in three carries only 1% holes instead of a bitmap.\n432 | /// Returns the fragments and a pool of live row ids to query.\n433 | fn shot_table_like(\n434 |     num_fragments: usize,\n435 |     rows_per_fragment: u64,\n436 |     seed: u64,"
+      },
+      {
+        "start": 504,
+        "end": 535,
+        "source": "504 | fn bench_shot_table(c: &mut Criterion) {\n505 |     let mut group = c.benchmark_group(\"row_id_index_shot_table\");\n506 |     group.sample_size(10);\n507 |     let (fragments, pool) = shot_table_like(shot_fragments(), SHOT_ROWS_PER_FRAGMENT, 7);\n508 | \n509 |     group.bench_function(\"build\", |b| {\n510 |         b.iter(|| RowIdIndex::new(&fragments).unwrap());\n511 |     });\n512 | \n513 |     let index = RowIdIndex::new(&fragments).unwrap();\n514 |     for n in [1usize, 1000, 100_000] {\n515 |         let ids = &pool[..n];\n516 |         group.throughput(criterion::Throughput::Elements(n as u64));\n517 |         group.bench_with_input(BenchmarkId::new(\"get_many\", n), &ids, |b, ids| {\n518 |             b.iter(|| {\n519 |                 let out = index.get_many(ids).unwrap();\n520 |                 assert!(out.iter().all(Option::is_some));\n521 |             });\n522 |         });\n523 |     }\n524 |     group.throughput(criterion::Throughput::Elements(1));\n525 |     let mut next = 0usize;\n526 |     group.bench_function(\"get\", |b| {\n527 |         b.iter(|| {\n528 |             next = (next + 1) % pool.len();\n529 |             assert!(index.get(pool[next]).unwrap().is_some());\n530 |         });\n531 |     });\n532 |     group.finish();\n533 | }\n534 | \n535 | fn bench_bitmap_mask_density(c: &mut Criterion) {"
+      }
+    ]
+  },
+  {
+    "path": "rust/lance-file/src/versions/v1/encoding/plain.rs",
+    "read_at": "2026-10-04T02:02:02.540Z",
+    "ranges": [
+      {
+        "start": 174,
+        "end": 211,
+        "source": "174 | fn bytes_to_array(\n175 |     data_type: &DataType,\n176 |     bytes: bytes::Bytes,\n177 |     len: usize,\n178 |     offset: usize,\n179 | ) -> Result<ArrayRef> {\n180 |     let layout = layout(data_type);\n181 |     if layout.buffers.len() != 1 {\n182 |         return Err(Error::internal(format!(\n183 |             \"v1 plain encoding requires one value buffer, found {data_type}\"\n184 |         )));\n185 |     }\n186 | \n187 |     let buffer = if let BufferSpec::FixedWidth {\n188 |         byte_width,\n189 |         alignment,\n190 |     } = &layout.buffers[0]\n191 |     {\n192 |         let min_buffer_size = (len + offset).saturating_mul(*byte_width);\n193 |         if bytes.len() < min_buffer_size {\n194 |             Buffer::copy_bytes_bytes(bytes, min_buffer_size)\n195 |         } else {\n196 |             Buffer::from_bytes_bytes(bytes, *alignment as u64)\n197 |         }\n198 |     } else {\n199 |         Buffer::from_slice_ref(bytes)\n200 |     };\n201 | \n202 |     let data = ArrayDataBuilder::new(data_type.clone())\n203 |         .len(len)\n204 |         .offset(offset)\n205 |         .null_count(0)\n206 |         .add_buffer(buffer)\n207 |         .build()?;\n208 |     Ok(make_array(data))\n209 | }\n210 | \n211 | impl<'a> PlainDecoder<'a> {"
+      },
+      {
+        "start": 411,
+        "end": 425,
+        "source": "411 |     async fn decode_range(&self, index: Range<usize>) -> Result<ArrayRef> {\n412 |         if index.is_empty() {\n413 |             return Ok(new_empty_array(self.data_type));\n414 |         }\n415 |         match self.data_type {\n416 |             DataType::FixedSizeList(items, list_size) => {\n417 |                 self.decode_fixed_size_list(items, *list_size, index.start, index.end)\n418 |                     .await\n419 |             }\n420 |             DataType::FixedSizeBinary(stride) => {\n421 |                 self.decode_fixed_size_binary(*stride, index.start, index.end)\n422 |                     .await\n423 |             }\n424 |             _ => self.decode_primitive(index.start, index.end).await,\n425 |         }"
+      },
+      {
+        "start": 160,
+        "end": 173,
+        "source": "160 |     position: usize,\n161 |     /// Number of the rows in this batch.\n162 |     length: usize,\n163 | }\n164 | \n165 | /// Get byte range from the row offset range.\n166 | #[inline]\n167 | fn get_byte_range(data_type: &DataType, row_range: Range<usize>) -> Range<usize> {\n168 |     match data_type {\n169 |         DataType::Boolean => row_range.start / 8..bit_util::ceil(row_range.end, 8),\n170 |         _ => row_range.start * data_type.byte_width()..row_range.end * data_type.byte_width(),\n171 |     }\n172 | }\n173 | "
+      }
+    ]
+  },
+  {
+    "path": "rust/lance-table/src/rowids/encoded_array.rs",
+    "read_at": "2026-10-04T02:02:02.540Z",
+    "ranges": [
+      {
+        "start": 193,
+        "end": 232,
+        "source": "193 | impl From<Vec<u64>> for EncodedU64Array {\n194 |     fn from(values: Vec<u64>) -> Self {\n195 |         let min = values.iter().copied().min().unwrap_or(0);\n196 |         let max = values.iter().copied().max().unwrap_or(0);\n197 |         let range = max - min;\n198 |         if values.is_empty() {\n199 |             Self::U64(Vec::new())\n200 |         } else if range <= u16::MAX as u64 {\n201 |             let base = min;\n202 |             let offsets = values.iter().map(|v| (*v - base) as u16).collect();\n203 |             Self::U16 { base, offsets }\n204 |         } else if range <= u32::MAX as u64 {\n205 |             let base = min;\n206 |             let offsets = values.iter().map(|v| (*v - base) as u32).collect();\n207 |             Self::U32 { base, offsets }\n208 |         } else {\n209 |             Self::U64(values)\n210 |         }\n211 |     }\n212 | }\n213 | \n214 | impl From<Range<u64>> for EncodedU64Array {\n215 |     fn from(range: Range<u64>) -> Self {\n216 |         let min = range.start;\n217 |         let max = range.end;\n218 |         let range = max - min;\n219 |         if range < u16::MAX as u64 {\n220 |             let base = min;\n221 |             let offsets = (0..range as u16).collect();\n222 |             Self::U16 { base, offsets }\n223 |         } else if range < u32::MAX as u64 {\n224 |             let base = min;\n225 |             let offsets = (0..range as u32).collect();\n226 |             Self::U32 { base, offsets }\n227 |         } else {\n228 |             Self::U64((min..max).collect())\n229 |         }\n230 |     }\n231 | }\n232 | "
+      }
+    ]
+  },
+  {
+    "path": "rust/lance-table/src/rowids/bitmap.rs",
+    "read_at": "2026-10-04T02:02:02.540Z",
+    "ranges": [
+      {
+        "start": 83,
+        "end": 98,
+        "source": "83 |     pub fn slice(&self, start: usize, len: usize) -> BitmapSlice<'_> {\n84 |         BitmapSlice {\n85 |             bitmap: self,\n86 |             start,\n87 |             len,\n88 |         }\n89 |     }\n90 | \n91 |     pub fn count_ones(&self) -> usize {\n92 |         count_ones(&self.data)\n93 |     }\n94 | \n95 |     pub fn count_zeros(&self) -> usize {\n96 |         self.len - self.count_ones()\n97 |     }\n98 | "
+      },
+      {
+        "start": 125,
+        "end": 166,
+        "source": "125 | \n126 | impl BitmapSlice<'_> {\n127 |     pub fn count_ones(&self) -> usize {\n128 |         if self.len == 0 {\n129 |             return 0;\n130 |         }\n131 |         let first_byte = self.start / 8;\n132 |         let last_byte = (self.start + self.len - 1) / 8;\n133 |         if first_byte == last_byte {\n134 |             let byte = self.bitmap.data[first_byte];\n135 |             let mut count = 0;\n136 |             for i in self.start % 8..((self.start + self.len - 1) % 8 + 1) {\n137 |                 if byte & (1 << i) != 0 {\n138 |                     count += 1;\n139 |                 }\n140 |             }\n141 |             count\n142 |         } else {\n143 |             let mut count = 0;\n144 |             // Handle first byte\n145 |             for i in self.start % 8..8 {\n146 |                 if self.bitmap.data[first_byte] & (1 << i) != 0 {\n147 |                     count += 1;\n148 |                 }\n149 |             }\n150 | \n151 |             // Handle last bytes\n152 |             for i in 0..((self.start + self.len - 1) % 8 + 1) {\n153 |                 if self.bitmap.data[last_byte] & (1 << i) != 0 {\n154 |                     count += 1;\n155 |                 }\n156 |             }\n157 | \n158 |             // Middle bytes can just use count_ones\n159 |             count += count_ones(&self.bitmap.data[first_byte + 1..last_byte]);\n160 |             count\n161 |         }\n162 |     }\n163 | \n164 |     pub fn count_zeros(&self) -> usize {\n165 |         self.len - self.count_ones()\n166 |     }"
+      }
+    ]
+  },
+  {
+    "path": "rust/lance-file/src/versions/v1/writer/statistics.rs",
+    "read_at": "2026-10-04T02:02:02.540Z",
+    "ranges": [
+      {
+        "start": 612,
+        "end": 634,
+        "source": "612 | pub struct StatisticsCollector {\n613 |     builders: BTreeMap<i32, (Field, StatisticsBuilder)>,\n614 | }\n615 | \n616 | impl StatisticsCollector {\n617 |     /// Try to create a new statistics collection. If no fields in the schema\n618 |     /// support statistics, will just return None.\n619 |     pub fn try_new(schema: &Schema) -> Option<Self> {\n620 |         let builders: BTreeMap<i32, (Field, StatisticsBuilder)> = visit_fields(schema)\n621 |             .filter(|f| supports_stats_collection(&f.data_type()))\n622 |             .map(|f| (f.id, (f.clone(), StatisticsBuilder::new(&f.data_type()))))\n623 |             .collect();\n624 |         if builders.is_empty() {\n625 |             None\n626 |         } else {\n627 |             Some(Self { builders })\n628 |         }\n629 |     }\n630 | \n631 |     pub fn get_builder(&mut self, field_id: i32) -> Option<&mut StatisticsBuilder> {\n632 |         self.builders.get_mut(&field_id).map(|(_, b)| b)\n633 |     }\n634 | "
+      }
+    ]
+  },
+  {
+    "path": "rust/lance-arrow/src/lib.rs",
+    "read_at": "2026-10-04T02:02:02.541Z",
+    "ranges": [
+      {
+        "start": 1588,
+        "end": 1605,
+        "source": "1588 |     fn copy_bytes_bytes(bytes: bytes::Bytes, size_bytes: usize) -> Self {\n1589 |         assert!(size_bytes >= bytes.len());\n1590 |         let mut buf = MutableBuffer::with_capacity(size_bytes);\n1591 |         let to_fill = size_bytes - bytes.len();\n1592 |         buf.extend(bytes);\n1593 |         buf.extend(std::iter::repeat_n(0_u8, to_fill));\n1594 | \n1595 |         // FIX for issue #4512: Shrink buffer to actual size before converting to immutable\n1596 |         // This reduces memory overhead from capacity over-allocation\n1597 |         buf.shrink_to_fit();\n1598 | \n1599 |         Self::from(buf)\n1600 |     }\n1601 | }\n1602 | \n1603 | #[cfg(test)]\n1604 | mod tests {\n1605 |     use super::*;"
+      }
+    ]
+  },
+  {
+    "path": "rust/lance-file/src/versions/v2_0/reader.rs",
+    "read_at": "2026-10-04T02:02:02.541Z",
+    "ranges": [
+      {
+        "start": 321,
+        "end": 334,
+        "source": "321 |     fn validate_indexed(\n322 |         &self,\n323 |         projection: &ReaderProjection,\n324 |         metadata_index: &FileMetadataIndex,\n325 |     ) -> Result<()> {\n326 |         FileMetadataProvider::validate_indexed_projection_structure(projection, metadata_index)?;\n327 |         Err(FileMetadataProvider::indexed_projection_error(\n328 |             projection,\n329 |             metadata_index,\n330 |         ))\n331 |     }\n332 | \n333 |     fn read_length(&self, prepared: &PreparedProjection) -> Result<u64> {\n334 |         prepared_read_length(prepared)"
+      }
+    ]
+  },
+  {
+    "path": "rust/lance-file/src/version.rs",
+    "read_at": "2026-10-04T02:02:02.541Z",
+    "ranges": [
+      {
+        "start": 323,
+        "end": 339,
+        "source": "323 |         for (value, expected) in cases {\n324 |             assert_eq!(LanceFileVersion::from_str(value).unwrap(), expected);\n325 |         }\n326 |     }\n327 | \n328 |     #[test]\n329 |     fn manifest_codec_only_accepts_canonical_exact_versions() {\n330 |         for version in EXACT_VERSIONS {\n331 |             let encoded = version.to_manifest_string();\n332 |             assert_eq!(\n333 |                 ConcreteFileVersion::from_manifest_string(encoded).unwrap(),\n334 |                 version\n335 |             );\n336 |         }\n337 | \n338 |         for selector_or_alias in [\"legacy\", \"0.3\", \"stable\", \"next\"] {\n339 |             assert!(ConcreteFileVersion::from_manifest_string(selector_or_alias).is_err());"
+      }
+    ]
+  }
+]

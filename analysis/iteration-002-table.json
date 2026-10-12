@@ -1,0 +1,286 @@
+{
+  "iteration": 2,
+  "files": [
+    {
+      "path": "protos/table.proto",
+      "reviewed": true,
+      "role": "Public lance.table contracts for dataset manifests, index metadata, fragment-reuse mappings, and MemWAL shard/index state. This is a broad persisted-state schema; it records conflict-sensitive metadata but does not execute commits, recovery, fencing, or index catch-up.",
+      "ranges": [
+        [
+          1,
+          12,
+          "SPDX, proto3, lance.table, imports of Any, Timestamp and file.proto, and public import of fragment_metadata.proto establish type visibility. The public import makes the separated fragment definitions accessible through table.proto rather than redeclaring them."
+        ],
+        [
+          13,
+          35,
+          "The opening historical-looking layout diagram lists encoded chunks, indices, chunk-position matrix, optional manifest, metadata, i64 metadata position, version pair and LANC. It is not the newer file2 footer diagram and should not be applied to every current file. UUID is a message with bytes uuid=1 documented as exactly 16 bytes; no validation is implemented in protobuf."
+        ],
+        [
+          36,
+          60,
+          "Manifest carries repeated lance.file.Field fields=1 including nested fields, repeated DataFragment fragments=2, uint64 version=3, uint64 version_aux_data=4, and bytes-valued schema_metadata map=5. fragment_tree=22 replaces the inline fragment list for tree tables: fragments must be empty and bit 12 set in both feature words so unaware readers do not see an empty dataset. Auxiliary data is version-specific, not inherited, and not loaded by default on query."
+        ],
+        [
+          61,
+          106,
+          "Nested WriterVersion stores library string=1, version string=2, optional prerelease string=3, optional build_metadata string=4. Version is a string because library versions may not be semver; semver has no leading v. New manifests should store core major.minor.patch in version and separate prerelease/build to remain parseable by older readers. Absent prerelease leaves version as-is, absent build means none. Manifest.writer_version=13 enables detection of files affected by writer-specific bugs; this is not itself a file-format gate."
+        ],
+        [
+          107,
+          115,
+          "Manifest.index_section optional uint64=6 points to index metadata. timestamp=7 is a protobuf Timestamp documented UTC; tag string=8 is described as optional but has no explicit scalar presence, so empty and absent wire values are not distinguishable in the declaration."
+        ],
+        [
+          116,
+          139,
+          "reader_feature_flags uint64 tag 9 requires rejection when any set bit is unrecognized. The comment lists bit 0 deletions, 1 stable row IDs, 2 deprecated v2 indicator, 3 table config, 4 multiple bases, 5 disabled transaction-file writes, 6 overlays, 7 covering columns. Without bit 13, covering columns are the trailing fields suffix. Both readers and writers must reject unknown covering semantics to avoid querying/maintaining an index as if merely carried columns were indexed keys."
+        ],
+        [
+          140,
+          161,
+          "Bit 8 enables mixed recognized exact v2 data-file versions, paired in reader/writer flags and one-way; use each DataFile version rather than snapshot default for decoding. Bit 9 combines stable row IDs and a fragment reuse index. Bit 12 means fragment-tree records and empty fragments. Bit 13 independently declares key fields versus covering_fields; it requires bit 7 in both words, and both bits persist even after dropping the final covering index. One field may appear in both lists. Enabling bit 13 reinterprets every index entry, so normalize all legacy entries atomically (or enable only when none covers), retain the bit in descendants until an atomic reverse conversion. The list omits bit 11 although fragment_metadata separately documents spilled lineage at 2048; do not treat this comment as exhaustive (protos/fragment_metadata.proto:43-51)."
+        ],
+        [
+          162,
+          178,
+          "writer_feature_flags uint64=10 uses the same bit identities but need not equal the reader word; unknown set bits prohibit writes. max_fragment_id optional uint32=11 is the highest ever allocated/reserved in the lineage, absent only before the first allocation, monotonic, with u32::MAX meaning exhaustion. A deleted maximum fragment cannot make this counter reusable."
+        ],
+        [
+          179,
+          202,
+          "transaction_file string=12 is relative to _transactions and stores wire Transaction content at {read_version}-{hyphenated UUID}.txn with unpadded decimal read version; empty means no external transaction file. transaction_section optional uint64=21 locates inline content prefixed by u32 message length, occupying len+4 bytes relative to section start. next_row_id uint64=14 is the next unused stable ID, used only with stable-row-ID flag; the comment states zero means no rows. This is not proof current visible row count equals next_row_id."
+        ],
+        [
+          203,
+          224,
+          "DataStorageFormat holds file_format string=1 (example lance) and version string=2. Version syntax is format-defined, not necessarily semver. It is the default for writes without an explicit exact version and does not constrain indices or other files. Without mixed-version capability every referenced data file must use it; with capability each recognized exact v2 DataFile version is authoritative. Manifest.data_format=15 stores this configuration."
+        ],
+        [
+          225,
+          249,
+          "Manifest.config string map=16 contains behavioral library configuration, reserving lance. prefix. table_metadata string map=19 is arbitrary table metadata, separate from config and schema_metadata (the latter describes data and attaches to scan schemas). Former secondary blob_dataset_version tag 17 and name are reserved; do not reuse them."
+        ],
+        [
+          250,
+          280,
+          "base_paths repeated BasePath=18 resolves imported, shallow-cloned or multi-tier files; example resolves ID zero as base/data/file.path and IDs increase from zero. branch optional string=20 uses absence for main. BasePath has id uint32=1, optional alias name=2 (source tag for shallow clone), is_dataset_root bool=3 distinguishing dataset roots with data/_deletions subdirectories from direct file directories, and absolute path string=4 parsed directly. The comment refers to lance.file.File/DeletionFile, but actual declarations are lance.table.DataFile/DeletionFile (protos/fragment_metadata.proto:6-6; protos/fragment_metadata.proto:90-90; protos/fragment_metadata.proto:257-257)."
+        ],
+        [
+          281,
+          289,
+          "VersionAuxData is loaded on demand and has metadata map<string,bytes>=3. Its absence/default loading policy comes from Manifest.version_aux_data; it is not table configuration."
+        ],
+        [
+          290,
+          311,
+          "IndexMetadata.uuid message=1 is unique across dataset versions; fields repeated int32=2 refers to logical Field IDs and preserves key order; name string=3 is unique within a version; dataset_version uint64=4 is the build version. With manifest bit 13 fields contains keys only; otherwise legacy carried values form the trailing suffix. The same bytes have different interpretation depending on the manifest flag, making atomic migration mandatory."
+        ],
+        [
+          312,
+          342,
+          "fragment_bitmap bytes=5 is a 32-bit Roaring bitmap of indexed fragments, retained because the historical dataset version may be deleted. index_details Any=6 supplies small plugin-specific metadata to avoid manifest bloat. Type URL identifies kind, with btree mapped to /lance.table.BTreeIndexDetails; comparisons are case-insensitive and kinds must be unique ignoring case. index_version optional int32=7 is described as minimum compatible Lance version; concrete numeric meaning and per-index conventions need implementation tracing rather than assuming it is a semver number."
+        ],
+        [
+          343,
+          361,
+          "created_at optional uint64=8 is UTC milliseconds, absent for older indices. base_id optional uint32=9 resolves through manifest bases. files repeated IndexFile=10 provides file sizes to skip HEAD requests and report size without IO; empty means sizes unknown, not no stored files."
+        ],
+        [
+          362,
+          390,
+          "covering_fields repeated int32=11 lists co-located values. Under bit 13 it is independent of fields and can overlap; maintenance dependencies are their union. In legacy form covering entries are a trailing fields suffix in emission order, including a second appearance if also a key. Empty means no extra-column declaration. Critically, declarations do not prove payload availability: actual segment storage schema is authoritative; readers must verify the column exists or fall back to base-table take. Maintenance may legally withdraw payload while retaining declaration; that state is not corruption."
+        ],
+        [
+          391,
+          405,
+          "IndexFile has index-directory-relative path string=1 and size_bytes uint64=2. IndexSection contains repeated IndexMetadata indices=1 for one dataset version. A comment records VectorIndexDetails and renamed HnswParameters moving to index.proto; it is not another declaration."
+        ],
+        [
+          406,
+          444,
+          "FragmentReuseIndexDetails.content chooses InlineContent inline=1 or ExternalFile external=2; comment threshold is below 200 KB inline, otherwise external InlineContent bytes, with exact unit/threshold selection to verify in code. InlineContent stores historical Version legacy_versions=1 and new Transition transitions=2 requiring index_version=1. Transition has source FragmentDigests=1 in scan order including deleted rows, destinations=2 in label order with creation counts, and exactly one ordered_compaction=3 or stable_partition=4 mapping. New safe backward-compatible mappings, including scan fallback, need no version bump; unsafe ones do. Ordered compaction concatenates surviving source rows in scan order then splits; stable partition distributes sequential source rows by destination label."
+        ],
+        [
+          445,
+          466,
+          "OrderedCompaction.changed_row_addrs bytes=1 is a RoaringTreemap of surviving source addresses; missing addresses are deleted. StablePartition has map_id string=1 locating _fri/<map_id>/stable_partition.lance independently of FRI UUID changes, map_size_bytes=2, and optional base_id=3 using dataset base when unset. FragmentDigest records id uint64=1, physical_rows=2, num_deleted_rows=3 for mapping cardinality."
+        ],
+        [
+          467,
+          488,
+          "Legacy Group summarizes a rewrite with RoaringTreemap changed_row_addrs=1, old_fragments=2 and new_fragments=3; together these reconstruct old-to-new/deleted addresses for index remapping or queries against newly unindexed fragments. Version records dataset_version=1 when this entry was added and groups=3. These remain distinct from new transitions."
+        ],
+        [
+          489,
+          529,
+          "The MemWAL section introduces ShardStatus ACTIVE=0 and SEALED=1. Drop-table two-phase commit seals a shard to refuse claims reversibly, then deletes on commit or returns ACTIVE on rollback. ShardManifest documents exactly one active writer per shard; shard_id UUID=11 is v4, version uint64=1 matches manifest filename, shard_spec_id uint32=10 is immutable at creation with zero for manual/unmanaged shards, and shard_field_entries repeated=14 stores raw Arrow scalar bytes keyed by field ID and interpreted by ShardingSpec.result_type. The comment explicitly gives little-endian int32 and raw UTF-8 examples."
+        ],
+        [
+          530,
+          564,
+          "ShardManifest.writer_epoch uint64=2 is a monotonically increasing fencing token incremented on claim. replay_after_wal_entry_position uint64=3 is latest flushed WAL position; positions are one-based, zero means never flushed, replay begins at watermark+1. wal_entry_position_last_seen uint64=4 is only a hint; recovery must list storage, not trust it. current_generation uint64=6 numbers next SSTable and advances per MemTable flush. Removed field 7's progress now lives in index metadata, but this text does not reserve tag 7. sstables repeated=8 lists flush results. status ShardStatus=15 defaults ACTIVE; SEALED refuses claim_epoch."
+        ],
+        [
+          565,
+          575,
+          "ShardFieldEntry has field_id string=1 matching ShardingField.field_id and value bytes=2 in raw little-endian Arrow representation; matching result_type gives the data type. There is no self-describing per-value type tag here."
+        ],
+        [
+          576,
+          611,
+          "SsTable is an immutable flushed MemTable stored as a Lance dataset. generation uint64=1 and shard-relative path string=2 identify it. Optional in_memory_bytes=3 estimates accounted buffer windows, excluding reader array structure and requiring headroom; absent means unknown, not zero. Optional physical_rows=4 includes older primary-key duplicates masked by its deletion vector. Optional primary_key_bytes=5 sums key-column payload over all physical rows, is not per-row/encoded-sort-key size, and is also absent without a primary key. Treating these estimates as hard bounds or defaults as zero risks underbudgeting."
+        ],
+        [
+          612,
+          635,
+          "CompactedSsTable has shard_id UUID=1 and generation uint64=2 for latest compaction into base data. IndexCatchupProgress has base index_name=1 (must match maintained_indexes) and caught_up_generations repeated=2. The protobuf comment says an absent shard means unknown progress, requiring retained SSTables and repair. This conflicts with the Rust getter comment saying absence is assumed fully caught up; the getter itself simply returns None (rust/lance-table/src/system_index/mem_wal.rs:157-164). Complete consumers must resolve policy; neither comment proves safe deletion."
+        ],
+        [
+          636,
+          670,
+          "MemWalIndexDetails centralizes configuration, base compaction progress, and shard snapshots. Writers read configuration; snapshots are point-in-time optimizations, while readers requiring current shards list directories and latest shard manifests. Background refresh does not make snapshots authoritative mutable shard state. Snapshot Lance-file schema lists shard_id utf8, shard_spec_id uint32, typed shard_field_{id}. snapshot_ts_millis int64=1 and num_shards uint32=2 describe it; optional inline_snapshots bytes=3 holds Lance bytes for small counts. The threshold example 100 is explicitly implementation-defined, not a specified constant."
+        ],
+        [
+          671,
+          697,
+          "sharding_specs repeated=7 configures partitioning. maintained_indexes repeated string=8 names base indices mirrored in MemTables; primary-key btree is implicit and must not be listed; vector quantization parameters are inherited for comparable distances. maintain_all_indexes optional bool=12 selects automatic eligible-index discovery according to prose: the named list is ignored, new/dropped indices follow current table state, unsupported kinds are skipped. Absent uses the explicit list and unsupported requested names error. The comment does not separately define present-false handling; inspect runtime conversion before asserting whether 'set' means presence or true."
+        ],
+        [
+          698,
+          723,
+          "compacted_sstables repeated=9 updates atomically with merge-insert data commits for concurrent-compactor conflict resolution, independently of background shard snapshots. index_catchup repeated=10 records asynchronous base-index rebuild coverage. When catch-up generation trails compaction, indexed readers use SSTable indices for the gap. Missing index progress keeps needed SSTables live until repair. Only the dedicated WAL repair path adds progress; ordinary index-changing operations remove entries because they cannot attest coverage."
+        ],
+        [
+          724,
+          745,
+          "writer_config_defaults map<string,string>=11 persists common process/restart defaults, while each ShardWriterConfig may override at runtime without persisting those overrides. ShardingSpec has spec_id uint32=1 unique within index and never reused, plus repeated ShardingField fields=2. Concrete map keys and defaults are not enumerated here."
+        ],
+        [
+          746,
+          769,
+          "ShardingField declares field_id string=1, repeated int32 source_ids=2, optional transform string=3 (examples identity/year/bucket), optional DataFusion SQL expression string=4, result_type string=5 as Arrow type name, parameters string map=6 (example num_buckets). transform and expression are mutually exclusive by comment but are separate optional fields, so an implementation must reject both being present. Valid transforms, SQL restrictions, and result-type validation are not enforced here."
+        ]
+      ],
+      "limits": "This document analyzes every schema line, not the algorithms alluded to in those comments. Current feature support, stable/unstable designation, commit conflict matrices, writer fencing, recovery listing, and catch-up/cleanup safety require Rust source. In particular, covering declarations may legally exceed payload availability (protos/table.proto:380-386), snapshots are not current shard truth (protos/table.proto:642-650), and absence is not zero progress (protos/table.proto:628-633)."
+    },
+    {
+      "path": "protos/transaction.proto",
+      "reviewed": true,
+      "role": "Public lance.table.Transaction persisted/wire representation for reconstructing a manifest during commit retries and deciding transaction compatibility. Nested messages encode proposed changes; no actual conflict matrix, atomic storage commit, retry loop, or validation implementation appears in this file.",
+      "ranges": [
+        [
+          1,
+          11,
+          "SPDX, proto3, file.proto/table.proto/Any imports, and lance.table package establish the transaction schema."
+        ],
+        [
+          12,
+          38,
+          "Transaction exists to rebuild a manifest on retry and determine compatibility after conflict. read_version uint64=1 is the snapshot used for planning/evaluating predicates; uuid string=2 identifies the transaction; tag string=3 is described as optional but lacks scalar presence; transaction_properties string map=4 reserves __lance_commit_message. These fields are not the newly assigned commit version."
+        ],
+        [
+          39,
+          64,
+          "Append.fragments repeated DataFragment=1 contains new fragments whose IDs are not assigned yet. Delete has updated_fragments=1 with existing IDs, deleted_fragment_ids uint64 list=2 for whole-fragment removal, and predicate string=3 that may determine whether a concurrent write would have matched. The predicate string alone does not encode the actual conflict algorithm."
+        ],
+        [
+          65,
+          81,
+          "Overwrite creates/replaces a dataset: new fragments=1 with IDs not yet assigned, schema repeated Field=2, bytes-valued schema_metadata=3, string config_upsert_values=4 merged with existing config, and initial_bases repeated BasePath=5 for creation. Overwrite does not imply every configuration map is blindly replaced according to these field comments."
+        ],
+        [
+          82,
+          93,
+          "CreateIndex carries new_indices=1 and removed_indices=2. It supports addition/replacement and removal by an empty new list; removed entries are the replaced indices. Names, IDs, duplicate handling, and conflicts are not validated here."
+        ],
+        [
+          94,
+          130,
+          "Rewrite is documented as rearranging storage without changing table data. Deprecated old_fragments=1 carries existing IDs; deprecated new_fragments=2 carries unassigned IDs. RewrittenIndex has old_id UUID=1, new_id UUID=2, new_index_details Any=3, new_index_version uint32=4, and new_index_files repeated=5 (empty when sizes unavailable). The preceding comment says only UUID is serialized, but the actual declaration now includes detail/version/files; retain the declaration and flag stale prose."
+        ],
+        [
+          131,
+          151,
+          "RewriteGroup holds old_fragments=1 with existing IDs and new_fragments=2 whose IDs were reserved by a prior reserve operation. Rewrite.groups=3 and rewritten_indices=4 are the current grouped metadata. Grouped new IDs therefore have different preconditions from the deprecated unassigned-ID fields."
+        ],
+        [
+          152,
+          171,
+          "Merge adds a column/schema, using existing-ID fragments=1, schema=2, schema_metadata=3, preserves_nullability bool=4. True asserts no field is introduced that earlier-schema staged data cannot safely omit. False or historical absence conservatively conflicts with concurrent value writes and may force retries; this is an optimization assertion, not a general no-conflict flag."
+        ],
+        [
+          172,
+          190,
+          "Project.schema=1 is the new field projection, preserves_nullability bool=2 asserts no nullability-affecting change. Rename/drop are examples eligible for true; tightening nullability must not set it. False/absent conservatively conflicts with concurrent value writes. Restore.version uint64=1 identifies the target historical version; its materialization and feature reconciliation remain runtime questions."
+        ],
+        [
+          191,
+          222,
+          "ReserveFragments.num_fragments uint32=1 reserves future rewrite IDs. Clone carries is_shallow bool=1, optional source ref_name=2, source ref_version uint64=3, absolute ref_path string=4, optional target branch_name=5. Shallow copies metadata and references original data via bases; deep-copy prose proposes native backend copy. The 3-10x speed claim is an unmeasured comment, not a benchmark or supported throughput guarantee, and atomicity behavior must be traced rather than inferred from backend examples."
+        ],
+        [
+          223,
+          250,
+          "ExactKeySetFilter stores repeated uint64 key_hashes=1 for small inserted-row sets; exact refers to the set of hashes, not collision-free original keys. BloomFilter stores SBBF bitmap bytes=1, num_bits uint32=2, number_of_items uint64=3, probability double=4. Different size/parameter filters cannot be intersected directly. The comments list defaults 8192 and 0.00057, but bare proto3 numeric defaults are zero; actual fallback/config initialization requires source evidence. Threshold for exact versus Bloom is not specified."
+        ],
+        [
+          251,
+          272,
+          "KeyExistenceFilter is created only when merge-insert ON columns match the schema's unenforced primary key; presence enables strict primary-key conflict detection. field_ids repeated int32=1 identifies key fields and data oneof selects ExactKeySetFilter exact=2 or BloomFilter bloom=3. UInt32List.values repeated=1 represents sorted distinct zero-based local physical fragment offsets, not stable row IDs."
+        ],
+        [
+          273,
+          293,
+          "Update carries removed_fragment_ids=1 for fully moved fragments, updated_fragments=2, new_fragments=3 for moved rows, fields_modified uint32 list=4, compacted_sstables=5, fields_for_preserving_frag_bitmap uint32 list=6, and UpdateMode=7. The latter field list helps decide which index fragment bitmaps retain new fragment IDs. The opening description says update does not add/remove rows, but the following inserted_rows contract explicitly serves merge-insert insert tracking; do not treat the heading as exhaustive runtime operation scope. The inserted_rows follow-up is at protos/transaction.proto:293-305."
+        ],
+        [
+          294,
+          307,
+          "Update.inserted_rows optional KeyExistenceFilter=8 tracks only INSERT keys during merge-insert, never updated keys. Deprecated updated_fragment_offsets map<uint64,UInt32List>=9 records RewriteColumns matched offsets. Current updated_fragment_offset_bitmaps map<uint64,bytes>=10 stores portable RoaringBitmap bytes: writers emit only 10; readers prefer 10 and fall back to 9 for older manifests. This is an explicit legacy-read boundary, not permission to extend the old writer form."
+        ],
+        [
+          308,
+          323,
+          "UpdateMode REWRITE_ROWS=0 deletes old-fragment rows and writes new fragments, motivated by many changed columns or few affected rows. REWRITE_COLUMNS=1 rewrites entire columns within fragments, adds new files, and tombstones old columns, motivated by many affected rows/few columns. These are qualitative selection guidelines, not measured thresholds."
+        ],
+        [
+          324,
+          339,
+          "UpdateMapEntry has key string=1 and optional value string=2: absent value removes the key, while present empty string stores an empty value. UpdateMap.update_entries repeated=1 applies changes and replace bool=2 selects full replacement versus merge. Duplicate-key ordering and deletion during replacement require converter evidence."
+        ],
+        [
+          340,
+          359,
+          "UpdateConfig uses UpdateMap config_updates=6, table_metadata_updates=7, schema_metadata_updates=8, and map<int32,UpdateMap> field_metadata_updates=9. Deprecated fields remain upsert_values map=1, delete_keys list=2, schema_metadata string map=3, and field_metadata map<uint32,FieldMetadataUpdate>=4 with nested metadata string map=5. The signed-versus-unsigned field-ID key types differ; preference/fallback between old and new forms is not specified here."
+        ],
+        [
+          360,
+          369,
+          "DataReplacementGroup contains fragment_id uint64=1 and DataFile new_file=2. DataReplacement.replacements repeated=1 replaces data in table regions. It does not define region selection or column matching beyond the group payload."
+        ],
+        [
+          370,
+          394,
+          "DataOverlayGroup identifies fragment_id=1 and repeated overlays=2 appended in order to existing overlays, preserving concurrently committed entries rather than replacing the list. Writer leaves committed_version zero; commit stamps the actual new version and restamps on retry. Touched fields come from each overlay data_file.fields. DataOverlay.groups=1 attaches sparse cell changes without rewriting base files. Its comment points through table.proto's public import to DataOverlayFile now declared in fragment_metadata.proto (protos/table.proto:11-11; protos/fragment_metadata.proto:185-238); exact permissive conflict rules are delegated to specs/implementation rather than specified here."
+        ],
+        [
+          395,
+          409,
+          "UpdateMemWalState.compacted_sstables=1 records SSTable compaction progress atomically during merge-insert, by contract. UpdateBases.new_bases repeated BasePath=1 adds bases to the manifest. Atomicity and duplicate/base-ID validation need actual commit code."
+        ],
+        [
+          410,
+          429,
+          "Transaction.operation union tags are append=100, delete=101, overwrite=102, create_index=103, rewrite=104, merge=105, restore=106, reserve_fragments=107, update=108, project=109, update_config=110, data_replacement=111, update_mem_wal_state=112, clone=113, update_bases=114, data_overlay=115. Adding a kind requires preserving applicable stable tags and updating all producer/consumer dispatch; this declaration alone does not identify those implementation files."
+        ],
+        [
+          430,
+          433,
+          "Former blob dataset operations reserve tags 200 and 202 and names blob_append/blob_overwrite. These arms are not active operations and cannot be reused for a new operation under the declared compatibility reservation."
+        ]
+      ],
+      "limits": "Conflict-relevant schema assertions and writer/reader preference contracts are captured, but the complete operation-pair compatibility matrix remains unknown (protos/transaction.proto:12-18; protos/transaction.proto:163-182; protos/transaction.proto:251-305; protos/transaction.proto:385-389). The stale rewrite UUID-only comment and Update heading mismatch must be reconciled with implementation, not silently generalized."
+    }
+  ]
+}

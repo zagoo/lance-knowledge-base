@@ -1,0 +1,121 @@
+@@ -2,6 +2,7 @@
+    2  // SPDX-FileCopyrightText: Copyright The Lance Authors
+    3  
+    4  use lance_core::utils::row_addr_remap::RowAddrRemap;
+    5 +use lance_index::scalar::RowAddrTranslator;
+    6  use std::collections::HashSet;
+    7  use std::sync::{Arc, Mutex};
+    8  use std::{
+
+@@ -592,7 +593,21 @@ impl<S: IvfSubIndex + 'static, Q: Quantization + 'static> IvfIndexBuilder<S, Q>
+  593          })
+  594      }
+  595  
+  596 +    /// Remap through an in-memory mapping (the legacy entry point). The
+  597 +    /// per-partition tasks are `'static`, so the map is shared through an
+  598 +    /// owned translator (the same clone this method always made).
+  599      pub async fn remap(&mut self, mapping: &RowAddrRemap) -> Result<Vec<IndexFile>> {
+  600 +        self.remap_with(RowAddrTranslator::sync(mapping.clone()))
+  601 +            .await
+  602 +    }
+  603 +
+  604 +    /// Remap through a translator whose payload may need reads, one
+  605 +    /// partition's addresses at a time.
+  606 +    pub async fn remap_streaming(&mut self, mapping: &RowAddrTranslator) -> Result<Vec<IndexFile>> {
+  607 +        self.remap_with(mapping.clone()).await
+  608 +    }
+  609 +
+  610 +    async fn remap_with(&mut self, mapping: RowAddrTranslator) -> Result<Vec<IndexFile>> {
+  611          if self.existing_indices.is_empty() {
+  612              return Err(Error::invalid_input(
+  613                  "No existing indices available for remapping",
+
+@@ -604,7 +619,6 @@ impl<S: IvfSubIndex + 'static, Q: Quantization + 'static> IvfIndexBuilder<S, Q>
+  619  
+  620          log::info!("remap {} partitions", ivf.num_partitions());
+  621          let existing_index = self.existing_indices[0].index.clone();
+  607 -        let mapping = Arc::new(mapping.clone());
+  622          let build_iter = (0..ivf.num_partitions()).map(move |part_id| {
+  623              let existing_index = existing_index.clone();
+  624              let mapping = mapping.clone();
+
+@@ -613,12 +627,17 @@ impl<S: IvfSubIndex + 'static, Q: Quantization + 'static> IvfIndexBuilder<S, Q>
+  627                      .as_any()
+  628                      .downcast_ref::<IVFIndex<S, Q>>()
+  629                      .ok_or(Error::invalid_input("existing index is not IVF index"))?;
+  630 +                let part = ivf_index
+  631 +                    .load_partition(part_id, false, &NoOpMetricsCollector)
+  632 +                    .await?;
+  633 +
+  634 +                // One partition's addresses are the unit of translation; the
+  635 +                // partition itself is the working set it always was.
+  636 +                let row_ids: Vec<u64> = part.storage.row_ids().copied().collect();
+  637 +                let mapping = mapping.resolve(row_ids).await?;
+  638                  let (storage, index) = if S::name() == HNSW::name() {
+  639                      remap_hnsw_partition(ivf_index, part_id, &mapping).await?
+  640                  } else {
+  619 -                    let part = ivf_index
+  620 -                        .load_partition(part_id, false, &NoOpMetricsCollector)
+  621 -                        .await?;
+  641                      let storage = part.storage.remap(&mapping)?;
+  642                      let index = part.index.remap(&mapping, &storage)?;
+  643                      (storage, index)
+
+@@ -630,13 +649,20 @@ impl<S: IvfSubIndex + 'static, Q: Quantization + 'static> IvfIndexBuilder<S, Q>
+  649              }
+  650          });
+  651  
+  633 -        let files = self
+  634 -            .merge_partitions(
+  652 +        // `merge_partitions` is the bulk of this future; `remap_streaming`/`remap`
+  653 +        // and the 11-arm v3 dispatch (`remap_index_file_v3`) each carry a copy
+  654 +        // otherwise. The eager compaction remap polls that chain under Python's
+  655 +        // `block_on` on the calling thread, which overflowed the Windows
+  656 +        // main-thread stack in CI (dev-profile wheel, opt-level 0, where every
+  657 +        // awaited future is also a separate stack temporary of its caller).
+  658 +        let files = Box::pin(
+  659 +            self.merge_partitions(
+  660                  stream::iter(build_iter)
+  661                      .buffered(get_num_compute_intensive_cpus())
+  662                      .boxed(),
+  638 -            )
+  639 -            .await?;
+  663 +            ),
+  664 +        )
+  665 +        .await?;
+  666          Ok(files)
+  667      }
+  668  
+
+@@ -995,9 +1021,18 @@ impl<S: IvfSubIndex + 'static, Q: Quantization + 'static> IvfIndexBuilder<S, Q>
+ 1021                                  .map(|row_id| partition_map.get(row_id).copied()),
+ 1022                          );
+ 1023                          let part_ids = UInt32Array::from(part_ids);
+ 1024 +                        // A batch that already carries the column would make
+ 1025 +                        // this a duplicate-name error, so report it instead of
+ 1026 +                        // panicking inside the spawned task.
+ 1027                          batch = batch
+ 1028                              .try_with_column(PART_ID_FIELD.clone(), Arc::new(part_ids.clone()))
+ 1000 -                            .expect("failed to add part id column");
+ 1029 +                            .map_err(|e| {
+ 1030 +                                Error::invalid_input(format!(
+ 1031 +                                    "could not attach the precomputed partition ids to a batch \
+ 1032 +                                     with schema {}: {e}",
+ 1033 +                                    batch.schema()
+ 1034 +                                ))
+ 1035 +                            })?;
+ 1036  
+ 1037                          if part_ids.null_count() > 0 {
+ 1038                              log::info!(
+
+@@ -1025,7 +1060,9 @@ impl<S: IvfSubIndex + 'static, Q: Quantization + 'static> IvfIndexBuilder<S, Q>
+ 1060                  })
+ 1061              })
+ 1062              .buffered(get_num_compute_intensive_cpus())
+ 1028 -            .map(|x| x.unwrap())
+ 1063 +            .map(|x| {
+ 1064 +                x.map_err(|e| Error::internal(format!("shuffle transform task failed: {e}")))?
+ 1065 +            })
+ 1066              .peekable(),
+ 1067          );
+ 1068  

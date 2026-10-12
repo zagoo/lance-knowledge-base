@@ -1,0 +1,927 @@
+{
+  "iteration": 36,
+  "files": [
+    {
+      "path": "rust/lance-table/src/transaction/row_version.rs",
+      "module": "L1-modules/rust-lance-table.md",
+      "reviewed": true,
+      "role": "Synchronous transaction row-ID allocation and creation/update lineage resolution, with public writer-placed-lineage predicate and transaction-internal helpers. Complete local mutation, fallback, preload and test analysis; no atomic commit or data-file IO implementation.",
+      "ranges": [
+        [
+          1,
+          20,
+          "SPDX and module docs describe stable row IDs with creation and last-update dataset-version sequences, preserving creation by tracing rewritten rows to source positions. Imports connect Fragment/metadata/version sequence, SpilledRowLineage/build_version_meta, row-ID codecs/sequence, Transaction, core errors, Cow, Ordering and HashMap/HashSet. This synchronous module has no store, await, IO, locks or unsafe blocks. row_version is a private transaction child with has_writer_placed_lineage publicly reexported (rust/lance-table/src/transaction.rs:29-54)."
+        ],
+        [
+          21,
+          38,
+          "Private UNKNOWN_CREATED_AT_VERSION:u64=1 is the fallback for an existing source row whose creation version is unavailable. Comment identifies1 as the initial dataset version; contextual builder starts absent-manifest version at1 (rust/lance-table/src/transaction/manifest_build.rs:752-752). The following helper contract says callers should supply only found UPDATE rows, with INSERT rows handled separately; O(K) is linear run lookup, not constant-time cached value access."
+        ],
+        [
+          39,
+          53,
+          "Private resolve_created_at_version accepts row ID, borrowed source map of ID to (&Fragment,usize offset), and owned decoded-sequence cache keyed by fragment ID. Missing source, missing cache entry or version_at out-of-range each returns1. It neither decodes nor allocates nor errors here. version_at scans run lengths from the start for every call, with unchecked prefix arithmetic (rust/lance-table/src/rowids/version.rs:272-282)."
+        ],
+        [
+          54,
+          80,
+          "Public has_writer_placed_lineage returns true iff row_id_meta is Column OR created_at_version_meta is Column. A last_updated_at Column alone does not qualify. It does not check physical count, carrier files, flags, provenance or payload validity. Docs explain trusting writer-placed creation lineage while recomputing inline/inline creation lineage; the doctest changes an empty Fragment to row-ID Column and asserts classification. Actual output validation/stamping is separate; this predicate is publicly callable through the transaction reexport."
+        ],
+        [
+          81,
+          111,
+          "pub(super) resolve_update_version_metadata receives immutable existing fragments, mutable new fragment slice, caller new_version and immutable preloaded lineage map; returns Result<()> with no IO. It collects needed IDs only from new fragments failing writer-placed classification and having successfully decoded inline row IDs. Inline decode errors are silently dropped via ok(). Each decoded sequence expands into a temporary Vec before insertion into a HashSet; duplicates collapse. Empty needed set avoids all existing-fragment scans, but later output processing still runs. Map size is bounded by distinct requested IDs, not total dataset IDs; transient expansion/decoded storage is additional memory."
+        ],
+        [
+          112,
+          133,
+          "Creates empty ID-to-source HashMap. For nonempty needed IDs, finds min/max by two set scans, collects one &Fragment per existing entry, and stable-sorts by fragment.id. Documentation wants the earliest/original occurrence even when old soft-deleted copies coexist with newer rewritten copies. The algorithm relies on ID ordering as lineage history and does not read deletion vectors or distinguish live/deleted rows. Sorting costs O(F log F) time and O(F) reference storage plus sorting scratch; it does not stop once all requested IDs are found."
+        ],
+        [
+          134,
+          150,
+          "For each existing fragment, inline row IDs decode into owned Cow or silently become None on error; absent metadata is ignored. Column row IDs require spilled[frag.id].row_ids and borrow its Arc target. Missing preload returns NotSupported containing fragment ID and explaining inability to resolve rewritten rows. This requirement occurs before the range prefilter, so even an unrelated spilled fragment needs loaded row IDs whenever the needed set is nonempty. Preload identity/count/carrier consistency is trusted."
+        ],
+        [
+          151,
+          172,
+          "For a decoded/borrowed sequence, inclusive row_id_range outside [needed_min,needed_max] or None skips enumeration. It is a conservative min/max filter, not exact set intersection, and requires decoding/loading first. Every remaining ID is enumerated at its physical sequence ordinal, and needed IDs insert through entry.or_insert; smallest fragment ID wins, and first duplicate within that sequence wins. No deletion filtering or duplicate rejection. Numeric-gap cost inherits sequence iteration; row_id_range behavior is documented at rust/lance-table/src/rowids.rs:279-300."
+        ],
+        [
+          173,
+          185,
+          "Collects source fragment IDs into a HashSet, then scans original existing_fragments order to build owned creation-version cache. Only source IDs are considered and absent created_at metadata is skipped. For unique fragment IDs each selected source is decoded once, reducing protobuf decoding per updated row; duplicate fragment IDs are not validated, can cause repeated processing and later cache replacement, so exactly-once assumes valid fragment identity."
+        ],
+        [
+          186,
+          205,
+          "Source created-at Column requires spilled[frag.id].created_at, clones its Arc and then clones the underlying RowDatasetVersionSequence into version_cache. Missing preload returns contextual NotSupported. Inline load_sequence succeeds into cache or its error is silently ignored, causing later fallback1. Source creation length/version values are not validated against physical rows or commit version. All source discovery and cache errors occur before this function mutates new fragments. last_updated_at preload is unused."
+        ],
+        [
+          206,
+          216,
+          "Processes new fragments in supplied order. First match arm is any row-ID state plus created_at Column: retain creation metadata unvalidated and assign last_updated_at=build_version_meta(fragment,new_version), then continue. This includes absent row IDs: positive physical_rows can therefore panic in build_version_meta despite Result return (rust/lance-table/src/rowids/version.rs:655-678). Zero/unknown physical rows produce None last-update metadata. Caller preparation may prevent malformed combinations; the local function does not."
+        ],
+        [
+          217,
+          240,
+          "For row-ID Column plus Some non-Column creation metadata (necessarily Inline after prior arm), decode creation sequence, convert error to InvalidInput with fragment ID and cause, and require sequence.len equal physical_rows.unwrap_or(0) as u64. Mismatch reports both counts and fragment ID. On success retains supplied creation bytes and stamps last-update via build_version_meta. This validates only decoded length, not creation versions, carrier/provenance or positional span semantics. Unknown physical rows require zero decoded length and yield None stamp."
+        ],
+        [
+          241,
+          257,
+          "Row-ID Column without creation metadata returns NotSupported: spilling row IDs requires placing creation lineage. Inline row IDs otherwise decode via ok(), ignoring supplied inline creation metadata and any decode error; no row IDs gives None. Created-at Column already took the first arm. This establishes asymmetric corruption policy: writer-placed inline creation is strict, ordinary inline row-ID decode here is permissive."
+        ],
+        [
+          258,
+          277,
+          "For successful inline row IDs, physical_rows defaults0; materializes one u64 creation version per yielded row in order. Found IDs call resolve_created_at_version; missing IDs use new_version as INSERT branch. A debug_assert_eq checks generated count versus physical_rows; there is no release Result validation, and new_version need not exceed source versions. Each found row performs map membership then another map lookup and linear version-run scan. Worst case includes sum of source-run traversals across all rewritten rows."
+        ],
+        [
+          278,
+          296,
+          "Compresses creation vector with from_versions into consecutive equal-version Range runs, serializes it and replaces created_at; serialization Result error would become Internal with cause, though from_sequence has no normal local Err arm (rust/lance-table/src/rowids/version.rs:230-250; rust/lance-table/src/rowids/version.rs:463-484). Then replaces last-update with build_version_meta. For absent/failed inline row-ID decode it builds one uniform metadata value and assigns both, cloning the shared handle. Empty valid inline input produces Some(empty creation bytes) but build_version_meta returns None for zero rows. Errors/panics in later fragments leave previous mutations; no rollback is implemented. Row-ID bytes themselves are not repaired here."
+        ],
+        [
+          297,
+          310,
+          "Transaction inherent impl adds pub(super) collect_pure_rewrite_row_update_frags_ids(&[Fragment])->Result<Vec<u64>>. It allocates output and requires physical_rows on every fragment, even one without row IDs; missing count returns Internal with Fragment does not have physical rows. usize count casts to u64 unchecked. Despite pure-rewrite naming, its test is only metadata cardinality."
+        ],
+        [
+          311,
+          331,
+          "If metadata exists, inline row IDs decode with errors propagated and their sequence length is used; Column is assumed to cover exactly physical_rows without IO or validation. Equal count appends fragment.id; smaller or larger count silently omits it; absent metadata omits it. Returns IDs in input order, preserving duplicate fragment IDs. It cannot establish that rows came from an existing source, exclude inserted rows, or verify global uniqueness. Contextual builder calls it after assign_row_ids (rust/lance-table/src/transaction/manifest_build.rs:945-965), so assignment can make an originally partial fragment qualify. Index consequences require full consumer analysis."
+        ],
+        [
+          332,
+          355,
+          "pub(super) Transaction::assign_row_ids(&mut u64,&mut [Fragment])->Result<()> processes fragments in order and always requires known physical_rows, returning Internal otherwise. Existing inline metadata decodes to count with propagated errors; Column count is trusted equal physical count, so column carrier content is never loaded. This helper neither checks feature flags nor uses deletion counts. next_row_id is supplied mutable state; no lock or dataset-wide uniqueness check."
+        ],
+        [
+          356,
+          375,
+          "Equal existing count is an immediate no-op: metadata bytes and next_row_id stay unchanged. For shortage computes remaining=physical-existing and new range next..next+remaining with unchecked u64 addition. It decodes the same inline bytes a second time; the non-inline fallback returns Internal but cannot be selected for valid Column because Column took equality. No overlap or reserved-ID check is made for the new range."
+        ],
+        [
+          376,
+          394,
+          "Shortage branch expands every existing ID into Vec, pushes each newly allocated ID, rebuilds one RowIdSequence via infallible slice conversion, serializes it, replaces Inline metadata and only then increments next_row_id by shortage. This materializes O(physical rows) values and may reselect representation; write_row_ids also clones/converts protobuf (rust/lance-table/src/rowids.rs:215-219; rust/lance-table/src/rowids/serde.rs:341-344). No checked-constructor uniqueness validation is used. Excess count returns Internal with actual/expected counts, without fragment ID; this fragment is unchanged, but earlier fragments/counter may already be mutated."
+        ],
+        [
+          395,
+          407,
+          "Without row-ID metadata, constructs raw Range next..next+physical, serializes and stores Inline, then advances counter with ordinary addition. Range creation avoids per-row materialization on this branch; zero rows still produce Inline empty-range encoding and unchanged counter. Overflow may panic with checks or wrap without them; no Result range validation. TODO about a separate file is not implemented: this path always emits inline bytes. Returns Ok only after all fragments, with no transaction rollback, version stamping, file writes or atomic publication."
+        ],
+        [
+          408,
+          419,
+          "Private cfg(test) module imports parent, RowDatasetVersionRun/U64Segment, shared creation/update accessors, default config, stable manifest and update_txn, rstest and Arc. Direct helper fixtures use in-memory Fragment metadata with empty base/overlay files and absent deletion metadata; no actual data file or spilled column is opened. Tests below were read, not executed."
+        ],
+        [
+          420,
+          449,
+          "test_assign_row_ids_new_fragment constructs fragment1 with100 physical rows, absent row/creation/update metadata and empty files/overlays/deletion. Starting counter0, invokes assignment and asserts next100, metadata presence, decoded length100 and exact IDs0..100; non-Inline panics. It does not validate version metadata or disk state."
+        ],
+        [
+          450,
+          456,
+          "Private inline_versions(rows,version) builds a uniform RowDatasetVersionSequence then from_sequence and unwraps. It is a fixture helper returning RowDatasetVersionMeta, without row-ID checks, storage IO or special zero-row assertions."
+        ],
+        [
+          457,
+          479,
+          "test_assign_row_ids_spilled_is_complete gives fragment1 Column row IDs,50 physical rows and counter100. Assignment succeeds, counter remains100 and marker equals original; no real hidden column, count verification or creation metadata is required by assignment."
+        ],
+        [
+          480,
+          507,
+          "test_resolve_update_versions_keeps_writer_placed_created_at uses Column IDs and Column creation for50 rows, initially inline last-update7. Direct resolution with no existing/preloaded fragments and new_version9 preserves Column creation and replaces last-update with inline uniform9. Demonstrates trust of writer-placed markers without source scanning or actual column data."
+        ],
+        [
+          508,
+          547,
+          "test_resolve_update_versions_skips_source_scan_for_spilled_new_fragments supplies existing fragment1 with unloaded Column row/creation metadata, then new fragment2 with inline IDs10..12 but Column creation. Direct resolution9 succeeds and retains creation Column/stamps two9 values. The absent preload would fail if source discovery ran; this is a behavioral skip assertion, not a scan-count instrument."
+        ],
+        [
+          548,
+          588,
+          "test_resolve_update_versions_recomputes_inline_created_at uses the same inline IDs0..10 in source1 and destination2, source creation/update3 and caller-supplied destination creation7. Direct resolution9 asserts creation becomes3 and update9 for10 rows, proving ordinary inline/inline supplied creation bytes are overwritten."
+        ],
+        [
+          589,
+          628,
+          "rstest cases covers_every_row50 and too_short40 use Column row IDs with50 physical rows and inline creation3. Equal case retains inline creation and stamps9; short case requires InvalidInput and diagnostic substring40 created-at versions for50 physical rows. It does not cover overlong, malformed, unknown/zero physical count or mid-batch mutation."
+        ],
+        [
+          629,
+          657,
+          "Spilled-source test constructs source1 with50 physical rows, Column IDs/creation and inline last-update2. Local new_fragment closure makes fragment2 with two physical rows and inline range argument, no version metadata or files. The closure does not verify that argument has two IDs; tests supply valid lengths."
+        ],
+        [
+          658,
+          672,
+          "First resolve of new IDs10..12 without preload returns NotSupported. Next a new fragment changed to Column IDs and still no creation metadata also returns NotSupported with no existing sources. Assertions check only error variant, not messages or mutation state. These exercise missing source-row preload and missing writer creation lineage separately."
+        ],
+        [
+          673,
+          704,
+          "Builds preload for source1: row IDs100..150 and50 creation versions initially2, position10=3 and11=4, with no last-update sequence. Resolves new IDs110..112 at version9; local versions closure unwraps metadata decode and collects values. Asserts created[3,4], updated[9,9]. Does not separately test missing source-created preload, source length mismatch or out-of-range lookup."
+        ],
+        [
+          705,
+          738,
+          "test_assign_row_ids_existing_complete encodes0..50 for50 rows, counter100; assignment leaves counter100 and decoded exact IDs/length unchanged. It does not compare byte identity directly, though equality branch is a source-level no-op."
+        ],
+        [
+          739,
+          773,
+          "test_assign_row_ids_partial_existing encodes0..30 for50 rows, counter100; asserts counter120, length50 and exact concatenation0..30 then100..120. This pins preserved existing order and appended allocation range, not dataset-wide uniqueness or malformed prefix behavior."
+        ],
+        [
+          774,
+          801,
+          "test_assign_row_ids_excess_row_ids supplies60 IDs for50 rows, counter100; asserts error and specifically Internal message containing both counts. No post-error counter/fragment equality assertion, multi-fragment rollback assertion or out-of-range arithmetic test."
+        ],
+        [
+          802,
+          830,
+          "Multi-fragment assignment fixture has fragment1 with30 rows/no IDs and fragment2 with25 rows/20 existing IDs500..520, empty files/overlays/deletion/version metadata. Counter starts1000. This uses two different input states in one ordered mutable slice."
+        ],
+        [
+          831,
+          860,
+          "After assignment, multi-fragment fixture asserts next1035. Fragment1 is Inline0-based allocation1000..1030 of length30; fragment2 is Inline length25 preserving500..520 then appending1030..1035. Non-Inline branches panic. Thus later fragment consumes counter advanced by earlier one."
+        ],
+        [
+          861,
+          885,
+          "Missing-physical-row test gives fragment1 with all metadata/count absent, invokes assignment at counter0, and asserts Internal plus Fragment does not have physical rows substring. It does not exercise missing count alongside existing/Column metadata or after a successfully assigned earlier fragment."
+        ],
+        [
+          886,
+          928,
+          "Manifest integration test source1 has IDs100,101,102, uniform creation5 and3 physical rows. Destination10 has IDs100,102/two rows. Shared fixture builds stable manifest, update transaction and build_manifest; extracted creation/update both equal[5,5]. Contextually fixture manifest.version=4, next_row_id=1000, reader stable flag; update read_version4, update_modeNone and default config use_stable_row_idsfalse (rust/lance-table/src/transaction/test_support.rs:21-34; rust/lance-table/src/transaction/test_support.rs:73-124). Equality of source and next version makes this test alone unable to distinguish preserved from freshly stamped creation."
+        ],
+        [
+          929,
+          972,
+          "Mixed-origins integration fixture makes source1 IDs10,11 with creation2, source2 IDs20,21,22 with creation3 and matching physical counts; each has empty files/overlays/deletion and no last-update metadata. Both are placed in the shared stable manifest."
+        ],
+        [
+          973,
+          994,
+          "New fragment10 takes IDs11,20 in that order; build_manifest result must have created[2,3] and updated[5,5]. Asserts source-offset mapping across two fragments, preserving destination order and commit stamping. No disk publication or conflict retry is invoked by the test."
+        ],
+        [
+          995,
+          1024,
+          "INSERT-branch integration test explains distinguishing a found rewritten ID10 from new ID999, but source IDs10,11 have creation5, equal the fixture next commit version. Source1 has two rows and no data files or last-update metadata."
+        ],
+        [
+          1025,
+          1049,
+          "Destination10 contains[10,999], and resulting creation/update both[5,5]. Comment attributes next version5 to update read_version4; contextual builder actually computes current_manifest.version+1 (rust/lance-table/src/transaction/manifest_build.rs:752-752). Fixture values coincide, so this assertion alone does not discriminate found versus absent creation logic. The following test uses distinct versions."
+        ],
+        [
+          1050,
+          1079,
+          "Distinct UPDATE/INSERT test source1 contains IDs10,11 with creation3, while comments specify new ordered IDs10,500,11,501 and expected creation3,5,3,5. The source fixture has two physical rows and empty storage metadata."
+        ],
+        [
+          1080,
+          1104,
+          "Destination20 contains nonmonotone IDs[10,500,11,501]/four physical rows. Shared build_manifest asserts creation[3,5,3,5] and all update5, directly distinguishing preserved and inserted branches while preserving physical order. Current version is supplied by manifest fixture, not validated against source creation in this helper."
+        ],
+        [
+          1105,
+          1142,
+          "Source-no-created-at integration test has source1 IDs50,51 but no creation metadata; new fragment10 selects50. Result must be created[1], updated[5]. This pins found-source fallback1, distinct from absent-ID new_version5."
+        ],
+        [
+          1143,
+          1179,
+          "No-row-ID integration fixture has source IDs10,11 and a new3-row fragment10 without row metadata. build_manifest assigns fresh IDs first, then resolves them as INSERT rows; expected creation/update both[5,5,5]. This tests caller ordering, not a direct successful resolver call on positive physical rows with no row IDs (which can panic through build_version_meta)."
+        ],
+        [
+          1180,
+          1217,
+          "Corrupt-created-at integration fixture gives source1 IDs10,11 and eight0xFF inline creation bytes. Destination10 selects10; build_manifest succeeds and both extracted arrays are created[1], updated[5]. Tests deliberate suppression of source creation decode errors, not corrupt source row-ID bytes or strict writer-placed creation validation."
+        ],
+        [
+          1218,
+          1244,
+          "Range-filter test comment incorrectly calls fragment1 the out-of-range source; actual first constructed fragment1 holds IDs10,11 with creation5 and2 rows. Header expects outside-range creation99 never to appear. This is a correctness fixture, not instrumented proof of reduced row scanning."
+        ],
+        [
+          1245,
+          1278,
+          "Actual outside-range source is fragment2 with IDs1000,1001, creation99 and2 rows. Destination10 rewrites IDs10,11, with no prior version metadata. This contradicts only the header fragment-number label, not its intended range scenario."
+        ],
+        [
+          1279,
+          1289,
+          "Builds both sources into stable manifest and asserts destination creation/update[5,5]. It proves unrelated source values do not contaminate output for this fixture, but would also pass with a correct full scan; no counter measures whether prefilter skipped enumeration."
+        ],
+        [
+          1290,
+          1312,
+          "Inclusive-boundary integration test source1 is IDs10,11,12 with creation7 and3 rows. This creation value exceeds fixture new_version5, so test data also demonstrates no local monotonicity validation, not a valid historical chronology guarantee."
+        ],
+        [
+          1313,
+          1334,
+          "Destination10 takes exactly boundary IDs10 and12; build_manifest creation must be[7,7]. No last-update assertion here. The inclusive prefilter cannot skip these bounds."
+        ],
+        [
+          1335,
+          1369,
+          "Many-rows same-source test comments require one decode per fragment but construct no decode counter. Source IDs0..100 use two50-row version runs,3 then4; each run span is0..50, confirming lengths/order matter rather than globally distinct span coordinates. Source1 has100 physical rows and no storage files."
+        ],
+        [
+          1370,
+          1394,
+          "Destination10 rewrites all100 IDs. Build result creation length100 and halves all3/all4 are asserted. This verifies values and order, not decode count, allocation count or runtime; those performance properties require source reasoning or dedicated instrumentation."
+        ],
+        [
+          1395,
+          1440,
+          "Multiple-source cache fixture creates source1 IDs10,11,12/version2 and source2 IDs20,21,22/version8, each3 rows, storing both in stable manifest. Version8 exceeds current/next fixture version; no chronological validity assertion exists."
+        ],
+        [
+          1441,
+          1461,
+          "Destination10 takes IDs12,20, then build_manifest requires creation[2,8]. Confirms source-fragment cache keys and differing local offsets, not last-update behavior, duplicate-source precedence or missing-preload failures. Closes cfg(test) module. No local test directly covers collect_pure_rewrite_row_update_frags_ids or resolve_created_at_version in isolation; other tests exercise some behavior indirectly."
+        ]
+      ],
+      "limits": "Direct callers and policy: transaction facade publicly reexports has_writer_placed_lineage (rust/lance-table/src/transaction.rs:29-54). Contextually read manifest builder assigns before resolving Update creation, later collects cardinality-only pure-rewrite IDs and calls assignment a second time (rust/lance-table/src/transaction/manifest_build.rs:945-1002). Append/Overwrite call assignment then uniform version stamping (rust/lance-table/src/transaction/manifest_build.rs:760-774; rust/lance-table/src/transaction/manifest_build.rs:1017-1038). Full builder/validation/index consequences and retry/IO orchestration are not yet analyzed. No source tests ran. Important untested local edges: corrupt row-ID suppression in direct resolver, duplicate source-fragment precedence with deletion metadata, absent source-created preload, unknown/zero counts, output length mismatch without debug assertions, next-ID overflow/overlap, and errors after prior fragment mutation (rust/lance-table/src/transaction/row_version.rs:102-295; rust/lance-table/src/transaction/row_version.rs:300-405)."
+    },
+    {
+      "path": "rust/lance-table/src/rowids/version.rs",
+      "module": "L1-modules/rust-lance-table.md",
+      "reviewed": true,
+      "role": "Public positional dataset-version runs, inline/column metadata codecs and synchronous fragment-update helpers; crate-internal range cursor.",
+      "ranges": [
+        [
+          1,
+          24,
+          "SPDX/module purpose and imports: HashMap, Range, Arc, core Error/Result/DeepSizeOf, prost Message, custom serde traits, Fragment/generated protobuf, U64Segment, RowIdSequence and read_row_ids. Dataset update version is not a file-format version or stable row ID. The module is public through rowids::version (rust/lance-table/src/rowids.rs:17-24)."
+        ],
+        [
+          25,
+          43,
+          "LoadedRowLineage is public Debug/Clone/Default with optional Arc row_ids, created_at and last_updated_at sequences. SpilledRowLineage aliases HashMap<u64,LoadedRowLineage> keyed by fragment ID. The contract says an IO-capable caller preloads spilled sequences because synchronous manifest construction has no store; inline sequences need not be included. Defaults are all None/empty map; no loader, validation, timestamp or IO is implemented by these declarations."
+        ],
+        [
+          44,
+          71,
+          "RowDatasetVersionRun derives Debug/Clone/PartialEq/Eq/DeepSizeOf with public span:U64Segment and version:u64. Docs define span over positional offsets rather than stable IDs, enabling alignment with RowIdSequence order. len()->usize and is_empty delegate to span; version copies the scalar. Direct construction permits arbitrary segment shape/values, including empty runs; no invariant validator here."
+        ],
+        [
+          72,
+          99,
+          "RowDatasetVersionSequence derives Debug/Clone/PartialEq/Eq/DeepSizeOf/Default around public Vec<RowDatasetVersionRun>. RowDatasetVersionCursor is pub(crate), Debug/Default, with private run index, intra-run offset, absolute position, optional cached run length, optional Vec run starts and indexed total; tests add seek counter. Cursor does not borrow, identify or hash its source sequence, so reuse assumes the same unchanged sequence."
+        ],
+        [
+          100,
+          120,
+          "Private seek_indexed lazily builds one start offset per run and total length by ordinary usize additions. This allocates O(number of runs) memory once; it does not rebuild when another/mutated sequence is supplied. Empty runs produce duplicate starts. Construction calls general run.len, and overflow/malformed segment arithmetic is not checked here."
+        ],
+        [
+          121,
+          146,
+          "Indexed seek rejects position>=cached total with Internal text containing position and total. Otherwise unwrap cached starts, binary-search position or take preceding start, then advance across every following start<=position to skip duplicate starts/empty runs. Sets run index, relative offset and position, clears cached length, increments test counter. Bounds failure may leave a newly built index installed but does not set a new position."
+        ],
+        [
+          147,
+          167,
+          "current_run repeatedly gets the current run, caching its length. Range fast path uses (end-start) as usize; all other spans delegate len. If offset>=length, advance run and reset offset/cache until a usable run or None. It skips any number of empty runs and never consults absolute span positions for ordering. Range subtraction/cast and index increments are ordinary arithmetic; malformed reverse ranges are not rejected here."
+        ],
+        [
+          168,
+          195,
+          "extend_range appends to caller Vec. Empty or reversed Range<usize> returns Ok immediately without validating bounds or moving cursor. A backwards start triggers indexed seek; after an index exists, every non-adjacent start in either direction uses it. Before indexing, forward gaps advance run lengths in place without output, returning Internal if exhausted. Existing cursor/output is not reset or cleared."
+        ],
+        [
+          196,
+          211,
+          "For each selected portion, current_run yields version/length and repeat_n appends count=min(request remainder,run remainder), then advances position/offset. Exhaustion returns Internal at current consumed position; output and cursor may already contain partial progress. No reserve, cancellation or async boundary. Adjacent traversal costs visited runs plus emitted values; repeated unindexed forward scanning is monotonic, indexed jumps add binary-search work."
+        ],
+        [
+          212,
+          229,
+          "new returns no runs. from_uniform_row_count(row_count:u64,version) returns empty for zero, otherwise exactly one Range(0..row_count) run. It neither checks fragment maximum count/usize fit nor rejects any version, and allocates only the run vector rather than per-row versions."
+        ],
+        [
+          230,
+          251,
+          "from_versions scans adjacent u64 values, emits a Range for each change and one final run if nonempty. Spans use global slice positions starting0, versions are exact values; empty input gives empty, uniform input one run. O(input rows) scan and up to O(rows) runs; usize indices/length cast to u64 without checked conversion. It merges adjacent equal values only, not equal values separated by others."
+        ],
+        [
+          252,
+          271,
+          "len sums run.len() cast to u64 with ordinary addition. is_empty is true for no runs or all-empty runs. versions constructs a borrowing VersionsIter; cursor returns a default unbound cursor and does not inspect self. Public runs remain mutable and no cached index lives in the sequence itself."
+        ],
+        [
+          272,
+          284,
+          "version_at linearly accumulates usize run lengths and returns the first run whose cumulative end exceeds index, else None. It ignores span numeric values and gaps, using concatenated positional lengths; zero-length runs contribute nothing. Cost O(visited runs), ordinary offset+length arithmetic, no random-access index in this method."
+        ],
+        [
+          285,
+          300,
+          "get_version_for_row_id scans RowIdSequence segments in stored order, first checks segment bounding range contains the ID and then position(row_id). On first match it calls version_at(prefix lengths+local position), otherwise adds segment length and continues. It does not assert equal row-ID/version lengths or unique IDs. Segment range supplies stored bounds and position then checks actual presence (rust/lance-table/src/rowids/segment.rs:360-431); no whole-dataset lookup or IO occurs."
+        ],
+        [
+          301,
+          313,
+          "rows_with_version_greater_than zips row_ids.iter with lazy versions, filters strictly greater than threshold and collects owned Vec IDs. Zip silently stops at the shorter iterator, with no alignment error. It preserves row-ID iteration order and includes no deletion filtering beyond what supplied sequences already encode. VersionsIter empty-run caveat applies."
+        ],
+        [
+          314,
+          342,
+          "mask consumes u32 positions once, tracks cumulative original run lengths before mutating each run and passes relative positions to span.mask. It implicitly needs ascending valid positions, but does not sort, deduplicate or validate them; a later position below the current run start can underflow subtraction. Remaining positions at/above final cutoff are ignored. Removes empty spans afterward, does not merge equal-version neighbors or rebase surviving span values, and always returns Ok locally. Segment mask is now covered: list cardinality equal to segment length clears all regardless of entries, and other paths assume ordered unique in-bounds positions (rust/lance-table/src/rowids/segment.rs:694-746)."
+        ],
+        [
+          343,
+          374,
+          "Public VersionsIter borrows runs and stores private run index, remaining count and current value. new initializes zeros then advance_run loads only the current run, or leaves remaining0 at exhaustion. It does not skip empty runs in advance_run. No allocation, size_hint override or ExactSize/DoubleEnded/FusedIterator implementation appears."
+        ],
+        [
+          375,
+          391,
+          "Iterator::next advances by at most one run when remaining count is0, returning None if beyond the list; otherwise it loads that run, saturating-decrements count and returns the version even if the loaded run is empty. Thus [length1/version7,length0/version9] expands to [7,9], a source-derived counterexample not executed here. Consecutive empty runs can likewise emit phantom values. This differs from cursor/version_at, which skip empty spans."
+        ],
+        [
+          392,
+          419,
+          "RowDatasetVersionMeta derives Debug/Clone/equality/DeepSizeOf: Inline(Arc<[u8]>) shares encoded bytes; Column is an empty marker locating reserved creation/update hidden fields via Fragment::row_lineage_file. Column requires IO through a dataset loader; this type stores no path or count. Private serde ColumnMarker has no fields, defining the empty-object column arm."
+        ],
+        [
+          420,
+          442,
+          "Serialize creates an untagged local Helper: Inline {inline:&[u8]} or Column {column:ColumnMarker}. JSON inline is a numeric byte sequence under inline; column is {column:{}}. Bytes are borrowed for serialization, not decoded. Serializer failures propagate; local helper variants exist only within serialize."
+        ],
+        [
+          443,
+          462,
+          "Deserialize uses untagged local Helper with Vec<u8> or empty marker, then allocates Arc::from(inline) or returns Column. It does not decode/validate version bytes, intern equivalent payloads or require a dataset context. No deny_unknown_fields annotation is present; exact unknown-field/ambiguous-arm acceptance delegates serde."
+        ],
+        [
+          463,
+          484,
+          "from_sequence writes protobuf bytes and wraps Arc, returning Ok with no explicit Result error branch. load_sequence decodes Inline; Column returns NotSupported explaining fragment metadata alone cannot decode a data-file column. These synchronous methods perform no IO and no physical-row count validation."
+        ],
+        [
+          485,
+          503,
+          "last_updated_at_version_meta_to_pb maps None to absent, Inline to copied Vec bytes under InlineLastUpdatedAtVersions, and Column to an empty RowLineageColumn under ColumnLastUpdatedAtVersions. It returns Option directly, with no validation, feature flag setting or version restamping."
+        ],
+        [
+          504,
+          519,
+          "created_at_version_meta_to_pb mirrors the same mapping under creation-version oneof alternatives. Inline bytes are copied and column carries no file metadata. Correct carrier/feature validation belongs to separate metadata and transaction paths."
+        ],
+        [
+          520,
+          536,
+          "write_dataset_versions clones every run.span into pb::U64Segment, stores Some(span) and exact version, collects all protobuf runs then encode_to_vec. It returns owned protobuf bytes directly without format prefix, separate version discriminator, checksum or validation. Segment conversion is covered at rust/lance-table/src/rowids/serde.rs:257-299 and panics for standalone Ranges; a directly constructed version span with that variant reaches this panic. This source-derived case was not executed. Clone+protobuf+output buffers can coexist."
+        ],
+        [
+          537,
+          560,
+          "read_dataset_versions uses prost decode, mapping malformed protobuf to Internal with Failed to decode RowDatasetVersionSequence text. Every run must have span or Internal Missing positions in RowDatasetVersionRun; U64Segment::try_from errors propagate. Collects decoded runs, preserving order/versions. No cross-run positional normalization, equal-neighbor merge, empty-run filter, unique-row or length-alignment check is performed here."
+        ],
+        [
+          561,
+          589,
+          "rechunk_version_sequences consumes owned sequences and u64 chunk sizes plus allow_incomplete. Collects all sizes first and allocates result Vec to that count; flattens owned run vectors through Peekable. Private closures build InvalidInput diagnostics for too few (chunk index, expected size, remaining) and too many runs (processed/expected chunk counts). It returns all output sequences, not a streaming interface."
+        ],
+        [
+          590,
+          612,
+          "For each requested chunk create empty output and remaining size, tracking an offset into the current input run across chunks. A zero remaining input length consumes that run and retries. At true exhaustion allow_incomplete breaks, otherwise returns too-few error. Zero-size output chunks skip this loop entirely. Empty input runs are skipped only while a positive output remainder is being filled."
+        ],
+        [
+          613,
+          639,
+          "If input remainder exceeds chunk remainder, slice that positional portion, copy its version and retain input run with increased segment_offset. Otherwise consume run, slice its remainder, reset offset and reduce needed count. Slicing delegates U64Segment::slice with unchecked u64->usize casts. No adjacent equal-version coalescing or explicit span rebasing; actual sliced span values follow the segment implementation. Segment slicing retains numeric values through skip/take and reconstruction, silently truncates excess selection and never selects Ranges (rust/lance-table/src/rowids/segment.rs:378-387)."
+        ],
+        [
+          640,
+          653,
+          "Every requested size produces one output sequence, including short/empty sequences under allow_incomplete and zero-size chunks. After all chunks, any peeked run causes too-many error even if it is empty; allow_incomplete does not permit excess input. Errors discard local outputs but consumed owned input/iterator progress is not recoverable from Result. No checked arithmetic or aggregate length prevalidation."
+        ],
+        [
+          654,
+          679,
+          "build_version_meta returns uniform inline metadata only for known positive physical_rows. It panics if row_id_meta is absent, treating presence as stable-ID sanity check without decoding it. physical_rows is authoritative even if row-ID bytes disagree. from_sequence is unwrapped although locally always Ok. Leading comment says no existing metadata, but body never checks existing creation/update metadata; caller decides whether to replace. Zero/unknown physical rows yield None."
+        ],
+        [
+          680,
+          712,
+          "Full-fragment rewrite refresh chooses any Some physical_rows first (including0), otherwise inline row-ID decode length using unwrap, Column/absent row IDs as0. Positive count replaces last_updated_at with uniform current version; zero count leaves existing metadata unchanged. It does not require row-ID metadata when count is known, use spilled sequences or touch creation versions. Malformed inline row IDs can panic despite Result return."
+        ],
+        [
+          713,
+          749,
+          "Partial refresh documents updated local offsets and preserving untouched versions/default prev_version. Count selection prefers physical_rows, else inline row-ID decode unwrap; unlike full refresh, Column row IDs without physical_rows return NotSupported, and missing row IDs imply0. It does not consult spilled.row_ids to recover unknown count. Zero count later causes a no-op."
+        ],
+        [
+          750,
+          782,
+          "Positive-count partial refresh allocates per-row Vec<u64>. Existing Column last-updated metadata requires spilled[fragment.id].last_updated_at or contextual NotSupported; loaded Arc payload is deep-cloned to an owned sequence. Existing Inline decode uses load_sequence().ok(), silently replacing a decode error with prev_version defaults. A decoded/loaded sequence is lazily expanded, truncated to count and padded with prev_version; no length mismatch error. Missing metadata also defaults every row."
+        ],
+        [
+          783,
+          816,
+          "Partial refresh assigns current_version only for offsets<len, silently ignores out-of-range positions, and tolerates duplicates/unsorted input. It scans the full version Vec into maximal equal-version Range runs and serializes to Inline before assigning last_updated_at. No monotonic version check, creation metadata change or column-file deletion. Empty updated_offsets still recompresses/replaces metadata when row count>0. Allocation is O(rows+runs+encoded bytes); returned errors before final assignment leave fragment unchanged, though unwrap/allocation panic is possible."
+        ],
+        [
+          817,
+          833,
+          "TryFrom last-updated protobuf arm declares Error but both arms return Ok: copied/moved Vec becomes new Arc or empty marker becomes Column. It validates neither payload bytes nor field carrier/flags/count."
+        ],
+        [
+          834,
+          848,
+          "TryFrom creation-version protobuf arm has the same infallible local control flow and allocation/validation boundaries. Separate implementations are needed because protobuf uses distinct oneof types."
+        ],
+        [
+          849,
+          864,
+          "Private cfg(test) imports parent; JSON test asserts exact column object string and roundtrips it, then roundtrips inline bytes[1,2,3] without interpreting those bytes as a valid sequence."
+        ],
+        [
+          865,
+          889,
+          "from_versions fixture checks empty input, uniform[3,3,3] one run/version3/len3, and alternating[1,2,1,2] run versions plus expanded values. It does not directly assert span coordinates."
+        ],
+        [
+          890,
+          915,
+          "Random-access fixture uses run spans0..3,0..2,0..1 with versions1/2/3, proving the reader uses concatenated lengths rather than absolute span positions. Checks positions0,2,3,4,5 and out-of-range6."
+        ],
+        [
+          916,
+          952,
+          "Partial-refresh fixture creates10,000 alternating single-row runs inline, updates only final offset to3, then asserts length and first two/last two values. Despite test name streams, implementation materializes the per-row vector. This is a correctness fixture, not timing/memory measurement; source tests were not executed."
+        ],
+        [
+          953,
+          975,
+          "Protobuf roundtrip uses two overlapping-coordinate Range runs of lengths4 and3 with versions42/99. Asserts two runs,total7,versions at0/5, not exact byte equality or every span field. No corrupt/missing-span case here."
+        ],
+        [
+          976,
+          997,
+          "Row-ID lookup fixture pairs IDs10..14 with length2 version8 then length2 version9; asserts all four and absent99. No unsorted/sparse/duplicate/mismatched-length ID fixture locally."
+        ],
+        [
+          998,
+          1035,
+          "Cursor fixture includes an empty middle run version99. Adjacent0..2/2..5 plus forward gap7..9 produce exact versions without99; backward1..6 matches expected slice and empty6..6 changes nothing. This exercises cursor empty-run handling, not VersionsIter."
+        ],
+        [
+          1036,
+          1059,
+          "Descending cursor fixture creates10,000 single-row runs and reads one position at a time in reverse, asserting exact reversed values and a10,000-entry index. Does not measure latency or assert seek counter."
+        ],
+        [
+          1060,
+          1098,
+          "Alternating cursor fixture repeatedly selects last then first position over10,000 runs, asserts exact values/index length and RUNS-1 indexed seeks. First forward read scans without building index; first rewind creates it and subsequent nonadjacent jumps use it."
+        ],
+        [
+          1099,
+          1113,
+          "Out-of-bounds cursor fixture selects4..5 from length4 and asserts Internal, exact position4/total_len4 diagnostic substring and unchanged empty output. It does not cover a selection that first appends valid values then overflows."
+        ],
+        [
+          1114,
+          1134,
+          "Non-range cursor fixture constructs span from[0,2,4,6,8], asserts it is not Range, pairs with three-row version8 span and expects five4s then three8s. Local suite lacks direct mask/rechunk/build/full-refresh, corrupt-inline fallback, unloaded Column, length mismatch, invalid offsets, stale cursor source and VersionsIter empty-run tests; other files may test these but remain pending."
+        ]
+      ],
+      "limits": "All1,134 lines read in bounded chunks. Public rowids::version and selected format facade reexports are distinguished from pub(crate) cursor. Local RowIdSequence is covered at rust/lance-table/src/rowids.rs:1-2309; transaction/row_version.rs now supplies complete local creation resolution and assignment consumer analysis (rust/lance-table/src/transaction/row_version.rs:1-1461). Dataset loaders, stream consumers and full manifest/retry orchestration remain pending; contextual call sites are not a completed call graph. No source edits, network, builds, tests or benchmarks."
+    },
+    {
+      "path": "rust/lance-table/src/rowids.rs",
+      "module": "L1-modules/rust-lance-table.md",
+      "reviewed": true,
+      "role": "Row-ID sequence facade, construction and mutation, stateful selection, ID-mask to positional-range conversion, set conversion, slicing, rechunking and ReadBatchParams selection.",
+      "ranges": [
+        [
+          1,
+          38,
+          "SPDX/module docs describe fragment-order row IDs and dataset-wide RowIdIndex. bitmap,encoded_array,index,runs,serde modules are private; segment/version are public despite the preceding all-private comment. Reexports expose FragmentRowIdIndex,RowIdIndex,read_row_ids,write_row_ids. Imports connect DeepSizeOf,core errors,ReadBatchParams,RowAddrMask/TreeMap/RowSetOps,exact-size iterator adapter,segment cursor and tracing. No storage IO is performed by this file; serialization is a reexport from serde."
+        ],
+        [
+          39,
+          66,
+          "Public RowIdSequence is a private Vec<U64Segment> tuple field, deriving Debug,Clone,DeepSizeOf,PartialEq,Eq,Default. Equality compares representations, not only yielded IDs. Type contract assumes table-wide unique u64 IDs except tombstones, without requiring global order/contiguity. Crate-visible Debug/Default RowIdSequenceCursor stores segment index, preceding row count, optional cached segment length, SegmentCursorState and last requested index; it owns no sequence reference or identity."
+        ],
+        [
+          67,
+          91,
+          "Private advance_segment adds cached length (or0), increments segment index, clears length and resets segment cursor. get resets the whole cursor if index precedes rows_passed or last_index, then remembers the request. It scans segments, lazily caches len, delegates local rank to SegmentCursorState or advances. Empty segments are skipped; exhaustion returns None. Arithmetic is unchecked usize. Switching source/mutating it without a reset is unsupported by the state assumptions but not prevented by a lifetime tie."
+        ],
+        [
+          92,
+          130,
+          "extend_range returns immediately for empty/reversed selection, leaving state/output unchanged. Otherwise it resets on backward start, stores requested end-1 even if beyond EOF, walks segments and appends clipped local subranges. End exhaustion truncates silently. Finishing a segment advances and resets the bitmap state. It advances logical count by requested count, assuming segment extension emitted exactly that many valid values; malformed segment invariants are not revalidated."
+        ],
+        [
+          131,
+          172,
+          "extend_dense_range duplicates the sparse sequence traversal but calls SegmentCursorState::extend_dense_range. Comment says sharing the loop measurably slowed sparse system-only scans; this is source rationale, not a benchmark measured here. Empty/backward/EOF/segment-reset behavior matches the ordinary path. No density test occurs inside this method."
+        ],
+        [
+          173,
+          208,
+          "Display reads up to11 front values and11 back values because break is after len>10, reverses the back vector and probes one remaining item to choose ellipsis. Front values are written without separators; last values use comma-space; ellipsis is comma-space-dot-dot-dot. Thus Range0..3 displays [012], not a conventional comma-separated list. At most23 values are consumed, but underlying sparse-span iteration may scan more slots. It is diagnostic text, not a parsable canonical serialization."
+        ],
+        [
+          209,
+          236,
+          "From<Range<u64>> wraps one raw range without validation; From<&[u64]> wraps one selected segment even for empty input and assumes uniqueness. Private find_duplicate first checks strictly increasing adjacent pairs without allocating; if that fails, clones/sorts all values and returns the first equal pair, hence the smallest duplicate value after sorting. Unsorted unique inputs pay the sorting copy; empty/singleton input passes the fast check."
+        ],
+        [
+          237,
+          266,
+          "new uses empty Vec Default. try_from_iter collects all input into Vec, returns canonical empty sequence for empty input, rejects a duplicate with InvalidInput including duplicate ID and total count, then constructs one U64Segment from the original order. It validates uniqueness only within this input. Comment says commit does not recheck dataset-wide uniqueness; that downstream claim remains pending commit analysis. Segment constructor is another collection stage, though moving a Vec iterator can permit allocation reuse; no streaming interface or global uniqueness proof."
+        ],
+        [
+          267,
+          278,
+          "iter flat_maps boxed segment iterators and exposes DoubleEndedIterator, preserving segment order. len sums segment.len as u64 with ordinary addition, inheriting per-segment usize casts/popcount work. is_empty checks only whether the segment Vec is empty, not whether total len is0. From(0..0), From(empty slice) and delete-all can therefore have len0 but is_empty false, unlike new/try_from_iter(empty)."
+        ],
+        [
+          279,
+          301,
+          "row_id_range scans segment bounds twice for minimum start and maximum end and returns inclusive bounds, or None if no segment supplies bounds. It is conservative and does not test membership. The comment that no values implies None has a caveat: a nonempty enclosing bitmap range with zero present bits still supplies bounds via segment.range (rust/lance-table/src/rowids/segment.rs:360-376). It does not canonicalize malformed compressed array bases."
+        ],
+        [
+          302,
+          320,
+          "extend consumes another sequence, merging only the existing final plain Range and incoming first plain Range when their endpoints touch. It replaces the final segment then moves remaining incoming segments; otherwise appends all. No overlap/duplicate/order validation, empty-segment cleanup, total-length overflow check or other representation optimization. Existing internal adjacent ranges are not swept."
+        ],
+        [
+          321,
+          339,
+          "use_range_segments visits every segment and replaces each successful as_ranges result, reporting whether any changed. No config/version gate exists in this public method. Comment explains reader performance motivation and intended table opt-in. A contextual caller in transaction/manifest_build.rs75-122 gates through lance.row_ids.range_segments and read/rewrites changed inline sequences; full transaction integration remains pending. Wire expansion is the existing sequence serde path, not a new protobuf arm."
+        ],
+        [
+          340,
+          366,
+          "delete first find_ids orders matching requested values by segment/local position. It replaces the backing Vec with a new Vec of equal capacity, clones unaffected segments from old storage, rebuilds affected ones through segment.delete and clones the tail. Even no matching IDs clones every segment. Empty results are retained as segments, so delete-all differs from mask-all. Duplicate requests are not deduplicated and may violate segment.delete preconditions; panic during rebuilding can leave self partially reconstructed."
+        ],
+        [
+          367,
+          397,
+          "mask accepts u32 physical positions and returns Result but has no Err branch. It walks original segment cutoffs using unchecked len-as-u32 and additions, consumes each position below cutoff, subtracts original offset and passes local positions to segment.mask. Inputs are assumed ordered/unique: descending positions can underflow after crossing a segment, duplicates can trigger segment count shortcuts, and an out-of-range front can hide later smaller positions. Remaining past-end positions are ignored. Segments mutate incrementally, then empty segments are removed even for an empty mask."
+        ],
+        [
+          398,
+          430,
+          "find_ids allocates one match Vec per segment and cycles segment enumeration. Despite the optimization comment, each input ID always scans exactly all segments because there is no break after a match; the iterator returns to its initial position for the next input. It first checks segment.range then segment.position, recording each matching local ordinal, including repeated requests and IDs present in multiple segments. Missing IDs are ignored. It sorts every segment match list but does not deduplicate."
+        ],
+        [
+          431,
+          455,
+          "find_ids computes contiguous slices into its eventual output for nonempty match lists, then converts each ordinal back to an ID with segment.get(...).unwrap. Output is segment order then local ordinal order, preserving duplicate requested matches. Position/get consistency is assumed; inconsistent public segment state can panic. Work includes all-segment searches plus sorting and another get for every match."
+        ],
+        [
+          456,
+          494,
+          "slice(len0) returns an empty borrowed RowIdSeqSlice regardless of offset. Positive len subtracts segment lengths to locate start and endpoint, then forms an inclusive segment slice. It does not return Result or clamp: offset at/past total or excessive positive len leads to slice-index panic; offset_start+len can overflow. A boundary end remains in the preceding segment because comparison is<=. Empty intermediate segments are traversed. Values are not copied at construction."
+        ],
+        [
+          495,
+          515,
+          "segments exposes immutable &[U64Segment]. The preceding get/out-of-bounds/None doc lines are misplaced on this accessor; it always returns a slice. Public get instead scans segment lengths from the beginning, returns delegated local get at first containing ordinal or None after EOF. Offsets/additions are unchecked usize; bitmap len recomputation can scan its storage on every independent get."
+        ],
+        [
+          516,
+          541,
+          "select creates a private cursor and last-index tracker and returns a lazy filter_map iterator. On consumption, strict decrease panics with Selection is not sorted; equal indices are allowed and repeat values. Out-of-bounds requests are dropped but still become last_index, so a later lower valid request panics. Crate-visible cursor() merely creates default state without binding its lifetime to self."
+        ],
+        [
+          542,
+          558,
+          "cursor_with_dense_range_expansion chooses dense mode only for exactly one RangeWithBitmap segment. It computes segment.len once, seeds cached length and calls segment density advisory; other shapes return an uncached default cursor/false. The threshold is segment.len>=bitmap.len-floor(bitmap.len/4), from segment.rs346-354. This avoids repeating initial popcount but does not validate storage or select among multiple dense segments."
+        ],
+        [
+          559,
+          593,
+          "select_range_with_cursor and dense counterpart preallocate Vec to selection.len before delegating; oversized requested ranges can allocate far beyond available output even though EOF is clipped. select_with_cursor returns lazy filter_map over the reusable cursor and permits decreasing indices via rewind. All three are pub(crate). Dense method trusts the caller policy. Cursor lifetime in the iterator borrows the supplied state and sequence only during that call, not across calls."
+        ],
+        [
+          594,
+          620,
+          "mask_to_offset_ranges is public and instrumented at debug with skip_all. It translates selected row IDs to present ordinal ranges, preserving sequence order and separate segment boundaries. Extracts finite allow-list with RowSetOps::len; bitmap segment count/total span and optional shared sorted-ID Vec are computed lazily. RowAddrMask is an exclusive AllowList/BlockList enum, so this fast path omits no simultaneous block list (context: rust/lance-select/src/mask.rs:24-79)."
+        ],
+        [
+          621,
+          646,
+          "Plain Range path constructs RowAddrTreeMap, applies mask, walks inclusive low32 runs, recombines high32 fragment and offsets, subtracts range.start/adds prior sequence offset, and coalesces adjacent runs within this segment. End reconstruction uses bitwise OR of frag<<32 and low_end+1. At low_end=u32MAX with odd fragment, carry bit overlaps existing high bits: for singleton ID8589934591 in range8589934591..8589934592, computed end is4294967296 and subtraction underflows instead of producing ordinal1. This is source-derived, unexecuted; iter_runs exposes inclusive u32 runs and insert_range can store that singleton (rust/lance-select/src/mask.rs:545-588; rust/lance-select/src/mask.rs:801-810)."
+        ],
+        [
+          647,
+          674,
+          "Holes path creates full range set, removes each hole and subtracts only successful removals from total offset, applies mask, clones/decodes/sorts holes and walks selected addresses. For each address it subtracts count of holes strictly below it, then groups ordinals. Sorting permits the tested unsorted unique hole list here, unlike several segment methods. Duplicate/outside holes can disagree with the successful-removal count and rank subtraction; valid unique in-range holes are assumed."
+        ],
+        [
+          675,
+          705,
+          "Bitmap fast path applies only with finite allow count. On first such bitmap, scans all sequence segments to cache bitmap count and summed enclosing numeric span, using ordinary u64 additions/subtractions. Uses direct selected-ID processing only if total selected count<=total bitmap span; otherwise fallback. This is a global heuristic, not each segment density. One bitmap streams allowed IDs; multiple bitmaps materialize allowed IDs once for binary-search slicing."
+        ],
+        [
+          706,
+          740,
+          "For multiple bitmap segments, lazily call allow_list.row_addrs once and cache Some(Vec<sorted IDs>) or None. For each applicable segment increment offset by bitmap.count_ones, binary-search the cached IDs at start/end and feed that subrange to bitmap_selected_offsets; single bitmap filters streamed addresses by range containment. If row_addrs unavailable, fall through. Contextual row_addrs collects an iterator per tree entry before flattening, so streaming avoids copying all IDs but is not allocation-free (rust/lance-select/src/mask.rs:497-515)."
+        ],
+        [
+          741,
+          763,
+          "Bitmap fallback materializes full range set, scans every numeric slot, removes missing bits while reducing total count, applies mask, then incrementally consumes bitmap logical iterator to count earlier holes for selected addresses. Iterator unwrap relies on valid bitmap length. This path scales with enclosing span plus selected values, whereas fast path popcounts intervening prefixes and selected IDs. No errors are returned locally; malformed padding/span can make fast and fallback lengths disagree."
+        ],
+        [
+          764,
+          781,
+          "Ranges path advances total by runs.present_len, inserts each base-adjusted present gap into a new tree map, applies mask and translates each address through runs.position(relative as u32).expect before grouping. HoleRuns invariants and inserted-set containment justify expect for valid data. It does not coalesce output with a prior segment."
+        ],
+        [
+          782,
+          800,
+          "SortedArray and Array both enumerate values in stored order and use mask.selected, producing ordinal=local index+prior count through GroupingIterator; sorting the IDs is neither required nor performed. Then advance by array length. Method returns accumulated Vec with no cross-segment range merge. Comment suggests sorted-array optimization but no separate algorithm exists."
+        ],
+        [
+          801,
+          839,
+          "Private GroupingIterator stores inner iterator and optional current half-open range. next extends only when next ID equals current end; otherwise yields old range and starts ID..ID+1. At inner EOF it takes the remaining range. It assumes appropriate order/distinctness for nonoverlapping increasing output; does not validate either, and ID+1 is unchecked at u64MAX. No FusedIterator/ExactSizeIterator guarantee is added."
+        ],
+        [
+          840,
+          864,
+          "bitmap_selected_offsets assumes sorted in-range IDs. Missing bitmap bits return None without advancing prefix state. Present IDs add popcount over bitmap slice previous_position..position, leave previous_position at the selected position, and emit offset_start+live_before. Including the previous selected bit in the next slice gives correct rank increments; repeated IDs repeat offsets. Relative subtraction/casts and sorted-delta subtraction are unchecked. GroupingIterator collects the local output Vec."
+        ],
+        [
+          865,
+          907,
+          "From<&RowIdSequence> for RowAddrTreeMap builds each segment in a fresh temporary set, then unions it into aggregate. Range inserts bounds; bitmap removes every absent slot; holes remove listed values; Ranges inserts present gaps; arrays insert each value. Isolating removals per segment preserves values present in overlapping other segments. Set conversion loses sequence order/duplicate multiplicity. It inherits tree-map edge behavior: contextual insert_range saturates excluded end0 to0, so Range0..0 inserts ID0 rather than nothing (rust/lance-select/src/mask.rs:545-588; rust/lance-select/src/mask.rs:1014-1019); full dependency analysis remains pending."
+        ],
+        [
+          908,
+          945,
+          "Public Debug RowIdSeqSlice has private borrowed segment slice, first start offset and last end offset. iter computes exact remaining size from sum of segment lengths minus trimmed prefixes/suffixes, then boxes iterators using skip/take for edge segments and full iteration for middle segments. One-segment case takes offset_last-offset_start. Calls exact_size adapter but return type advertises only Iterator; size_hint still reflects supplied count and decrements through that adapter. Arithmetic assumes valid slice; source borrow forbids ordinary mutation while view lives."
+        ],
+        [
+          946,
+          987,
+          "Public rechunk_sequences consumes sequence and u64 size iterables plus allow_incomplete, collecting all sizes/output upfront. Flattens owned segment vectors into Peekable and tracks u64 offset within current segment. InvalidInput closures include chunk index/expected size/remaining count or processed/expected chunk counts. Docs motivate later allocation of IDs for inserted rows, but this function never creates those IDs itself and returns a Vec, not a stream."
+        ],
+        [
+          988,
+          1013,
+          "For each requested chunk create an empty sequence. While remaining>0, inspect current segment length minus segment_offset. Empty/exhausted segments are consumed and offset reset; if no segment remains, allow_incomplete breaks with a short chunk, otherwise error. Later requested chunks still appear as empty when exhausted and incomplete allowed. A zero-sized chunk skips this loop and emits an empty Vec-backed sequence without consuming empty input segments."
+        ],
+        [
+          1014,
+          1043,
+          "If segment has more remaining values than requested, slice requested ordinal range, extend output and keep current segment with increased offset. Equal/less consumes segment, slices remaining values and extends, resetting offset and subtracting count. Even a whole uncut segment is rebuilt through U64Segment::slice, which materializes/re-encodes values; plain range input can cost proportional rows. u64-to-usize casts are unchecked. Adjacent plain output ranges may merge through extend."
+        ],
+        [
+          1044,
+          1053,
+          "After all chunk sizes, any peeked segment produces too-many error regardless of its length or allow_incomplete. Thus leftover empty segments cause an error even when total row cardinalities match; zero chunk sizes do not drain them. allow_incomplete allows shortages only, never excess input. Earlier output allocations are discarded on Result error; consumed inputs cannot be recovered."
+        ],
+        [
+          1054,
+          1089,
+          "select_row_ids accepts borrowed sequence and ReadBatchParams and returns owned Vec. Error closure includes u32 index and freshly computed sequence.len. Indices reads Arrow values buffer directly, without inspecting validity. Nondecreasing values check only last against length then use cursor-based select; arbitrary order uses independent get per index and errors at first missing. Duplicates preserve repeated output; empty values return empty. Nullable index-array policy belongs to ReadBatchParams producers and is not enforced here."
+        ],
+        [
+          1090,
+          1113,
+          "Range checks only end<=sequence.len as usize then slices start,end-start. Ranges sums lengths with unchecked subtraction/casts, preallocates full requested count before per-range end checks, then slices/extends in supplied order. Neither rejects reverse bounds explicitly; arithmetic/panics can precede an InvalidInput. Error offset casts end to u32 and can truncate diagnostic values. A zero-length range accepted by end check uses slice empty shortcut."
+        ],
+        [
+          1114,
+          1129,
+          "RangeFull collects every ID. RangeTo checks end, then slices0..end. RangeFrom performs sequence.len as usize minus start with no explicit start bound check; excessive start can underflow/panic rather than return InvalidInput. All returned data is materialized; no IO, schema conversion or cancellation handling occurs here."
+        ],
+        [
+          1130,
+          1157,
+          "cfg(test) imports module, pretty_assertions and Bitmap. Range fixture asserts len10/nonempty/exact iteration. rstest checked-constructor cases cover sorted contiguous, sorted gapped, sparse and reverse inputs, checking exact order and length. These tests were read, not executed."
+        ],
+        [
+          1158,
+          1190,
+          "Checked construction tests pin contiguous input to one Range and empty input to len0/is_empty true. Three duplicate patterns (adjacent,separated,unsorted) require InvalidInput and must-be-unique substring. No global cross-sequence duplicate or infallible constructor rejection is asserted."
+        ],
+        [
+          1191,
+          1233,
+          "Extend test pins adjacent plain range merge and disjoint range retention. Delete test pins alternating survivors to bitmap, cross-segment deletion with missing requested IDs ignored, and delete-all to one Range0..0. It does not assert is_empty after delete-all or test duplicate deletion requests."
+        ],
+        [
+          1234,
+          1284,
+          "Slice fixture uses six segments spanning Range,holes,sorted array,bitmap,general array and final Range. Nested offset/len loops keep only valid bounds, compare values with full-iteration skip/take and check equal size-hint bounds/actual length. Loops exclude len==total and offset==total; separate test covers offset10,len0. Ranges representation and invalid positive bounds are absent."
+        ],
+        [
+          1285,
+          1334,
+          "Nested assert_rechunked compares exact sequence structures for small-to-large, large-to-small and equal chunks, including adjacency coalescing. Too-few and too-many cases assert only is_err, not error variants/messages. All chunks here are positive and valid total counts except deliberate mismatches."
+        ],
+        [
+          1335,
+          1401,
+          "select_row_ids fixture covers sorted/unsorted Indices, Range,Full,To,From and multiple Ranges across two mixed segment sequences. It constructs a flattened-values/explicit-index oracle and checks exact output. No compact Ranges segment, nullable indices, reverse bounds or oversized From case appears."
+        ],
+        [
+          1402,
+          1446,
+          "Bounds fixture checks InvalidInput for sorted/unsorted index1000, Range end1000 and RangeTo1000 over ten IDs; omits Ranges/RangeFrom. Treemap conversion fixture asserts explicit sorted union of six mixed segments. It does not assert sequence order survives set conversion."
+        ],
+        [
+          1447,
+          1467,
+          "Overlapping-bounds regression uses complementary even/odd bitmaps over0..6 and requires the aggregate set contain all six IDs, preventing one segment missing-bit removal from erasing another segment live ID. Oracle includes both explicit0..6 and collected sequence membership."
+        ],
+        [
+          1468,
+          1523,
+          "Position-mask fixture derives ordered positions for one removal from each of five representation segments, applies mask and asserts exact survivor segment encodings. It covers valid unique offsets, not malformed ordering/duplicates or Result failure."
+        ],
+        [
+          1524,
+          1558,
+          "Mask-all fixture over Range and SortedArray requires an empty segment Vec, unlike delete-all. Selection fixture constructs five mixed segments and checks sorted picks including past-end57 drop against flattened expected values."
+        ],
+        [
+          1559,
+          1583,
+          "Ordinary cursor selection tests chunk sizes1/3/7/16 across all values, a forward6..19 request, rewind1..8 and a tail request extending five past EOF. Results match independent slices of the flattened sequence; they do not reuse a cursor on a different sequence."
+        ],
+        [
+          1584,
+          1620,
+          "Bitmap40 with holes3/4/17/39 plus a plain five-row segment yields41 values. Tests full selection, sparse/repeated/past-end picks, sequential range chunks and rewind2..6 against flattened values. This covers bitmap byte boundaries and segment transition but not cached-length invalidation after mutation."
+        ],
+        [
+          1621,
+          1665,
+          "Dense cursor fixture uses one90%-present bitmap and asserts dense selection plus seeded len. Sequential chunks (including byte boundary and past-end) and rewind match expected. Half-full bitmap chooses sparse while still caching20; adding another segment disables dense and leaves lenNone. Threshold equality and all-zero nonempty bitmap are not tested."
+        ],
+        [
+          1666,
+          1697,
+          "Large cursor regression creates one-million-slot bitmap with every17th bit cleared after initial Range0..8. It compares full selection and sorted boundary/stride9973/tail/past-end picks to a flattened oracle. Comment predicts a restart-per-index slowdown, but no elapsed-time assertion or benchmark measurement is performed."
+        ],
+        [
+          1698,
+          1730,
+          "Large fixture additionally reads final100,000 values in one range and chunks1/7/8/9/1024/4097, checking exact concatenation. Separate should_panic test consumes public selection[2,4,3] and requires Selection is not sorted. Internal select_with_cursor decreasing-index iterator is not directly tested by this case."
+        ],
+        [
+          1731,
+          1774,
+          "Mask-to-offset examples cover even selection in Range0..10, allow/block54 within40..60, holes2/6, and an intentionally unsorted hole array[47,43] with allow/block44. Exact expected ordinal ranges demonstrate holes sorted locally for rank correction. These low-value fixtures do not reach high32 boundaries."
+        ],
+        [
+          1775,
+          1804,
+          "Bitmap mask examples cover live0/1/4/5/6/7 with even allowed IDs and separate40..45 bitmap allow/block44. Expected ranges pin omitted holes and present ordinal rank; only allow-list case takes the finite-ID optimization."
+        ],
+        [
+          1805,
+          1839,
+          "Sparse bitmap1024 with holes3/7/64/1000 follows a five-row segment. Mask includes live/hole/outside boundary IDs and expected offsets7..8,66..68,1024..1025. Empty and all-missing masks yield empty. Full-fragment allow marker forces fallback and preserves adjacent segment boundary ranges0..5,5..1025."
+        ],
+        [
+          1840,
+          1879,
+          "Sorted/general array masks check stored-order ordinal grouping, mixed-segment example preserves global offsets, default mask selects full Range and allow_nothing selects none. No empty Range0..0/high32 carry case is included."
+        ],
+        [
+          1880,
+          1901,
+          "Brute-force oracle enumerates each segment values, tests mask.selected and groups resulting ordinals separately per segment. Comment claims no shared logic, but it reuses GroupingIterator and segment.iter/len, so it is independent of optimized mask branches rather than wholly independent. Agreement on fixtures cannot prove all-input equivalence."
+        ],
+        [
+          1902,
+          1924,
+          "Private TestRng holds u64 state. next replaces zero with1, performs xorshift12/25/27 and wrapping multiplication0x2545_F491_4F6C_DD1D; below debug-asserts positive bound then modulo. Seeds0 and1 start identically; modulo sampling is not claimed unbiased. Generator comments introduce disjoint-range fixtures and missing-ID lists."
+        ],
+        [
+          1925,
+          1955,
+          "random_sequence chooses1..4 segments with initial cursor<1000. Kind0 is Range span1..300; kind1/2 bitmap span50..1999 with random hole probability10..90 percent but first slot forced live. Records missing IDs and advances cursor; these generated segments never have empty presence."
+        ],
+        [
+          1956,
+          1996,
+          "Kind3 builds range span20..199 with1..5 sampled holes, sorts/deduplicates them and records them. Final kind makes1..8 sampled IDs within span3*count+1, deduplicates then chooses shuffled Array or SortedArray; advances cursor by full span. No Ranges form, overlapping ranges, huge IDs, empty segments or malformed storage. Returns sequence, recorded holes and next cursor."
+        ],
+        [
+          1997,
+          2019,
+          "random_allow_mask chooses mainly live IDs, sometimes known holes, lower-outside IDs when live[0]>0, or IDs at/past past_end. It preallocates requested count then converts through TreeMap, so duplicates collapse and actual allowed cardinality can be smaller. It assumes live nonempty; random_sequence guarantees that for its fixtures."
+        ],
+        [
+          2020,
+          2043,
+          "Fifty seeded randomized cases generate sequence/live IDs, assert nonempty, and compare allow_nothing,allow_all-live,default,empty/nonempty block masks, three small mixed allow masks and one medium mask. Seeds0/1 duplicate initial generator state. Assertions verify equality to the local brute-force oracle, not timing or a formal proof."
+        ],
+        [
+          2044,
+          2071,
+          "Further randomized masks add a broad allowed region beyond every segment to force fallback and masks containing only holes/outside IDs. Each mask compares optimized result and oracle with seed/mask-index context. The generator restricts ID domains to small values, so u32/u64 boundary arithmetic is not exercised."
+        ],
+        [
+          2072,
+          2105,
+          "Two-bitmap regression follows Range0..5 with100..110 missing102/107 and200..205 missing200. Selected/live/hole/outside IDs yield explicit split ranges0..1,4..5,5..6,7..8,12..13,13..14,16..17 plus oracle equality. All-missing mask yields empty. This pins shared finite-selection cache semantics and lack of cross-segment merging."
+        ],
+        [
+          2106,
+          2118,
+          "Broad two-bitmap allow list includes all live IDs and100 outside IDs, requiring equality with oracle through fallback. It does not measure one-time materialization or assert how many dependency iterators were created."
+        ],
+        [
+          2119,
+          2152,
+          "Rechunk empty-segment test begins with exact-fit two chunks and a smaller-segment accumulation into one chunk, asserting both counts and concrete values. These first scenarios contain no empty segments despite the test name."
+        ],
+        [
+          2153,
+          2186,
+          "Rechunk fixtures then place one empty Range between live runs with split3/1 and multiple consecutive empties while building a three-row chunk. Both assert output cardinality and values. Empty segments are consumed only while some requested chunk still needs rows."
+        ],
+        [
+          2187,
+          2219,
+          "Boundary empty between two positive chunks is skipped when filling the next chunk. Incomplete fixture has two live IDs then trailing empty and requested5, returning only those two. It does not cover trailing empty after an exactly filled final chunk, zero-sized chunks or excess input with allow_incomplete."
+        ],
+        [
+          2220,
+          2250,
+          "row_id_range tests cover empty raw Range returningNone, exact10..=19, unsorted input bounded around10/50 and disjoint-range union0..=104. They do not test is_empty consistency, all-missing nonzero bitmap bounds or noncanonical relative array bases."
+        ],
+        [
+          2251,
+          2271,
+          "Clustered live values0..600 excluding50..250 and300..310 initially select bitmap. use_range_segments returns true and yields one Ranges; second call returns false and preserves exact equality. It validates local idempotence, not manifest configuration or on-disk reader performance."
+        ],
+        [
+          2272,
+          2309,
+          "Compact Ranges fixture compares full values/count, cursor chunks37, selected indices, allow/block masks and treemap conversion against bitmap; protobuf encode/decode must equal the compact sequence. It exercises serde folding but does not establish historical released compatibility. File ends here; no direct Display, invalid mask, duplicate delete, source-switch cursor or high-domain range regression is present. All tests are source-read only."
+        ]
+      ],
+      "limits": "All2,309 physical lines read in ten bounded numbered chunks. This file is synchronous; no storage reads/writes, task scheduling, cancellation or commit occurs locally. Segment/serde/version primitives are fully analyzed. Contextual snippets in lance-select mask.rs, table utils/stream.rs and transaction/manifest_build.rs establish limited dependencies/callers only; those full files remain pending and their snippets do not count as completed coverage. Dataset compaction/update/merge-insert rechunk callers were located lexically, not fully traced. No source edits, network, build/test/benchmark execution or measured performance claims. Transaction::assign_row_ids now supplies a reviewed allocation/extension consumer and resolve_update_version_metadata supplies ID-to-source scanning (rust/lance-table/src/transaction/row_version.rs:97-295; rust/lance-table/src/transaction/row_version.rs:332-405); full builder and dataset callers remain pending."
+    }
+  ]
+}

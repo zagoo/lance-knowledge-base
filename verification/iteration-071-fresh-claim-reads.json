@@ -1,0 +1,128 @@
+[
+  {
+    "id": 2,
+    "path": "rust/lance-core/src/cache/entry_io.rs",
+    "start": 117,
+    "end": 138,
+    "unit": "lines",
+    "read_at": "2026-10-04T03:28:11.297Z",
+    "evidence": "117 | /// Reads a cache entry body, tracking an offset into the input and exposing\n118 | /// the entry's `type_version` so implementors can branch for backward compat.\n119 | ///\n120 | /// All reads are zero-copy: returned [`Bytes`] and the buffers behind decoded\n121 | /// [`RecordBatch`]es borrow from the input allocation.\n122 | pub struct CacheEntryReader<'a> {\n123 |     data: &'a Bytes,\n124 |     offset: usize,\n125 |     version: u32,\n126 | }\n127 | \n128 | impl<'a> CacheEntryReader<'a> {\n129 |     /// Create a reader over `data`, starting at body byte `offset`, for an\n130 |     /// entry written at `version`.\n131 |     pub fn new(data: &'a Bytes, offset: usize, version: u32) -> Self {\n132 |         Self {\n133 |             data,\n134 |             offset,\n135 |             version,\n136 |         }\n137 |     }\n138 | "
+  },
+  {
+    "id": 3,
+    "path": "protos/index_old.proto",
+    "start": 55,
+    "end": 80,
+    "unit": "lines",
+    "read_at": "2026-10-04T03:28:11.298Z",
+    "evidence": "55 |   enum DocumentGranularity {\n56 |     ROW = 0;\n57 |     LIST_ELEMENT = 1;\n58 |   }\n59 | \n60 |   message CodeTokenizerConfig {\n61 |     /* Split one lexical identifier into subwords, e.g. getUserName ->\n62 |      * get/user/name.\n63 |      */\n64 |     bool split_identifiers = 1;\n65 |     /* Split identifier subwords across letter/number boundaries, e.g.\n66 |      * HTML2JSON -> html/2/json. An absent value uses the code tokenizer default;\n67 |      * a present value records the explicit index-time choice.\n68 |      */\n69 |     optional bool split_on_numerics = 2;\n70 |     /* Keep the complete lexical identifier in addition to subwords, e.g.\n71 |      * user_name plus user/name. An absent value uses the code tokenizer default;\n72 |      * a present value records the explicit index-time choice.\n73 |      */\n74 |     optional bool preserve_original = 3;\n75 |     /* Index operator tokens such as \"::\", \"->\", and \"!=\". Operators are not\n76 |      * indexed by default because they are often high-frequency noise.\n77 |      */\n78 |     bool index_operators = 4;\n79 |   }\n80 | "
+  },
+  {
+    "id": 6,
+    "path": "rust/lance-core/src/utils/row_addr_remap.rs",
+    "start": 90,
+    "end": 103,
+    "unit": "lines",
+    "read_at": "2026-10-04T03:28:11.298Z",
+    "evidence": "90 | \n91 |     /// Build an ordered remap chain, flattening nested chains and omitting\n92 |     /// empty remaps.\n93 |     pub fn chained(remaps: impl IntoIterator<Item = Self>) -> Self {\n94 |         let mut remaps = remaps\n95 |             .into_iter()\n96 |             .filter(|remap| !remap.is_empty())\n97 |             .collect::<Vec<_>>();\n98 |         match remaps.len() {\n99 |             0 => Self::empty(),\n100 |             1 => remaps.pop().unwrap(),\n101 |             _ => Self::Compact(CompactRowAddrRemap::chained(remaps)),\n102 |         }\n103 |     }"
+  },
+  {
+    "id": 7,
+    "path": "rust/lance-file/src/reader.rs",
+    "start": 2401,
+    "end": 2423,
+    "unit": "lines",
+    "read_at": "2026-10-04T03:28:11.298Z",
+    "evidence": "2401 |         // Next, read the metadata for the columns\n2402 |         // This is both the column metadata and the CMO table\n2403 |         let column_metadata_start = footer.column_meta_start as usize;\n2404 |         let column_metadata_end = footer.global_buff_offsets_start as usize;\n2405 |         let column_metadata_bytes = bytes.slice(column_metadata_start..column_metadata_end);\n2406 |         let column_metadatas =\n2407 |             FileReader::read_all_column_metadata(column_metadata_bytes, &footer)?;\n2408 | \n2409 |         let page_table = versions::decode_column_metadata(file_version, &column_metadatas)?;\n2410 | \n2411 |         Ok(Self {\n2412 |             data: bytes,\n2413 |             num_rows: page_table\n2414 |                 .first()\n2415 |                 .map(|col| col.page_infos.iter().map(|page| page.num_rows).sum::<u64>())\n2416 |                 .unwrap_or(0),\n2417 |             page_table,\n2418 |             top_level_columns: projection.column_indices,\n2419 |             schema: Arc::new(schema),\n2420 |         })\n2421 |     }\n2422 | }\n2423 | "
+  },
+  {
+    "id": 8,
+    "path": "rust/lance-table/src/format/overlay/staleness.rs",
+    "start": 341,
+    "end": 379,
+    "unit": "lines",
+    "read_at": "2026-10-04T03:28:11.299Z",
+    "evidence": "341 |     #[test]\n342 |     fn test_collect_frags_missing_bitmap_covers_all() {\n343 |         let schema = flat_test_schema();\n344 |         // A segment with no fragment_bitmap (legacy index predating bitmap tracking) must treat\n345 |         // every overlaid fragment as covered so stale rows can't leak past the index unmasked.\n346 |         let fragment = fragment_with_overlay(3, dense_overlay(vec![3], [1, 2], 9));\n347 |         let overlaid: HashMap<u32, &Fragment> = HashMap::from([(3u32, &fragment)]);\n348 | \n349 |         let mut stale = RoaringBitmap::new();\n350 |         collect_overlay_stale_frags(&segment(vec![3], 1, None), &overlaid, &mut stale, &schema)\n351 |             .unwrap();\n352 |         assert_eq!(stale, bitmap([3]), \"missing bitmap must cover fragment 3\");\n353 | \n354 |         // A present bitmap that excludes fragment 3 leaves it untouched.\n355 |         let mut stale = RoaringBitmap::new();\n356 |         collect_overlay_stale_frags(\n357 |             &segment(vec![3], 1, Some(bitmap([0]))),\n358 |             &overlaid,\n359 |             &mut stale,\n360 |             &schema,\n361 |         )\n362 |         .unwrap();\n363 |         assert!(\n364 |             stale.is_empty(),\n365 |             \"fragment absent from bitmap is not covered\"\n366 |         );\n367 | \n368 |         // A present bitmap that includes fragment 3 marks it stale.\n369 |         let mut stale = RoaringBitmap::new();\n370 |         collect_overlay_stale_frags(\n371 |             &segment(vec![3], 1, Some(bitmap([3]))),\n372 |             &overlaid,\n373 |             &mut stale,\n374 |             &schema,\n375 |         )\n376 |         .unwrap();\n377 |         assert_eq!(stale, bitmap([3]));\n378 |     }\n379 | "
+  },
+  {
+    "id": 9,
+    "path": "rust/lance-table/src/rowids/serde.rs",
+    "start": 640,
+    "end": 662,
+    "unit": "lines",
+    "read_at": "2026-10-04T03:28:11.299Z",
+    "evidence": "640 | \n641 |     #[test]\n642 |     fn test_rejects_encoded_offset_overflow() {\n643 |         use pb::encoded_u64_array as pb_array;\n644 | \n645 |         let arrays = [\n646 |             pb_array::Array::U16Array(pb_array::U16Array {\n647 |                 base: u64::MAX,\n648 |                 offsets: 1u16.to_le_bytes().to_vec(),\n649 |             }),\n650 |             pb_array::Array::U32Array(pb_array::U32Array {\n651 |                 base: u64::MAX,\n652 |                 offsets: 1u32.to_le_bytes().to_vec(),\n653 |             }),\n654 |         ];\n655 |         for array in arrays {\n656 |             assert_corrupt_segment(\n657 |                 pb::u64_segment::Segment::Array(pb::EncodedU64Array { array: Some(array) }),\n658 |                 \"overflows u64\",\n659 |             );\n660 |         }\n661 |     }\n662 | "
+  },
+  {
+    "id": 10,
+    "path": "rust/lance-table/src/utils/stream.rs",
+    "start": 41,
+    "end": 62,
+    "unit": "lines",
+    "read_at": "2026-10-04T03:28:11.299Z",
+    "evidence": "41 | \n42 | #[derive(Debug)]\n43 | struct SharedReadError(Arc<Error>);\n44 | \n45 | impl fmt::Display for SharedReadError {\n46 |     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {\n47 |         self.0.fmt(f)\n48 |     }\n49 | }\n50 | \n51 | impl std::error::Error for SharedReadError {\n52 |     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {\n53 |         Some(self.0.as_ref())\n54 |     }\n55 | }\n56 | \n57 | struct PendingReadBatch {\n58 |     task: Option<ReadBatchFut>,\n59 |     shared_task: Option<SharedReadBatchFut>,\n60 |     offset: u32,\n61 |     num_rows: u32,\n62 | }"
+  },
+  {
+    "id": 11,
+    "path": "rust/lance-core/src/utils/row_addr_remap.rs",
+    "start": 49,
+    "end": 70,
+    "unit": "lines",
+    "read_at": "2026-10-04T03:28:44.493Z",
+    "evidence": "49 | use crate::deepsize::{Context, DeepSizeOf};\n50 | use crate::utils::address::RowAddress;\n51 | use crate::{Error, Result};\n52 | use roaring::{RoaringBitmap, RoaringTreemap};\n53 | use std::collections::{HashMap, HashSet};\n54 | use std::hash::{BuildHasherDefault, Hasher};\n55 | use std::mem::size_of;\n56 | \n57 | /// A queryable row-address remapping with the exact semantics of\n58 | /// `HashMap<u64, Option<u64>>::get(&addr).copied()`:\n59 | ///\n60 | /// * `None` — the address is not affected by this remap (keep it unchanged)\n61 | /// * `Some(None)` — the row was deleted\n62 | /// * `Some(Some(addr))` — the row moved to `addr`\n63 | #[derive(Clone, Debug, PartialEq, Eq)]\n64 | pub enum RowAddrRemap {\n65 |     /// Compact, `O(#fragments)` remap built from per-group rewritten-row\n66 |     /// bitmaps and new-fragment layouts.\n67 |     Compact(CompactRowAddrRemap),\n68 |     /// Full materialized old-to-new address map. Uses `O(#rows)` memory.\n69 |     Direct(HashMap<u64, Option<u64>>),\n70 | }"
+  },
+  {
+    "id": 12,
+    "path": "rust/lance-file/src/versions/v1/writer/statistics.rs",
+    "start": 611,
+    "end": 634,
+    "unit": "lines",
+    "read_at": "2026-10-04T03:28:44.494Z",
+    "evidence": "611 | #[derive(Debug)]\n612 | pub struct StatisticsCollector {\n613 |     builders: BTreeMap<i32, (Field, StatisticsBuilder)>,\n614 | }\n615 | \n616 | impl StatisticsCollector {\n617 |     /// Try to create a new statistics collection. If no fields in the schema\n618 |     /// support statistics, will just return None.\n619 |     pub fn try_new(schema: &Schema) -> Option<Self> {\n620 |         let builders: BTreeMap<i32, (Field, StatisticsBuilder)> = visit_fields(schema)\n621 |             .filter(|f| supports_stats_collection(&f.data_type()))\n622 |             .map(|f| (f.id, (f.clone(), StatisticsBuilder::new(&f.data_type()))))\n623 |             .collect();\n624 |         if builders.is_empty() {\n625 |             None\n626 |         } else {\n627 |             Some(Self { builders })\n628 |         }\n629 |     }\n630 | \n631 |     pub fn get_builder(&mut self, field_id: i32) -> Option<&mut StatisticsBuilder> {\n632 |         self.builders.get_mut(&field_id).map(|(_, b)| b)\n633 |     }\n634 | "
+  },
+  {
+    "id": 14,
+    "path": "rust/lance-core/src/container/list.rs",
+    "start": 92,
+    "end": 108,
+    "unit": "lines",
+    "read_at": "2026-10-04T03:28:44.494Z",
+    "evidence": "92 | \n93 |     /// Clears the list, removing all elements.\n94 |     /// This will free the memory used by the list.\n95 |     pub fn clear(&mut self) {\n96 |         self.inner.clear();\n97 |         self.len = 0;\n98 |     }\n99 | \n100 |     /// Returns the number of elements in the list.\n101 |     pub fn len(&self) -> usize {\n102 |         self.len\n103 |     }\n104 | \n105 |     /// Returns whether the list is empty.\n106 |     pub fn is_empty(&self) -> bool {\n107 |         self.inner.is_empty()\n108 |     }"
+  },
+  {
+    "id": 15,
+    "path": "rust/lance-table/src/transaction/manifest_build.rs",
+    "start": 278,
+    "end": 314,
+    "unit": "lines",
+    "read_at": "2026-10-04T03:28:44.494Z",
+    "evidence": "278 |         // Per shard: what this commit records as compacted, and the most the\n279 |         // read version may credit. Generations compacted after that read landed\n280 |         // in fragments no index under consideration has seen; the committed\n281 |         // value caps it in turn, so a read version since rolled back cannot\n282 |         // retire SSTables no live commit copied in.\n283 |         let read_details = read_version_state\n284 |             .map(|state| {\n285 |                 state\n286 |                     .indices\n287 |                     .iter()\n288 |                     .find(|idx| idx.name == MEM_WAL_INDEX_NAME)\n289 |                     .cloned()\n290 |                     .map(load_mem_wal_index_details)\n291 |                     .transpose()\n292 |             })\n293 |             .transpose()?\n294 |             .flatten();\n295 |         let shards: Vec<(Uuid, u64, u64)> = details\n296 |             .compacted_sstables\n297 |             .iter()\n298 |             .map(|committed| {\n299 |                 let at_read = read_details\n300 |                     .as_ref()\n301 |                     .and_then(|read| {\n302 |                         read.compacted_sstables\n303 |                             .iter()\n304 |                             .find(|s| s.shard_id == committed.shard_id)\n305 |                     })\n306 |                     .map_or(0, |s| s.generation);\n307 |                 (\n308 |                     committed.shard_id,\n309 |                     committed.generation,\n310 |                     at_read.min(committed.generation),\n311 |                 )\n312 |             })\n313 |             .collect();\n314 | "
+  },
+  {
+    "id": 16,
+    "path": "rust/lance-core/src/cache/backend.rs",
+    "start": 120,
+    "end": 126,
+    "unit": "lines",
+    "read_at": "2026-10-04T03:28:44.494Z",
+    "evidence": "120 |     /// Weighted capacity in bytes, or `None` when the backend has no fixed\n121 |     /// capacity or cannot report it. Lets callers skip loading entries that\n122 |     /// could never be retained.\n123 |     fn capacity_bytes(&self) -> Option<usize> {\n124 |         None\n125 |     }\n126 | "
+  },
+  {
+    "id": 18,
+    "path": "rust/lance-table/src/transaction/manifest_build.rs",
+    "start": 5091,
+    "end": 5102,
+    "unit": "lines",
+    "read_at": "2026-10-04T03:28:44.495Z",
+    "evidence": "5091 |         /// Credit never exceeds what this commit records as compacted, so a\n5092 |         /// read version since rolled back cannot retire SSTables no live commit\n5093 |         /// copied in.\n5094 |         #[test]\n5095 |         fn credit_is_capped_by_the_committed_progress() {\n5096 |             let shard = Uuid::new_v4();\n5097 |             let read = table(&[0], Uuid::new_v4(), progress(shard, 9));\n5098 |             let mut after = table(&[0], Uuid::new_v4(), progress(shard, 3));\n5099 |             apply(&mut after, &read, &[0], &read).unwrap();\n5100 |             assert_eq!(coverage_for(&after, \"idx\"), Some(compacted(shard, 3)));\n5101 |         }\n5102 | "
+  },
+  {
+    "id": 20,
+    "path": "rust/lance-file/src/datatypes.rs",
+    "start": 211,
+    "end": 228,
+    "unit": "lines",
+    "read_at": "2026-10-04T03:28:44.495Z",
+    "evidence": "211 |         let mut fields_by_node = Vec::with_capacity(nodes.len());\n212 |         fields_by_node.resize_with(nodes.len(), || None);\n213 |         for (node_index, mut node) in nodes.into_iter().enumerate().rev() {\n214 |             node.field.children.reserve(node.child_indices.len());\n215 |             for child_index in node.child_indices {\n216 |                 let child = fields_by_node\n217 |                     .get_mut(child_index)\n218 |                     .and_then(Option::take)\n219 |                     .ok_or_else(|| {\n220 |                         Error::internal(format!(\n221 |                             \"Schema field arena node {child_index} was not materialized before its parent\"\n222 |                         ))\n223 |                     })?;\n224 |                 node.field.children.push(child);\n225 |             }\n226 |             fields_by_node[node_index] = Some(node.field);\n227 |         }\n228 | "
+  }
+]

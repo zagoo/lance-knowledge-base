@@ -1,0 +1,34 @@
+@@ -457,21 +457,21 @@ fn range_from_proto(proto: &pb::U64Range) -> Range<u64> {
+  457      proto.start..proto.end
+  458  }
+  459  
+  460 -fn fragments_from_proto(fragment_ids: &[u64], dataset: &Arc<Dataset>) -> Result<Vec<Fragment>> {
+  460 +fn fragments_from_proto(fragment_ids: &[u64], dataset: &Dataset) -> Result<Vec<Fragment>> {
+  461 +    let fragments = dataset.manifest.fragments.as_slice();
+  462 +    // Duplicate IDs in legacy manifests must resolve to their first stored fragment.
+  463 +    let ids_are_unique = dataset.fragment_bitmap.len() == fragments.len() as u64;
+  464      fragment_ids
+  465          .iter()
+  466          .map(|id| {
+  464 -            dataset
+  465 -                .manifest
+  466 -                .fragments
+  467 -                .iter()
+  468 -                .find(|f| f.id == *id)
+  469 -                .cloned()
+  470 -                .ok_or_else(|| {
+  471 -                    Error::invalid_input_source(
+  472 -                        format!("Fragment {} not found in dataset", id).into(),
+  473 -                    )
+  474 -                })
+  467 +            let fragment = if ids_are_unique && u32::try_from(*id).is_ok() {
+  468 +                dataset.find_fragment(*id)
+  469 +            } else {
+  470 +                fragments.iter().find(|f| f.id == *id)
+  471 +            };
+  472 +            fragment.cloned().ok_or_else(|| {
+  473 +                Error::invalid_input_source(format!("Fragment {} not found in dataset", id).into())
+  474 +            })
+  475          })
+  476          .collect()
+  477  }

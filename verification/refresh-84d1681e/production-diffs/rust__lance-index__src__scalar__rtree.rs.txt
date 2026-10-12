@@ -1,0 +1,45 @@
+@@ -38,6 +38,7 @@ use lance_core::utils::tempfile::TempDir;
+   38  use lance_core::{Error, ROW_ID, Result};
+   39  use lance_datafusion::chunker::chunk_concat_stream;
+   40  pub use lance_geo::bbox::{BoundingBox, bounding_box, total_bounds};
+   41 +use lance_index_core::remapping::RowAddrTranslator;
+   42  use lance_index_core::remapping::{
+   43      BatchRowIdRemapper, remap_record_batch_async, remap_row_addrs_tree_map_async,
+   44  };
+
+@@ -810,6 +811,17 @@ impl ScalarIndex for RTreeIndex {
+  811          ))
+  812      }
+  813  
+  814 +    async fn remap_streaming(
+  815 +        &self,
+  816 +        _translator: &RowAddrTranslator,
+  817 +        _dest_store: &dyn IndexStore,
+  818 +    ) -> Result<CreatedIndex> {
+  819 +        // No mapping to materialize for an index that cannot be remapped.
+  820 +        Err(Error::invalid_input_source(
+  821 +            "RTree does not support remap".into(),
+  822 +        ))
+  823 +    }
+  824 +
+  825      async fn update(
+  826          &self,
+  827          new_data: SendableRecordBatchStream,
+
+@@ -1250,6 +1262,7 @@ impl ScalarIndexPlugin for RTreeIndexPlugin {
+ 1262          &self,
+ 1263          index_store: Arc<dyn IndexStore>,
+ 1264          _index_details: &prost_types::Any,
+ 1265 +        _index_version: u32,
+ 1266          frag_reuse_index: Option<Arc<dyn RowIdRemapper>>,
+ 1267          cache: &LanceCache,
+ 1268      ) -> Result<Arc<dyn ScalarIndex>> {
+
+@@ -1263,6 +1276,7 @@ impl ScalarIndexPlugin for RTreeIndexPlugin {
+ 1276          &self,
+ 1277          index_store: Arc<dyn IndexStore>,
+ 1278          _index_details: &prost_types::Any,
+ 1279 +        _index_version: u32,
+ 1280          remapping: Option<Arc<dyn BatchRowIdRemapper>>,
+ 1281          cache: &LanceCache,
+ 1282      ) -> Result<Arc<dyn ScalarIndex>> {

@@ -1,0 +1,78 @@
+@@ -5,6 +5,7 @@
+    5  //! `signatures.lance`, and sorting the (band key, doc id) records into
+    6  //! `bands.lance` with an external sort that spills to local temporary files.
+    7  
+    8 +use crate::scalar::RowAddrTranslatorRef;
+    9  use std::cmp::Reverse;
+   10  use std::path::{Path, PathBuf};
+   11  
+
+@@ -79,8 +80,8 @@ pub(super) enum RowIdTransform<'a> {
+   80      Keep,
+   81      /// Keep only the rows the filter selects.
+   82      Filter(&'a OldIndexDataFilter),
+   82 -    /// Rewrite row ids through the mapping, dropping rows it deletes.
+   83 -    Remap(&'a RowAddrRemap),
+   83 +    /// Rewrite row ids through the translator, dropping rows it deletes.
+   84 +    Remap(RowAddrTranslatorRef<'a>),
+   85  }
+   86  
+   87  impl RowIdTransform<'_> {
+
+@@ -88,12 +89,13 @@ impl RowIdTransform<'_> {
+   89      ///
+   90      /// Stored row ids predate any deferred compaction the segment was opened
+   91      /// with, so `frag_reuse_index` first brings them into the current address
+   91 -    /// space, which is the space the filter or mapping is expressed in.
+   92 -    fn apply(
+   92 +    /// space, which is the space the filter or mapping is expressed in. A
+   93 +    /// remap translates one batch at a time through the translator.
+   94 +    async fn apply(
+   95          &self,
+   96          row_ids: &UInt64Array,
+   97          frag_reuse_index: Option<&dyn RowIdRemapper>,
+   96 -    ) -> Vec<Option<u64>> {
+   98 +    ) -> Result<Vec<Option<u64>>> {
+   99          let mut row_ids: Vec<Option<u64>> = row_ids
+  100              .values()
+  101              .iter()
+
+@@ -112,9 +114,13 @@ impl RowIdTransform<'_> {
+  114                      }
+  115                  }
+  116              }
+  115 -            Self::Remap(mapping) => mapping.remap_in_place(&mut row_ids),
+  117 +            Self::Remap(translator) => {
+  118 +                let current: Vec<u64> = row_ids.iter().flatten().copied().collect();
+  119 +                let resolved = translator.resolve(current).await?;
+  120 +                resolved.remap_in_place(&mut row_ids);
+  121 +            }
+  122          }
+  117 -        row_ids
+  123 +        Ok(row_ids)
+  124      }
+  125  }
+  126  
+
+@@ -145,15 +151,13 @@ impl SignatureSource<'_> {
+  151          let stream = batches
+  152              .map(move |batch| {
+  153                  let generator = generator.clone();
+  148 -                // Row id filtering needs the transform, which cannot move into
+  149 -                // the CPU task, so it runs here; band keys are computed there.
+  150 -                let prepared = batch.and_then(|batch| {
+  151 -                    let (row_ids, _) = signature_columns(&batch, num_hashes)?;
+  152 -                    let kept = transform.apply(row_ids, frag_reuse_index);
+  153 -                    Ok((batch, kept))
+  154 -                });
+  154                  async move {
+  156 -                    let (batch, kept) = prepared?;
+  155 +                    let batch = batch?;
+  156 +                    // Row id filtering needs the transform, which cannot move
+  157 +                    // into the CPU task, so it runs here, one batch at a time;
+  158 +                    // band keys are computed there.
+  159 +                    let (row_ids, _) = signature_columns(&batch, num_hashes)?;
+  160 +                    let kept = transform.apply(row_ids, frag_reuse_index).await?;
+  161                      spawn_cpu(move || resign_batch(generator, batch, kept)).await
+  162                  }
+  163              })

@@ -1,0 +1,484 @@
+{
+  "iteration": 79,
+  "files": [
+    {
+      "path": "rust/lance-encoding/src/data.rs",
+      "module": "L1-modules/rust-lance-encoding.md",
+      "role": "Physical DataBlock representations, Arrow normalization and validated reconstruction, shared statistics, range builders, dictionary/null conversion and regression tests.",
+      "reviewed": true,
+      "limits": "All2898 lines freshly read in ANALYZE79. Source deductions only: no repository build, test, lint, benchmark, generator, installation or network. Public fields and infallible helpers retain caller preconditions. Full structural/legacy primitive callers remain pending.",
+      "ranges": [
+        [
+          1,
+          16,
+          "License and module docs place DataBlock between Arrow ArrayData and typed arrays: physical representations can combine logical types and expose codec-oriented buffers. Docs require variable offsets to start at zero; Arrow conversion validation actually permits a bounded nonzero first offset. Public fields do not enforce this invariant."
+        ],
+        [
+          17,
+          38,
+          "Imports connect Arrow arrays/dictionary keys, buffer builders, checked ArrayData construction, datatype byte widths, LanceBuffer, errors and statistics. No asynchronous work or IO is implemented here. Arc/RwLock protect the shared statistics map, not mutable physical data."
+        ],
+        [
+          39,
+          60,
+          "Public AllNullDataBlock contains only num_values. Arrow conversion creates a null array of the requested type with count cast to usize; validate is ignored. Serialization has no buffers. A comment plans deprecation in2.1 but the type has no deprecated attribute and remains dispatched."
+        ],
+        [
+          61,
+          87,
+          "Public BlockInfo tuple exposes Arc<RwLock<HashMap<Stat,Arc<dyn Array>>>>. Default/new allocate an empty map. Clones share the map and statistic arrays. PartialEq acquires both read locks and compares entries, unwrapping poison errors. It does not compare Arc identity. Cache validity is not tied to buffer mutation."
+        ],
+        [
+          88,
+          121,
+          "Public NullableDataBlock contains boxed child, packed validity bytes and shared stats. Arrow conversion always converts child with validation enabled, attaches validity and performs checked build. Serialized validity precedes child buffers; data_size adds visible validity bytes. Legacy-deprecation comment is future intent, not an attribute or removed implementation."
+        ],
+        [
+          122,
+          153,
+          "Public ConstantDataBlock stores one scalar byte sequence and logical count. into_buffers emits one scalar buffer and data_size measures only that buffer, not expanded values. Arrow conversion is todo and panics. try_clone returns Ok with a cheap buffer clone and copied count."
+        ],
+        [
+          154,
+          193,
+          "Public FixedWidthDataBlock exposes data, bits_per_value, num_values and BlockInfo. do_into_arrow repacks bits_per_value8 into packed Boolean bits by taking at most declared count bytes and treating nonzero as true; otherwise moves the buffer directly. Checked Arrow construction uses requested datatype/count/null_count0, but no independent physical-width versus requested-type equality check except the Boolean branch."
+        ],
+        [
+          194,
+          218,
+          "FixedWidth public into_arrow ignores the caller validation flag and always uses checked construction. Serialization returns one buffer; try_clone copies metadata and shares buffer/statistics ownership; data_size reports visible byte length. This is not retained allocation size."
+        ],
+        [
+          219,
+          233,
+          "Private generic VariableWidthDataBlockBuilder stores offsets Vec<T> initially[0] and byte Vec with estimated capacity cast to usize. Offset type is chosen when the first input establishes builder shape."
+        ],
+        [
+          234,
+          266,
+          "Variable builder validate_append unwraps VariableWidth and validates selected offsets. append_validated assumes that proof, debug-checks width and borrows typed offsets. It computes selected byte span and checked-adds its length to current data; arithmetic overflow or inability to represent new total in T returns NotSupported before mutation."
+        ],
+        [
+          267,
+          296,
+          "After size checks, variable builder copies the selected payload and appends rebased offsets after the selection start. Finish derives count from offsets.len()-1 and emits owned buffers with fresh empty stats. Selected-range validation need not inspect offsets outside that range; this builder does not validate UTF-8."
+        ],
+        [
+          297,
+          336,
+          "Private BitmapDataBlockBuilder reserves estimated_bytes*8 bits, with unchecked multiplication. Validation is a no-op; append unwraps FixedWidth and appends selected packed bits without an explicit bits_per_value check or declared-count bound. Finish creates bits_per_value1 with builder logical length and fresh stats."
+        ],
+        [
+          337,
+          379,
+          "Private FixedWidthDataBlockBuilder asserts a multiple-of-eight width, stores bytes_per_value and reserves estimated bytes. Validation is a no-op. Append asserts matching bit width, multiplies cast range endpoints by byte width and slices bytes; malformed ranges can panic. Zero bits pass construction but finish divides by zero. Finish count derives from appended byte length."
+        ],
+        [
+          380,
+          421,
+          "Private StructDataBlockBuilder stores child builders. Validation indexes input children for each builder and validates all before appending. Too few children panic; extra children are ignored. Child appends occur sequentially, so a later append error can leave prior children changed. Finish always sets parent validity None and creates empty stats, discarding input parent validity."
+        ],
+        [
+          422,
+          443,
+          "Private default AllNullDataBlockBuilder counts selected rows with ordinary subtraction/addition. Validation ignores both block and selection; append does not inspect type or bounds. Finish returns an AllNull block."
+        ],
+        [
+          444,
+          481,
+          "Public FixedSizeListBlock exposes child and dimension. num_values divides child count by dimension, truncating remainders and panicking for zero. try_into_flat rejects Nullable children with None, recursively multiplies physical width and divides logical count for nested/fixed children, retains leaf stats, and panics for other child kinds."
+        ],
+        [
+          482,
+          507,
+          "flatten_as_fixed takes mutable self but only recursively clones the fixed leaf: it does not multiply dimensions or update counts. from_flat recursively follows Arrow FixedSizeList dimensions, divides width and multiplies count with ordinary arithmetic and no dimension validation. Other requested types simply return FixedWidth. Retained shared statistics are not recomputed."
+        ],
+        [
+          508,
+          534,
+          "FixedSizeList Arrow conversion computes count using its own dimension, expects a FixedSizeList datatype or panics, converts child with validation and checked-builds the requested Arrow layout. There is no explicit equality check between stored and schema dimensions. Buffers and size are inherited from the child."
+        ],
+        [
+          535,
+          568,
+          "Private FixedSizeListBlockBuilder stores child builder and first-input dimension. Both validation and append unwrap incoming FSL and multiply selected row endpoints by stored dimension without checked arithmetic or an incoming-dimension equality check. Finish wraps the child result."
+        ],
+        [
+          569,
+          613,
+          "Private NullableDataBlockBuilder reserves a validity builder and delegates validation only to its inner child. Append changes the child first, then constructs a BooleanBuffer over selected raw validity bits and appends it. Malformed validity can therefore panic after child mutation. Finish wraps child and packed validity with new empty stats."
+        ],
+        [
+          614,
+          629,
+          "Public OpaqueBlock contains a vector of buffers, logical count and stats. It represents encoded data that cannot yet be turned into Arrow. data_size sums visible buffer lengths, with no capacity accounting or shared-buffer deduplication."
+        ],
+        [
+          630,
+          655,
+          "Public VariableWidthBlock exposes data, offsets, bits_per_offset, num_values and stats. Docs prescribe num_values+1 offsets starting at0. Private unit ValidVariableWidthLayout is passed only after local validation to permit unchecked construction; it has no fields or lifetime tying it to a particular instance. Correct private call ordering is part of the safety argument."
+        ],
+        [
+          656,
+          688,
+          "append_error produces CorruptFile with pseudo filename variable width data block, selected range, count, offset width and both buffer sizes. validate_offsets_for_append<T> checks width matches T, whole offset-buffer divisibility and ordered selection bounded by num_values, with checked usize endpoint conversions."
+        ],
+        [
+          689,
+          727,
+          "Append validation borrows the typed whole offset buffer, requires a present end offset, then checks only the selected inclusive offsets for monotonicity, nonnegativity and payload bounds. It permits nonzero first offsets, does not require the complete logical offset count and does not inspect UTF-8. Whole-buffer divisibility can reject padding accepted by Arrow conversion."
+        ],
+        [
+          728,
+          757,
+          "VariableWidth into_arrow ignores validate. Binary/Utf8 require32-bit offsets; LargeBinary/LargeUtf8 require64. Width mismatch is CorruptFile even when count is zero. Unsupported requested types use a checked Arrow fallback; empty supported arrays also use checked fallback. Nonempty supported arrays validate then use the private unchecked builder."
+        ],
+        [
+          758,
+          796,
+          "expected_offset_bits maps only four classic binary/string types. layout_error and format_layout_error include requested datatype, declared count, width and buffer sizes in CorruptFile diagnostics. Other requested types are left to Arrow checked validation."
+        ],
+        [
+          797,
+          824,
+          "validate_layout computes required (count+1)*offset_bytes using checked arithmetic, requires sufficient offset bytes and dispatches i32/i64 or reports unsupported width. UTF-8 validation is enabled for string types. Extra offset bytes are accepted; the caller already checked datatype/width consistency."
+        ],
+        [
+          825,
+          867,
+          "validate_offsets_and_values slices exactly the required offset prefix before typed borrowing, so non-width-aligned trailing padding is ignored. It validates monotonicity and payload bounds. Strings validate the selected payload from first through final offset as UTF-8 once, then require every offset to be a character boundary, rescanning to report the first bad boundary. Unused payload prefix/suffix need not be valid UTF-8. A nonzero first offset and unused suffix are allowed."
+        ],
+        [
+          868,
+          917,
+          "offset_violation_detail assumes a nonempty slice. Fast path folds monotonic comparisons and checks first>=0 plus final offset convertible to usize and within payload. Failure path reports first decreasing pair, then negative/unrepresentable value, then out-of-bounds value with position_base-adjusted indices. An unrepresentable positive offset would share the negative-offset message."
+        ],
+        [
+          918,
+          957,
+          "into_arrow_checked maps Arrow builder errors to contextual CorruptFile. The sole production unsafe block calls build_unchecked only after receiving the private proof; it avoids repeated offset/UTF-8 scans. into_arrow_builder moves full original buffers, sets requested datatype/count/null_count0 and preserves no separate bits_per_offset metadata. Safety depends on the matching prior validation and source platform assumptions."
+        ],
+        [
+          958,
+          976,
+          "Variable serialization orders offsets before payload. Public offsets_as_block takes mutable self but only clones offsets, sets fixed width/count+1 and new stats; it does not mutate the block. data_size adds the two visible lengths; count+1 and byte sums are ordinary arithmetic."
+        ],
+        [
+          977,
+          1017,
+          "Public StructDataBlock exposes children, stats and optional NullBuffer. into_arrow requires Struct or returns Internal, zips fields with children, converts each child and assigns row count from the last visited child. Extra children are ignored; no children yields zero rows. Validity extraction takes the underlying buffer and null count without explicitly preserving a BooleanBuffer bit offset. Checked Arrow build validates resulting layout, but this file has no dedicated sliced-parent-validity regression."
+        ],
+        [
+          1018,
+          1049,
+          "Struct remove_outer_validity recursively transforms children and clears parent validity while retaining stats. Serialization flattens child buffers and omits parent validity. has_variable_width_child merely tests whether any direct child is not FixedWidth, counting FSL, Nullable and AllNull too. data_size likewise omits parent validity and stats."
+        ],
+        [
+          1050,
+          1085,
+          "Public DictionaryDataBlock exposes fixed-width indices and boxed dictionary. decode_helper returns AllNull0 for zero declared indices. Otherwise it estimates expanded capacity from dictionary byte size and counts with unchecked arithmetic, including division by dictionary count. It iterates all physically stored indices, not only declared num_values, converting keys to usize and appending one dictionary range each. Empty dictionaries or malformed keys can panic/error; no local normalization occurs."
+        ],
+        [
+          1086,
+          1130,
+          "Public decode interprets keys as unsigned native8/16/32/64 by physical width; unsupported width returns Internal. Requested Arrow Dictionary conversion compares physical index width with requested key byte width and reports CorruptFile on mismatch, then checked-converts keys and dictionary values and attaches the child with checked Arrow construction. Signed key interpretation is delegated to requested Arrow type rather than unsigned expansion."
+        ],
+        [
+          1131,
+          1155,
+          "Dictionary into_arrow dispatches declared Dictionary types to dictionary reconstruction; other requested types eagerly expand then convert. Buffer order is indices followed by dictionary buffers. Public into_parts returns DataBlock::FixedWidth indices plus unboxed dictionary; from_parts simply stores supplied components with no validation."
+        ],
+        [
+          1156,
+          1184,
+          "Public DataBlock has ten variants: Empty, Constant, AllNull, Nullable, FixedWidth, FixedSizeList, VariableWidth, Opaque, Struct, Dictionary. Docs describe zero-copy reconstruction but Boolean repacking and dictionary expansion allocate; Arrow-to-block normalization can also copy. Enum itself is Debug/Clone."
+        ],
+        [
+          1185,
+          1210,
+          "Public DataBlock::into_arrow ignores caller validate and dispatches with true. Empty produces Arrow empty array, Constant reaches todo, Opaque returns Internal requiring decoding first. Composite conversions recursively enforce their local checks; not every malformed public-field state yields a Result error."
+        ],
+        [
+          1211,
+          1228,
+          "into_buffers consumes each variant and flattens it in variant-specific order; Opaque returns its vector. There is no framing, type, count or version metadata in this operation. Struct parent validity omission means this is not a generic lossless Arrow serialization API."
+        ],
+        [
+          1229,
+          1251,
+          "try_clone returns Ok for every variant using derived/shared clones. Docs referring to borrowed-versus-owned modes, mutable self and borrow_and_clone are stale: signature is &self and current LanceBuffer wraps an Arrow Buffer. Physical data and BlockInfo maps are shared, not deep copied. (rust/lance-encoding/src/buffer.rs:12-27)"
+        ],
+        [
+          1252,
+          1283,
+          "name returns fixed diagnostic variant strings. is_variable recurses through Nullable, FSL and Struct children; FixedWidth/Empty/AllNull/Constant are false. Dictionary is todo and Opaque panics. This method is distinct from Struct has_variable_width_child direct-kind test."
+        ],
+        [
+          1284,
+          1297,
+          "is_nullable returns true for AllNull/Nullable and recursively examines FSL/Struct children, but ignores Struct.validity. Dictionary is todo and Opaque panics. Thus it is not a complete logical Arrow nullability predicate."
+        ],
+        [
+          1298,
+          1316,
+          "num_values reads variant counts, delegates Nullable/FSL, takes Struct.children[0] without checking emptiness or agreement, and takes dictionary index count. The comment saying no recursion should not be read literally: Nullable/FSL recurse. Empty returns0."
+        ],
+        [
+          1317,
+          1334,
+          "items_per_row delegates Nullable, multiplies FSL dimension by child value, and returns1 for FixedWidth/VariableWidth/Dictionary/Opaque. Empty, Constant, AllNull and Struct remain todo panics. Products are unchecked."
+        ],
+        [
+          1335,
+          1350,
+          "data_size returns zero for Empty/AllNull, stored scalar size for Constant, visible physical bytes for leaves/composites and indices plus dictionary for Dictionary. Struct validity is omitted. Shared buffers can be counted repeatedly; this is not retained capacity or logical expanded size."
+        ],
+        [
+          1351,
+          1366,
+          "remove_outer_validity panics for AllNull, unwraps one Nullable layer, recursively clears Struct children/validity, and leaves other variants including FSL and Dictionary unchanged. Removing validity can expose arbitrary bytes under null slots. The recurse parameter described in docs does not exist."
+        ],
+        [
+          1367,
+          1429,
+          "make_builder chooses packed bitmap for fixed bits1, byte-aligned fixed builder otherwise, variable i32/i64, recursively FSL/Nullable/Struct, or AllNull. Nullable assigns estimated_bytes/16 to validity and the remainder to child; Struct divides estimate among children (zero for empty). Empty/Constant/Opaque/Dictionary and unsupported offset widths are todo; non-byte-aligned fixed widths panic. This method does not copy input values."
+        ],
+        [
+          1430,
+          1463,
+          "Three private macros generate consuming, shared-reference and mutable-reference Option casts using exact enum matching. They perform no nested unwrap, validation, conversion or statistic invalidation. Consuming wrong-variant casts return None and drop the consumed input."
+        ],
+        [
+          1464,
+          1492,
+          "Public DataBlock cast implementation invokes each macro for seven variants AllNull, Nullable, FixedWidth, FixedSizeList, VariableWidth, Struct and Dictionary, creating21 exact public methods. Empty, Constant and Opaque have no generated casts. Mutable casts allow mutation without refreshing shared stats."
+        ],
+        [
+          1493,
+          1503,
+          "Private get_byte_range<T> borrows typed offsets, returns0..0 for empty, otherwise casts first and last offsets to usize without validating sign, monotonicity or payload bounds. Mutable parameter does not imply mutation."
+        ],
+        [
+          1504,
+          1549,
+          "stitch_offsets<T> returns empty outputs for no buffers. Otherwise it reserves typed-element capacity using the sum of input byte lengths, inserts a leading zero, rebases each nonempty input by x+last_offset-start, and records original payload spans. Even one input is copied to normalize a nonzero start. Arithmetic adds before subtracting, so intermediate overflow is possible even when the rebased result would fit. Empty buffers contribute0..0 spans."
+        ],
+        [
+          1550,
+          1598,
+          "arrow_binary_to_data_block slices each ArrayData offset buffer using its element offset and len+1, stitches i32 for32-bit or i64 otherwise, slices corresponding payload ranges and copies concatenated payloads. It creates VariableWidth with caller-supplied count and empty stats. These operations assume valid inputs and do not independently verify total count."
+        ],
+        [
+          1599,
+          1608,
+          "encode_flat_data derives byte width from the first array type, reserves declared count*width and copies each ArrayData first buffer. There is no explicit ArrayData element-offset adjustment here; it relies on array to_data buffer representation. Sliced UInt16 tests cover one concrete case. Counts/types are not reconciled."
+        ],
+        [
+          1609,
+          1627,
+          "encode_bitmap_data obtains BooleanBuffer views and appends them to a new builder, preserving bit slicing through Arrow buffer APIs. Declared count controls initial capacity, not an enforced output bound. Output is a packed buffer."
+        ],
+        [
+          1628,
+          1670,
+          "concat_dict_arrays uses Arrow concat; DictionaryKeyOverflow triggers casting all inputs to UInt32 dictionary keys and retrying concat. A second key overflow is unimplemented beyond2^32 entries; other errors unwrap. It assumes nonempty dictionary arrays and matching usable types. Arrow concat controls merge/remap behavior; this code does not deduplicate values itself."
+        ],
+        [
+          1671,
+          1684,
+          "max_index_val maps eight signed/unsigned integer key types to their positive native maxima; other types panic. The result guides null-item insertion and index widening."
+        ],
+        [
+          1685,
+          1731,
+          "arrow_dictionary_to_data_block first concatenates dictionaries and derives actual key count. If logical validity exists, it reuses the first null dictionary item or appends a null item. A null-item index beyond current key maximum widens keys to UInt32; inability beyond that limit is unimplemented. This can happen with either a new or existing null dictionary item."
+        ],
+        [
+          1732,
+          1779,
+          "For nullable dictionaries, conversion encodes the null index in the chosen key type, copies key bytes and replaces every logically invalid row key. Validity is moved into the dictionary items; the fixed indices carry no validity bitmap. Without logical validity it clones key bytes. Dictionary items recursively convert through DataBlock::from, and key stats start empty."
+        ],
+        [
+          1780,
+          1794,
+          "Private Nullability distinguishes None, All and Some(NullBuffer). to_option clones only Some; it returns None for both no-nulls and all-null cases because the latter is handled by an earlier representation shortcut."
+        ],
+        [
+          1795,
+          1824,
+          "extract_nulls calls logical_nulls on every array, which can materialize dictionary logical validity. If none returns a bitmap it yields None; otherwise it concatenates bitmaps, filling missing ones with true. It classifies All by comparing null count with caller-supplied num_values, not summed actual lengths. A present all-valid bitmap can remain Some."
+        ],
+        [
+          1825,
+          1845,
+          "validate_variable_width_offsets<T> permits a zero-length array with an empty offset buffer, otherwise slices the selected offset span respecting ArrayData.offset and checks monotonicity/payload bounds. Arithmetic is unchecked but this helper is invoked after Arrow basic layout validation. It does not validate UTF-8."
+        ],
+        [
+          1846,
+          1863,
+          "validate_variable_width_layouts applies classic binary/string offset checks using i32/i64 and visits all child ArrayData. It intentionally avoids rescanning UTF-8 content; view-specific offsets are not handled by these custom branches. Basic Arrow validation remains separate."
+        ],
+        [
+          1864,
+          1890,
+          "validate_array_data first calls ArrayData.validate, then recursive offset checks, mapping errors to InvalidInput with field name and buffered-array index. Crate-internal validate_arrays runs this over every input; empty input succeeds. Public from_arrays does not invoke it. Both current structural and legacy primitive flush sites call it separately. (rust/lance-encoding/src/encodings/logical/primitive.rs:7575-7587; rust/lance-encoding/src/array_encoding/logical/primitive.rs:511-514)"
+        ],
+        [
+          1891,
+          1937,
+          "Public infallible from_arrays returns AllNull0 when arrays is empty or declared count is0 before inspecting nonempty input type/nulls. It uses only first datatype, computes logical nullability and returns AllNull with declared count for all-null input. Classic Binary/Utf8 use32-bit normalization, Large variants64; BinaryView/Utf8View cast to classic32-bit with expect. Boolean uses packed fixed-width1."
+        ],
+        [
+          1938,
+          1970,
+          "Fixed-size binary, integer/unsigned, floats16/32/64, dates, times, timestamps, intervals, durations and decimals32/64/128/256 use raw fixed-width copy. Null yields AllNull. Dictionary uses key/null normalization. Declared count and actual copied lengths can disagree for misuse of this public infallible API."
+        ],
+        [
+          1971,
+          1994,
+          "Struct conversion collects each positional child across all input arrays and recursively converts using declared row count. It stores parent validity on StructDataBlock. Generic wrapping later also creates Nullable for Some, so a partially nullable Struct can retain parent validity in both inner and outer representations. Child type/shape agreement is assumed."
+        ],
+        [
+          1995,
+          2019,
+          "FixedSizeList conversion collects child values, recursively converts declared_count*dimension and wraps dimension cast to u64. List/LargeList/ListView/LargeListView/Map/RunEndEncoded/Union are unsupported panics unless zero/all-null shortcuts already returned. Unsupported logical type does not imply every invocation panics."
+        ],
+        [
+          2020,
+          2038,
+          "from_arrays computes statistics on the encoded inner representation, then wraps Some validity in Nullable with a fresh empty outer BlockInfo. Dictionaries skip this wrapper because nulls were normalized into items. Statistics may recurse into children or require existing child stats; Struct stats sum child MaxLength and can panic when a child lacks it. (rust/lance-encoding/src/statistics.rs:56-71; rust/lance-encoding/src/statistics.rs:579-597)"
+        ],
+        [
+          2039,
+          2051,
+          "Public generic from_array uses the array actual len and wraps it in Arc before from_arrays. From<ArrayRef> likewise derives actual count. These wrappers avoid a caller-supplied count mismatch but preserve unsupported-type and downstream panics."
+        ],
+        [
+          2052,
+          2064,
+          "Private Debug DataBlockBuilderImpl defines validate_append, append_validated and consuming finish. Default append validates then mutates. It is not declared Send or Sync; full operation transactionality is not guaranteed by this two-step protocol."
+        ],
+        [
+          2065,
+          2090,
+          "Public Debug DataBlockBuilder holds estimated capacity and optional boxed implementation. with_capacity_estimate allocates no specific builder. First append/get_builder fixes shape using the input make_builder, and even a failed first append can leave that implementation installed. Public append delegates validation/mutation without an outer rollback."
+        ],
+        [
+          2091,
+          2118,
+          "Private append_ranges validates the complete source block once, then validates each range order/end before appending it. Later invalid ranges or append failures retain earlier appended ranges; it is not atomic. Public finish panics if no input ever initialized the builder. A zero-length append can initialize an empty result."
+        ],
+        [
+          2119,
+          2146,
+          "Test module imports Arrow builders/dictionary/list/string types, seeded RNG and rstest. Tests are local source evidence and were not executed in this goal. Fixtures construct both valid arrays and intentionally invalid ArrayData via unsafe build_unchecked."
+        ],
+        [
+          2147,
+          2165,
+          "Sliced UInt16 regression checks logical count4 and8 data bytes; it does not compare the numeric values. Nullable sliced UInt16 checks count3,6 data bytes and packed validity0b10."
+        ],
+        [
+          2166,
+          2210,
+          "String concatenation verifies combined logical count, validity0x1d, offsets[0,5,5,10,11,12,12,12] and payload helloworldab across null/empty values. Non-null case verifies abcdef with offsets[0,1,3,6]."
+        ],
+        [
+          2211,
+          2249,
+          "StringView tests repeat exact null/empty concatenation expectations after conversion to classic32-bit offsets, including payload, count and validity."
+        ],
+        [
+          2250,
+          2262,
+          "BinaryView fixture foo/null/bar asserts normalized variable payload foobar after unwrapping nullable; it does not assert every offset or validity byte."
+        ],
+        [
+          2263,
+          2296,
+          "String-slice helper verifies count, offsets and payload for world, hello, helloworld and hellofoo from differently sliced chunks. This tests rebasing from nonzero offsets and concatenation."
+        ],
+        [
+          2297,
+          2331,
+          "Two rstest cases Utf8/LargeUtf8 construct ArrayData with element offset1, length1 and offsets[0,5,10], then validate and normalize to world with rebased[0,5]."
+        ],
+        [
+          2332,
+          2360,
+          "Two invalid string-offset cases build malformed Utf8/LargeUtf8 ArrayData unsafely with a negative offset and require pre-encoding InvalidInput including field name and offset[1](-1). They exercise validation before normalizing buffers."
+        ],
+        [
+          2361,
+          2376,
+          "LargeBinary hello/world verifies64-bit offsets[0,5,10], payload helloworld and logical count2."
+        ],
+        [
+          2377,
+          2406,
+          "Dictionary concatenation regression verifies keys[0,0,1,2,3] and dictionary payload abbc with four items from two inputs. Duplicate b dictionary values remain: this fixture does not promise global deduplication."
+        ],
+        [
+          2407,
+          2453,
+          "Dictionary null normalization tests null keys and preexisting null dictionary items. Both require keys[3,0,1,2,3], four dictionary items, bitmap0b111, offsets[0,1,2,3,3] and payload abc."
+        ],
+        [
+          2454,
+          2499,
+          "Despite cannot_add_null name, this regression verifies successful UInt8-to-UInt32 key widening for256 distinct strings plus null. It checks257 dictionary items, keys0..256, null index256 and32640 payload bytes."
+        ],
+        [
+          2500,
+          2515,
+          "All-null test covers UInt32, FixedSizeBinary2, List<UInt32> and Struct<UInt32>, ten values each, comparing roundtrip against Arrow new_null_array. Unsupported non-null List conversion is bypassed."
+        ],
+        [
+          2516,
+          2549,
+          "Despite cannot_concatenate name, dictionary concat test expects widening to UInt32 for two256-entry dictionaries, sequential keys0..511 and65536 payload bytes."
+        ],
+        [
+          2550,
+          2622,
+          "Seeded fixed-int data_size cases cover3 and400 rows with no nulls and two null patterns; expected visible value bytes plus ceiling-packed validity are compared. Three3-row arrays are also compared to Arrow concat size behavior. This is byte-accounting coverage, not allocation-capacity measurement."
+        ],
+        [
+          2623,
+          2646,
+          "Malformed variable block has a final offset100000 against14 payload bytes alphabetagamma; direct conversion must return contextual CorruptFile."
+        ],
+        [
+          2647,
+          2666,
+          "Four-byte fixed block declaring two Int32 values must error both through FixedWidth and DataBlock conversions for validate=false and true. Assertions check errors, not their variants/messages."
+        ],
+        [
+          2667,
+          2713,
+          "Three variable-builder cases cover decreasing i32/i64 offsets and an i32 out-of-bounds end. append must return CorruptFile with expected diagnostic fragment; no mutation rollback assertion is made."
+        ],
+        [
+          2714,
+          2820,
+          "Eleven malformed-layout cases span four classic types with bounds errors, negative/decreasing/interior-bad/short offsets, invalid Utf8 and LargeUtf8 payloads and an offset splitting a UTF-8 character. Both validation flag values must yield CorruptFile. The comment suggesting the flag chooses extra checks is stale: these paths ignore it."
+        ],
+        [
+          2821,
+          2849,
+          "Dictionary conversion with malformed variable-width values must reject them as CorruptFile even with validate=false. This covers nested variable validation."
+        ],
+        [
+          2850,
+          2878,
+          "Dictionary test rejects32-bit physical indices when requested key type is Int8 and asserts the width diagnostic. Key128 is also invalid for the three values, but width validation is encountered first."
+        ],
+        [
+          2879,
+          2898,
+          "Four valid classic Binary/LargeBinary/Utf8/LargeUtf8 cases include empty values and Unicode string content and require exact roundtrips under both flag values. Missing local tests include shared-cache mutation, empty Struct, parent validity in builders, FSL dimension mismatch, zero-width/bitmap misuse, extra dictionary indices, count disagreement, appended-range partial failure and padded/nonzero-base layouts."
+        ]
+      ]
+    }
+  ]
+}

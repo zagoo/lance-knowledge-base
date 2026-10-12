@@ -1,0 +1,18 @@
+@@ -443,10 +443,17 @@ impl Transaction {
+  443      ) -> Vec<(u64, Vec<u32>)> {
+  444          let prev_by_id: HashMap<u64, &Fragment> =
+  445              prev_fragments.iter().map(|f| (f.id, f)).collect();
+  446 +        // Only the first occurrence of a previous id is that fragment's merged
+  447 +        // version; later ones are staged fragments still carrying placeholder
+  448 +        // id 0, which must not be mistaken for a rewrite of fragment 0.
+  449 +        let mut seen_prev_ids = HashSet::new();
+  450          new_fragments
+  451              .iter()
+  452              .filter_map(|new_frag| {
+  453                  let prev = prev_by_id.get(&new_frag.id)?;
+  454 +                if !seen_prev_ids.insert(new_frag.id) {
+  455 +                    return None;
+  456 +                }
+  457                  let prev_paths = Self::fragment_field_paths(prev);
+  458                  let new_paths = Self::fragment_field_paths(new_frag);
+  459                  let mut changed: Vec<u32> = prev_paths

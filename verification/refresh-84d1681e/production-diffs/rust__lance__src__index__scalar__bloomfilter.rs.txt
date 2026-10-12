@@ -1,0 +1,27 @@
+@@ -17,6 +17,7 @@ use crate::{Dataset, Error, Result, dataset::index::LanceIndexStoreExt};
+   17  pub(in crate::index) async fn merge_segments(
+   18      dataset: &Dataset,
+   19      segments: Vec<IndexMetadata>,
+   20 +    staged: Option<&crate::index::frag_reuse::StagedRemappingPlans>,
+   21  ) -> Result<IndexMetadata> {
+   22      if segments.is_empty() {
+   23          return Err(Error::index("No segment metadata was provided".to_string()));
+
+@@ -58,8 +59,15 @@ pub(in crate::index) async fn merge_segments(
+   59          if effective.is_empty() && !(fragment_bitmap.is_empty() && position == 0) {
+   60              continue;
+   61          }
+   61 -        let scalar_index =
+   62 -            super::open_scalar_index(dataset, &field_path, segment, &NoOpMetricsCollector).await?;
+   62 +        let scalar_index = super::open_scalar_index_with_plan(
+   63 +            dataset,
+   64 +            &field_path,
+   65 +            segment,
+   66 +            staged.and_then(|plans| plans.get(&segment.uuid)),
+   67 +            crate::index::frag_reuse::OpenPurpose::Maintenance,
+   68 +            &NoOpMetricsCollector,
+   69 +        )
+   70 +        .await?;
+   71          scalar_indices.push((segment.uuid, scalar_index, effective));
+   72      }
+   73  

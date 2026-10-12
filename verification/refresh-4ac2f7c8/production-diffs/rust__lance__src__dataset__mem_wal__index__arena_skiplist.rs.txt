@@ -1,0 +1,57 @@
+@@ -51,8 +51,13 @@ const MAX_HEIGHT: usize = 16;
+   51  /// Inverse promotion probability (p = 1/4): a node grows one level with prob
+   52  /// 1/4. Matches RocksDB's default `kBranching`.
+   53  const BRANCHING: u64 = 4;
+   54 -/// Bump-arena chunk size (1 MiB). Nodes are packed contiguously within a chunk.
+   55 -const CHUNK_SIZE: usize = 1 << 20;
+   54 +/// Largest bump-arena chunk (1 MiB). Nodes are packed contiguously within one.
+   55 +const MAX_CHUNK_SIZE: usize = 1 << 20;
+   56 +/// First chunk (4 KiB), doubling up to [`MAX_CHUNK_SIZE`], so an index holding
+   57 +/// few nodes is not charged a full chunk.
+   58 +const FIRST_CHUNK_SIZE: usize = 4 << 10;
+   59 +/// How many times the chunk size doubles before it reaches [`MAX_CHUNK_SIZE`].
+   60 +const CHUNK_DOUBLINGS: usize = (MAX_CHUNK_SIZE / FIRST_CHUNK_SIZE).trailing_zeros() as usize;
+   61  
+   62  /// Node header. The variable-length forward-pointer tower (`height` slots of
+   63  /// `AtomicPtr<Node<K>>`) is laid out immediately after this header in the same
+
+@@ -119,7 +124,8 @@ impl Arena {
+  124      #[cold]
+  125      unsafe fn grow(&mut self, layout: Layout, allocated: &AtomicUsize) {
+  126          let align = layout.align().max(64);
+  122 -        let size = CHUNK_SIZE.max(layout.size().next_power_of_two());
+  127 +        let ramped = FIRST_CHUNK_SIZE << self.chunks.len().min(CHUNK_DOUBLINGS);
+  128 +        let size = ramped.max(layout.size().next_power_of_two());
+  129          let chunk_layout = Layout::from_size_align(size, align).expect("valid chunk layout");
+  130          let ptr = alloc::alloc(chunk_layout);
+  131          if ptr.is_null() {
+
+@@ -352,12 +358,12 @@ pub struct SkipListReader<K> {
+  358  impl<K: Ord> SkipListReader<K> {
+  359      /// Bytes of arena chunks backing this skiplist's nodes.
+  360      ///
+  355 -    /// Counts chunks, not entries, so it steps by `CHUNK_SIZE` and overshoots
+  356 -    /// the live nodes by at most one partly-filled chunk. Excludes any bytes a
+  361 +    /// Counts chunks, not entries, so it overshoots the live nodes by at most
+  362 +    /// one partly-filled chunk. Excludes any bytes a
+  363      /// key owns outside its node (e.g. a long `Box<[u8]>` key) — the arena
+  364      /// never sees those, so whoever built the key charges them; see
+  365      /// `BytesBackend::key_heap_bytes`.
+  360 -    pub(crate) fn resident_bytes(&self) -> usize {
+  366 +    pub fn resident_bytes(&self) -> usize {
+  367          self.core.arena_bytes.load(Ordering::Relaxed)
+  368      }
+  369  
+
+@@ -439,6 +445,11 @@ impl<K: Ord> SkipListReader<K> {
+  445      pub fn len(&self) -> usize {
+  446          self.core.len()
+  447      }
+  448 +
+  449 +    /// Whether no node has been inserted.
+  450 +    pub fn is_empty(&self) -> bool {
+  451 +        self.len() == 0
+  452 +    }
+  453  }
+  454  
+  455  /// Forward iterator over keys in ascending order. Yields `&K` borrowed from the

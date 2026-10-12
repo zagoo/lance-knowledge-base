@@ -1,0 +1,85 @@
+@@ -533,24 +533,44 @@ pub(crate) async fn count_trainable_vectors(
+  533      total_rows: usize,
+  534      enough: usize,
+  535  ) -> Result<usize> {
+  536 -    if !is_multivector(dataset, column)? {
+  537 -        return count_non_null_vectors(dataset, column, total_rows).await;
+  536 +    let is_multivector = is_multivector(dataset, column)?;
+  537 +    if !is_multivector
+  538 +        && dataset
+  539 +            .schema()
+  540 +            .field(column)
+  541 +            .is_some_and(|field| !field.nullable)
+  542 +    {
+  543 +        return Ok(total_rows);
+  544 +    }
+  545 +    if enough == 0 {
+  546 +        return Ok(0);
+  547      }
+  548  
+  549      let mut scanner = dataset.scan();
+  550      scanner.project(&[column])?;
+  551 +    // These callers need a threshold, not a full count. Bound prefetch so a
+  552 +    // small training floor does not schedule reads from the rest of the table.
+  553 +    // Keep batches large enough to also scan sparse or all-null inputs efficiently.
+  554 +    scanner
+  555 +        .batch_size(1024)
+  556 +        .batch_readahead(1)
+  557 +        .fragment_readahead(1);
+  558      let mut batches = scanner.try_into_stream().await?;
+  559      let mut vectors = 0_usize;
+  560      while let Some(batch) = batches.try_next().await? {
+  545 -        let lists = utils::get_column_from_batch(&batch, column)?;
+  546 -        let lists = lists.as_list::<i32>();
+  547 -        for row in 0..lists.len() {
+  548 -            if lists.is_null(row) {
+  549 -                continue;
+  561 +        let array = utils::get_column_from_batch(&batch, column)?;
+  562 +        if is_multivector {
+  563 +            let lists = array.as_list::<i32>();
+  564 +            for row in 0..lists.len() {
+  565 +                if lists.is_null(row) {
+  566 +                    continue;
+  567 +                }
+  568 +                // Null vectors inside a non-null list cannot be trained on.
+  569 +                let row_vectors = lists.value(row);
+  570 +                vectors = vectors.saturating_add(row_vectors.len() - row_vectors.null_count());
+  571              }
+  551 -            // A vector inside the row can be null, and is not one to train on.
+  552 -            let row_vectors = lists.value(row);
+  553 -            vectors = vectors.saturating_add(row_vectors.len() - row_vectors.null_count());
+  572 +        } else {
+  573 +            vectors = vectors.saturating_add(array.len() - array.null_count());
+  574          }
+  575          if vectors >= enough {
+  576              return Ok(vectors);
+
+@@ -564,28 +584,6 @@ fn is_multivector(dataset: &Dataset, column: &str) -> Result<bool> {
+  584      Ok(matches!(vector_type, DataType::List(_)))
+  585  }
+  586  
+  567 -/// Count the rows of `column` holding a vector.
+  568 -///
+  569 -/// A column that cannot hold nulls has one per row, so `total_rows` is the
+  570 -/// answer and nothing is read.
+  571 -async fn count_non_null_vectors(
+  572 -    dataset: &Dataset,
+  573 -    column: &str,
+  574 -    total_rows: usize,
+  575 -) -> Result<usize> {
+  576 -    let nullable = dataset
+  577 -        .schema()
+  578 -        .field(column)
+  579 -        .is_none_or(|field| field.nullable);
+  580 -    if !nullable {
+  581 -        return Ok(total_rows);
+  582 -    }
+  583 -
+  584 -    dataset
+  585 -        .count_rows(Some(format!("{column} IS NOT NULL")))
+  586 -        .await
+  587 -}
+  588 -
+  587  /// The partition count a whole-table build can train.
+  588  ///
+  589  /// A partition's centroid is what search ranks to choose partitions, so one

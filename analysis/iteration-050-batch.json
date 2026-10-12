@@ -1,0 +1,491 @@
+{
+  "iteration": 50,
+  "files": [
+    {
+      "path": "rust/lance-table/src/io/commit/dynamodb.rs",
+      "module": "L1-modules/rust-lance-table-dynamodb.md",
+      "reviewed": true,
+      "role": "Feature-gated DynamoDB implementation of ExternalManifestStore, with SDK error adaptation, cached key-schema checks, strongly consistent manifest lookups, conditional full-item publication, dataset-record deletion and size-attribute unit fixtures.",
+      "ranges": [
+        [
+          1,
+          32,
+          "SPDX/module introduction and imports connect HashMap/HashSet, Arc/LazyLock, async_trait, DynamoDB SDK client/errors/request IDs/fluent builders/attribute types, Path, Snafu OptionExt, Tokio RwLock, warnings and parent external-manifest types. The dynamodb feature gate is on the parent module declaration; there is no local network client creation in this file."
+        ],
+        [
+          33,
+          71,
+          "Private Debug WrappedSdkError<E> wraps SdkError<E>. From converts it to core IO with boxed source for E: Error + Send + Sync + static. Display reports request ID or unknown and raw response Debug or no service error; it does not directly display the inner typed service-error message. Error::source preserves the underlying SDK error. Formatter errors propagate. Placeholder explanatory comments have no execution effect."
+        ],
+        [
+          72,
+          92,
+          "Private SdkResultExt<T>::wrap_err maps any SDK error into WrappedSdkError/core IO after warning at tracing target lance::dynamodb with request ID and full Debug SDK error. Success passes through. There is no conditional-check-failure-to-CommitConflict specialization here; the higher external handler later classifies all put errors. This adapter logs and returns the same failure, without an explicit local retry."
+        ],
+        [
+          93,
+          116,
+          "Public Debug DynamoDBExternalManifestStore privately holds Arc<Client>, owned table_name and committer_name strings. Docs require base_uri string HASH key, version numeric RANGE key, path/committer strings and strongly consistent reads. They describe conditional-write single-winner intent. Actual constructor checks key names/roles only, not declared attribute scalar types or full schema cardinality; the size column is used below but omitted from this introductory schema list."
+        ],
+        [
+          117,
+          138,
+          "Private zero-argument macros expand to exact attribute names base_uri, version, path and committer, enabling literal match patterns in schema validation. These strings are persistent key/row identities, not configurable field names. No macro performs IO or runtime initialization."
+        ],
+        [
+          139,
+          161,
+          "Private parse_size_attribute borrows an attribute map. Absent size returns Ok(None) for older rows; present size must be AttributeValue::N, whose string must parse as u64. Wrong attribute type or malformed/negative/fractional/overflow numeric text returns InvalidInput including value and parse context. Zero and u64::MAX are accepted. This helper does not HEAD storage, validate path/version or silently turn malformed present values into unknown size."
+        ],
+        [
+          162,
+          183,
+          "Public async new_external_store(client: Arc<Client>, table_name: &str, committer_name: &str) returns Arc<dyn ExternalManifestStore>. It constructs the store first. Function-static LazyLock<RwLock<HashSet<String>>> caches successful checks process-wide using only table_name: a hit returns immediately without DescribeTable. Client, endpoint, account and region are not in the key; there is no expiry/invalidation. Concurrent misses may both describe because read lock is released before the request."
+        ],
+        [
+          184,
+          225,
+          "On cache miss, constructor issues DescribeTable through the supplied client and wraps SDK failures as IO. Missing table metadata or key schema returns contextual IO. It pops exactly two schema elements, requiring each be Hash/base_uri or Range/version, otherwise IO with table/key name. Missing either popped element errors. Remaining schema elements are not inspected and AttributeDefinitions are not checked, so docs about string/number types exceed the local validation."
+        ],
+        [
+          226,
+          243,
+          "After the two entries, constructor requires both expected roles to have appeared, preventing duplicate-role acceptance. Success obtains the async write lock, inserts table_name, then returns the store; failed checks are not cached. It does not create or repair a table and has no cache invalidation when a table is recreated. No lock spans the DescribeTable await."
+        ],
+        [
+          244,
+          266,
+          "Private ddb_put, ddb_get, ddb_query and ddb_delete construct SDK fluent builders prefilled with table_name. Both get and query explicitly set consistent_read(true); writes/deletes do not set conditions here. These methods do not send requests themselves. Strong reads apply per request, not an atomic multi-request snapshot."
+        ],
+        [
+          267,
+          298,
+          "ExternalManifestStore::get sends a strongly consistent GetItem using base_uri as S and version as decimal N. Absent item becomes core NotFound with dataset/version; missing path also becomes NotFound, wrong path type InvalidInput, and string path is cloned. It does not parse size, inspect row version, read objects or ignore a wrong path type. SDK failures remain wrapped IO."
+        ],
+        [
+          299,
+          344,
+          "get_manifest_location repeats the keyed strongly consistent GET, checks item/path presence and string type, constructs Path::from, parses optional size, and classifies naming through the parent heuristic. It returns the requested version, row path/size, ETag None and identity None. Legacy e_tag attributes are deliberately ignored. Path::from is delegated conversion rather than a local fallible Path::parse check. No object existence/content/size HEAD occurs here."
+        ],
+        [
+          345,
+          368,
+          "get_latest_version calls the overridden get_latest_manifest_location and strips metadata to (version,path string); it therefore also rejects malformed size. Latest-location query conditions only base_uri equality, uses strongly consistent Query, descending sort-key order and limit 1. No detached-version predicate, pagination loop or object-store validation is added."
+        ],
+        [
+          369,
+          395,
+          "Latest lookup returns None for absent/empty items and InvalidInput if the response contains more than one item despite limit 1. A checked pop uses expect. Missing version/path columns are NotFound with base URI and column context. parse_size_attribute runs before checking the version/path attribute type pair, establishing error precedence for malformed rows."
+        ],
+        [
+          396,
+          422,
+          "Latest row requires version N and path S, parses version to the ManifestLocation u64 type, builds/classifies Path and returns row size with ETag/identity None. Either wrong attribute type produces a broad not number type message, even if path alone is wrong. Numeric overflow or malformed version is InvalidInput. Maximum numeric record wins, including a detached-bit number if stored under the same partition; no payload/file consistency check is made."
+        ],
+        [
+          423,
+          455,
+          "put_if_not_exists ignores its ETag argument and sends PutItem with exactly base_uri S, version decimal N, path S, committer S and size decimal N. Condition requires both key attributes absent for the target item. It never writes an ETag or identity. Any SDK condition/transport/service error is warned and wrapped as IO, not directly a core commit conflict. Success returns unit; there is no readback here. Atomicity relies on the service honoring the conditional request."
+        ],
+        [
+          456,
+          485,
+          "put_if_exists also sends a complete five-attribute PutItem, conditioned only on both key attributes existing. It supplies no expected old path, ETag, committer or record incarnation condition. The request intentionally omits legacy ETags rather than using a separate REMOVE update; clearing relies on PutItem replacement semantics. It refreshes committer to this store's name even for reader helping. All errors use the same IO wrapper; generic finalization decides whether to swallow a failed repair."
+        ],
+        [
+          486,
+          514,
+          "delete queries matching base_uri once with strong reads, then sequentially sends unconditional DeleteItem for each returned numeric version attribute. Missing/wrong-type version is silently skipped; numeric strings are forwarded without parsing. It ignores any last-evaluated key, so this function processes only one query response/page. Errors stop after prior deletions may have succeeded. Concurrent inserts/replacements are not fenced; there is no batch transaction, identity condition or physical-object deletion. The impl ends without overriding predecessor/identity/list/forget hooks, retaining false/None/None/NotSupported trait defaults and generic put/finalize."
+        ],
+        [
+          515,
+          536,
+          "The cfg(test) module imports parent definitions. Private item fixture constructs base_uri s3://bucket/table, version N(7), path _versions/7.manifest and optionally inserts the supplied size attribute. It creates no client or external table; all local tests exercise only parse_size_attribute."
+        ],
+        [
+          537,
+          555,
+          "test_absent_size_is_not_an_error asserts None for missing size. test_size_roundtrips_through_the_attribute checks exact Some values for 0, 1, 4096 and u64::MAX represented as N strings. These fixtures validate parsing, not an SDK write/read roundtrip or object HEAD fallback."
+        ],
+        [
+          556,
+          570,
+          "test_unreadable_size_is_reported supplies empty, abc, -1, 1.5 and an overflowing integer string and asserts each error contains could not parse the size. The comment calls the row corrupt, but the helper's actual variant is InvalidInput; the test checks message rather than variant."
+        ],
+        [
+          571,
+          586,
+          "test_non_numeric_size_attribute_is_reported supplies string 4096, Bool(true) and Null(true), requires errors containing expected a number, and closes the test module. No local fixtures cover SDK errors, cached schema validation, conditions, pagination, dataset recreation, deletion races or actual service consistency. All tests were read, not run."
+        ]
+      ],
+      "limits": "All 586 physical lines are read and annotated. DynamoDB requests are reconstructed offline from this implementation and its already analyzed parent factory; no service, SDK test, network request or benchmark ran. Conditional request semantics and SDK retries are expressed by the builders, not empirically qualified. Full Dataset outcome handling and namespace-backed stores remain pending. Full public signatures and all source lines follow."
+    },
+    {
+      "path": "rust/lance-table/src/rowids/index.rs",
+      "module": "L1-modules/rust-lance-table-row-index.md",
+      "reviewed": true,
+      "role": "In-memory stable-row-ID to physical RowAddress lookup, selecting a merged range map or a fragment-probing interval tree, with deletion filtering, per-segment accelerators, retained-memory accounting and unit/property fixtures. Public types are reexported from the otherwise private rowids::index module.",
+      "ranges": [
+        [
+          1,
+          28,
+          "SPDX/imports connect Arc, inclusive ranges, Bitmap/count_ones, RowIdSequence/U64Segment, DeepSizeOf, RowAddress, DeletionVector, core errors and RangeInclusiveMap. Private MAX_PROBE_DEPTH=64 bounds overlapping fragment envelopes for the probe choice; MERGE_ROWS_BUDGET=1<<20 estimates rows read by merging; RANK_BLOCK_BYTES=256 means 2,048 bitmap slots per rank directory entry. Source comments' measured depth 46 is historical rationale, not a measurement from this task."
+        ],
+        [
+          29,
+          61,
+          "Public Debug RowIdIndex owns private sorted fragment entries, a max-end tree and optional merged RangeInclusiveMap<u64,(row-ID segment,address segment)>. Public FragmentRowIdIndex has public u32 fragment_id plus Arc<RowIdSequence> and Arc<DeletionVector>, without validation or a derive here. The opening comment says tombstoned addresses may be returned; current probe and merged construction actually filter supplied deletions, so the comment is stale. Empty deletion input naturally provides no such filtering."
+        ],
+        [
+          62,
+          81,
+          "Public new borrows a fragment-index slice, builds FragmentEntry/lookup sidecars for every nonempty source, sorts by lowest row ID and constructs the end tree before deciding representation. It builds a merged map unless probing_beats_merging returns true. Returns Result for duplicate-live-ID merge failures; input capacities, offsets and within-fragment uniqueness are not comprehensively validated. Both original fragment/sidecar state and the tree remain retained even when merged is Some."
+        ],
+        [
+          82,
+          115,
+          "build_merged clones Arc handles into temporary source descriptors, decomposes every source into chunks, eagerly collects them, groups overlapping numeric envelopes and merges only those groups. Nonoverlapping chunks pass through. Sparse bounds may overlap without live-ID collision, so duplicate detection examines enumerated IDs rather than span cardinality. Final chunks become RangeInclusiveMap. Construction materializes multiple intermediate vectors and may error after significant temporary allocation, but publishes no external state."
+        ],
+        [
+          116,
+          130,
+          "Public get(row_id:u64)->Result<Option<RowAddress>> dispatches to merged_get when a map exists, wrapping its Option in Ok, otherwise probes fragments. Thus merged cross-chunk duplicate errors happen at construction, while probe errors happen only for requested duplicated IDs. Missing IDs return None; no row bytes, file IO or mutable cache is accessed."
+        ],
+        [
+          131,
+          159,
+          "Public get_many allocates one None per input and returns it immediately for empty input. It builds/sorts a working Vec<(row_id,original_index)> and restores results to original positions, preserving input duplicates. Probe mode simply invokes self.probe for every sorted ID with no explicit persistent traversal cursor; first error aborts the whole call. The doc's O(F+N) amortization omits sorting and applies to merged chunk traversal, not total work in both modes."
+        ],
+        [
+          160,
+          184,
+          "Merged get_many walks sorted map chunks with a peekable iterator, advancing while range end < requested ID, skipping IDs before the next start and stopping when no chunks remain. Within a covering envelope it finds the row-ID segment position and corresponding address; either absence leaves None. Output remains in caller order. Work includes O(N log N) input sort plus chunk traversal and encoding-specific position/get costs; sparse envelope membership alone is not a live hit."
+        ],
+        [
+          185,
+          244,
+          "Private probe returns None for zero fragments or no start <= row ID. partition_point finds the candidate upper bound. An iterative stackless left-to-right DFS uses max-end tree values to prune subtrees, tests FragmentEntry::resolve at leaves, and continues after the first live hit to detect a second. Two hits return Internal naming the row ID. Ascending from right children adjusts lo/width; reaching root ends the walk, while lo>=upper terminates remaining sorted starts. No recursion or heap stack per lookup; worst work depends on overlapping envelopes and segment searches, not solely one binary search."
+        ],
+        [
+          245,
+          275,
+          "merged_get queries the range map, calls row-ID segment.position then address segment.get, converts raw address and returns None on either miss. Private SegmentEntry stores original sequence index, inclusive envelope, u32 starting physical offset and lookup. SegmentLookup::Native delegates to encoding; Positions stores sorted (ID,u32 position) pairs for unsorted arrays; BitmapRank stores u32 prefix popcounts per 256-byte block. These are memory-only accelerators, not serialized format fields."
+        ],
+        [
+          276,
+          305,
+          "SegmentEntry::position uses its original sequence index. Native delegates; Positions binary-searches ID and returns the saved offset. BitmapRank verifies the source variant and range, rejects a clear bit, then sums the directory prefix and bit count from the block start up to but excluding this bit. At most one 256-byte block prefix is scanned. It trusts valid bitmap storage, rank lengths and u32 offsets; malformed backing or stale sequence/sidecar correspondence can panic or misresolve. Arc ownership keeps ordinary safe mutation from changing this stored sequence."
+        ],
+        [
+          306,
+          328,
+          "build_lookup eagerly iterates Array into (ID,position as u32), sorts tuples and deduplicates by ID so the smallest original position wins; returned length remains the original segment length, not deduplicated count. Bitmap builds a rank directory and uses total counted ones as length; all other encodings use Native plus segment.len. Therefore construction does more than reading bounds: Array sidecars require full enumeration/sort and bitmap sidecars scan bytes even when probe mode is chosen."
+        ],
+        [
+          329,
+          351,
+          "build_bitmap_rank reserves ceil(data byte length/256) entries, stores cumulative ones cast to u32 before each chunk and counts all supplied bytes, returning directory and usize total. It does not mask logical trailing padding or validate bitmap.len; correctness relies on canonical bitmap storage. Private Debug FragmentEntry retains ID, Arc sequence/deletions, segment sidecars, min/max envelope and estimated merge_rows."
+        ],
+        [
+          352,
+          390,
+          "FragmentEntry::new iterates all sequence segments, builds lookup and len, counts len toward merge_rows whenever any deletion exists for the fragment or the segment is not a plain Range. Only positive-len segments with a reported range become entries; physical offset still advances for every segment. It computes min start/max end over retained segments or drops a source with none. u32 length casts and offset addition, u64 merge estimate addition are unchecked. Entirely deleted but physically nonempty sources may remain as probe candidates because deletion filtering occurs later."
+        ],
+        [
+          391,
+          410,
+          "FragmentEntry::resolve scans segments in sequence order, filters envelopes, asks the sidecar for a position, adds the segment start offset, then skips supplied deletion offsets. First surviving hit becomes RowAddress(fragment_id,physical_offset); later segments are not checked after that hit. Consequently this path detects cross-entry duplicates in probe, not every duplicate within one fragment; Positions collapses repeated IDs to their first original position. It preserves physical holes rather than compacting surviving offsets."
+        ],
+        [
+          411,
+          436,
+          "probing_beats_merging requires estimated merge rows strictly greater than 1,048,576 AND max envelope overlap depth <=64; exact budget or depth 65 selects merging. Short-circuit avoids overlap calculation below budget. max_overlap_depth sorts ends and sweeps start-sorted fragments, closing only end < next start because envelopes are inclusive. Depth counts fragment envelopes, including holes/deleted IDs, not exact live overlap. It assumes starts already sorted; totals use ordinary arithmetic."
+        ],
+        [
+          437,
+          453,
+          "build_end_tree returns empty Vec for no fragments; otherwise pads leaf count to next power of two, allocates 2*leaves zero u64s, stores fragment ends in leaves and fills internal maxima bottom-up. Index 0 is unused; root is 1. Padding zero may pass an ID-zero end check but is excluded by slot bounds. Capacity arithmetic/allocation are not fallible Result paths."
+        ],
+        [
+          454,
+          501,
+          "Manual DeepSizeOf traverses shared sequences/deletion vectors with the supplied Context, counts segment Vec capacity and Positions/BitmapRank allocation capacities, then estimates merged entries as two u64 bounds plus segment pair inline sizes and owned children. It adds fragment Vec/end-tree capacities. Arc dedup follows shared Context, but separately cached roots may each charge retained sequences. Range-map node/allocation overhead is not measured; this is an estimate, not exact RSS. Both probe accelerators and merged storage are charged when retained."
+        ],
+        [
+          502,
+          534,
+          "decompose_sequence starts at RowAddress::first_row(fragment_id), tracks u32 physical offset and u64 raw address, and chooses a no-deletion fast path only if the entire deletion vector is empty. After processing each segment, both offsets advance by its full physical length, including deleted rows; None chunks are filtered out. Length casts/additions are unchecked and no fragment-size bounds are validated here. Result is eagerly collected Vec."
+        ],
+        [
+          535,
+          549,
+          "build_chunk_from_pairs returns None for empty input, sorts (row ID,address) pairs by row ID, unzips into two owned Vecs, compresses each with U64Segment::from_iter and obtains inclusive coverage from the row-ID segment. Address order follows sorted IDs, preserving the original physical pairing. It does not explicitly reject duplicates within this single chunk; later overlapping-group merge is a separate check."
+        ],
+        [
+          550,
+          572,
+          "Without deletions a nonempty plain Range becomes cloned ID Range, arithmetic address Range and inclusive start..=end-1 in constant row-independent time. Empty segments return None. Every other encoding, including compact Ranges, is enumerated into pairs then sorted/compressed. Unchecked address end arithmetic assumes fragment lengths fit the RowAddress representation. Fast-path complexity is per segment, not total index construction including fragment/chunk sorting."
+        ],
+        [
+          573,
+          611,
+          "With deletions, every segment value is enumerated; local position plus current_offset is checked against DeletionVector, surviving values retain original raw address, then build_chunk_from_pairs sorts/compresses. Private IndexChunk aliases coverage plus ID/address segments. RawIndexChunk distinguishes one nonoverlapping chunk from an overlapping-envelope group; range_end extracts inclusive end. No tombstone is returned from either decomposition path when supplied deletion metadata is correct."
+        ],
+        [
+          612,
+          648,
+          "prep_index_chunks sorts all chunks by u64::MAX-start (descending start) and pops to process ascending starts. Empty input returns empty owned iterator; otherwise seed output with the first nonoverlapping chunk. It tracks a current overlapping group/envelope. Debug assertions repeatedly recompute minimum start/maximum end, using zero defaults for an empty group; these add debug-only work and encode internal grouping invariants."
+        ],
+        [
+          649,
+          691,
+          "When no group is active, compare next start <= previous output end. Overlap removes the previous nonoverlapping chunk, starts a two-chunk group and expands end; otherwise append it standalone. An active group absorbs any chunk starting within its current inclusive end, transitively extending the envelope; a gap flushes the group via replace/take then appends a standalone chunk. unwrap/unreachable rely on seeded-output/group state, not user validation."
+        ],
+        [
+          692,
+          718,
+          "Final debug assertions repeat group min/max agreement. Any remaining overlap group is appended, then the owned output Vec becomes an iterator. Adjacent but nonoverlapping inclusive envelopes are not grouped; sparse holes within overlapping bounds are handled later by live-ID merge. Despite its iterator return type, all grouping is completed and materialized before return."
+        ],
+        [
+          719,
+          744,
+          "merge_overlapping_chunks preallocates summed row-ID lengths, extends with zip of each ID/address iterator, stable-sorts by ID and rejects the first adjacent duplicate as Internal. Zip would truncate mismatched inputs; private decomposition is expected to maintain pairing. Duplicate check does not know actual fragment identities, so its multiple fragments message can also describe malformed overlapping chunks from one source. Rebuilds compressed ID/address segments and unwraps nonempty range, relying on nonempty overlap inputs."
+        ],
+        [
+          745,
+          784,
+          "cfg(test) RowIdIndex::probing bypasses the heuristic but still builds/sorts fragment sidecars and tree; its Result currently always succeeds. The tests module imports proptest. sparse_sequence makes even IDs in an explicit SortedArray; fragment wraps a sequence in Arc with empty deletion vector. Helpers are fixtures, not public construction alternatives."
+        ],
+        [
+          785,
+          821,
+          "Heuristic tests require a one-million-row plain Range and 16-element sparse sequence to merge, while a sparse sequence with budget+1 rows probes and resolves ID6 to offset3. A second fixture creates 65 interleaved fragments with just over the total row budget and requires merging despite build size. These tests establish selection thresholds in source, not measured performance or sub-second execution."
+        ],
+        [
+          822,
+          860,
+          "One test rejects duplicated live ID2 across two fragments during normal merged construction, then successfully probes only the first fragment; its name does not mean probe tolerates the same corrupt two-fragment input. The next forced-probe fixture uses both sources, resolves unique ID0, requires Internal plus the duplicate message for get(2), and requires get_many([0,2]) to error."
+        ],
+        [
+          861,
+          902,
+          "Bitmap rank test spans three full 2,048-slot blocks plus 17 slots, clears every slot congruent to1 mod3 and checks every live/missing lookup plus outside bounds. Unsorted-array probe fixture permutes 2,048 IDs by multiply7919 modulo2048 and asserts every original physical position, keeping merged None. Neither test benchmarks latency."
+        ],
+        [
+          903,
+          961,
+          "test_new_index combines fragment10 Range/holes/sorted-array segments with fragment20 bitmap/Array segments. Assertions check first values, omitted IDs15/61, end-of-hole rank and cumulative offsets across segments: ID25 at fragment10 offset16, ID40/60 at fragment20 offsets2/4. Both deletion vectors are empty; holes are sequence representation gaps."
+        ],
+        [
+          962,
+          1028,
+          "test_new_index_overlap interleaves IDs1..9 across fragments10/42/23 with overlapping sparse envelopes, then asserts all nine exact fragment/offset pairs. This verifies valid overlapping envelopes merge without requiring dense ownership by one fragment."
+        ],
+        [
+          1029,
+          1100,
+          "Unsorted fixture supplies [9,3,6], [8,2,5] and [7,1,4] across fragments10/20/30 as explicit Arrays. It verifies all nine IDs map to original physical positions after sorting the merged ID dimension, and IDs0/10 are absent. This tests pairing preservation, not sorted-input assumptions."
+        ],
+        [
+          1101,
+          1143,
+          "Partial-overlap fixture has fragment0 RangeWithHoles(0..100, hole50) and fragment1 Range50..51. It checks ownership of50 by fragment1 and fragment0 offsets before/after the hole (ID51 at50, ID99 at98). Sequence holes do not occupy physical positions, unlike deletion-vector holes."
+        ],
+        [
+          1144,
+          1199,
+          "Sparse-overlap deletion fixture alternates odd/even IDs across two fragments and tombstones even-source offset2 (ID4). It asserts ID4 missing and surviving IDs6/8 retain physical offsets3/4. Thus overlapping span union may have holes and deletion filtering must not renumber surviving addresses."
+        ],
+        [
+          1200,
+          1232,
+          "Single Range0..6 with deletion offsets2/3 returns addresses for0/1/4/5 at unchanged offsets and None for2/3. This directly contradicts the stale type comment that this index can return supplied tombstoned addresses."
+        ],
+        [
+          1233,
+          1270,
+          "Empty-fragment fixture mixes no segments with Range5..8 and checks live boundary lookup plus missing4. Completely empty constructor returns an index whose get(0) and get(100) are None. No error is expected from empty inputs."
+        ],
+        [
+          1271,
+          1317,
+          "Three adjacent nonoverlapping ranges0..5,5..10,10..15 across fragments10/20/30 assert each first/last physical offset. Inclusive coverage boundaries derived from exclusive ranges must not cause false overlap or off-by-one mapping."
+        ],
+        [
+          1318,
+          1342,
+          "arbitrary_row_ids generates fragment sizes in supplied ranges, constructs globally unique IDs0..sum, shuffles all IDs, partitions by sizes and compresses each sequence. Fragment IDs are cumulative starting row positions cast to u32, not sequential fragment ordinal; zero-size sources may reuse a cumulative ID but hold no rows. Strategy materializes the global ID Vec."
+        ],
+        [
+          1343,
+          1378,
+          "arbitrary_row_ids_with_deletions pairs the generated sources with one arbitrary bool per physical row, then consumes those flags in source/offset order into Roaring deletion bitmaps. Each result retains its Arc sequence and a Bitmap deletion vector, possibly empty. Test generation uses unwrap under guaranteed vector cardinality and bounded inputs."
+        ],
+        [
+          1379,
+          1441,
+          "Large-range regression constructs100 fragments of250,000 rows (25 million total) without deletions, times only RowIdIndex::new and asserts selected boundaries plus missing final+1. It requires elapsed.as_secs()<1. The comment's typically<1ms and O(fragments) language are rationale, not observed here; range decomposition is row-independent but fragment/chunk sorting still exists. This test was not run."
+        ],
+        [
+          1442,
+          1516,
+          "Large-deletion fixture uses10 fragments of1,000 rows with every third physical offset removed, checks missing0/3/next-fragment-start/last-row and unchanged survivor offsets including final998. It checks final out-of-range too. No timing assertion in this test; it exercises deletion-aware enumeration and mapping."
+        ],
+        [
+          1517,
+          1553,
+          "Proptest robustness generates0..4 fragments each0..31 rows with deletions, constructs both heuristic and forced-probe indices, and checks every generated physical ID against an explicit deletion/address oracle. It covers both representations on small fixtures, not malformed global duplicates or all sidecar encodings by guarantee."
+        ],
+        [
+          1554,
+          1582,
+          "Moved-ID property chooses any u64 row ID, source fragment below1024 and positive delta below1024, marks source offset0 deleted and target live. New merged index must resolve to target offset0. This includes u64::MAX candidates through the generator and establishes live uniqueness rather than physical-history uniqueness."
+        ],
+        [
+          1583,
+          1612,
+          "Duplicate-live property creates two distinct fragments holding the same arbitrary u64 ID without deletions. Construction must fail with Internal and exact ID context. It tests merged validation on small sources; forced probe's delayed duplicate behavior is tested separately."
+        ],
+        [
+          1613,
+          1641,
+          "Range-segment fixture excludes1200..1900 from1000..3000, asserts use_range_segments changes representation, then verifies every remaining ID's ordinal address and missing1500. get_many on [2999,1000,1199,1900,1500] must preserve requested order and return last,0,199,200,None. This is the file's explicit successful batch-lookup case; there is no broad get_many property matrix, retained-size fixture or overflow/padding-corruption test here."
+        ]
+      ],
+      "limits": "All 1,641 physical lines were read and authored. This synchronous structure uses no unsafe blocks, locks, awaits or object IO. Segment/bitmap/deletion/RowAddress contracts are separately documented; no source tests or benchmarks were executed. Heuristic thresholds and test timing assertions are source facts, not verified latency promises. Complete Dataset construction/caching/refresh and scan callers remain pending; the benchmark is analyzed separately."
+    },
+    {
+      "path": "rust/lance-table/benches/row_id_index.rs",
+      "module": "L1-modules/rust-lance-table-row-index.md",
+      "reviewed": true,
+      "role": "Criterion workloads for RowIdIndex construction/lookup, row-ID column application, synthetic interleaved fragment history and bitmap-mask density. Includes optional CSV serialization-size output and synthetic protobuf row-ID generators. This is benchmark source, not recorded performance evidence.",
+      "ranges": [
+        [
+          1,
+          39,
+          "SPDX, historical TODO/checklist/questions and imports establish benchmark scope. Checklist says build/get work is unfinished even though later functions implement workloads; it is not authoritative current coverage. Imports include HashMap/Write/Range/Arc, Arrow, Criterion, row addresses/deletions, scan parameters/masks, table row-ID codecs/index/stream adapter, Prost and seeded SmallRng. External Criterion documentation URL was not fetched."
+        ],
+        [
+          40,
+          53,
+          "make_sequence starts from a contiguous RowIdSequence, collects every other ID up to requested deletions and calls sequence.delete. This removes IDs from the sequence itself; it is not a tombstoned physical fragment. The request is capped implicitly by available alternating IDs, so a requested80% can remove at most ceil(original length/2), not80%. No ratio validation or error return."
+        ],
+        [
+          54,
+          75,
+          "make_frag_sequences integer-divides total rows by fragment count, constructs exactly that many equal-sized ranges, removes floor(float rows_per_frag * ratio) alternating IDs, advances the original ID span and returns Arc sequences with fragment ordinal cast to u32. Remainder rows are dropped, num_frags=0 would divide by zero, and precision/cast behavior is inherited from f32. All later DeletionVectors are empty because removed IDs are already absent from sequences."
+        ],
+        [
+          76,
+          91,
+          "num_rows parses BENCH_NUM_ROWS as u64 with unwrap and defaults to1,000,000 on any env-read error. Invalid Unicode takes the default; malformed set numeric text panics. No positive/minimum/multiple-of100 check. SizeStats owns structure label, f32 ratio and u64 bytes; SizeStatsFile optionally owns an OS file."
+        ],
+        [
+          92,
+          115,
+          "SizeStatsFile::new reads BENCH_SIZE_STATS_FILE and, if present, File::create truncates/creates that path then writes CSV header structure,percent_deletions,size. Otherwise output is disabled. write_row emits quoted structure plus numeric fields using writeln and unwrap; it does not escape arbitrary quotes or explicitly flush. The caller supplies controlled labels. These effects were not executed in this task."
+        ],
+        [
+          116,
+          141,
+          "bench_creation creates row_id_index_creation group and optional CSV sink. For ratios0,0.25,0.5, setup constructs100 fragment sequences plus empty deletion vectors outside timing. BuildIndex iterations call RowIdIndex::new and drop the resulting index; they include constructor sidecar/heuristic/merge work and destructor, not sequence generation or disk IO."
+        ],
+        [
+          142,
+          163,
+          "The RowIdIndex CSV size is the sum of serialized RowIdSequence byte lengths computed outside timing, not the in-memory index or a persisted merged lookup map. TODOs about collecting serialized size/adding HashMap are partly stale because those operations appear in this function. Tombstoned versus compacted comparison is not implemented by empty deletion vectors."
+        ],
+        [
+          164,
+          204,
+          "The creation comparison materializes flat ID/address Vecs outside timing; addresses are dense surviving sequence ordinals. FlatData CSV reports exactly16 bytes per remaining row, excluding Vec/HashMap overhead. BuildHashMap times constructing an unreserved HashMap and extending zipped pairs, then drops it. No BTreeMap, correctness assertion or explicit black_box is present in these two creation workloads. Group finishes after all ratios."
+        ],
+        [
+          205,
+          240,
+          "bench_get_single creates100 fragments for ratios0,0.02,0.25,0.5,0.8 and builds the RowIdIndex outside timing. Its mutable query generator adds241861 modulo BENCH_NUM_ROWS, starting at0. Each GetIndex iteration performs ONE get and discards the Result, including errors. Zero rows causes modulo-zero panic; dropped remainder and deleted IDs can be misses. The80% label does not equal actual removal due to alternating-ID cap."
+        ],
+        [
+          241,
+          277,
+          "HashMap lookup setup separately flattens/builds the baseline outside timing. Crucially each GetHashMap timed iteration loops over ALL IDs0..num_rows, while GetIndex performs one lookup. No throughput normalization corrects this difference, and num_rows parses the environment inside the HashMap iteration. The two reported per-iteration times are not directly comparable single-get latency. Results are ignored without explicit black_box or assertions."
+        ],
+        [
+          278,
+          316,
+          "bench_apply_row_id creates one non-null UInt64 value batch0..num_rows outside timing. RowIdAndDeletesConfig uses default parameters, row-ID true, address/creation/update columns false, no deletion or row/version sequences, no nullification, and total rows cast to u32. Each iteration clones the batch handle and calls apply_row_id_and_deletes(batch,0,0,&config), discarding Result. Complete stream-adapter behavior remains separately pending; this measures the call including clone, not just one primitive lookup."
+        ],
+        [
+          317,
+          336,
+          "shot_fragments parses BENCH_SHOT_FRAGMENTS with unwrap and defaults to2000; doc suggests19960 to mimic a historical table, not a measured reproduction here. SHOT_ROWS_PER_FRAGMENT=870,000. hash_byte mixes position XOR seed with two explicit wrapping u64 multipliers, rotate-left23, and the high byte of little-endian output. It is a cheap deterministic workload generator, not a cryptographic hash or proven uniform distribution."
+        ],
+        [
+          337,
+          363,
+          "bitmap_segment constructs a protobuf RangeWithBitmap, allocating ceil(span/8) bytes and selecting each bit when hash_byte %100 < density_pct, then clears trailing padding. Positions passed to hash are segment-local; seed varies independently. End-start and usize conversions are unchecked. Modulo100 of a byte can bias density, so comments such as82% are nominal thresholds, not guaranteed fractions."
+        ],
+        [
+          364,
+          398,
+          "holes_segment filters local offsets with hash_byte %100 < holes_pct, casts them to u32, emits little-endian four-byte offsets and constructs protobuf RangeWithHoles with U32Array base=start. Iteration keeps holes sorted. range_segment builds a plain protobuf half-open Range. Neither validates arbitrary caller bounds/span against u32, relying on fixed benchmark sizes."
+        ],
+        [
+          399,
+          426,
+          "sample_segment unwraps the protobuf arm. Plain Range samples a random slot; bitmap samples a slot and checks its bit; holes samples a local u32 offset then linearly scans encoded four-byte hole entries. Returns None for a sampled hole, and unreachable for other encodings. Empty ranges/unsupported shapes can panic. Sampling cost is setup work, not measured lookup cost."
+        ],
+        [
+          427,
+          450,
+          "shot_table_like seeds SmallRng, groups up to16 fragments and chooses each group compacted with rng0..100 <44. Uncompacted or single-fragment groups retain one plain Range per fragment. The comment's about half and historical17.4B table description are approximate fixture rationale; current default is2000 fragments. No real dataset or deletion/compaction operation is loaded."
+        ],
+        [
+          451,
+          479,
+          "Compacted groups split every source span in halves, shuffle all slices, take pairs and sort each pair's bounds. A pair can contain halves from the same original fragment despite the comment saying different sources. Each slice independently chooses nominal1% holes with probability1/3, otherwise nominal82% bitmap occupancy, using a fresh seed. Disjoint slices are reassigned to output fragments, producing overlapping envelopes without duplicate source slots."
+        ],
+        [
+          480,
+          503,
+          "Build a100,000-ID pool by uniformly choosing a fragment then one of its segments and rejection-sampling holes until full. This is not a uniform sample over all live rows; selection weights depend on fragment/segment length/density. No attempt limit exists. Zero fragments or empty selected spans can panic; all-hole input could loop. Each sequence is then Prost-encoded and decoded through read_row_ids to build Arc sources with empty deletion vectors and ordinal u32 fragment IDs. Pool generation/codec work happens before timed benchmarks."
+        ],
+        [
+          504,
+          534,
+          "bench_shot_table uses group row_id_index_shot_table, sample_size10, fixed seed7 and configured fragments*870,000 nominal slots. It times constructor separately, builds one index for lookup, then get_many for1/1000/100000 pooled IDs with matching Elements throughput and asserts every result Some inside each timed iteration. Single get cycles from pool index1, asserts Some and uses Elements1. Assertions establish source intent, not exact-address validation or executed performance."
+        ],
+        [
+          535,
+          573,
+          "bench_bitmap_mask_density creates a million-slot sequence excluding every17th ID and asserts its representation is one RangeWithBitmap. Group uses15 samples,250ms warmup,1s measurement. Ten hit counts from1 through all live rows generate roughly spaced allowed IDs (or clone all), build masks outside timing, then black_box mask_to_offset_ranges. It times selection across density, not RowIdIndex::get, and contains no expected-output assertion for each mask."
+        ],
+        [
+          574,
+          610,
+          "bench_broad_dataset_wide_mask compares one100,000-slot fragment at5,000,000 with a roughly10-million-ID dataset-wide allow set, both excluding every17th ID. It asserts bitmap representation, builds local and broad masks outside timing and measures black_box mask_to_offset_ranges with10 samples,300ms warmup,2s measurement. Source comment expects the range-based path to avoid scanning the broad allow list; the benchmark neither asserts branch choice nor a timing ratio. Wide setup eagerly retains a large Vec."
+        ],
+        [
+          611,
+          626,
+          "Linux Criterion registration runs all six benchmark functions with lance_testing PProfProfiler configured100 and Flamegraph output. Non-Linux registers the same six targets without profiler. criterion_main!(benches) supplies entry point. This file declares no unit tests or benchmark results; running it can allocate large synthetic fixtures and create/truncate the optional CSV path."
+        ]
+      ],
+      "limits": "All 626 lines were read, including benchmark setup, assertions, environment knobs and platform registration. No benchmark was executed, no CSV generated and no performance claim measured. Constructor and mask implementations are documented separately; full apply_row_id_and_deletes remains pending. Treat ratios, labels and historical comments as workload intent, with the explicit setup/comparison limitations above."
+    },
+    {
+      "path": "rust/lance-table/src/io.rs",
+      "module": "L1-modules/rust-lance-table-io.md",
+      "reviewed": true,
+      "role": "Public table IO module routing with no runtime work of its own.",
+      "ranges": [
+        [
+          1,
+          6,
+          "SPDX prelude and unconditional public commit, deletion and manifest submodules. Complete parent commit resolver/publication, generic external manifest authority, feature-gated DynamoDB authority, manifest body IO and deletion serialization are now analyzed. The concrete namespace store and full Dataset conflict/retry/cleanup remain pending. Module declarations alone supply no storage atomicity guarantees."
+        ]
+      ],
+      "limits": "This six-line facade is fully covered. Parent commit, generic external-manifest and concrete DynamoDB behavior are documented separately; namespace authority and full Dataset orchestration remain pending. No source test or build was run."
+    }
+  ]
+}

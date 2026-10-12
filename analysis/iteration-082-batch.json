@@ -1,0 +1,424 @@
+{
+  "iteration": 82,
+  "files": [
+    {
+      "path": "rust/lance-encoding/src/decoder.rs",
+      "module": "L1-modules/rust-lance-encoding.md",
+      "role": "Read-plan construction, array/structural scheduling and decoding, row/byte batch planning, request aggregation and public decode contracts.",
+      "reviewed": true,
+      "limits": "All4203 lines read through ten bounded untruncated outputs. Source-only analysis; no Rust build/test/runtime. Concrete logical codecs remain pending. Deductions about panic/overflow and concurrency are not reproduced failures.",
+      "ranges": [
+        [
+          1,
+          55,
+          "Module documentation separates scheduling I/O from Arrow decoding and sketches field/page and logical/physical hierarchies. These conceptual comments largely describe array encoding, not every current structural path. They claim page bridging is unimplemented; implementation details below and codec modules are authoritative."
+        ],
+        [
+          56,
+          115,
+          "Lists illustrate offsets/items and independent page boundaries. Single-column multi-buffer storage cannot project nested fields independently; multiple physical columns need synchronization. The diagram separates I/O and CPU concurrency. This is architecture documentation, not evidence of measured throughput or actual task placement."
+        ],
+        [
+          116,
+          172,
+          "Row-major scheduling example uses differently sized pages for score, ID and vectors. A printed last vector page C2P1024 appears off by one for1024 zero-indexed pages; examples are not executable scheduling validation. Whole-file scheduling/backpressure discussion must be read alongside actual initialization, requested ranges and inline policies below."
+        ],
+        [
+          173,
+          214,
+          "Indirect I/O and batch-size guidance describe intended separation and tradeoffs. Follow-up I/O behavior depends on concrete codecs, which remain pending. Smaller batches are a recommendation, not a measured optimal size."
+        ],
+        [
+          215,
+          262,
+          "Imports connect Arrow/core types, array and structural logical schedulers, rep/def, caches, futures, Tokio channels and I/O. No codec implementation is defined by an import."
+        ],
+        [
+          263,
+          292,
+          "CANDIDATE_BATCH_SIZES is eight powers of four from1 through16384. SchedulingJob requires Debug only, reports rows and schedules with context plus PriorityRange. FieldScheduler requires Send+Sync+Debug, initializes through a borrowed future and creates a job borrowing itself."
+        ],
+        [
+          293,
+          342,
+          "DecoderReady owns a logical page decoder and VecDeque path. LogicalPageDecoder requires Debug+Send; default accept_child returns contextual Internal, wait_for_loaded is asynchronous, counters and drain are implementation contracts. rows_unloaded/rows_left subtract unchecked; default max_rows_to_drain accepts every row with byte estimate0."
+        ],
+        [
+          343,
+          388,
+          "DrainLimit carries rows and bytes for the most constrained nested i32-offset array. Budget is i32::MAX. clamp_rows_to_i32_budget returns0 only for zero request, otherwise clamps estimate to at least1, allowing one oversized estimated row. has_i32_offsets recognizes Binary/Utf8/List/ListView/Map and recurses through large lists, FSL, structs, dictionary values and run-end values."
+        ],
+        [
+          389,
+          415,
+          "Large-batch diagnostic threshold is10MiB. Repetition-index cache env is parsed once with defaulttrue. Inline threshold env is parsed once as trimmed u64, default16384 on missing/invalid input; zero is accepted. OnceLock freezes the first result. Structural decode spawn env is declared here but read per construction later."
+        ],
+        [
+          416,
+          456,
+          "PageEncoding is Clone+Debug Legacy ArrayEncoding or Structural PageLayout. DeepSizeOf estimates encoded protobuf length times4, not exact allocation. Variant accessors panic on wrong grammar; is_structural is only a tag check."
+        ],
+        [
+          457,
+          480,
+          "PageInfo exposes row count, top-row priority, encoding and shared buffer offset/size pairs. Its only-2.1 priority comment is stale relative to reviewed newer structural formats. DeepSizeOf delegates to each field; this record does not validate positions, counts or grammar consistency."
+        ],
+        [
+          481,
+          528,
+          "ColumnInfo Clone+Debug stores index, shared pages/buffers and protobuf column encoding. new wraps inputs without validation. is_structural examines only the first page and returnsfalse for no pages; mixed page grammars are not rejected here."
+        ],
+        [
+          529,
+          576,
+          "Private RootScheduler distinguishes structural boxed scheduler from array Arc scheduler; wrong accessor panics. DecodeBatchScheduler stores root/cache and exposes root_fields. Backpressure remains a TODO in its documentation, not an enforced queue bound."
+        ],
+        [
+          577,
+          631,
+          "ColumnInfoIter owns a cloned Arc vector and borrows supplied top-level index mapping. next advances sequential physical position; next_top_level jumps to the next mapped index or end. peek and transform direct-index and can panic. transform clones/replaces only this iterator vector. expect_next converts exhaustion into InvalidInput but no bounds, duplicates, shape or mapping validation occurs up front."
+        ],
+        [
+          632,
+          685,
+          "FileBuffers, ColumnBuffers and PageBuffers are nested Copy+Clone+Debug borrowed offset/size views. CoreFieldDecoderStrategy Default sets validatefalse, default decompression and cache_repfalse; from_config copies config and with_cache accepts either bool. This differs from DecoderConfig default cachetrue."
+        ],
+        [
+          686,
+          746,
+          "ensure_values_encoded requires Some Values or InvalidInput with field/index/encoding context. Structural primitive recognition includes recursive Dictionary and FSL plus primitive/scalar/binary/string types. Array primitive recognition excludes variable-width binary and Dictionary here, which have separate branches. Decoder recognition is not identical to encoder primitive policy."
+        ],
+        [
+          747,
+          789,
+          "create_primitive requires Values then builds PrimitiveFieldScheduler with column/file buffer context. check_simple_struct requires exactlyone legacy Struct page, but unwraps protobuf oneof and variant accessor can panic; its caller later unwraps its Result. packed probe indexes page0 and unwraps encoding without an empty-page guard."
+        ],
+        [
+          790,
+          865,
+          "Legacy list factory requires Values, recursively constructs field.children[0] before page encoding checks, ignores zero-row offset pages, and rejects non-List/missing-offset encoding with contextual InvalidInput. It creates UInt64 inner offset pages with priority0 and OffsetPageInfo, then ListScheduler using Int32/Int64 offsets according to List/LargeList. Child shape/indexing remains an assumption."
+        ],
+        [
+          866,
+          899,
+          "unwrap_blob unwraps column oneof and Blob.inner, cloning ColumnInfo with inner encoding. Structural dispatch first validates FSL dimensions, then primitive types consume one column and construct lazy PrimitiveStructuralScheduler with decompressor/cache settings; advance top-level mapping only after successful construction."
+        ],
+        [
+          900,
+          941,
+          "Packed Struct takes the primitive structural path before blob handling. Blob Struct takes one primitive column if any page is BlobLayout; otherwise ordinary recursive Struct handling applies. Peek can panic; mixed page layouts are not universally checked here. Empty ordinary Struct creates zero children and consumes no column, unlike encoder primitive acceptance of empty Struct; cross-boundary compatibility requires concrete-codec evidence."
+        ],
+        [
+          942,
+          985,
+          "Structural List/LargeList and direct FSL<Struct> require first child through expect_ok and recurse. FSL wrappers around another FSL<Struct> are not recognized by this direct guard. Map rejects keys_sorted=true, requires entries child and recurses; no local exact arity/key-value validation. Other types hit todo panic."
+        ],
+        [
+          986,
+          1030,
+          "Array dispatch validates FSL dimensions. Primitive fields consume one column. Binary/string types unwrap Blob descriptors when configured; otherwise a first legacy List page routes through synthesized UInt8 List/LargeList plus Binary wrapper, and other/empty page sets use primitive scheduling."
+        ],
+        [
+          1031,
+          1070,
+          "Array nonprimitive FSL is todo. Dictionary supports primitive or binary-like values, otherwise NotSupported. List consumes offsets column and advances mapping before recursively constructing its item scheduler."
+        ],
+        [
+          1071,
+          1123,
+          "Array Struct consumes one column; Blob descriptors and packed Struct use primitive scheduling, otherwise check_simple_struct is unwrapped, rows summed, each child advances top-level mapping then recurses. Unsupported types hit todo. Result-returning API therefore retains panic assumptions for malformed/unsupported inputs."
+        ],
+        [
+          1124,
+          1154,
+          "root_column synthesizes legacy Struct metadata. Pages are ceil(num_rows/u32::MAX), final row count is modulo u32::MAX, and nonfinal pages use u64::MAX. Exactly u32::MAX therefore produces a zero-row page; larger values produce multiple pages rejected by the simple-struct single-page check. This is source deduction, not reproduced runtime failure. Dummy index is u32::MAX, Values encoding, no buffers."
+        ],
+        [
+          1155,
+          1208,
+          "RootDecoder publicly distinguishes structural and array root types; into accessors panic on wrong variant. Public async DecodeBatchScheduler::try_new accepts schema, mapping, columns, file buffers, row count, plugins, I/O, cache, filter and decoder config; delegates to range-aware constructor with None."
+        ],
+        [
+          1209,
+          1248,
+          "Range-aware constructor asserts positive rows, converts schema to a nonnullable root Struct, restores original Field IDs, and inserts __lance_decoder_root=true metadata. _decoder_plugins is unused. Empty columns or first-column structural classification selects structural dispatch; initialization awaits requested-range/filter context."
+        ],
+        [
+          1249,
+          1285,
+          "Array construction prepends dummy root column and index0, shifts each supplied index with saturating_add(1), creates array root and awaits initialization without requested-range restriction. Both paths return stored cache/root fields. Column mapping and grammar assumptions are not globally validated."
+        ],
+        [
+          1286,
+          1343,
+          "from_scheduler is deprecated since0.29.1 and supports array root only. Structural scheduling builds a job, reports construction/step errors through callback then returns, flushes queued I/O after each successful step before checking empty completion, sums emitted scan-line rows, and stops when callback returnsfalse."
+        ],
+        [
+          1344,
+          1407,
+          "Array range scheduling computes unchecked range lengths, traces first/last by unwrap, builds a job and loops until its reported row count is scheduled. Default SimplePriority starts0, advances by rows; callbacks can stop. I/O flush occurs per step. Zero-progress jobs can loop, overscheduling/subtraction can underflow, and empty ranges can reach trace unwrap assumptions."
+        ],
+        [
+          1408,
+          1451,
+          "Root dispatch chooses structural or array; custom PriorityRange applies only to array. schedule_ranges_to_vec collects every Result message in memory then collects into Result, discarding partial successful output when an error exists."
+        ],
+        [
+          1452,
+          1539,
+          "Public range/channel wrappers require sorted nonoverlapping ranges by documentation, without local validation. Closed unbounded receiver logs debug and halts scheduling. schedule_take returns for empty indices, otherwise validates/coalesces through indices_to_ranges; validation errors are sent once, closed error channel logs debug."
+        ],
+        [
+          1540,
+          1598,
+          "ReadBatchTask publicly owns static future and u32 row metadata. Array BatchDecodeStream stores receiver/root/counters/Once diagnostic/limitflag. new enables i32 limiting but accepts rows_per_batch0 without validation; private constructor can disable it."
+        ],
+        [
+          1599,
+          1633,
+          "Array stream ignores empty decoder paths for root, otherwise accepts child. wait_for_scheduled updates cumulative count and accepts messages until need; errors propagate. EOF marks scheduling exhausted and treats fewer rows as possible pushdown, not corruption. Wrong message variants panic."
+        ],
+        [
+          1634,
+          1692,
+          "Array next task decrements remaining rows before loading, waits for missing scheduled rows, shrinks on early EOF and returnsNone for zero take. Always waits for loaded rows using drained+take-1. If i32 limits apply, query nested budget, force at leastone row and restore deferred rows to remaining count. Drain advances counters before decode CPU work."
+        ],
+        [
+          1693,
+          1734,
+          "Array unfold emits one zero-row error task then fuses after planning/load/drain error. Successful task future calls tokio::spawn with synchronous into_batch inside async body when polled, not spawn_blocking/spawn_cpu. Join errors are wrapped. Decode-task errors do not update stream planning state or automatically fuse it."
+        ],
+        [
+          1735,
+          1792,
+          "RootDecoderMessage/RootDecoderType adapt blocking decoder paths. Structural accepts loaded pages, drains and has no wait or budget override. Array accepts child pages, block_on waits and supplies i32 budget only for relevant types. Default budget permits all rows, so structural blocking path lacks this array i32 limiter."
+        ],
+        [
+          1793,
+          1846,
+          "Blocking BatchDecodeIterator owns a newly built current-thread Tokio runtime without enable_all, counters/schema/Once and precollected messages. Construction unwraps runtime result. wait_for_page wraps future with maybe_done and block_on for Future; Done takes output and Gone is unreachable. It is a wait adapter, not an independent I/O runtime guarantee."
+        ],
+        [
+          1847,
+          1880,
+          "Blocking wait consumes messages until cumulative need and loads structural pages sequentially; empty array root paths are skipped. It then waits for array root loaded count before caller adjusts for under-scheduling. Waiting is invoked only when additional scheduling messages are required. Structural adapter wait is no-op."
+        ],
+        [
+          1881,
+          1951,
+          "Blocking next predecrements remaining rows, adjusts EOF shortfall, applies adapter budget (array only), drains and materializes synchronously. Iterator fuses after any error, including decode CPU errors, and converts to ArrowError. It owns an Arc schema getter. Counter updates precede CPU decode."
+        ],
+        [
+          1952,
+          1989,
+          "estimate_bytes_per_row uses byte_width_opt first, Boolean1/8, binary/string64, Structsum, list/map five child values, FSL dimension times child, dictionary value only, fallback64. It is a heuristic excluding validity and unspecified overhead; it is not allocation validation or a measured size bound."
+        ],
+        [
+          1990,
+          2057,
+          "StructuralBatchDecodeStream stores row and optional byte targets plus shared AtomicU64 feedback. Schema bytes/row is estimated and clamped to1 only when a byte target exists; otherwise0. Feedback starts0. Constructors do not reject zero row caps or byte targets."
+        ],
+        [
+          2058,
+          2086,
+          "Structural scheduling wait updates cumulative rows before sequentially awaiting each unloaded page and accepting it. EOF marks exhaustion and permits fewer actual rows. Error propagates; wrong message variant panics."
+        ],
+        [
+          2087,
+          2138,
+          "Structural next task uses min(remaining,rowcap), then byte_target / actual_feedback_or_schema_estimate floored and clamped to at leastone when target exists. This can exceed target for a large row. It decrements, waits, shrinks on EOF, drains and advances. No i32-offset budget query occurs in this structural stream."
+        ],
+        [
+          2139,
+          2199,
+          "Structural planning error emits one zero-row error task and fuses. CPU decode is spawned or inline according to policy. Successful decode updates shared relaxed atomic bytes/row using integer division: increases adopted immediately, decreases averaged with previous, minimum1; no CAS, so concurrent completions can lose/interleave updates. Feedback updates even with no byte target. Task metadata rows are not checked against produced batch length here."
+        ],
+        [
+          2200,
+          2237,
+          "RequestedRows is Debug Ranges or Indices. num_rows sums unchecked end-start or index count. trim_empty_ranges drops empty/reversed ranges, but public wrappers call num_rows first, so reversed ranges can already underflow. into_ranges preserves ranges without sorting/overlap/bounds validation."
+        ],
+        [
+          2238,
+          2262,
+          "indices_to_ranges requires strictly increasing indices, with position/value context for duplicates or descent. checked_add rejects u64::MAX. Contiguous indices merge; gaps produce separate half-open ranges; empty input produces empty output. No file row bounds check."
+        ],
+        [
+          2263,
+          2304,
+          "DecoderConfig Clone+Debug defaults cache_rep from once-cached env(defaulttrue), validatefalse, inline_schedulingNone. None selects row threshold automatically, true schedules inline, false spawns scheduler. Initial asynchronous I/O remains awaited before this choice."
+        ],
+        [
+          2305,
+          2353,
+          "SchedulerDecoderConfig holds plugins, row batch size, I/O/cache/config and optional byte target documented ignored for v2.0. check_scheduler_on_drop chains a final stream item that awaits scheduler JoinHandle and unwraps panic; on_drop aborts handle. Synchronous scheduler bodies without await cannot be assumed promptly preempted. Initialization has already finished in current caller before scheduler spawning."
+        ],
+        [
+          2354,
+          2425,
+          "Public create_decode_stream enables i32 limiter and delegates. Structural builds StructuralStructDecoder and structural stream; limitflag has no effect there. Array warns if byte target supplied and constructs SimpleStructDecoder plus array stream with limitflag. should_validate reaches structural root; array root constructor has no corresponding flag."
+        ],
+        [
+          2426,
+          2464,
+          "create_decode_iterator constructs structural or array blocking adapter with Arrow schema. It has no byte target option. Root variant must match supplied message grammar; mismatches hit unreachable adapter branches."
+        ],
+        [
+          2465,
+          2507,
+          "create_scheduler_decoder computes requested count and first-column grammar with column_infos[0] (nonempty assumption). Structural CPU spawn env is read each call: exact always/never override, otherwise ranges spawn and indices inline. It creates an unbounded channel and decode stream before converting/validating indices."
+        ],
+        [
+          2508,
+          2542,
+          "Scheduler creation supplies empty file buffers, requested row count, and Some requested ranges, then awaits initialization. Inline scheduling uses explicit bool or count<=once-cached threshold. Inline schedules before return; spawned Tokio body has no await while scheduling and gets drop/EOF wrapper. Plugins remain unused by constructor."
+        ],
+        [
+          2543,
+          2589,
+          "Public schedule_and_decode returns an empty stream immediately for zero requested rows, bypassing metadata/config checks. Otherwise trims ranges, clones I/O to retain it through a FinallyStream closure, and calls scheduler helper. EOF or dropping the closure releases this keepalive. This wrapper itself does not decode all tasks or impose batch readahead."
+        ],
+        [
+          2590,
+          2635,
+          "WAITER_RT is a public LazyLock current-thread runtime with unwrap. Blocking schedule_and_decode zero fast path returns empty RecordBatchIterator with schema; otherwise trims, indexes first column and block_on initializes with empty file buffers and requested ranges. No separate row-bound validation."
+        ],
+        [
+          2636,
+          2671,
+          "Blocking path schedules synchronously, drains all unbounded channel messages via recv_many.now_or_never.unwrap into a Vec, then builds iterator. It ignores inline_scheduling, byte target and structural CPU spawn mode, without async path byte-target warning. No outer FinallyStream I/O keepalive is installed."
+        ],
+        [
+          2672,
+          2727,
+          "PrimitivePageDecoder Send+Sync decodes a slice into DataBlock. variable_width_bytes defaultNone means unknown; implementers may provide an upper bound for nested i32-limit planning. Surrounding docs mention historical arguments/helpers absent from the actual signature. Zero-copy is a possibility, not a guarantee."
+        ],
+        [
+          2728,
+          2791,
+          "PageScheduler Debug+Send+Sync accepts sorted nonoverlapping per-page ranges, I/O and top-row priority, returning a static future of primitive decoder. PriorityRange requires Debug+Send+Sync, advance,current_priority,box_clone. SimplePriorityRange stores u64 and unchecked adds; clone retains current priority."
+        ],
+        [
+          2792,
+          2862,
+          "ListPriorityRange shares item offsets and clones base priority state; starts item position0. advance increases item position and advances base once per crossed/equal next offset, including empty lists. Offsets are assumed normalized/monotonic; no validation/overflow check. Debug prints offset length, not contents."
+        ],
+        [
+          2863,
+          2905,
+          "IO_REQUEST_BATCH_BYTES is8MiB aggregation target, not a hard maximum request size. SharedRead is a shared future Result<Arc<Vec<Bytes>>,CloneableError>. SubmittedRead distinguishes direct future from shared future plus restoration indices; PendingRead stores ranges, priority and oneshot sender. Documentation motivates aggregating across columns."
+        ],
+        [
+          2906,
+          2946,
+          "RequestBatch wraps inner I/O and Arc<Mutex<Vec<PendingRead>>>. pending_bytes rescans ranges under unwrap lock; length sums unchecked. flush takes pending vector then releases lock before submitting. Empty flush is harmless."
+        ],
+        [
+          2947,
+          2998,
+          "submit_batch directly forwards a single read preserving order/priority. Multiple reads flatten and stable-sort by(start,end), without merging/deduplication; use minimum priority and mapping indices to restore each caller order. Delegate submit occurs before sending oneshot replies; closed receivers are ignored, so dropped requests can still be submitted. Shared errors are cloneable wrappers."
+        ],
+        [
+          2999,
+          3053,
+          "submit_request flushes existing nonempty queue only when existing+new bytes exceed8MiB, while still holding the mutex; current request is queued even if individually oversized. Exact equality does not flush. First future poll checks reply, otherwise yields once then flushes all pending and awaits receiver; closed channel becomes Internal. Shared outputs index by mapping and can panic for too-few returned buffers; extra buffers ignored. Alone returns inner result unchanged."
+        ],
+        [
+          3054,
+          3082,
+          "RequestBatch bypass and I/O stats delegate directly to inner hooks, not a new batched wrapper. SchedulerContext owns optional receiver/name, batched I/O/cache and parallel path/path-name stacks. Locally new starts receiverNone/nameempty."
+        ],
+        [
+          3083,
+          3151,
+          "ScopedSchedulerContext requires explicit consuming pop; it has no Drop auto-pop. SchedulerContext::new wraps I/O in shared RequestBatch; getters borrow Arcs, flush_io delegates, push/pop maintain both stacks (empty pop no-op). path_name formats ROOT or TEMP based on recv; current_path clones indices. Deprecated locate_decoder attaches current path without changing state."
+        ],
+        [
+          3152,
+          3218,
+          "UnloadedPageShard is a future tuple with placeholder Debug. ScheduledScanLine owns row count/messages. StructuralSchedulingJob Debug emits vectors, empty meansend. FilterExpression wraps opaque Bytes; empty is no-op and no parser here. StructuralFieldScheduler is Send+Debug, notSync, initializes through &mut self with optional ranges/filter/context, then schedules via borrowed job."
+        ],
+        [
+          3219,
+          3262,
+          "DecodeArrayTask Send consumes itself into(array,data_size). Its structural-task adapter checks repdef.ensure_exhausted before returning. NextDecodeTask exposes task/row metadata; into_batch requires returned array.as_struct (wrong type panic), forms RecordBatch without verifying metadata count, and emits one debug diagnostic for reported data_size strictly above10MiB. It is debug, notwarn."
+        ],
+        [
+          3263,
+          3307,
+          "MessageType tags DecoderReady array or UnloadedPage structural; wrong into accessor panics. DecoderMessage exposes cumulative scheduled_so_far and decoder vector. DecoderContext wraps an unbounded receiver. No message monotonicity/type validation at these containers."
+        ],
+        [
+          3308,
+          3361,
+          "DecoderContext::new stores receiver. DecodedPage pairs DataBlock/RepDefUnraveler; DecodePageTask Send+Debug consumes into Result. StructuralPageDecoder Send+Debug drains tasks and reports rows; default exact decoded_bytes returns NotSupported. LoadedPageShard carries decoder/path; comments saying only structs have children/lists indirect reflect historical architecture, not full structural implementations."
+        ],
+        [
+          3362,
+          3400,
+          "DecodedArray exposes array/composite repdef/data_size excluding Arrow overhead. StructuralDecodeArrayTask consumes into it. StructuralFieldDecoder requires accept_page (despite comment claiming a default), drain and data_type; plan_decoded_bytes returns eight candidate estimates clamped by contract and defaults NotSupported. Comments allow worst-case estimates despite saying exact. DecoderPlugins is empty Default+Debug placeholder."
+        ],
+        [
+          3401,
+          3443,
+          "EncodedBatchLayout explicitly selects Array or Structural root grammar for memory decoding, independently of page-tag auto-selection in scheduler. decode_batch uses BufferScheduler, caller cache or new128MiB cache, DecoderConfig default and empty file buffers; schedules full range before constructing stream. should_validate only goes to stream, not default scheduler config."
+        ],
+        [
+          3444,
+          3464,
+          "decode_batch reads spawn env: only exact never disables structural CPU spawn; all other values enable. It casts u64 batch rows to u32 unchecked and disables array i32 split to preserve one-input-batch contract, then unwraps first stream item and awaits only its task. Zero rows panic earlier positive-row assert; inconsistent public EncodedBatch/layout or too-large count can violate assumptions."
+        ],
+        [
+          3465,
+          3598,
+          "Test fixtures StaticArrayDecodeTask and StaticArrayPageDecoder return slices and optionally fake bytes/row for budget tests without huge allocations. Counters/row bytes and max_rows_to_drain implement a simple prefix budget. array_stream_batch_sizes constructs one-column root, sends all page messages and sequentially awaits each task. These helpers are cfg(test), not production validation."
+        ],
+        [
+          3599,
+          3664,
+          "Three async array tests require small pages to span one batch[4], fake800MiB rows to split[2,1], and estimated3GiB rows to emit[1,1]. Requested indices test covers coalescing, duplicate rejection and u64::MAX rejection, with InvalidInput and message checks. No tests were executed."
+        ],
+        [
+          3665,
+          3735,
+          "FailingPageDecoder fixture reports no loaded rows and returns simulated I/O error from wait, with drain forbidden. InvalidInputDecodeTask emits malformed sparse page error; next_decode_task_preserves_invalid_input_errors checks variant survives into_batch."
+        ],
+        [
+          3736,
+          3826,
+          "Zero-dimension FSL test requires both structural/array factory guards to return descriptive error before using empty column iterator. Non-list legacy offsets fixture uses Flat encoding and requires InvalidInput with field/column/page context. These cover intended read-side validation, not all unsupported/malformed branches."
+        ],
+        [
+          3827,
+          3923,
+          "Array and structural load-error stream tests use one scheduled row out of two, buffered readahead2, require first error message and then end. They test planning/load failure fusion, not CPU task error fusion, dropped I/O cancellation or scheduler panic propagation."
+        ],
+        [
+          3924,
+          3962,
+          "Three index coalescing tests cover singleton, contiguous and gaps. Byte estimate test checks Int32,Int64,Float32,Boolean,Utf8,Binary and four-field Int32 struct. Other types and invalid parameter combinations are untested locally."
+        ],
+        [
+          3963,
+          4031,
+          "Byte-target test helper encodes StructuralU16, initializes scheduler with default config, schedules all rows, creates validating structural stream with spawned CPU tasks, and sequentially awaits/collects batches. This sequence gives feedback time to update before requesting next task; it does not test concurrent feedback races."
+        ],
+        [
+          4032,
+          4116,
+          "Fixed-width byte-target test expects1000 rows of four Int32 columns at1600-byte target to yield ten100-row batches and exact concatenated columns. No-byte-target test expects four250-row batches for1000 two-column rows. These are source assertions, not executed results."
+        ],
+        [
+          4117,
+          4139,
+          "Row-cap test expects ten100-row batches despite byte target capable of all1000 Int32 rows. It verifies row cap precedence for this positive configuration."
+        ],
+        [
+          4140,
+          4203,
+          "String-feedback test uses500 equal100-byte values with5000-byte target. It checks exact concatenated roundtrip and at leasttwo batches; only if at leastthree exist does it require second/third sizes40..60. It does not assert exact first78 rows or every later target, and conditional checks can be skipped for two batches. No local tests exercise zero caps, reversed/overlapping ranges, request batching, cancellation, env modes or root dummy overflow."
+        ]
+      ]
+    }
+  ]
+}

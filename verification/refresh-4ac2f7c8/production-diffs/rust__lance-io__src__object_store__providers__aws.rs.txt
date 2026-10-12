@@ -1,0 +1,55 @@
+@@ -614,29 +614,35 @@ impl AwsCredentialAdapter {
+  614  impl StorageOptions {
+  615      /// Add values from the environment to storage options.
+  616      ///
+  617 -    /// Only adds keys that are not already present, so explicitly-set options
+  618 -    /// (including empty-string sentinels) always take precedence over env vars.
+  617 +    /// Explicitly-set options (including aliases, case variants, and empty-string
+  618 +    /// sentinels) always take precedence over env vars.
+  619      pub fn with_env_s3(&mut self) {
+  620 -        for (os_key, os_value) in std::env::vars_os() {
+  621 -            if let (Some(key), Some(value)) = (os_key.to_str(), os_value.to_str())
+  622 -                && let Ok(config_key) = AmazonS3ConfigKey::from_str(&key.to_ascii_lowercase())
+  623 -                && !self.0.contains_key(config_key.as_ref())
+  624 -            {
+  625 -                self.0
+  626 -                    .insert(config_key.as_ref().to_string(), value.to_string());
+  627 -            }
+  628 -        }
+  620 +        self.merge_env_options(std::env::vars_os(), |key| {
+  621 +            AmazonS3ConfigKey::from_str(key)
+  622 +                .ok()
+  623 +                .map(|key| key.as_ref().to_string())
+  624 +        });
+  625      }
+  626  
+  631 -    /// Subset of options relevant for s3 storage
+  627 +    /// Return options recognized by [`AmazonS3ConfigKey`], ignoring unknown keys.
+  628 +    ///
+  629 +    /// When aliases conflict, the exact canonical name (such as `aws_region`)
+  630 +    /// wins, followed by case variants of that name. Remaining ties use the
+  631 +    /// lexicographically smallest original key. Empty values are preserved.
+  632 +    ///
+  633 +    /// ```
+  634 +    /// use std::collections::HashMap;
+  635 +    /// use lance_io::object_store::StorageOptions;
+  636 +    /// use object_store::aws::AmazonS3ConfigKey;
+  637 +    ///
+  638 +    /// let options = StorageOptions(HashMap::from([
+  639 +    ///     ("region".into(), "us-east-1".into()),
+  640 +    ///     ("aws_region".into(), "eu-west-1".into()),
+  641 +    /// ]));
+  642 +    /// assert_eq!(options.as_s3_options()[&AmazonS3ConfigKey::Region], "eu-west-1");
+  643 +    /// ```
+  644      pub fn as_s3_options(&self) -> HashMap<AmazonS3ConfigKey, String> {
+  633 -        self.0
+  634 -            .iter()
+  635 -            .filter_map(|(key, value)| {
+  636 -                let s3_key = AmazonS3ConfigKey::from_str(&key.to_ascii_lowercase()).ok()?;
+  637 -                Some((s3_key, value.clone()))
+  638 -            })
+  639 -            .collect()
+  645 +        self.as_cloud_options()
+  646      }
+  647  
+  648      /// Parse the `aws_provider_scheme` storage option, if set.

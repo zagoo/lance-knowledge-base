@@ -1,0 +1,95 @@
+@@ -446,7 +446,6 @@ impl LsmPointLookupPlanner {
+  446                          match probe_memtable(
+  447                              &m.batch_store,
+  448                              &m.index_store,
+  449 -                            &self.pk_columns[0],
+  449                              &pk_values[0],
+  450                              target,
+  451                              self.visibility,
+
+@@ -550,7 +549,6 @@ impl LsmPointLookupPlanner {
+  549                  .await;
+  550          }
+  551  
+  553 -        let pk_col = &self.pk_columns[0];
+  552          let refs = self.collector.in_memory_refs_newest_first();
+  553          // Hits grouped by (memtable index, batch index) so each source batch is
+  554          // gathered with a single `take`.
+
+@@ -559,8 +557,7 @@ impl LsmPointLookupPlanner {
+  557          for key in keys {
+  558              let mut resolved = false;
+  559              for (ri, m) in refs.iter().enumerate() {
+  562 -                match probe_position(&m.batch_store, &m.index_store, pk_col, key, self.visibility)?
+  563 -                {
+  560 +                match probe_position(&m.batch_store, &m.index_store, key, self.visibility)? {
+  561                      ProbePos::Found { batch_idx, row } => {
+  562                          // Newest version is a tombstone → the key is deleted:
+  563                          // resolve it as a miss (emit nothing) and do not fall
+
+@@ -714,7 +711,10 @@ impl LsmPointLookupPlanner {
+  711                  // rustc's depth limit up this point-lookup chain, and boxing inside
+  712                  // `create_plan` instead triggers a `Box<Future>: Send` solver overflow
+  713                  // (E0275 downstream). Same for the other arms below.
+  717 -                Box::pin(scanner.create_plan()).await?
+  714 +                let scan = Box::pin(scanner.create_plan()).await?;
+  715 +                // The source schema narrows a struct in declaration order, the
+  716 +                // canonical one in selection order; cast the children by name.
+  717 +                project_to_canonical(scan, &target)?
+  718              }
+  719              LsmDataSource::SsTable { path, .. } => {
+  720                  let dataset = open_sstable(
+
+@@ -1000,13 +1000,12 @@ enum ProbePos {
+ 1000  }
+ 1001  
+ 1002  /// Resolve the `(batch_idx, row)` of a key's newest *visible* row in one
+ 1003 -/// in-memory memtable via a seek-and-stop on the ordered skiplist
+ 1004 -/// (`BTreeMemIndex::get_newest_visible`), honoring the MVCC watermark. No
+ 1003 +/// in-memory memtable with one seek on its primary-key index
+ 1004 +/// ([`IndexStore::pk_newest_visible`]), honoring the MVCC watermark. No
+ 1005  /// materialization.
+ 1006  fn probe_position(
+ 1007      batch_store: &BatchStore,
+ 1008      index_store: &IndexStore,
+ 1009 -    pk_column: &str,
+ 1009      pk_value: &ScalarValue,
+ 1010      visibility: MemTableVisibility,
+ 1011  ) -> Result<ProbePos> {
+
+@@ -1032,14 +1031,13 @@ fn probe_position(
+ 1031      }
+ 1032      let max_visible_row = visible_end - 1;
+ 1033  
+ 1035 -    // A single-column primary key always has a value-keyed BTree (reused or
+ 1036 -    // auto-created — see `IndexStore::enable_pk_index`): collision-free, so one
+ 1037 -    // seek yields the answer with no re-check. Absent only when the table has no
+ 1038 -    // PK index, where the caller falls back to the plan path.
+ 1039 -    let Some(btree) = index_store.get_btree_by_column(pk_column) else {
+ 1034 +    // One seek on the primary-key index, no re-check; without one the caller
+ 1035 +    // plans instead.
+ 1036 +    if !index_store.has_pk_index() {
+ 1037          return Ok(ProbePos::NoIndex);
+ 1041 -    };
+ 1042 -    let Some(pos) = btree.get_newest_visible(pk_value, max_visible_row) else {
+ 1038 +    }
+ 1039 +    let Some(pos) = index_store.pk_newest_visible(std::slice::from_ref(pk_value), max_visible_row)
+ 1040 +    else {
+ 1041          return Ok(ProbePos::Miss);
+ 1042      };
+ 1043      let (batch_idx, row) = resolve_position(batch_store, last_visible_idx, pos)?;
+
+@@ -1141,12 +1139,11 @@ fn gather_rows(
+ 1139  fn probe_memtable(
+ 1140      batch_store: &BatchStore,
+ 1141      index_store: &IndexStore,
+ 1144 -    pk_column: &str,
+ 1142      pk_value: &ScalarValue,
+ 1143      target: &SchemaRef,
+ 1144      visibility: MemTableVisibility,
+ 1145  ) -> Result<Probe> {
+ 1149 -    match probe_position(batch_store, index_store, pk_column, pk_value, visibility)? {
+ 1146 +    match probe_position(batch_store, index_store, pk_value, visibility)? {
+ 1147          ProbePos::NoIndex => Ok(Probe::NoIndex),
+ 1148          ProbePos::Miss => Ok(Probe::Miss),
+ 1149          ProbePos::Found { batch_idx, row } => {

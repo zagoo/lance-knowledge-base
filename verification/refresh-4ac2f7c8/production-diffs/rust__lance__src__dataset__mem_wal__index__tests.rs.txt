@@ -1,0 +1,510 @@
+@@ -0,0 +1,1635 @@
+    1 +// SPDX-License-Identifier: Apache-2.0
+    2 +// SPDX-FileCopyrightText: Copyright The Lance Authors
+    3 +use super::plugin::{FlushContext, FlushOutcome, MemIndex, MemIndexBuildContext, MemIndexPlugin};
+    4 +use super::query::{MemMatches, MemQuery, SearchContext};
+    5 +use lance_index::IndexType;
+    6 +use lance_index::pbold;
+    7 +use lance_index::scalar::InvertedIndexParams;
+    8 +use lance_index::scalar::SargableQuery;
+    9 +use lance_index::scalar::expression::{SargableQueryParser, ScalarQueryParser};
+   10 +use lance_index::scalar::inverted::DocumentGranularity;
+   11 +use lance_index::scalar::registry::{TrainingCriteria, TrainingOrdering};
+   12 +use lance_table::format::IndexMetadata;
+   13 +use prost::Message as _;
+   14 +use std::collections::BTreeMap;
+   15 +use std::sync::RwLock as StdRwLock;
+   16 +
+   17 +use super::test_plugin::{Deviation, wrapped};
+   18 +use super::*;
+   19 +use crate::dataset::mem_wal::memtable::batch_store::StoredBatch;
+   20 +use arrow_array::{Int32Array, StringArray};
+   21 +use arrow_schema::{DataType, Field, Fields, Schema as ArrowSchema};
+   22 +use datafusion::common::ScalarValue;
+   23 +use lance_index::scalar::inverted::InvertedListFormatVersion;
+   24 +use rstest::rstest;
+   25 +use std::sync::Arc;
+   26 +use uuid::Uuid;
+   27 +
+   28 +impl IndexStore {
+   29 +    /// The index named `name`, if it is a `T`.
+   30 +    pub(crate) fn typed<T: 'static>(&self, name: &str) -> Option<&T> {
+   31 +        (self.indexes.get(name)?.as_ref() as &dyn std::any::Any).downcast_ref::<T>()
+   32 +    }
+   33 +
+   34 +    pub(crate) fn get_btree(&self, name: &str) -> Option<&BTreeMemIndex> {
+   35 +        self.typed(name)
+   36 +    }
+   37 +
+   38 +    pub(crate) fn get_hnsw(&self, name: &str) -> Option<&HnswMemIndex> {
+   39 +        self.typed(name)
+   40 +    }
+   41 +
+   42 +    pub(crate) fn get_fts(&self, name: &str) -> Option<&FtsMemIndex> {
+   43 +        self.typed(name)
+   44 +    }
+   45 +}
+   46 +
+   47 +/// A value-to-positions index, for exercising the plugin paths with a kind
+   48 +/// Lance does not build in.
+   49 +#[derive(Debug, Default)]
+   50 +struct StubMemIndex {
+   51 +    columns: Vec<String>,
+   52 +    postings: StdRwLock<BTreeMap<String, Vec<RowPosition>>>,
+   53 +}
+   54 +
+   55 +impl StubMemIndex {
+   56 +    fn new(column: String) -> Self {
+   57 +        Self {
+   58 +            columns: vec![column],
+   59 +            postings: StdRwLock::new(BTreeMap::new()),
+   60 +        }
+   61 +    }
+   62 +
+   63 +    fn key(array: &dyn arrow_array::Array, row: usize) -> Option<String> {
+   64 +        (!array.is_null(row))
+   65 +            .then(|| ScalarValue::try_from_array(array, row).ok())
+   66 +            .flatten()
+   67 +            .map(|value| value.to_string())
+   68 +    }
+   69 +}
+   70 +
+   71 +#[async_trait::async_trait]
+   72 +impl MemIndex for StubMemIndex {
+   73 +    fn columns(&self) -> &[String] {
+   74 +        &self.columns
+   75 +    }
+   76 +
+   77 +    fn can_answer(&self, query: &dyn MemQuery) -> bool {
+   78 +        matches!(
+   79 +            query.as_any().downcast_ref::<SargableQuery>(),
+   80 +            Some(SargableQuery::Equals(_) | SargableQuery::IsIn(_))
+   81 +        )
+   82 +    }
+   83 +
+   84 +    fn insert(&self, batch: &RecordBatch, row_offset: RowPosition) -> Result<()> {
+   85 +        let array = &batch[self.columns[0].as_str()];
+   86 +        let mut postings = self.postings.write().unwrap();
+   87 +        for row in 0..array.len() {
+   88 +            if let Some(key) = Self::key(array.as_ref(), row) {
+   89 +                postings
+   90 +                    .entry(key)
+   91 +                    .or_default()
+   92 +                    .push(row_offset + row as u64);
+   93 +            }
+   94 +        }
+   95 +        Ok(())
+   96 +    }
+   97 +
+   98 +    fn resident_bytes(&self) -> usize {
+   99 +        let postings = self.postings.read().unwrap();
+  100 +        postings
+  101 +            .iter()
+  102 +            .map(|(key, positions)| {
+  103 +                key.len() + positions.len() * std::mem::size_of::<RowPosition>()
+  104 +            })
+  105 +            .sum()
+  106 +    }
+  107 +
+  108 +    fn search(&self, query: &dyn MemQuery, ctx: &SearchContext) -> Result<Option<MemMatches>> {
+  109 +        let Some(query) = query.as_any().downcast_ref::<SargableQuery>() else {
+  110 +            return Ok(None);
+  111 +        };
+  112 +        let postings = self.postings.read().unwrap();
+  113 +        let hits: Vec<RowPosition> = match query {
+  114 +            SargableQuery::Equals(value) => postings
+  115 +                .get(&value.to_string())
+  116 +                .cloned()
+  117 +                .unwrap_or_default(),
+  118 +            SargableQuery::IsIn(values) => values
+  119 +                .iter()
+  120 +                .filter_map(|value| postings.get(&value.to_string()))
+  121 +                .flatten()
+  122 +                .copied()
+  123 +                .collect(),
+  124 +            _ => return Ok(None),
+  125 +        };
+  126 +        Ok(Some(MemMatches::exact(
+  127 +            hits.into_iter().filter(|p| *p <= ctx.max_visible),
+  128 +        )))
+  129 +    }
+  130 +
+  131 +    async fn flush(&self, _ctx: &FlushContext<'_>) -> Result<FlushOutcome> {
+  132 +        Ok(FlushOutcome::BuildFromGeneration)
+  133 +    }
+  134 +}
+  135 +
+  136 +/// Claims base-table indexes whose details message is `.0`.
+  137 +#[derive(Debug)]
+  138 +struct StubPlugin(&'static str);
+  139 +
+  140 +#[async_trait::async_trait]
+  141 +impl MemIndexPlugin for StubPlugin {
+  142 +    fn name(&self) -> &str {
+  143 +        "Stub"
+  144 +    }
+  145 +    fn details_message(&self) -> &str {
+  146 +        self.0
+  147 +    }
+  148 +    fn flush_index_type(&self) -> IndexType {
+  149 +        IndexType::ZoneMap
+  150 +    }
+  151 +    fn training_criteria(&self) -> TrainingCriteria {
+  152 +        TrainingCriteria::new(TrainingOrdering::Values).with_row_id()
+  153 +    }
+  154 +    fn query_parser(
+  155 +        &self,
+  156 +        index_name: String,
+  157 +        _index_details: Option<&prost_types::Any>,
+  158 +    ) -> Option<Box<dyn ScalarQueryParser>> {
+  159 +        Some(Box::new(SargableQueryParser::new(
+  160 +            index_name,
+  161 +            "Stub".to_string(),
+  162 +            false,
+  163 +        )))
+  164 +    }
+  165 +    fn validate(&self, ctx: &MemIndexBuildContext<'_>) -> Result<()> {
+  166 +        ctx.single_column().map(|_| ())
+  167 +    }
+  168 +    fn create(&self, ctx: &MemIndexBuildContext<'_>) -> Result<Arc<dyn MemIndex>> {
+  169 +        let (column, _) = ctx.single_column()?;
+  170 +        Ok(Arc::new(StubMemIndex::new(column.to_string())))
+  171 +    }
+  172 +}
+  173 +
+  174 +fn add_stub(store: &mut IndexStore, name: &str, column: &str) {
+  175 +    let spec = MemIndexSpec::for_plugin(name, 0, column, Arc::new(StubPlugin("StubIndexDetails")));
+  176 +    store.add_index(
+  177 +        name.to_string(),
+  178 +        spec.build(&LanceSchema::default(), 1_000, 16).unwrap(),
+  179 +    );
+  180 +}
+  181 +
+  182 +/// A type url resolves by its message name, whatever package or host
+  183 +/// prefix it carries.
+  210 +
+  211 +/// A type url reaches the plugin whose message is exactly its own, and a
+  212 +/// plugin must claim a bare message name.
+  232 +
+  233 +/// Adding a second plugin for a kind is refused.
+  245 +
+  246 +/// Replacing a built-in swaps it rather than adding a second claimant, and the
+  247 +/// replacement must claim a bare message name.
+  270 +
+  271 +/// The shard schema these tests build their memtables against.
+  272 +fn test_lance_schema() -> LanceSchema {
+  273 +    LanceSchema::try_from(create_test_schema().as_ref()).unwrap()
+  274 +}
+  275 +
+  276 +/// A query finds the index on its column that answers it.
+  344 +
+  345 +/// A B-tree hands the flush its sorted rows; a full-text index, which writes
+  346 +/// its own file, has none to give.
+  373 +
+  374 +fn create_test_schema() -> Arc<ArrowSchema> {
+  375 +    Arc::new(ArrowSchema::new(vec![
+  376 +        Field::new("id", DataType::Int32, false),
+  377 +        Field::new("name", DataType::Utf8, true),
+  378 +        Field::new("description", DataType::Utf8, true),
+  379 +    ]))
+  380 +}
+  381 +
+  382 +fn create_test_batch(schema: &ArrowSchema, start_id: i32) -> RecordBatch {
+  383 +    RecordBatch::try_new(
+  384 +        Arc::new(schema.clone()),
+  385 +        vec![
+  386 +            Arc::new(Int32Array::from(vec![start_id, start_id + 1, start_id + 2])),
+  387 +            Arc::new(StringArray::from(vec!["alice", "bob", "charlie"])),
+  388 +            Arc::new(StringArray::from(vec![
+  389 +                "hello world",
+  390 +                "goodbye world",
+  391 +                "hello again",
+  392 +            ])),
+  393 +        ],
+  394 +    )
+  395 +    .unwrap()
+  396 +}
+  397 +
+  398 +fn create_sized_batch(schema: &ArrowSchema, start_id: i32, num_rows: usize) -> RecordBatch {
+  399 +    let ids: Vec<i32> = (0..num_rows as i32).map(|i| start_id + i).collect();
+  400 +    let names: Vec<String> = ids.iter().map(|id| format!("name-{id}")).collect();
+  401 +    let descriptions: Vec<String> = ids.iter().map(|id| format!("hello world {id}")).collect();
+  402 +    RecordBatch::try_new(
+  403 +        Arc::new(schema.clone()),
+  404 +        vec![
+  405 +            Arc::new(Int32Array::from(ids)),
+  406 +            Arc::new(StringArray::from(names)),
+  407 +            Arc::new(StringArray::from(descriptions)),
+  408 +        ],
+  409 +    )
+  410 +    .unwrap()
+  411 +}
+  412 +
+  413 +fn fts_index_metadata(index_version: i32) -> IndexMetadata {
+  414 +    fts_index_metadata_with_details(index_version, None)
+  415 +}
+  416 +
+  417 +fn fts_index_metadata_with_details(
+  418 +    index_version: i32,
+  419 +    details: Option<pbold::InvertedIndexDetails>,
+  420 +) -> IndexMetadata {
+  421 +    let index_details = details.map(|details| {
+  422 +        let mut value = Vec::new();
+  423 +        details.encode(&mut value).unwrap();
+  424 +        Arc::new(prost_types::Any {
+  425 +            type_url: "type.googleapis.com/lance.index.InvertedIndexDetails".to_string(),
+  426 +            value,
+  427 +        })
+  428 +    });
+  429 +
+  430 +    IndexMetadata {
+  431 +        uuid: Uuid::new_v4(),
+  432 +        fields: vec![2],
+  433 +        covering_fields: vec![],
+  434 +        name: "desc_idx".to_string(),
+  435 +        dataset_version: 1,
+  436 +        fragment_bitmap: None,
+  437 +        index_details,
+  438 +        index_version,
+  439 +        created_at: None,
+  440 +        base_id: None,
+  441 +        files: None,
+  442 +    }
+  443 +}
+  444 +
+  445 +/// Single-column `id` batch for primary-key lookup tests.
+  446 +fn id_batch(ids: &[i32]) -> RecordBatch {
+  447 +    RecordBatch::try_new(
+  448 +        Arc::new(ArrowSchema::new(vec![Field::new(
+  449 +            "id",
+  450 +            DataType::Int32,
+  451 +            false,
+  452 +        )])),
+  453 +        vec![Arc::new(Int32Array::from(ids.to_vec()))],
+  454 +    )
+  455 +    .unwrap()
+  456 +}
+  457 +
+  458 +fn id_vector_batch(ids: &[i32]) -> RecordBatch {
+  459 +    use arrow_array::builder::{FixedSizeListBuilder, Float32Builder};
+  460 +
+  461 +    let schema = Arc::new(ArrowSchema::new(vec![
+  462 +        Field::new("id", DataType::Int32, false),
+  463 +        Field::new(
+  464 +            "vector",
+  465 +            DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), 2),
+  466 +            false,
+  467 +        ),
+  468 +    ]));
+  469 +    let mut vectors = FixedSizeListBuilder::new(Float32Builder::new(), 2);
+  470 +    for id in ids {
+  471 +        vectors.values().append_value(*id as f32);
+  472 +        vectors.values().append_value(*id as f32 + 0.5);
+  473 +        vectors.append(true);
+  474 +    }
+  475 +    RecordBatch::try_new(
+  476 +        schema,
+  477 +        vec![
+  478 +            Arc::new(Int32Array::from(ids.to_vec())),
+  479 +            Arc::new(vectors.finish()),
+  480 +        ],
+  481 +    )
+  482 +    .unwrap()
+  483 +}
+  484 +
+  485 +fn id_name_vector_batch(rows: &[(i32, &str)]) -> RecordBatch {
+  486 +    use arrow_array::builder::{FixedSizeListBuilder, Float32Builder};
+  487 +
+  488 +    let schema = Arc::new(ArrowSchema::new(vec![
+  489 +        Field::new("id", DataType::Int32, false),
+  490 +        Field::new("name", DataType::Utf8, false),
+  491 +        Field::new(
+  492 +            "vector",
+  493 +            DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), 2),
+  494 +            false,
+  495 +        ),
+  496 +    ]));
+  497 +    let mut ids = Vec::with_capacity(rows.len());
+  498 +    let mut names = Vec::with_capacity(rows.len());
+  499 +    let mut vectors = FixedSizeListBuilder::new(Float32Builder::new(), 2);
+  500 +    for (id, name) in rows {
+  501 +        ids.push(*id);
+  502 +        names.push(*name);
+  503 +        vectors.values().append_value(*id as f32);
+  504 +        vectors.values().append_value(name.len() as f32);
+  505 +        vectors.append(true);
+  506 +    }
+  507 +    RecordBatch::try_new(
+  508 +        schema,
+  509 +        vec![
+  510 +            Arc::new(Int32Array::from(ids)),
+  511 +            Arc::new(StringArray::from(names)),
+  512 +            Arc::new(vectors.finish()),
+  513 +        ],
+  514 +    )
+  515 +    .unwrap()
+  516 +}
+  517 +
+  535 +
+  536 +fn pk_vector_store() -> IndexStore {
+  537 +    let mut store = IndexStore::new();
+  538 +    store.add_hnsw(
+  539 +        "vector_hnsw".to_string(),
+  540 +        1,
+  541 +        "vector".to_string(),
+  542 +        DistanceType::L2,
+  543 +        64,
+  544 +        8,
+  545 +    );
+  546 +    store.enable_pk_index(&[("id".to_string(), 0)]);
+  547 +    store
+  548 +}
+  549 +
+  550 +/// A key written again, in the same insert or a later one, is a rewrite.
+  561 +
+  578 +
+  579 +/// Rewrites are recorded with no search index present.
+  590 +
+  615 +
+  651 +
+  675 +
+  676 +/// Each spec becomes an index under its own name, of its own kind.
+  696 +
+  697 +/// Two indexes under one name would leave one of them unmaintained.
+  707 +
+  744 +
+  745 +fn fts_params(resolved: &ResolvedIndex) -> &FtsParams {
+  746 +    (resolved.params.as_ref() as &dyn std::any::Any)
+  747 +        .downcast_ref()
+  748 +        .unwrap()
+  749 +}
+  750 +
+  776 +
+  789 +
+  829 +
+  852 +
+  874 +
+  875 +/// HNSW reports its graph before the first insert allocates it.
+  906 +
+  907 +/// A plugin index's growth is counted in the store's total.
+  939 +
+  940 +fn vector_schema() -> Arc<ArrowSchema> {
+  941 +    Arc::new(ArrowSchema::new(vec![
+  942 +        Field::new("id", DataType::Int32, false),
+  943 +        Field::new("description", DataType::Utf8, true),
+  944 +        Field::new(
+  945 +            "vector",
+  946 +            DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), 4),
+  947 +            true,
+  948 +        ),
+  949 +        Field::new(
+  950 +            "f64_vector",
+  951 +            DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float64, true)), 4),
+  952 +            true,
+  953 +        ),
+  954 +    ]))
+  955 +}
+  956 +
+  957 +/// A spec that would fail every insert is rejected when the shard opens.
+ 1018 +
+ 1057 +
+ 1090 +
+ 1091 +/// A composite PK builds an order-preserving encoded key, so its columns must
+ 1092 +/// be encodable. A single-column PK aliases a BTree entry, which accepts any
+ 1093 +/// type — so it must *not* be rejected here.
+ 1131 +
+ 1165 +
+ 1166 +/// `insert_batches` picks the inline or the threaded path by row count, so
+ 1167 +/// exercise both and assert they leave the same index state: every row indexed
+ 1168 +/// exactly once, in every index, with a timing reported for each.
+ 1210 +
+ 1211 +fn stand_in(spec: MemIndexSpec) -> MemIndexSpec {
+ 1212 +    wrapped(spec, Deviation::None)
+ 1213 +}
+ 1214 +
+ 1215 +/// Rewrites are tracked whatever type maintains the search index.
+ 1236 +
+ 1237 +/// A full-text index of another type reports its granularity.
+ 1258 +
+ 1259 +/// Settings that differ only in a cached schema lookup are the same index; a
+ 1260 +/// plugin of another type with the same name, or another column or field, is
+ 1261 +/// not.
+ 1297 +
+ 1298 +/// One index listed twice is one index; two different ones under one name are
+ 1299 +/// refused before any is built.
+ 1315 +
+ 1316 +/// Columns and field ids that do not pair up are refused, whatever the plugin
+ 1317 +/// checks itself.
+ 1335 +
+ 1336 +/// A composite key needs every key column in each batch.
+ 1349 +
+ 1361 +
+ 1362 +/// A shared key index found by its entry still reports rewrites when its plugin
+ 1363 +/// hands out a new key capability each time it is asked.
+ 1385 +
+ 1386 +/// A user index on exactly the key column is shared and counted once; without
+ 1387 +/// one, or beside one that cannot serve, the store keeps its own B-tree.
+ 1442 +
+ 1443 +/// A key lookup with the wrong number of values finds nothing.
+ 1458 +
+ 1459 +/// Counts the insert calls it gets, and refuses to be fed one batch at a time.
+ 1460 +#[derive(Debug, Default)]
+ 1461 +struct ApplyCounter {
+ 1462 +    columns: Vec<String>,
+ 1463 +    calls: AtomicUsize,
+ 1464 +    batches: AtomicUsize,
+ 1465 +}
+ 1466 +
+ 1467 +#[async_trait::async_trait]
+ 1468 +impl MemIndex for ApplyCounter {
+ 1469 +    fn columns(&self) -> &[String] {
+ 1470 +        &self.columns
+ 1471 +    }
+ 1472 +    fn can_answer(&self, _query: &dyn MemQuery) -> bool {
+ 1473 +        false
+ 1474 +    }
+ 1475 +    fn insert(&self, _batch: &RecordBatch, _row_offset: RowPosition) -> Result<()> {
+ 1476 +        Err(Error::internal("indexed one batch at a time"))
+ 1477 +    }
+ 1478 +    fn insert_batches(&self, batches: &[StoredBatch]) -> Result<()> {
+ 1479 +        self.calls.fetch_add(1, Ordering::Relaxed);
+ 1480 +        self.batches.fetch_add(batches.len(), Ordering::Relaxed);
+ 1481 +        Ok(())
+ 1482 +    }
+ 1483 +    fn resident_bytes(&self) -> usize {
+ 1484 +        0
+ 1485 +    }
+ 1486 +    fn search(&self, _query: &dyn MemQuery, _ctx: &SearchContext) -> Result<Option<MemMatches>> {
+ 1487 +        Ok(None)
+ 1488 +    }
+ 1489 +    async fn flush(&self, _ctx: &FlushContext<'_>) -> Result<FlushOutcome> {
+ 1490 +        Ok(FlushOutcome::Skip)
+ 1491 +    }
+ 1492 +}
+ 1493 +
+ 1494 +fn three_batches(rows_per_batch: usize) -> Vec<StoredBatch> {
+ 1495 +    let schema = create_test_schema();
+ 1496 +    (0..3)
+ 1497 +        .map(|n| {
+ 1498 +            let start = n * rows_per_batch;
+ 1499 +            StoredBatch::new(
+ 1500 +                create_sized_batch(&schema, start as i32, rows_per_batch),
+ 1501 +                start as u64,
+ 1502 +                n,
+ 1503 +            )
+ 1504 +        })
+ 1505 +        .collect()
+ 1506 +}
+ 1507 +
+ 1508 +/// An index receives every batch of one write in one call.
+ 1528 +
+ 1529 +/// A failed index stops the write: the error comes back and the batches are
+ 1530 +/// not counted indexed.
+ 1547 +
+ 1548 +/// An index that panics on its own thread fails the write, naming it.
+ 1574 +
+ 1575 +/// The store's own key index, single-column or composite, takes every row and
+ 1576 +/// sees rewrites on either insert path.
+ 1621 +
+ 1622 +/// HNSW graph settings that cannot build a graph fail when the shard opens,
+ 1623 +/// not on the first durable insert.

@@ -1,0 +1,905 @@
+@@ -0,0 +1,1222 @@
+    1 +// SPDX-License-Identifier: Apache-2.0
+    2 +// SPDX-FileCopyrightText: Copyright The Lance Authors
+    3 +
+    4 +//! Hamming sufficient statistics and weighted k-modes for streaming IVF training.
+    5 +
+    6 +use std::{
+    7 +    cmp::Ordering,
+    8 +    collections::{BTreeSet, BinaryHeap},
+    9 +};
+   10 +
+   11 +use arrow_array::{Array, FixedSizeListArray, UInt8Array, cast::AsArray};
+   12 +use arrow_schema::DataType;
+   13 +use lance_arrow::FixedSizeListArrayExt;
+   14 +use lance_core::{Error, Result};
+   15 +use lance_index::vector::kmeans::KMeans;
+   16 +use lance_linalg::distance::DistanceType;
+   17 +use rand::{Rng, SeedableRng, rngs::SmallRng};
+   18 +
+   19 +use super::{KMeansProgressCallback, KMeansStepOptions, train_ivf_kmeans_step_arrow_array_no_loss};
+   20 +
+   21 +mod counter;
+   22 +
+   23 +use counter::CompactCounters;
+   26 +
+   27 +#[derive(Clone, Debug)]
+   28 +pub(super) struct HammingCoreset {
+   29 +    dimension: usize,
+   30 +    counts: Vec<u64>,
+   31 +    ones: CompactCounters,
+   32 +    representatives: BTreeSet<Vec<u8>>,
+   33 +    representative_capacity: usize,
+   34 +}
+   35 +
+   36 +impl HammingCoreset {
+   37 +    pub(super) fn new(dimension: usize, capacity: usize) -> Self {
+   38 +        Self {
+   39 +            dimension,
+   40 +            counts: Vec::with_capacity(capacity),
+   41 +            ones: CompactCounters::with_capacity(
+   42 +                capacity.saturating_mul(dimension).saturating_mul(8),
+   43 +            ),
+   44 +            representatives: BTreeSet::new(),
+   45 +            representative_capacity: capacity,
+   46 +        }
+   47 +    }
+   48 +
+   49 +    pub(super) fn len(&self) -> usize {
+   50 +        self.counts.len()
+   51 +    }
+   52 +
+   53 +    fn bit_dimension(&self) -> usize {
+   54 +        self.dimension * 8
+   55 +    }
+   56 +
+   57 +    fn summary_start(&self, index: usize) -> usize {
+   58 +        index * self.bit_dimension()
+   59 +    }
+   60 +
+   61 +    fn insert_representative(&mut self, vector: &[u8]) -> Result<()> {
+   62 +        if vector.len() != self.dimension {
+   63 +            return Err(Error::invalid_input(format!(
+   64 +                "Hamming representative dimension {}, expected {}",
+   65 +                vector.len(),
+   66 +                self.dimension
+   67 +            )));
+   68 +        }
+   69 +        if self.representative_capacity == 0 {
+   70 +            return Ok(());
+   71 +        }
+   72 +        self.representatives.insert(vector.to_vec());
+   73 +        if self.representatives.len() > self.representative_capacity {
+   74 +            let _ = self.representatives.pop_last();
+   75 +        }
+   76 +        Ok(())
+   77 +    }
+   78 +
+   79 +    fn extend_representatives(
+   80 +        &mut self,
+   81 +        representatives: impl IntoIterator<Item = Vec<u8>>,
+   82 +    ) -> Result<()> {
+   83 +        for representative in representatives {
+   84 +            self.insert_representative(&representative)?;
+   85 +        }
+   86 +        Ok(())
+   87 +    }
+   88 +
+   89 +    fn validate_distinct_representatives(&self, target_k: usize) -> Result<()> {
+   90 +        if self.representative_capacity < target_k {
+   91 +            return Err(Error::invalid_input(format!(
+   92 +                "Hamming coreset representative capacity {} is smaller than the requested {target_k} partitions",
+   93 +                self.representative_capacity
+   94 +            )));
+   95 +        }
+   96 +        if self.representatives.len() < target_k {
+   97 +            return Err(Error::invalid_input(format!(
+   98 +                "weighted Hamming training requires at least {target_k} distinct training vectors, but sampled only {}",
+   99 +                self.representatives.len()
+  100 +            )));
+  101 +        }
+  102 +        Ok(())
+  103 +    }
+  104 +
+  132 +
+  133 +    fn push_compact(&mut self, count: u64, ones: &CompactCounters, start: usize) -> Result<()> {
+  134 +        if count == 0 {
+  135 +            return Ok(());
+  136 +        }
+  137 +        let bit_dimension = self.bit_dimension();
+  138 +        let end = start.checked_add(bit_dimension).ok_or_else(|| {
+  139 +            Error::invalid_input("Hamming summary counter range overflow while appending")
+  140 +        })?;
+  141 +        if end > ones.len() {
+  142 +            return Err(Error::invalid_input(format!(
+  143 +                "Hamming summary counter range {start}..{end} exceeds length {}",
+  144 +                ones.len()
+  145 +            )));
+  146 +        }
+  147 +        if let Some((bit, value)) = (start..end)
+  148 +            .map(|index| ones.value(index))
+  149 +            .enumerate()
+  150 +            .find(|(_, value)| *value > count)
+  151 +        {
+  152 +            return Err(Error::invalid_input(format!(
+  153 +                "Hamming coreset one-count at bit {bit} is {value}, greater than row count {count}"
+  154 +            )));
+  155 +        }
+  156 +        self.counts.push(count);
+  157 +        self.ones.extend_from(ones, start, bit_dimension, count)?;
+  158 +        Ok(())
+  159 +    }
+  160 +
+  161 +    pub(super) fn append(&mut self, other: Self) -> Result<()> {
+  162 +        if self.dimension != other.dimension {
+  163 +            return Err(Error::invalid_input(format!(
+  164 +                "cannot append Hamming coreset dimension {} to dimension {}",
+  165 +                other.dimension, self.dimension
+  166 +            )));
+  167 +        }
+  168 +        let Self {
+  169 +            counts,
+  170 +            ones,
+  171 +            representatives,
+  172 +            ..
+  173 +        } = other;
+  174 +        self.extend_representatives(representatives)?;
+  175 +        self.counts.extend(counts);
+  176 +        self.ones.append(ones)?;
+  177 +        Ok(())
+  178 +    }
+  179 +
+  180 +    pub(super) fn reduce_to_budget(&mut self, budget: usize) -> Result<()> {
+  181 +        if self.len() <= budget {
+  182 +            return Ok(());
+  183 +        }
+  184 +        if budget == 0 {
+  185 +            return Err(Error::invalid_input(
+  186 +                "Hamming coreset budget must be greater than zero",
+  187 +            ));
+  188 +        }
+  189 +
+  190 +        let total_count = self.counts.iter().try_fold(0_u64, |total, count| {
+  191 +            total.checked_add(*count).ok_or_else(|| {
+  192 +                Error::invalid_input("Hamming coreset row count overflow during reduction")
+  193 +            })
+  194 +        })?;
+  195 +        if total_count == 0 {
+  196 +            let mut reduced = Self::new(self.dimension, budget);
+  197 +            reduced.extend_representatives(self.representatives.iter().cloned())?;
+  198 +            *self = reduced;
+  199 +            return Ok(());
+  200 +        }
+  201 +
+  202 +        let bit_dimension = self.bit_dimension();
+  203 +        let mut weighted_sums = vec![0.0; bit_dimension];
+  204 +        let mut weighted_square_sums = vec![0.0; bit_dimension];
+  205 +        for row in 0..self.len() {
+  206 +            let count = self.counts[row] as f64;
+  207 +            let summary_start = self.summary_start(row);
+  208 +            for bit in 0..bit_dimension {
+  209 +                let fraction = self.ones.value(summary_start + bit) as f64 / count;
+  210 +                weighted_sums[bit] += count * fraction;
+  211 +                weighted_square_sums[bit] += count * fraction * fraction;
+  212 +            }
+  213 +        }
+  214 +        let total_count = total_count as f64;
+  215 +        let variances = weighted_sums
+  216 +            .into_iter()
+  217 +            .zip(weighted_square_sums)
+  218 +            .map(|(weighted_sum, weighted_square_sum)| {
+  219 +                let mean = weighted_sum / total_count;
+  220 +                weighted_square_sum / total_count - mean * mean
+  221 +            })
+  222 +            .collect::<Vec<_>>();
+  223 +        let split_bit = variances
+  224 +            .iter()
+  225 +            .enumerate()
+  226 +            .max_by(|(_, left), (_, right)| left.partial_cmp(right).unwrap_or(Ordering::Equal))
+  227 +            .map(|(bit, _)| bit)
+  228 +            .unwrap_or(0);
+  229 +
+  230 +        let mut indices = (0..self.len()).collect::<Vec<_>>();
+  231 +        indices.sort_unstable_by(|left, right| {
+  232 +            let left_count = self.counts[*left] as u128;
+  233 +            let right_count = self.counts[*right] as u128;
+  234 +            let left_ones = self.ones.value(self.summary_start(*left) + split_bit) as u128;
+  235 +            let right_ones = self.ones.value(self.summary_start(*right) + split_bit) as u128;
+  236 +            (left_ones * right_count)
+  237 +                .cmp(&(right_ones * left_count))
+  238 +                .then_with(|| left.cmp(right))
+  239 +        });
+  240 +
+  241 +        let mut reduced = Self::new(self.dimension, budget);
+  242 +        for group_index in 0..budget {
+  243 +            let group_start = group_index * indices.len() / budget;
+  244 +            let group_end = (group_index + 1) * indices.len() / budget;
+  245 +            if group_start == group_end {
+  246 +                continue;
+  247 +            }
+  248 +            let group_indices = &indices[group_start..group_end];
+  249 +            let count = group_indices.iter().try_fold(0_u64, |count, index| {
+  250 +                count.checked_add(self.counts[*index]).ok_or_else(|| {
+  251 +                    Error::invalid_input("Hamming coreset row count overflow during merge")
+  252 +                })
+  253 +            })?;
+  254 +            let mut ones = CompactCounters::zeros(bit_dimension);
+  255 +            for &index in group_indices {
+  256 +                ones.add_from(
+  257 +                    0,
+  258 +                    &self.ones,
+  259 +                    self.summary_start(index),
+  260 +                    bit_dimension,
+  261 +                    count,
+  262 +                )?;
+  263 +            }
+  264 +            reduced.push_compact(count, &ones, 0)?;
+  265 +        }
+  266 +        reduced.extend_representatives(self.representatives.iter().cloned())?;
+  267 +        *self = reduced;
+  268 +        Ok(())
+  269 +    }
+  270 +
+  271 +    fn subset(&self, indices: &[usize]) -> Result<Self> {
+  272 +        let mut subset = Self::new(self.dimension, indices.len());
+  273 +        for &index in indices {
+  274 +            subset.push_compact(self.counts[index], &self.ones, self.summary_start(index))?;
+  275 +        }
+  276 +        Ok(subset)
+  277 +    }
+  278 +
+  279 +    fn mode(&self, index: usize) -> Vec<u8> {
+  280 +        self.ones.mode(
+  281 +            self.summary_start(index),
+  282 +            self.counts[index],
+  283 +            self.dimension,
+  284 +        )
+  285 +    }
+  286 +
+  287 +    fn cost(&self, index: usize, centroid: &[u8]) -> Result<u64> {
+  288 +        self.ones.cost(
+  289 +            self.summary_start(index),
+  290 +            self.counts[index],
+  291 +            centroid,
+  292 +            self.dimension,
+  293 +        )
+  294 +    }
+  295 +}
+  296 +
+  297 +#[derive(Debug)]
+  298 +pub(super) struct HammingAccumulator {
+  299 +    dimension: usize,
+  300 +    counts: Vec<u64>,
+  301 +    ones: CompactCounters,
+  302 +}
+  303 +
+  304 +impl HammingAccumulator {
+  305 +    pub(super) fn try_new(num_clusters: usize, dimension: usize) -> Result<Self> {
+  306 +        let bit_dimension = dimension.checked_mul(8).ok_or_else(|| {
+  307 +            Error::invalid_input(format!(
+  308 +                "Hamming accumulator bit dimension overflow for dimension {dimension}"
+  309 +            ))
+  310 +        })?;
+  311 +        let num_counters = num_clusters.checked_mul(bit_dimension).ok_or_else(|| {
+  312 +            Error::invalid_input(format!(
+  313 +                "Hamming accumulator size overflow for {num_clusters} clusters and dimension {dimension}"
+  314 +            ))
+  315 +        })?;
+  316 +        Ok(Self {
+  317 +            dimension,
+  318 +            counts: vec![0; num_clusters],
+  319 +            ones: CompactCounters::zeros(num_counters),
+  320 +        })
+  321 +    }
+  322 +
+  323 +    fn bit_dimension(&self) -> usize {
+  324 +        self.dimension * 8
+  325 +    }
+  326 +
+  327 +    fn add_vector(&mut self, cluster_id: usize, vector: &[u8]) -> Result<()> {
+  328 +        if vector.len() != self.dimension {
+  329 +            return Err(Error::invalid_input(format!(
+  330 +                "Hamming accumulator vector dimension {}, expected {}",
+  331 +                vector.len(),
+  332 +                self.dimension
+  333 +            )));
+  334 +        }
+  335 +        let count = self
+  336 +            .counts
+  337 +            .get(cluster_id)
+  338 +            .copied()
+  339 +            .ok_or_else(|| {
+  340 +                Error::invalid_input(format!(
+  341 +                    "Hamming accumulator cluster {cluster_id} is outside 0..{}",
+  342 +                    self.counts.len()
+  343 +                ))
+  344 +            })?
+  345 +            .checked_add(1)
+  346 +            .ok_or_else(|| {
+  347 +                Error::invalid_input(format!(
+  348 +                    "Hamming accumulator row count overflow for cluster {cluster_id}"
+  349 +                ))
+  350 +            })?;
+  351 +        self.ones
+  352 +            .add_vector(cluster_id * self.bit_dimension(), vector, count)?;
+  353 +        self.counts[cluster_id] = count;
+  354 +        Ok(())
+  355 +    }
+  356 +
+  357 +    fn add_summary(
+  358 +        &mut self,
+  359 +        cluster_id: usize,
+  360 +        coreset: &HammingCoreset,
+  361 +        summary_index: usize,
+  362 +    ) -> Result<()> {
+  363 +        if self.dimension != coreset.dimension {
+  364 +            return Err(Error::invalid_input(format!(
+  365 +                "Hamming accumulator dimension {} does not match coreset dimension {}",
+  366 +                self.dimension, coreset.dimension
+  367 +            )));
+  368 +        }
+  369 +        let summary_count = coreset.counts.get(summary_index).copied().ok_or_else(|| {
+  370 +            Error::invalid_input(format!(
+  371 +                "Hamming coreset summary {summary_index} is outside 0..{}",
+  372 +                coreset.len()
+  373 +            ))
+  374 +        })?;
+  375 +        let count = self
+  376 +            .counts
+  377 +            .get(cluster_id)
+  378 +            .copied()
+  379 +            .ok_or_else(|| {
+  380 +                Error::invalid_input(format!(
+  381 +                    "Hamming accumulator cluster {cluster_id} is outside 0..{}",
+  382 +                    self.counts.len()
+  383 +                ))
+  384 +            })?
+  385 +            .checked_add(summary_count)
+  386 +            .ok_or_else(|| {
+  387 +                Error::invalid_input(format!(
+  388 +                    "Hamming accumulator row count overflow for cluster {cluster_id}"
+  389 +                ))
+  390 +            })?;
+  391 +        self.ones.add_from(
+  392 +            cluster_id * self.bit_dimension(),
+  393 +            &coreset.ones,
+  394 +            coreset.summary_start(summary_index),
+  395 +            self.bit_dimension(),
+  396 +            count,
+  397 +        )?;
+  398 +        self.counts[cluster_id] = count;
+  399 +        Ok(())
+  400 +    }
+  401 +
+  402 +    fn count(&self, cluster_id: usize) -> u64 {
+  403 +        self.counts[cluster_id]
+  404 +    }
+  405 +
+  406 +    fn mode(&self, cluster_id: usize) -> Vec<u8> {
+  407 +        self.ones.mode(
+  408 +            cluster_id * self.bit_dimension(),
+  409 +            self.counts[cluster_id],
+  410 +            self.dimension,
+  411 +        )
+  412 +    }
+  413 +
+  414 +    pub(super) fn total_count(&self) -> Result<u64> {
+  415 +        self.counts.iter().try_fold(0_u64, |total, count| {
+  416 +            total
+  417 +                .checked_add(*count)
+  418 +                .ok_or_else(|| Error::invalid_input("Hamming accumulator total row count overflow"))
+  419 +        })
+  420 +    }
+  421 +}
+  422 +
+  423 +pub(super) fn append_local_coreset(
+  424 +    coreset: &mut HammingCoreset,
+  425 +    data: &FixedSizeListArray,
+  426 +    local_k: usize,
+  427 +    max_iters: usize,
+  428 +    on_progress: KMeansProgressCallback,
+  429 +) -> Result<()> {
+  430 +    if data.value_type() != DataType::UInt8 {
+  431 +        return Err(Error::invalid_input(format!(
+  432 +            "streaming Hamming k-modes requires UInt8 vectors, got {}",
+  433 +            data.value_type()
+  434 +        )));
+  435 +    }
+  436 +    let dimension = data.value_length() as usize;
+  437 +    let local_k = local_k.max(1);
+  438 +    let sample_rate = data.len().div_ceil(local_k).max(1);
+  439 +    let kmeans = train_ivf_kmeans_step_arrow_array_no_loss(
+  440 +        None,
+  441 +        data,
+  442 +        KMeansStepOptions {
+  443 +            dimension,
+  444 +            metric_type: DistanceType::Hamming,
+  445 +            num_partitions: local_k,
+  446 +            sample_rate,
+  447 +            max_iters,
+  448 +            disable_hierarchical: false,
+  449 +            on_progress,
+  450 +        },
+  451 +    )?;
+  452 +    let centroids = FixedSizeListArray::try_new_from_values(kmeans.centroids, dimension as i32)?;
+  453 +    let assignment_model = KMeans::with_centroids(
+  454 +        centroids.values().clone(),
+  455 +        dimension,
+  456 +        DistanceType::Hamming,
+  457 +        f64::MAX,
+  458 +    );
+  459 +    let (membership, _) = assignment_model.compute_membership_and_distances(data)?;
+  460 +    let values = data
+  461 +        .values()
+  462 +        .as_primitive::<arrow_array::types::UInt8Type>()
+  463 +        .values();
+  464 +    let mut summaries = HammingAccumulator::try_new(centroids.len(), dimension)?;
+  465 +    for (row_index, member) in membership.into_iter().enumerate() {
+  466 +        let Some(cluster_id) = member.map(|value| value as usize) else {
+  467 +            continue;
+  468 +        };
+  469 +        let vector = &values[row_index * dimension..(row_index + 1) * dimension];
+  470 +        coreset.insert_representative(vector)?;
+  471 +        summaries.add_vector(cluster_id, vector)?;
+  472 +    }
+  473 +    for cluster_id in 0..centroids.len() {
+  474 +        coreset.push_compact(
+  475 +            summaries.count(cluster_id),
+  476 +            &summaries.ones,
+  477 +            cluster_id * summaries.bit_dimension(),
+  478 +        )?;
+  479 +    }
+  480 +    Ok(())
+  481 +}
+  482 +
+  483 +#[derive(Debug)]
+  484 +struct WeightedKModesResult {
+  485 +    centroids: Vec<u8>,
+  486 +    membership: Vec<u32>,
+  487 +    cluster_counts: Vec<u64>,
+  488 +    cluster_losses: Vec<f64>,
+  489 +    loss: f64,
+  490 +}
+  491 +
+  492 +fn initialize_centroids(coreset: &HammingCoreset, k: usize) -> Result<Vec<u8>> {
+  493 +    let mut rng = SmallRng::seed_from_u64(0x1f17_5eed);
+  494 +    let mut selected = vec![false; coreset.len()];
+  495 +    let total_count = coreset.counts.iter().try_fold(0_u64, |total, count| {
+  496 +        total
+  497 +            .checked_add(*count)
+  498 +            .ok_or_else(|| Error::invalid_input("Hamming initialization row count overflow"))
+  499 +    })?;
+  500 +    let first = if total_count > 0 {
+  501 +        let mut threshold = rng.random_range(0..total_count);
+  502 +        let mut row_index = 0;
+  503 +        for (index, count) in coreset.counts.iter().copied().enumerate() {
+  504 +            if threshold < count {
+  505 +                row_index = index;
+  506 +                break;
+  507 +            }
+  508 +            threshold -= count;
+  509 +        }
+  510 +        row_index
+  511 +    } else {
+  512 +        0
+  513 +    };
+  514 +    selected[first] = true;
+  515 +    let mut centroids = coreset.mode(first);
+  516 +    let mut min_costs = vec![u64::MAX; coreset.len()];
+  517 +
+  518 +    while centroids.len() / coreset.dimension < k {
+  519 +        let last = &centroids[centroids.len() - coreset.dimension..];
+  520 +        for row_index in 0..coreset.len() {
+  521 +            if selected[row_index] {
+  522 +                min_costs[row_index] = 0;
+  523 +            } else {
+  524 +                min_costs[row_index] = min_costs[row_index].min(coreset.cost(row_index, last)?);
+  525 +            }
+  526 +        }
+  527 +        let total_cost = min_costs.iter().try_fold(0_u64, |total, cost| {
+  528 +            total
+  529 +                .checked_add(*cost)
+  530 +                .ok_or_else(|| Error::invalid_input("Hamming initialization distance sum overflow"))
+  531 +        })?;
+  532 +        let next = if total_cost > 0 {
+  533 +            let mut threshold = rng.random_range(0..total_cost);
+  534 +            let mut choice = None;
+  535 +            for (index, cost) in min_costs.iter().copied().enumerate() {
+  536 +                if selected[index] {
+  537 +                    continue;
+  538 +                }
+  539 +                if threshold < cost {
+  540 +                    choice = Some(index);
+  541 +                    break;
+  542 +                }
+  543 +                threshold -= cost;
+  544 +            }
+  545 +            choice
+  546 +        } else {
+  547 +            None
+  548 +        }
+  549 +        .or_else(|| (0..coreset.len()).find(|index| !selected[*index]));
+  550 +        let Some(next) = next else {
+  551 +            break;
+  552 +        };
+  553 +        selected[next] = true;
+  554 +        centroids.extend(coreset.mode(next));
+  555 +    }
+  556 +    while centroids.len() / coreset.dimension < k {
+  557 +        let row_index = (centroids.len() / coreset.dimension) * coreset.len() / k;
+  558 +        centroids.extend(coreset.mode(row_index));
+  559 +    }
+  560 +    Ok(centroids)
+  561 +}
+  562 +
+  563 +fn assign_summaries(coreset: &HammingCoreset, centroids: &[u8]) -> Result<WeightedKModesResult> {
+  564 +    let k = centroids.len() / coreset.dimension;
+  565 +    let mut membership = Vec::with_capacity(coreset.len());
+  566 +    let mut accumulator = HammingAccumulator::try_new(k, coreset.dimension)?;
+  567 +    let mut cluster_losses = vec![0.0_f64; k];
+  568 +
+  569 +    for row_index in 0..coreset.len() {
+  570 +        let mut best_assignment = None;
+  571 +        for cluster_id in 0..k {
+  572 +            let centroid =
+  573 +                &centroids[cluster_id * coreset.dimension..(cluster_id + 1) * coreset.dimension];
+  574 +            let cost = coreset.cost(row_index, centroid)?;
+  575 +            if best_assignment
+  576 +                .as_ref()
+  577 +                .is_none_or(|(_, best_cost)| cost < *best_cost)
+  578 +            {
+  579 +                best_assignment = Some((cluster_id, cost));
+  580 +            }
+  581 +        }
+  582 +        let (cluster_id, cost) = best_assignment
+  583 +            .ok_or_else(|| Error::index("weighted Hamming training has no centroids"))?;
+  584 +        membership.push(cluster_id as u32);
+  585 +        accumulator.add_summary(cluster_id, coreset, row_index)?;
+  586 +        cluster_losses[cluster_id] += cost as f64;
+  587 +    }
+  588 +
+  589 +    let mut next_centroids = Vec::with_capacity(centroids.len());
+  590 +    for cluster_id in 0..k {
+  591 +        if accumulator.count(cluster_id) == 0 {
+  592 +            next_centroids.extend_from_slice(
+  593 +                &centroids[cluster_id * coreset.dimension..(cluster_id + 1) * coreset.dimension],
+  594 +            );
+  595 +        } else {
+  596 +            next_centroids.extend(accumulator.mode(cluster_id));
+  597 +        }
+  598 +    }
+  599 +    let loss = cluster_losses.iter().sum();
+  600 +    Ok(WeightedKModesResult {
+  601 +        centroids: next_centroids,
+  602 +        membership,
+  603 +        cluster_counts: accumulator.counts,
+  604 +        cluster_losses,
+  605 +        loss,
+  606 +    })
+  607 +}
+  608 +
+  609 +fn has_converged(previous_loss: f64, loss: f64) -> bool {
+  610 +    if loss == 0.0 {
+  611 +        previous_loss == 0.0
+  612 +    } else {
+  613 +        (previous_loss - loss).abs() < 1e-4 * loss.abs()
+  614 +    }
+  615 +}
+  616 +
+  617 +fn train_weighted_kmodes(
+  618 +    coreset: &HammingCoreset,
+  619 +    k: usize,
+  620 +    max_iters: usize,
+  621 +    on_progress: KMeansProgressCallback,
+  622 +) -> Result<WeightedKModesResult> {
+  623 +    if coreset.len() < k {
+  624 +        return Err(Error::invalid_input(format!(
+  625 +            "weighted Hamming training requires at least {k} summaries, got {}",
+  626 +            coreset.len()
+  627 +        )));
+  628 +    }
+  629 +    let mut centroids = initialize_centroids(coreset, k)?;
+  630 +    let mut previous_loss = f64::MAX;
+  631 +    let max_iters = max_iters.max(1);
+  632 +    for iteration in 1..=max_iters {
+  633 +        on_progress(iteration as u32, max_iters as u32);
+  634 +        let mut result = assign_summaries(coreset, &centroids)?;
+  635 +        let converged = has_converged(previous_loss, result.loss);
+  636 +        previous_loss = result.loss;
+  637 +        if converged || iteration == max_iters {
+  638 +            return Ok(result);
+  639 +        }
+  640 +        centroids = std::mem::take(&mut result.centroids);
+  641 +    }
+  642 +    unreachable!("weighted Hamming training runs at least one iteration")
+  643 +}
+  644 +
+  645 +#[derive(Clone, Debug)]
+  646 +struct WeightedCluster {
+  647 +    id: usize,
+  648 +    indices: Vec<usize>,
+  649 +    centroid: Vec<u8>,
+  650 +    count: u64,
+  651 +    loss: f64,
+  652 +    finalized: bool,
+  653 +}
+  654 +
+  655 +impl Eq for WeightedCluster {}
+  656 +
+  657 +impl PartialEq for WeightedCluster {
+  658 +    fn eq(&self, other: &Self) -> bool {
+  659 +        self.finalized == other.finalized && self.loss == other.loss && self.count == other.count
+  660 +    }
+  661 +}
+  662 +
+  663 +impl Ord for WeightedCluster {
+  664 +    fn cmp(&self, other: &Self) -> Ordering {
+  665 +        match (self.finalized, other.finalized) {
+  666 +            (false, true) => Ordering::Greater,
+  667 +            (true, false) => Ordering::Less,
+  668 +            _ => self
+  669 +                .loss
+  670 +                .partial_cmp(&other.loss)
+  671 +                .unwrap_or(Ordering::Equal)
+  672 +                .then_with(|| self.count.cmp(&other.count)),
+  673 +        }
+  674 +    }
+  675 +}
+  676 +
+  677 +impl PartialOrd for WeightedCluster {
+  678 +    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+  679 +        Some(self.cmp(other))
+  680 +    }
+  681 +}
+  682 +
+  683 +fn complete_distinct_centroids(
+  684 +    candidates: impl IntoIterator<Item = Vec<u8>>,
+  685 +    fallbacks: impl IntoIterator<Item = Vec<u8>>,
+  686 +    target_k: usize,
+  687 +    dimension: usize,
+  688 +) -> Result<Vec<u8>> {
+  689 +    if target_k == 0 {
+  690 +        return Ok(Vec::new());
+  691 +    }
+  692 +    let mut distinct = BTreeSet::new();
+  693 +    let mut values = Vec::with_capacity(target_k.saturating_mul(dimension));
+  694 +    for centroid in candidates.into_iter().chain(fallbacks) {
+  695 +        if centroid.len() != dimension {
+  696 +            return Err(Error::invalid_input(format!(
+  697 +                "Hamming centroid dimension {}, expected {dimension}",
+  698 +                centroid.len()
+  699 +            )));
+  700 +        }
+  701 +        if distinct.insert(centroid.clone()) {
+  702 +            values.extend(centroid);
+  703 +            if distinct.len() == target_k {
+  704 +                return Ok(values);
+  705 +            }
+  706 +        }
+  707 +    }
+  708 +    Err(Error::index(format!(
+  709 +        "Hamming centroid completion produced only {} distinct centroids for {target_k} partitions",
+  710 +        distinct.len()
+  711 +    )))
+  712 +}
+  713 +
+  714 +pub(super) fn train_hierarchical(
+  715 +    coreset: &HammingCoreset,
+  716 +    target_k: usize,
+  717 +    max_iters: usize,
+  718 +    on_progress: KMeansProgressCallback,
+  719 +) -> Result<FixedSizeListArray> {
+  720 +    if coreset.len() == 0 {
+  721 +        return Err(Error::index("empty Hamming coreset"));
+  722 +    }
+  723 +    coreset.validate_distinct_representatives(target_k)?;
+  724 +    let initial_k = 16_usize.min(target_k).min(coreset.len()).max(1);
+  725 +    let initial = train_weighted_kmodes(coreset, initial_k, max_iters, on_progress.clone())?;
+  726 +    let mut heap = BinaryHeap::new();
+  727 +    let mut next_cluster_id = 0;
+  728 +    for cluster_id in 0..initial_k {
+  729 +        let indices = initial
+  730 +            .membership
+  731 +            .iter()
+  732 +            .enumerate()
+  733 +            .filter_map(|(index, member)| (*member as usize == cluster_id).then_some(index))
+  734 +            .collect::<Vec<_>>();
+  735 +        if !indices.is_empty() {
+  736 +            heap.push(WeightedCluster {
+  737 +                id: next_cluster_id,
+  738 +                indices,
+  739 +                centroid: initial.centroids
+  740 +                    [cluster_id * coreset.dimension..(cluster_id + 1) * coreset.dimension]
+  741 +                    .to_vec(),
+  742 +                count: initial.cluster_counts[cluster_id],
+  743 +                loss: initial.cluster_losses[cluster_id],
+  744 +                finalized: false,
+  745 +            });
+  746 +            next_cluster_id += 1;
+  747 +        }
+  748 +    }
+  749 +
+  750 +    while heap.len() < target_k {
+  751 +        let mut cluster = heap
+  752 +            .pop()
+  753 +            .ok_or_else(|| Error::index("No weighted Hamming cluster can be further split"))?;
+  754 +        if cluster.finalized {
+  755 +            heap.push(cluster);
+  756 +            break;
+  757 +        }
+  758 +        if cluster.indices.len() <= 1 {
+  759 +            cluster.finalized = true;
+  760 +            heap.push(cluster);
+  761 +            continue;
+  762 +        }
+  763 +        let remaining_k = target_k - heap.len();
+  764 +        let cluster_k = if cluster.indices.len() <= 16 {
+  765 +            2.min(remaining_k).min(cluster.indices.len())
+  766 +        } else {
+  767 +            (cluster.indices.len() / 16).min(remaining_k).clamp(2, 16)
+  768 +        };
+  769 +        let subset = coreset.subset(&cluster.indices)?;
+  770 +        let split =
+  771 +            train_weighted_kmodes(&subset, cluster_k, max_iters.min(20), on_progress.clone())?;
+  772 +        let mut assignments = vec![Vec::new(); cluster_k];
+  773 +        for (local_index, member) in split.membership.iter().copied().enumerate() {
+  774 +            assignments[member as usize].push(cluster.indices[local_index]);
+  775 +        }
+  776 +        let nonempty = assignments
+  777 +            .iter()
+  778 +            .filter(|indices| !indices.is_empty())
+  779 +            .count();
+  780 +        if nonempty <= 1 {
+  781 +            cluster.finalized = true;
+  782 +            heap.push(cluster);
+  783 +            continue;
+  784 +        }
+  785 +        for (child_id, child_indices) in assignments.into_iter().enumerate() {
+  786 +            if child_indices.is_empty() {
+  787 +                continue;
+  788 +            }
+  789 +            heap.push(WeightedCluster {
+  790 +                id: next_cluster_id,
+  791 +                indices: child_indices,
+  792 +                centroid: split.centroids
+  793 +                    [child_id * coreset.dimension..(child_id + 1) * coreset.dimension]
+  794 +                    .to_vec(),
+  795 +                count: split.cluster_counts[child_id],
+  796 +                loss: split.cluster_losses[child_id],
+  797 +                finalized: false,
+  798 +            });
+  799 +            next_cluster_id += 1;
+  800 +        }
+  801 +    }
+  802 +
+  803 +    let mut clusters = heap.into_vec();
+  804 +    clusters.sort_by_key(|cluster| cluster.id);
+  805 +    let values = complete_distinct_centroids(
+  806 +        clusters.into_iter().map(|cluster| cluster.centroid),
+  807 +        coreset.representatives.iter().cloned(),
+  808 +        target_k,
+  809 +        coreset.dimension,
+  810 +    )?;
+  811 +    Ok(FixedSizeListArray::try_new_from_values(
+  812 +        UInt8Array::from(values),
+  813 +        coreset.dimension as i32,
+  814 +    )?)
+  815 +}
+  816 +
+  817 +pub(super) fn refine_weighted(
+  818 +    coreset: &HammingCoreset,
+  819 +    initial_centroids: &FixedSizeListArray,
+  820 +    max_iters: usize,
+  821 +    on_progress: KMeansProgressCallback,
+  822 +) -> Result<FixedSizeListArray> {
+  823 +    let target_k = initial_centroids.len();
+  824 +    let mut centroids = initial_centroids
+  825 +        .values()
+  826 +        .as_primitive::<arrow_array::types::UInt8Type>()
+  827 +        .values()
+  828 +        .to_vec();
+  829 +    let mut previous_loss = f64::MAX;
+  830 +    for iteration in 1..=max_iters.max(1) {
+  831 +        on_progress(iteration as u32, max_iters.max(1) as u32);
+  832 +        let result = assign_summaries(coreset, &centroids)?;
+  833 +        let converged = has_converged(previous_loss, result.loss);
+  834 +        previous_loss = result.loss;
+  835 +        centroids = result.centroids;
+  836 +        if converged {
+  837 +            break;
+  838 +        }
+  839 +    }
+  840 +    let centroids = complete_distinct_centroids(
+  841 +        centroids
+  842 +            .chunks_exact(coreset.dimension)
+  843 +            .map(|centroid| centroid.to_vec()),
+  844 +        coreset.representatives.iter().cloned(),
+  845 +        target_k,
+  846 +        coreset.dimension,
+  847 +    )?;
+  848 +    Ok(FixedSizeListArray::try_new_from_values(
+  849 +        UInt8Array::from(centroids),
+  850 +        coreset.dimension as i32,
+  851 +    )?)
+  852 +}
+  853 +
+  854 +pub(super) fn accumulate_raw_assignments(
+  855 +    data: &FixedSizeListArray,
+  856 +    centroids: &FixedSizeListArray,
+  857 +    accumulator: &mut HammingAccumulator,
+  858 +) -> Result<f64> {
+  859 +    let dimension = data.value_length() as usize;
+  860 +    if accumulator.dimension != dimension || accumulator.counts.len() != centroids.len() {
+  861 +        return Err(Error::invalid_input(format!(
+  862 +            "Hamming refinement accumulator has {} clusters of dimension {}, expected {} clusters of dimension {dimension}",
+  863 +            accumulator.counts.len(),
+  864 +            accumulator.dimension,
+  865 +            centroids.len()
+  866 +        )));
+  867 +    }
+  868 +    let model = KMeans::with_centroids(
+  869 +        centroids.values().clone(),
+  870 +        dimension,
+  871 +        DistanceType::Hamming,
+  872 +        f64::MAX,
+  873 +    );
+  874 +    let (membership, distances) = model.compute_membership_and_distances(data)?;
+  875 +    let values = data
+  876 +        .values()
+  877 +        .as_primitive::<arrow_array::types::UInt8Type>()
+  878 +        .values();
+  879 +    let mut loss = 0.0;
+  880 +    for row_index in 0..data.len() {
+  881 +        let (Some(cluster_id), Some(distance)) = (membership[row_index], distances[row_index])
+  882 +        else {
+  883 +            continue;
+  884 +        };
+  885 +        let cluster_id = cluster_id as usize;
+  886 +        accumulator.add_vector(
+  887 +            cluster_id,
+  888 +            &values[row_index * dimension..(row_index + 1) * dimension],
+  889 +        )?;
+  890 +        loss += distance as f64;
+  891 +    }
+  892 +    Ok(loss)
+  893 +}
+  894 +
+  895 +pub(super) fn update_raw_centroids(
+  896 +    centroids: &FixedSizeListArray,
+  897 +    accumulator: &HammingAccumulator,
+  898 +) -> Result<FixedSizeListArray> {
+  899 +    let dimension = centroids.value_length() as usize;
+  900 +    if accumulator.dimension != dimension || accumulator.counts.len() != centroids.len() {
+  901 +        return Err(Error::invalid_input(format!(
+  902 +            "Hamming refinement accumulator has {} clusters of dimension {}, expected {} clusters of dimension {dimension}",
+  903 +            accumulator.counts.len(),
+  904 +            accumulator.dimension,
+  905 +            centroids.len()
+  906 +        )));
+  907 +    }
+  908 +    let current = centroids
+  909 +        .values()
+  910 +        .as_primitive::<arrow_array::types::UInt8Type>()
+  911 +        .values();
+  912 +    let mut candidates = Vec::with_capacity(centroids.len());
+  913 +    for cluster_id in 0..centroids.len() {
+  914 +        if accumulator.count(cluster_id) == 0 {
+  915 +            candidates.push(current[cluster_id * dimension..(cluster_id + 1) * dimension].to_vec());
+  916 +        } else {
+  917 +            candidates.push(accumulator.mode(cluster_id));
+  918 +        }
+  919 +    }
+  920 +    let next = complete_distinct_centroids(
+  921 +        candidates,
+  922 +        current
+  923 +            .chunks_exact(dimension)
+  924 +            .map(|centroid| centroid.to_vec()),
+  925 +        centroids.len(),
+  926 +        dimension,
+  927 +    )?;
+  928 +    Ok(FixedSizeListArray::try_new_from_values(
+  929 +        UInt8Array::from(next),
+  930 +        dimension as i32,
+  931 +    )?)
+  932 +}
+  933 +

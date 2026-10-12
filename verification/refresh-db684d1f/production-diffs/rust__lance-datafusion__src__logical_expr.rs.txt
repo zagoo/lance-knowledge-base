@@ -1,0 +1,54 @@
+@@ -71,6 +71,24 @@ pub fn resolve_column_type(expr: &Expr, schema: &Schema) -> Option<DataType> {
+   71      Some(field.data_type())
+   72  }
+   73  
+   74 +fn is_literal_only_same_type_expr(expr: &Expr) -> bool {
+   75 +    match expr {
+   76 +        Expr::BinaryExpr(BinaryExpr { left, op, right }) => {
+   77 +            (op.is_numerical_operators()
+   78 +                || matches!(
+   79 +                    op,
+   80 +                    Operator::BitwiseShiftLeft
+   81 +                        | Operator::BitwiseShiftRight
+   82 +                        | Operator::StringConcat
+   83 +                ))
+   84 +                && is_literal_only_same_type_expr(left)
+   85 +                && is_literal_only_same_type_expr(right)
+   86 +        }
+   87 +        Expr::Literal(..) => true,
+   88 +        _ => false,
+   89 +    }
+   90 +}
+   91 +
+   92  /// Resolve logical expression `expr`.
+   93  ///
+   94  /// Parameters
+
+@@ -110,16 +128,17 @@ pub fn resolve_expr(expr: &Expr, schema: &Schema) -> Result<Expr> {
+  128                          op: *op,
+  129                          right: Box::new(resolve_value(right.as_ref(), &left_type)?),
+  130                      })),
+  113 -                    // For cases complex expressions (not just literals) on right hand side like x = 1 + 1 + -2*2
+  114 -                    Expr::BinaryExpr(r) => Ok(Expr::BinaryExpr(BinaryExpr {
+  115 -                        left: left.clone(),
+  116 -                        op: *op,
+  117 -                        right: Box::new(Expr::BinaryExpr(BinaryExpr {
+  118 -                            left: coerce_expr(&r.left, &left_type).map(Box::new)?,
+  119 -                            op: r.op,
+  120 -                            right: coerce_expr(&r.right, &left_type).map(Box::new)?,
+  121 -                        })),
+  122 -                    })),
+  131 +                    // Constant expressions need the column type applied to all of their literals.
+  132 +                    Expr::BinaryExpr(_) if is_literal_only_same_type_expr(right) => {
+  133 +                        Ok(Expr::BinaryExpr(BinaryExpr {
+  134 +                            left: left.clone(),
+  135 +                            op: *op,
+  136 +                            right: Box::new(coerce_expr(right, &left_type)?),
+  137 +                        }))
+  138 +                    }
+  139 +                    // Let DataFusion coerce other expressions. Recursively resolving them
+  140 +                    // can narrow literals to an inner column's type before arithmetic promotes
+  141 +                    // its operands, for example the 0.5 in `float_col = int_col + 0.5`.
+  142                      _ => Ok(expr.clone()),
+  143                  }
+  144              } else if let Some(right_type) = resolve_column_type(right.as_ref(), schema) {

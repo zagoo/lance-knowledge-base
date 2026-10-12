@@ -1,0 +1,213 @@
+@@ -0,0 +1,515 @@
+    1 +// SPDX-License-Identifier: Apache-2.0
+    2 +// SPDX-FileCopyrightText: Copyright The Lance Authors
+    3 +
+    4 +//! How a filter expression reaches a memtable index.
+    5 +//!
+    6 +//! The filter goes through [`apply_scalar_indices`], the pass the base table's
+    7 +//! scan uses, with a provider built from the memtable's indexes and their
+    8 +//! plugins' [`ScalarQueryParser`]s. The result is a tree of index searches and
+    9 +//! whether they cover the whole filter; when they do not, the rows they select
+   10 +//! are checked against the whole filter.
+   11 +//!
+   12 +//! `NOT` is not evaluated from indexes: complementing a result needs each
+   13 +//! index's null rows, which they do not report, so such a filter is scanned.
+   14 +
+   15 +use std::collections::HashMap;
+   16 +
+   17 +use arrow_schema::DataType;
+   18 +use datafusion::common::tree_node::{Transformed, TreeNode};
+   19 +use datafusion::logical_expr::{Cast, Expr};
+   20 +use lance_core::Result;
+   21 +use lance_core::datatypes::Schema as LanceSchema;
+   22 +use lance_index::scalar::expression::{
+   23 +    IndexInformationProvider, MultiQueryParser, ScalarIndexExpr, ScalarQueryParser,
+   24 +    apply_scalar_indices,
+   25 +};
+   26 +
+   27 +use super::query::{MemMatches, MemSearchResult, PositionSet, ScalarQuery, SearchContext};
+   28 +use super::{BTreeMemIndexPlugin, IndexStore, MemIndexPlugin, MemIndexSpec};
+   29 +
+   30 +/// The name of the memtable's own key index: one no base-table index can have.
+   31 +pub const OWN_KEY_INDEX: &str = "\u{0}primary key";
+   32 +
+   33 +/// The memtable's indexes, in the shape the expression pass expects.
+   34 +#[derive(Debug, Default)]
+   35 +pub struct MemIndexCatalog {
+   36 +    columns: HashMap<String, (DataType, MultiQueryParser)>,
+   37 +    schema: Option<LanceSchema>,
+   38 +}
+   39 +
+   40 +impl MemIndexCatalog {
+   41 +    /// The parsers of every single-column spec whose plugin has one. A parsed
+   42 +    /// query names no column, so an index over several could not tell which
+   43 +    /// one it is about.
+   44 +    pub fn new(specs: &[MemIndexSpec], schema: &LanceSchema) -> Self {
+   45 +        let mut catalog = Self {
+   46 +            columns: HashMap::new(),
+   47 +            schema: Some(schema.clone()),
+   48 +        };
+   49 +        for spec in specs {
+   50 +            if let [column] = spec.columns.as_slice()
+   51 +                && let Some(parser) = spec
+   52 +                    .plugin
+   53 +                    .query_parser(spec.name.clone(), spec.index_details.as_deref())
+   54 +            {
+   55 +                catalog.add_parser(column, parser);
+   56 +            }
+   57 +        }
+   58 +        catalog
+   59 +    }
+   60 +
+   61 +    /// Answer expressions on `column` from the memtable's own key index too,
+   62 +    /// after any maintained index on it. Only a catalog with a schema, as
+   63 +    /// [`IndexStore::from_specs`] builds, can type the column.
+   64 +    pub(crate) fn add_own_key_index(&mut self, column: &str) {
+   65 +        if let Some(parser) = BTreeMemIndexPlugin.query_parser(OWN_KEY_INDEX.to_string(), None) {
+   66 +            self.add_parser(column, parser);
+   67 +        }
+   68 +    }
+   69 +
+   70 +    /// The first parser added for a column, in spec order and then the own key
+   71 +    /// index, answers an expression it claims, as on the base table.
+   72 +    fn add_parser(&mut self, column: &str, parser: Box<dyn ScalarQueryParser>) {
+   73 +        if let Some((_, existing)) = self.columns.get_mut(column) {
+   74 +            existing.add(parser);
+   75 +            return;
+   76 +        }
+   77 +        let Some(field) = self.schema.as_ref().and_then(|schema| schema.field(column)) else {
+   78 +            return;
+   79 +        };
+   80 +        self.columns.insert(
+   81 +            column.to_string(),
+   82 +            (field.data_type(), MultiQueryParser::single(parser)),
+   83 +        );
+   84 +    }
+   85 +
+   86 +    /// Whether no index claims expressions on any column.
+   87 +    pub fn is_empty(&self) -> bool {
+   88 +        self.columns.is_empty()
+   89 +    }
+   90 +}
+   91 +
+   92 +impl IndexInformationProvider for MemIndexCatalog {
+   93 +    fn get_index(&self, col: &str) -> Option<(&DataType, &MultiQueryParser)> {
+   94 +        self.columns
+   95 +            .get(col)
+   96 +            .map(|(data_type, parser)| (data_type, parser))
+   97 +    }
+   98 +}
+   99 +
+  100 +/// A filter split into index searches.
+  101 +#[derive(Debug)]
+  102 +pub struct IndexedFilter {
+  103 +    /// The index searches, combined with `AND` and `OR`.
+  104 +    pub searches: ScalarIndexExpr,
+  105 +    /// Whether the searches are the whole filter, with nothing left over.
+  106 +    pub is_whole_filter: bool,
+  107 +}
+  108 +
+  109 +/// Split `filter` into index searches; `None` when no index can help or the
+  110 +/// searches need `NOT`.
+  111 +pub fn plan_filter(filter: &Expr, catalog: &MemIndexCatalog) -> Result<Option<IndexedFilter>> {
+  112 +    if catalog.is_empty() {
+  113 +        return Ok(None);
+  114 +    }
+  115 +    let split = apply_scalar_indices(see_through_relabelling(filter, catalog), catalog)?;
+  116 +    Ok(split
+  117 +        .scalar_query
+  118 +        .map(ScalarIndexExpr::optimize)
+  119 +        .filter(is_evaluable)
+  120 +        .map(|searches| IndexedFilter {
+  121 +            searches,
+  122 +            is_whole_filter: split.refine_expr.is_none(),
+  123 +        }))
+  124 +}
+  125 +
+  126 +/// `filter` with each cast of an indexed column removed when the cast changes
+  127 +/// only the column's nested field names or metadata.
+  128 +///
+  129 +/// Field ids on a memtable's nested fields make comparing a list column with a
+  130 +/// list literal cast the column, which changes no value but hides the column
+  131 +/// from the parser. Only the index split looks through such a cast.
+  132 +fn see_through_relabelling(filter: &Expr, catalog: &MemIndexCatalog) -> Expr {
+  133 +    filter
+  134 +        .clone()
+  135 +        .transform_up(|expr| {
+  136 +            if let Expr::Cast(Cast { expr: inner, field }) = &expr
+  137 +                && let Expr::Column(column) = inner.as_ref()
+  138 +                && catalog
+  139 +                    .get_index(&column.name)
+  140 +                    .is_some_and(|(column_type, _)| column_type.equals_datatype(field.data_type()))
+  141 +            {
+  142 +                return Ok(Transformed::yes(inner.as_ref().clone()));
+  143 +            }
+  144 +            Ok(Transformed::no(expr))
+  145 +        })
+  146 +        .map_or_else(|_| filter.clone(), |transformed| transformed.data)
+  147 +}
+  148 +
+  149 +/// Whether the memtable can evaluate this tree. See the module note on `NOT`.
+  150 +fn is_evaluable(expr: &ScalarIndexExpr) -> bool {
+  151 +    match expr {
+  152 +        ScalarIndexExpr::Not(_) => false,
+  153 +        ScalarIndexExpr::And(lhs, rhs) | ScalarIndexExpr::Or(lhs, rhs) => {
+  154 +            is_evaluable(lhs) && is_evaluable(rhs)
+  155 +        }
+  156 +        ScalarIndexExpr::Query(_) => true,
+  157 +    }
+  158 +}
+  159 +
+  160 +/// Evaluate a tree of index searches against one memtable.
+  161 +pub fn evaluate(
+  162 +    expr: &ScalarIndexExpr,
+  163 +    indexes: &IndexStore,
+  164 +    ctx: &SearchContext,
+  165 +) -> Result<MemSearchResult> {
+  166 +    match expr {
+  167 +        ScalarIndexExpr::And(lhs, rhs) => {
+  168 +            let lhs = evaluate(lhs, indexes, ctx)?;
+  169 +            if lhs.at_most.is_empty() {
+  170 +                return Ok(lhs);
+  171 +            }
+  172 +            Ok(lhs & evaluate(rhs, indexes, ctx)?)
+  173 +        }
+  174 +        ScalarIndexExpr::Or(lhs, rhs) => {
+  175 +            Ok(evaluate(lhs, indexes, ctx)? | evaluate(rhs, indexes, ctx)?)
+  176 +        }
+  177 +        ScalarIndexExpr::Not(_) => {
+  178 +            debug_assert!(false, "planning refuses NOT, so none reaches here");
+  179 +            Ok(unknown(ctx))
+  180 +        }
+  181 +        ScalarIndexExpr::Query(search) => {
+  182 +            let index = if search.index_name == OWN_KEY_INDEX {
+  183 +                indexes.own_key_index()
+  184 +            } else {
+  185 +                indexes.get_index(&search.index_name).cloned()
+  186 +            };
+  187 +            let Some(index) = index else {
+  188 +                return Ok(unknown(ctx));
+  189 +            };
+  190 +            match index.search(&ScalarQuery(search.query.as_ref()), ctx)? {
+  191 +                Some(MemMatches::Filter(result)) => {
+  192 +                    let result = result.truncate_to(ctx.max_visible);
+  193 +                    // The query matches more than the expression, so these rows
+  194 +                    // are only candidates.
+  195 +                    Ok(if search.needs_recheck {
+  196 +                        MemSearchResult::at_most(result.at_most)
+  197 +                    } else {
+  198 +                        result
+  199 +                    })
+  200 +                }
+  201 +                // A ranked answer or none: nothing is ruled out.
+  202 +                Some(MemMatches::Ranked(_)) | None => Ok(unknown(ctx)),
+  203 +            }
+  204 +        }
+  205 +    }
+  206 +}
+  207 +
+  208 +/// Nothing is ruled out: every visible row is a candidate.
+  209 +fn unknown(ctx: &SearchContext) -> MemSearchResult {
+  210 +    MemSearchResult::at_most(PositionSet::all_visible(ctx.max_visible))
+  211 +}
+  212 +

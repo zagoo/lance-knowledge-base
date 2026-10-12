@@ -1,0 +1,28 @@
+@@ -372,10 +372,25 @@ async fn row_addrs_to_row_ids_impl(
+  372  /// keyed by the fragment's content; the index is keyed by manifest generation
+  373  /// and cannot stand in for it.
+  374  async fn load_row_id_index(dataset: &Dataset) -> Result<RowIdIndex> {
+  375 +    load_row_id_index_for_fragments(dataset, &dataset.manifest.fragments).await
+  376 +}
+  377 +
+  378 +/// Build a row id index covering only `fragments`, not the whole dataset.
+  379 +///
+  380 +/// A caller that already knows the row ids it will look up were all read from
+  381 +/// a known, small set of fragments -- compaction rewriting a handful of
+  382 +/// fragments out of a much larger table, for instance -- gets no benefit from
+  383 +/// [`get_row_id_index`]'s whole-dataset index and pays for reading every other
+  384 +/// fragment's row id sequence and deletion vector for nothing. This builds an
+  385 +/// index scoped to just those fragments instead.
+  386 +pub(crate) async fn load_row_id_index_for_fragments(
+  387 +    dataset: &Dataset,
+  388 +    fragments: &[Fragment],
+  389 +) -> Result<RowIdIndex> {
+  390      // A `for` loop rather than `map`: a closure returning a future that borrows
+  391      // its argument trips the higher-ranked lifetime check on the outer future.
+  377 -    let mut loads = Vec::with_capacity(dataset.manifest.fragments.len());
+  378 -    for fragment in dataset.manifest.fragments.iter() {
+  392 +    let mut loads = Vec::with_capacity(fragments.len());
+  393 +    for fragment in fragments.iter() {
+  394          loads.push(read_fragment_row_id_index(dataset, fragment));
+  395      }
+  396      let fragment_indices: Vec<FragmentRowIdIndex> = futures::stream::iter(loads)

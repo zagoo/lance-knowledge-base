@@ -1,0 +1,313 @@
+{
+  "iteration": 77,
+  "files": [
+    {
+      "path": "rust/lance-encoding/src/buffer.rs",
+      "module": "L1-modules/rust-lance-encoding.md",
+      "reviewed": true,
+      "role": "Public Arrow-backed owned byte-buffer abstraction, typed views, byte slicing, concatenation, raw-pointer interleaving and owned iteration. Alignment, ownership and unsafe preconditions are separate contracts.",
+      "limits": "Every physical line was read during ANALYZE73 in bounded outputs. Offline read-only source inspection only: no repository build, test, lint, benchmark, generator or dependency installation. Exact declarations and source are retained below. Contextual caller snippets do not claim whole-file coverage; lexical references do not establish a resolved call graph.",
+      "ranges": [
+        [
+          1,
+          22,
+          "SPDX, module documentation, standard pointer/ownership/Cow and Arrow imports, then public tuple LanceBuffer(Buffer) with private field and Clone,Debug,PartialEq,Eq. Documentation describes copy-on-write and cheap cloning; this file exposes no mutable-data method. Buffer refcounting and underlying allocation behavior are delegated to Arrow."
+        ],
+        [
+          23,
+          44,
+          "Public into_buffer consumes wrapper and returns Arrow Buffer without a local copy. all_unset(len) allocates len zero bytes; all_set(len) allocates len bytes of0xff, not a bit count and not a masked final byte. empty creates an empty Vec<u8>-backed Buffer. No length validation or allocation budget."
+        ],
+        [
+          45,
+          61,
+          "as_hex returns uppercase hexadecimal. concat borrows a slice of wrappers, sums usize lengths without checked arithmetic, allocates total capacity and copies every visible buffer in order; even a single input is copied. Empty inputs yield empty output. This differs from consuming concat_into_one."
+        ],
+        [
+          62,
+          77,
+          "as_spaced_hex doubles bytes_per_word after usize cast, divides hex length by that width for capacity, then inserts one space before each noninitial group. No trailing space. bytes_per_word=0 causes division by zero even for empty input. Cast/product/capacity arithmetic are unchecked; no Result."
+        ],
+        [
+          78,
+          110,
+          "from_bytes consumes Bytes and a u64 bytes_per_value. Only power-of-two widths trigger align_offset; a misaligned pointer causes copying through Vec<u8>, otherwise unsafe Buffer::from_custom_allocation retains Bytes via Arc as owner. Non-power-of-two widths bypass alignment testing by design. The copying branch does not explicitly request the supplied alignment from its Vec<u8> allocation, so do not infer a guaranteed typed alignment; later typed access rechecks the actual pointer. No width-zero validation: is_pwr_two uses n&(n-1), whose zero subtraction can panic under overflow checks, and align_offset(0) is invalid if reached. u64->usize cast is unchecked. The custom allocation retains a valid Bytes pointer/lifetime; local SAFETY comment discusses alignment but dependency allocation semantics are not independently inspected. (rust/lance-core/src/utils/bit.rs:8-17)"
+        ],
+        [
+          111,
+          129,
+          "deep_copy copies visible bytes into fresh owned storage. reinterpret_vec<T:ArrowNativeType> transfers Vec<T> into Arrow Buffer, preserving allocation layout through the dependency rather than constructing a Vec<u8> with the wrong deallocation alignment. It does not serialize or byte-swap values. Documentation explains why naive Vec reinterpretation is unsound."
+        ],
+        [
+          130,
+          143,
+          "reinterpret_slice<T:ArrowNativeType+RefUnwindSafe> accepts Arc<[T]>, derives non-null pointer or dangling fallback, computes byte length with size_of_val, and creates custom Arrow allocation retaining the original Arc through another Arc owner. Payload is shared without copying; owner lifetime, not the raw pointer alone, keeps it valid. SAFETY comment says len items although actual length is bytes. No external endianness conversion."
+        ],
+        [
+          144,
+          173,
+          "borrow_to_typed_slice<T:ArrowNativeType> returns ScalarBuffer<T>, despite prose mentioning Vec<T>. It panics if byte length is not divisible by size_of<T>. With aligned pointer, clone the Arrow Buffer and construct a shared owning ScalarBuffer. Otherwise allocate Vec<T> capacity, convert to MutableBuffer, append raw bytes and return the resulting typed Arrow storage. The returned handle owns a refcount and can outlive the original wrapper. Alignment is checked against the actual T. Element size is assumed nonzero. This is not a borrowed Rust slice."
+        ],
+        [
+          174,
+          204,
+          "borrow_to_typed_view<T:ArrowNativeType+bytemuck::Pod> returns Cow<[T]>. Same divisibility panic; aligned data uses bytemuck::cast_slice and a borrowed view tied to self, unaligned data uses pod_collect_to_vec and owned copy. Documentation motivates avoiding refcount clones on hot paths; no performance measurement here. Neither typed method performs endian conversion or validates a logical Arrow datatype."
+        ],
+        [
+          205,
+          225,
+          "concat_into_one consumes Vec<LanceBuffer>; exactly one buffer is moved out unchanged, preserving its allocation. Zero or multiple inputs sum lengths, allocate and copy in order. No checked total/cap or zero-copy multi-buffer composition."
+        ],
+        [
+          226,
+          245,
+          "zip_into_one consumes buffers paired with bit widths and a u64 value count. It rejects widths not divisible by8 with InvalidInput including the width; zero width is accepted. Computes per-buffer byte widths, unchecked sum and product, casts total and widths to usize, allocates zeroed output, and retains all input owners while collecting raw pointers. No validation of source length versus num_values*width, integer representability or output arithmetic."
+        ],
+        [
+          246,
+          261,
+          "Unsafe zipper loops until output pointer reaches end, copies each source width with copy_nonoverlapping and advances both pointers. For valid inputs it interleaves rows in supplied buffer order and ignores surplus source tails. Safety requires each source contain every requested value and all size/address arithmetic fit; these are not established by this safe public function. Short inputs or overflow can cause out-of-bounds raw access, not merely a Result error. No unsafe probe was executed. Empty buffers, zero rows or all-zero widths produce empty output. Independent output allocation supplies nonoverlap for valid sources. No local SAFETY justification accompanies this block. A lexical production caller is the older packed-struct encoder; it derives count from first field and checks equal counts only with debug_assert, without establishing byte lengths in the inspected snippet. Preserve its frozen legacy boundary. (rust/lance-encoding/src/array_encoding/physical/packed_struct.rs:172-249; AGENTS.md:15-20)"
+        ],
+        [
+          262,
+          282,
+          "copy_slice and const-generic copy_array allocate owned copies. len delegates to Arrow and allows clippy len_without_is_empty; Deref<[u8]> supplies slice methods separately. as_ptr later exposes the raw visible-byte pointer, without transferring ownership."
+        ],
+        [
+          283,
+          311,
+          "slice_with_length asserts offset.saturating_add(length)<=self.len then delegates to Arrow slice; valid ranges share allocation, invalid ranges panic. Bit slicing delegates to Arrow bit_slice; documentation promises little-endian bit interpretation and copying unless byte-aligned. This file does not implement the dependency masking/bounds behavior; local tests cover specific results."
+        ],
+        [
+          312,
+          345,
+          "as_ptr delegates to Arrow; its pointer remains dependent on an owner lifetime. AsRef<[u8]> exposes visible bytes; Deref Target=[u8] forwards to AsRef. From<Vec<u8>> and From<Buffer> move input storage into wrapper. No borrowed custom IntoIterator or explicit mutation method is introduced."
+        ],
+        [
+          346,
+          379,
+          "Public LanceBufferIter has private Buffer and usize index. Iterator Item=u8: next first checks index>=len and returns None, otherwise unsafe get_unchecked is justified by that check, then increments index and returns a copied byte. IntoIterator consumes LanceBuffer, moves its Buffer into the iterator and starts at0. Comment says clone/borrowed but actual implementation moves an owning Buffer. Terminal calls remain None, but no FusedIterator, ExactSizeIterator or custom size_hint is declared."
+        ],
+        [
+          380,
+          407,
+          "cfg(test): test_eq compares Vec and Arrow-created buffers by contents. test_reinterpret_vec checks u32[1,2,3] LE byte pattern and typed values; no pointer-identity assertion. Crate itself rejects non-little-endian targets. (rust/lance-encoding/src/lib.rs:27-31)"
+        ],
+        [
+          408,
+          453,
+          "test_concat covers three inputs, singleton empty and nonempty plus empty, using concat_into_one; it does not cover concat or zero inputs. test_zip interleaves widths8,16,32 for three values and checks all21 bytes. No invalid width, short input, overflow or zero-width zipper tests."
+        ],
+        [
+          454,
+          490,
+          "test_hex asserts uppercase. should_panic test rejects a three-byte buffer interpreted as u16. test_borrow_to_typed_slice compares two aligned typed handles sharing a pointer, then two simultaneously live copies from a deliberately offset Bytes slice producing different pointers. The test assumes initial allocation alignment; no test of borrow_to_typed_view is present. Tests were read, not run."
+        ],
+        [
+          491,
+          503,
+          "Bit-slice test uses input[0x0f,0x0b] and asserts (offset,length): (0,4)->[0x0f], (4,4)->[0], (3,8)->[0x61], (0,8)->[0x0f], (4,8)->[0xb0], (4,12)->[0xb0,0]. Eight local tests total; no async lifecycle, local mutex or feature-gated production branch."
+        ]
+      ]
+    },
+    {
+      "path": "rust/lance-encoding/src/statistics.rs",
+      "module": "L1-modules/rust-lance-encoding.md",
+      "role": "DataBlock statistic keys, eager/lazy computation, shared cached Arrow arrays, approximate cardinality, bit/run/entropy estimators and ten local tests.",
+      "reviewed": true,
+      "limits": "Every physical source line read during ANALYZE76 in bounded untruncated primary reads. No repository build, test, lint, benchmark, generator or installation executed. Failure-path observations are source deductions, not reproductions; contextual files remain pending unless previously analyzed.",
+      "ranges": [
+        [
+          1,
+          18,
+          "SPDX and imports: Arc,fmt,RandomState/Hash,Arrow arrays/primitive bounds,HyperLogLogPlus,PrimInt and every relevant DataBlock variant. Statistics describe physical representations; no async, IO or local unsafe. Dependencies supply typed-buffer borrowing and HLL internals, not reimplemented here."
+        ],
+        [
+          19,
+          51,
+          "Public Clone Copy PartialEq Eq Hash Stat variants BitWidth,DataSize,Cardinality,FixedSize,NullCount,MaxLength,RunCount,BytePositionEntropy; manual Debug spells variant name and Display delegates Debug. FixedSize has no computation here; NullCount only supplied by AllNull here. Most values use UInt64Array, with lengths depending on statistic."
+        ],
+        [
+          52,
+          72,
+          "Public ComputeStat declares compute_stat(&mut self) without Result. DataBlock dispatch no-ops Empty,Constant,AllNull,Dictionary; Nullable computes underlying data only; FixedWidth,VariableWidth,FixedSizeList,Opaque,Struct delegate. Panics/poisoned locks are not converted into recoverable errors."
+        ],
+        [
+          73,
+          88,
+          "VariableWidth compute requires shared statistic map empty or panics, computes physical data_size and max_length, then inserts DataSize/MaxLength under write lock. No cardinality yet. Empty check and insertion are separate lock acquisitions; once-only condition is not atomic across shared BlockInfo clones."
+        ],
+        [
+          89,
+          116,
+          "FixedWidth compute eagerly calculates physical DataSize, chunked BitWidth, MaxLength=floor(bits/8), RunCount and BytePositionEntropy before one write lock inserts all five. No once-only guard and no clearing other entries, including cached Cardinality. Recomputing after data changes can retain stale cardinality, especially with shared BlockInfo. (rust/lance-encoding/src/data.rs:63-85)"
+        ],
+        [
+          117,
+          139,
+          "FixedSizeList compute delegates child unchanged; comment suggests future list-splitting optimization but no special list algorithm exists. Opaque computes/inserts DataSize only. Repeated fixed-list compute over already-computed variable child can encounter variable once-only panic."
+        ],
+        [
+          140,
+          160,
+          "Public GetStat:fmt::Debug exposes optional Arc<dyn Array>, expect_stat panics missing key with self/stat, and generic expect_single_stat<T> downcasts primitive array, panics if len!=1 and returns value0. Wrong type panics via Arrow accessor; scalar helper does not inspect validity of the array element."
+        ],
+        [
+          161,
+          186,
+          "DataBlock get_stat returns None for Empty/Constant and delegates every other variant. Nullable simply forwards to underlying data; its null bitmap and own BlockInfo do not participate. Comment about deprecation in2.1 is design guidance, not an attribute. NULL semantics are therefore not generally represented in these statistics."
+        ],
+        [
+          187,
+          216,
+          "Variable getter panics if whole map empty, even for an unsupported requested stat. Existing entry clones Arc; absent non-Cardinality returnsNone. Missing Cardinality computes outside lock, then takes write lock, rechecks map nonempty and entry-or-inserts. Concurrent callers may duplicate a full scan; first cached value wins."
+        ],
+        [
+          217,
+          231,
+          "FixedSizeList getter asks child for same stat. MaxLength maps returned UInt64 value0 multiplied by dimension, unchecked; every other stat forwards unchanged. Cardinality/run/bit statistics describe child elements, not distinct lists; no dimension scaling except MaxLength."
+        ],
+        [
+          232,
+          259,
+          "Variable compute_cardinality creates HyperLogLogPlus<&[u8],Xxh3Builder> with precision4 and unwraps constructor. Comment motivates xxhash versus SipHash1-3 based on estimates, not a measured guarantee in this task.32-bit path hashes every adjacent unsigned offset window payload, including empty strings; no logical-count/null filtering."
+        ],
+        [
+          260,
+          281,
+          "64-bit cardinality path mirrors with offsets cast to usize. Unsupported width unreachable panic. Return hll.count() as u64 in one UInt64Array; approximate floating estimate is truncated by cast. Descending/out-of-bounds offsets can panic; offset windows drive count independently of num_values."
+        ],
+        [
+          282,
+          310,
+          "Variable max_length scans differences of every adjacent unsigned32/64 offset pair and returns maximum or0 for fewer than two offsets. Unsupported width unreachable. Does not validate monotonicity, payload bounds or logical count; descending subtraction can panic/wrap depending checks. Length is encoded bytes, not Unicode character count."
+        ],
+        [
+          311,
+          323,
+          "AllNull get_stat dynamically creates scalar NullCount=num_values or DataSize=0, otherwiseNone; no initialized map required. MaxLength and Cardinality are not supplied."
+        ],
+        [
+          324,
+          352,
+          "Fixed getter also panics empty map, returns cached Arc first, and lazily computes only missing Cardinality for widths64or128. Other absent stats returnNone. Compute outside lock, then entry-or-insert; unlike Variable no second empty-map check. Cache can be shared across cloned blocks. (rust/lance-encoding/src/data.rs:63-85)"
+        ],
+        [
+          353,
+          370,
+          "Fixed max_bit_widths returns[0] immediately when num_values0. Otherwise local CHUNK_SIZE=1024 and nested calculate_max_bit_width<T:PrimInt> process all physical typed values in chunks, OR each chunk then compute width-leading_zeros. It does not restrict scans to num_values or validate length consistency."
+        ],
+        [
+          371,
+          407,
+          "Bit width dispatch interprets physical bytes as unsigned8/16/32/64 words; other widths return one configured-width entry (including1/128). Signed negatives contribute full native bit patterns, as do raw float bits. Nonzero count with empty physical data yields empty result for native widths; zero count ignores physical bytes. No feature gate."
+        ],
+        [
+          408,
+          440,
+          "Fixed cardinality supports64-bit raw u64 values with Xxh3Builder and128-bit raw u128 with fresh RandomState, both HLL precision4. Every physical typed value is hashed irrespective of logical count; random seed can change128-bit estimates between uncached computations. Wrong width unreachable. Output scalar cast estimate; no exactness/error bound promised."
+        ],
+        [
+          441,
+          477,
+          "Run-count comments describe adjacent equal values. Actual run_count returns[0] for declared count0; nested generic count_runs returns0 for empty physical slice, otherwise1+adjacent transitions. Dispatch begins unsigned8/16/32, so equality is physical bit equality, not original floating/null semantics."
+        ],
+        [
+          478,
+          503,
+          "Run-count dispatch includes64/128-bit unsigned physical words; unsupported widths return declared num_values as pessimistic no-runs estimate. Supported widths scan whole buffer independently of positive logical count. Signed-zero/NaN comparisons follow raw words if floating payloads are represented at these widths."
+        ],
+        [
+          504,
+          530,
+          "Byte-position entropy samples first min(num_values-as-usize,64) declared values using local SAMPLE_SIZE=64. Zero sample gives empty UInt64Array. For each floor(bits/8) byte position, count occurrences in256 u32 counters; missing physical positions are skipped rather than errors. One-bit boolean width has zero byte positions."
+        ],
+        [
+          531,
+          551,
+          "For each byte position compute Shannon -sum(p*log2(p)), dividing each count by declared sample count even if bytes were missing; multiply1000 and castu64. All positions share first64-row sample, not random/full scan. Malformed short data yields unnormalized frequencies; widths and allocation/cast arithmetic remain trusted."
+        ],
+        [
+          552,
+          578,
+          "Opaque and Struct get_stat require nonempty map then clone requested entry orNone. Dictionary returnsNone for every key regardless of contents. No fallback computes struct or opaque cardinality."
+        ],
+        [
+          579,
+          596,
+          "Struct compute takes data_size and sums each child expect_single_stat<UInt64Type>(MaxLength), then inserts DataSize/MaxLength. Does not compute children first; missing/wrong child stats panic. Sum unchecked, empty children produce zero stats. AllNull/Dictionary/Empty/Constant child MaxLength unavailable through dispatch."
+        ],
+        [
+          597,
+          619,
+          "Private cfg(test) module imports arrays, builders, ArrowData, seeded Xoshiro DEFAULT_SEED and random generation. Tests are source evidence only; no local entropy tests. Normal from_arrays computes stats before wrapping nullable values. (rust/lance-encoding/src/data.rs:2020-2030)"
+        ],
+        [
+          620,
+          706,
+          "Data-size test compares three Int32 batches and seeded random Binary against Arrow own data-buffer sums (Binary includes offsets and payload), Struct against child own-buffer sums, Dictionary againstNone, and nullable Int32 against values buffers excluding null bitmap. Confirms payload accounting rather than total in-memory allocation."
+        ],
+        [
+          707,
+          770,
+          "Integer bit-width test starts Int8 cases [1,2,3]->2, max positive->7, lower masks->5 and negative->8, then begins Int16 cases. All use DataBlock::from_array to initialize stats and assert UInt64Array equality, without runtime evidence here."
+        ],
+        [
+          771,
+          850,
+          "Continues Int16 positive/boundary/negative cases and Int32 positive/boundary/negative cases. The helper operates on unsigned representation, so any negative signed input yields full width. Source appendix preserves every literal input and expected number."
+        ],
+        [
+          851,
+          930,
+          "Completes signed32/64 fixtures and starts unsigned8/16 cases. Repeated explicit fixtures test single chunks of small arrays, signed extremes and widening boundaries; no parameterized harness used locally."
+        ],
+        [
+          931,
+          1030,
+          "Completes unsigned16/32/64 fixtures including u64::MAX. All explicit integer tests compare whole BitWidth arrays. No direct zero-count, empty typed buffer, width1/128 fallback or mismatched declared-count test here."
+        ],
+        [
+          1031,
+          1060,
+          "Multi-chunk bit-width test concatenates1024 values3,1024 values8 and10 values-1 separately for signed8/16/32/64; expect[2,4,native width]. Covers1024 chunk boundaries and short tail using true physical lengths."
+        ],
+        [
+          1061,
+          1070,
+          "Random Binary three-value test confirms unsupported BitWidth returnsNone after ordinary construction; it does not test an uninitialized statistics map (which panics)."
+        ],
+        [
+          1071,
+          1125,
+          "Variable cardinality tests String and LargeString fixtures: two unique hello/world, three unique sentences and repeated Samuel/Saunders/Samuel produce2,3,2 respectively. Small exact expected estimates do not establish general HLL exactness. All values present, no null/empty malformed-buffer coverage."
+        ],
+        [
+          1126,
+          1171,
+          "Variable MaxLength tests String/LargeString hello/world, sentence lengths and String Samuel/Saunders/Samuel. All ASCII and present. Assertions use byte string len, not character counts; no direct zero-window/descending/sliced offset case."
+        ],
+        [
+          1172,
+          1215,
+          "RunCount test covers Int32 consecutive triples->3, five unique->5, mixed nine->5, five repeated42->1, UInt8 three pairs->3 and Int64 five values->3. Comment single value means one distinct value across five rows. No zero rows, boolean,128-bit, nonconsecutive equal raw floats or count mismatch."
+        ],
+        [
+          1216,
+          1230,
+          "Fixed lazy-cardinality test builds seven Int64[1,2,3,1,2,3,1], checks DataSize/BitWidth cached and Cardinality absent. Does not call cardinality getter."
+        ],
+        [
+          1231,
+          1246,
+          "Fixed on-demand test uses same Int64 fixture, invokes getter expecting scalar3 then asserts Cardinality now present. No repeat-get Arc identity or concurrent cache initialization check."
+        ],
+        [
+          1247,
+          1269,
+          "Variable lazy test String[a,b,a] checks DataSize/MaxLength present/Cardinality absent, calls getter for2, then checks cached. Ten test functions total; no direct BytePositionEntropy,128-bit HLL, poisoned locks, recomputation/stale-cache, invalid scalar-stat or NULL filtering regression tests."
+        ]
+      ]
+    }
+  ]
+}

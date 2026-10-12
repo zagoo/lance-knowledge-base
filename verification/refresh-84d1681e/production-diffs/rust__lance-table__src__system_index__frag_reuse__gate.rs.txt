@@ -1,0 +1,233 @@
+@@ -14,6 +14,7 @@
+   14  use super::FRAG_REUSE_INDEX_NAME;
+   15  use super::metadata::{is_tagged, uses_tagged_fri};
+   16  use crate::format::{IndexMetadata, Manifest};
+   17 +use crate::system_index::mem_wal::MEM_WAL_INDEX_NAME;
+   18  use crate::transaction::{FragReuseUpdate, Operation};
+   19  use lance_core::{Error, Result};
+   20  use roaring::RoaringBitmap;
+
+@@ -33,8 +34,15 @@ pub enum Admission {
+   34      /// Restore copies an earlier manifest whole; it never reaches
+   35      /// `build_manifest`, classified here so the table is complete.
+   36      RestoresManifest,
+   37 +    /// The trim `cleanup_frag_reuse_index` derives against the current
+   38 +    /// entry at commit time: exactly the entry replaced or removed.
+   39 +    TrimsEntry,
+   40      /// Creates, replaces or drops user indices; the entry is untouched.
+   41      MaintainsUserIndices,
+   42 +    /// Records MemWAL compaction progress: replaces the MemWAL system
+   43 +    /// index's own entry and nothing else (no fragment, no user segment,
+   44 +    /// not the history).
+   45 +    MaintainsMemWalState,
+   46  }
+   47  
+   48  /// Classify `operation` against the table's current state.
+
+@@ -74,6 +82,63 @@ pub fn classify(
+   82          ));
+   83      }
+   84  
+   85 +    // A `CreateIndex` touching a tagged entry is only safe in one shape:
+   86 +    // the trim the maintenance path derives against the CURRENT entry at
+   87 +    // commit time, exactly the FRI entry replaced (or removed outright),
+   88 +    // nothing else mixed in, and the removed identity matching the entry
+   89 +    // this manifest actually carries. The in-memory intent
+   90 +    // (`config.tagged_frag_reuse_trim`) distinguishes that derivation from
+   91 +    // a hand-built entry, whose snapshot may be stale: splicing it would
+   92 +    // silently drop records a concurrent writer appended.
+   93 +    let trims_tagged_entry = if let Operation::CreateIndex {
+   94 +        new_indices,
+   95 +        removed_indices,
+   96 +        ..
+   97 +    } = operation
+   98 +    {
+   99 +        let touches_fri = new_indices
+  100 +            .iter()
+  101 +            .chain(removed_indices.iter())
+  102 +            .any(|idx| idx.name == FRAG_REUSE_INDEX_NAME);
+  103 +        let tagged_involved = new_indices.iter().any(is_tagged)
+  104 +            || removed_indices.iter().any(is_tagged)
+  105 +            || (touches_fri && current_indices.iter().any(is_tagged));
+  106 +        if tagged_involved {
+  107 +            if !matches!(frag_reuse, FragReuseUpdate::Trim) {
+  108 +                return Err(Error::invalid_input(
+  109 +                    "a tagged fragment reuse entry may only be replaced or removed by \
+  110 +                     the trim `cleanup_frag_reuse_index` derives against the current \
+  111 +                     entry at commit time; a hand-built entry may splice away \
+  112 +                     concurrent records",
+  113 +                ));
+  114 +            }
+  115 +            let current_entry = current_indices
+  116 +                .iter()
+  117 +                .find(|idx| idx.name == FRAG_REUSE_INDEX_NAME);
+  118 +            let removed_matches_current = matches!(
+  119 +                (removed_indices.as_slice(), current_entry),
+  120 +                ([removed], Some(current))
+  121 +                    if removed.name == FRAG_REUSE_INDEX_NAME && removed.uuid == current.uuid
+  122 +            );
+  123 +            let new_is_tagged_entry_or_empty = match new_indices.as_slice() {
+  124 +                [] => true,
+  125 +                [entry] => is_tagged(entry),
+  126 +                _ => false,
+  127 +            };
+  128 +            if !removed_matches_current || !new_is_tagged_entry_or_empty {
+  129 +                return Err(Error::invalid_input(
+  130 +                    "a tagged fragment reuse trim must replace or remove exactly the \
+  131 +                     current FRI entry and carry nothing else; the entry it removes \
+  132 +                     no longer matches the current manifest, so it was derived \
+  133 +                     against a stale version",
+  134 +                ));
+  135 +            }
+  136 +        }
+  137 +        tagged_involved
+  138 +    } else {
+  139 +        false
+  140 +    };
+  141 +
+  142      let replaces_entry = matches!(
+  143          operation,
+  144          Operation::Rewrite {
+
+@@ -114,6 +179,27 @@ pub fn classify(
+  179      if appends_transitions {
+  180          return Ok(Admission::AppendsTransitions);
+  181      }
+  182 +    if trims_tagged_entry {
+  183 +        return Ok(Admission::TrimsEntry);
+  184 +    }
+  185 +    // Creating, replacing or dropping user indices leaves the tagged entry
+  186 +    // untouched (it is carried through unchanged), and draining index
+  187 +    // coverage onto a rewrite's destinations is exactly how tagged
+  188 +    // histories become trimmable, so this shape is safe and necessary.
+  189 +    // Only a `CreateIndex` touching the FRI entry needs the trim rules
+  190 +    // above.
+  191 +    if let Operation::CreateIndex {
+  192 +        new_indices,
+  193 +        removed_indices,
+  194 +        ..
+  195 +    } = operation
+  196 +        && new_indices
+  197 +            .iter()
+  198 +            .chain(removed_indices.iter())
+  199 +            .all(|idx| idx.name != FRAG_REUSE_INDEX_NAME)
+  200 +    {
+  201 +        return Ok(Admission::MaintainsUserIndices);
+  202 +    }
+  203  
+  204      // A rewrite that carries neither an entry nor transition intent is still
+  205      // safe when no current index, the entry included (its bitmap holds the
+
+@@ -142,16 +228,32 @@ pub fn classify(
+  228              .flat_map(|group| group.old_fragments.iter())
+  229              .filter_map(|fragment| u32::try_from(fragment.id).ok())
+  230              .collect();
+  145 -        // Unknown coverage is not empty coverage: without a bitmap the
+  146 -        // entry could cover anything, so refuse.
+  147 -        if current_indices.iter().all(|index| {
+  148 -            index
+  149 -                .fragment_bitmap
+  150 -                .as_ref()
+  151 -                .is_some_and(|bitmap| bitmap.is_disjoint(&rewritten))
+  152 -        }) {
+  153 -            return Ok(Admission::RewritesUncoveredFragments);
+  154 -        }
+  231 +        let fragments = || {
+  232 +            groups
+  233 +                .iter()
+  234 +                .flat_map(|group| group.old_fragments.iter().map(|fragment| fragment.id))
+  235 +                .collect::<Vec<_>>()
+  236 +        };
+  237 +        return match covered_bare_rewrite(&rewritten, current_indices) {
+  238 +            None => Ok(Admission::RewritesUncoveredFragments),
+  239 +            Some(BareRewriteRefusal::Covered { index, overlap }) => {
+  240 +                Err(Error::invalid_input(format!(
+  241 +                    "rewrite of fragments {:?} carries no fragment reuse transition but index \
+  242 +                     {index} covers fragments {:?} of it; record a transition for the group or \
+  243 +                     rebuild the index before the rewrite",
+  244 +                    fragments(),
+  245 +                    overlap.iter().collect::<Vec<_>>(),
+  246 +                )))
+  247 +            }
+  248 +            Some(BareRewriteRefusal::UnknownCoverage { index }) => {
+  249 +                Err(Error::invalid_input(format!(
+  250 +                    "rewrite of fragments {:?} carries no fragment reuse transition and index \
+  251 +                     {index} has no fragment bitmap, so its coverage is unknown; record a \
+  252 +                     transition for the group or rebuild the index before the rewrite",
+  253 +                    fragments(),
+  254 +                )))
+  255 +            }
+  256 +        };
+  257      }
+  258  
+  259      // A tagged history translates row ADDRESSES; stable row ids replace
+
+@@ -206,23 +308,64 @@ pub fn classify(
+  308          | Operation::Overwrite { .. }
+  309          | Operation::Project { .. }
+  310          | Operation::Merge { .. }
+  209 -        | Operation::DataReplacement { .. } => Ok(Admission::MovesNoRows),
+  311 +        | Operation::DataReplacement { .. }
+  312 +        | Operation::UpdateBases { .. } => Ok(Admission::MovesNoRows),
+  313          Operation::Restore { .. } => Ok(Admission::RestoresManifest),
+  211 -        // A bare rewrite of covered fragments or a v0 snapshot would
+  212 -        // misinterpret the history; MemWAL state, overlays, clones and base
+  213 -        // changes have no tagged semantics yet. A CreateIndex reaching here
+  214 -        // touches the entry itself.
+  314 +        // Replaces only the MemWAL entry; fragments, user segments and the
+  315 +        // history are carried through unchanged.
+  316 +        Operation::UpdateMemWalState { .. } => Ok(Admission::MaintainsMemWalState),
+  317 +        // A bare rewrite beside an entry of a newer version or carrying
+  318 +        // rewritten indices, or a v0 snapshot, would misinterpret the
+  319 +        // history; overlays, clones and base changes have no tagged
+  320 +        // semantics yet. A CreateIndex reaching here touches the entry
+  321 +        // without being its trim.
+  322          Operation::Rewrite { .. }
+  323          | Operation::CreateIndex { .. }
+  217 -        | Operation::UpdateMemWalState { .. }
+  324          | Operation::DataOverlay { .. }
+  325          | Operation::Clone { .. }
+  220 -        | Operation::UpdateBases { .. } => Err(Error::not_supported(
+  326 +        | Operation::Unknown { .. } => Err(Error::not_supported(
+  327              "Tagged FRI history maintenance is not implemented for this operation; upgrade to a writer supporting tagged histories",
+  328          )),
+  329      }
+  330  }
+  331  
+  332 +/// Why a rewrite recording no transition for `rewritten` is refused.
+  333 +#[derive(Debug, Clone, PartialEq, Eq)]
+  334 +pub enum BareRewriteRefusal {
+  335 +    /// `index`'s bitmap contains `overlap`, a subset of the rewritten fragments.
+  336 +    Covered {
+  337 +        index: String,
+  338 +        overlap: RoaringBitmap,
+  339 +    },
+  340 +    /// `index` carries no bitmap; unknown coverage is not empty coverage.
+  341 +    UnknownCoverage { index: String },
+  342 +}
+  343 +
+  344 +/// The bare-rewrite rule shared by the gate and the per-group check of a
+  345 +/// transition-carrying rewrite: every current index bitmap, the fragment
+  346 +/// reuse entry's included, must be disjoint from `rewritten`, and an index
+  347 +/// without a bitmap refuses. The MemWAL entry carries no bitmap by design
+  348 +/// and covers no fragment, so it is skipped. The first offending index is
+  349 +/// returned.
+  350 +pub fn covered_bare_rewrite(
+  351 +    rewritten: &RoaringBitmap,
+  352 +    indices: &[IndexMetadata],
+  353 +) -> Option<BareRewriteRefusal> {
+  354 +    indices
+  355 +        .iter()
+  356 +        .filter(|index| index.name != MEM_WAL_INDEX_NAME)
+  357 +        .find_map(|index| match index.fragment_bitmap.as_ref() {
+  358 +            Some(bitmap) if bitmap.is_disjoint(rewritten) => None,
+  359 +            Some(bitmap) => Some(BareRewriteRefusal::Covered {
+  360 +                index: index.name.clone(),
+  361 +                overlap: bitmap & rewritten,
+  362 +            }),
+  363 +            None => Some(BareRewriteRefusal::UnknownCoverage {
+  364 +                index: index.name.clone(),
+  365 +            }),
+  366 +        })
+  367 +}
+  368 +

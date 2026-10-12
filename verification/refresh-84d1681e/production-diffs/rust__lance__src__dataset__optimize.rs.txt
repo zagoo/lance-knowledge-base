@@ -1,0 +1,388 @@
+@@ -105,6 +105,7 @@ use super::{
+  105  };
+  106  use crate::Dataset;
+  107  use crate::Result;
+  108 +use crate::dataset::rowids::load_row_id_index_for_fragments;
+  109  use crate::dataset::utils::CapturedRowIds;
+  110  use crate::index::{DatasetIndexInternalExt, index_is_usable, load_all_indices};
+  111  use crate::io::commit::{commit_transaction, default_commit_retry_timeout, migrate_fragments};
+
+@@ -820,14 +821,7 @@ impl CompactionPlanner for DefaultCompactionPlanner {
+  821              dataset.manifest.data_storage_format.lance_file_format(),
+  822              write_version,
+  823          )?;
+  823 -        if self.options.defer_index_remap && dataset.manifest.uses_stable_row_ids() {
+  824 -            return Err(Error::invalid_input(
+  825 -                "defer_index_remap=true is not supported on datasets with stable row IDs: \
+  826 -                 stable row IDs do not require index remapping during compaction, so there \
+  827 -                 is nothing to defer."
+  828 -                    .to_string(),
+  829 -            ));
+  830 -        }
+  824 +        reject_deferred_remap_with_row_id_indices(dataset, &self.options).await?;
+  825  
+  826          // get_fragments should be returning fragments in sorted order (by id)
+  827          // and fragment ids should be unique
+
+@@ -1647,7 +1641,11 @@ impl BlobV2FieldRewritePlan {
+ 1641          }
+ 1642      }
+ 1643  
+ 1650 -    fn try_new(field: &LanceField, input_field: &ArrowField) -> Result<Self> {
+ 1644 +    fn try_new(
+ 1645 +        field: &LanceField,
+ 1646 +        input_field: &ArrowField,
+ 1647 +        preserve_managed: bool,
+ 1648 +    ) -> Result<Self> {
+ 1649          if !field_contains_blob_v2(field) {
+ 1650              return Ok(Self::passthrough(input_field));
+ 1651          }
+
+@@ -1660,6 +1658,13 @@ impl BlobV2FieldRewritePlan {
+ 1658                  ))
+ 1659              })?;
+ 1660              let ArrowDataType::Struct(input_children) = input_field.data_type() else {
+ 1661 +                // Legacy blob bytes: the writer converts them to Blob v2.
+ 1662 +                if matches!(
+ 1663 +                    input_field.data_type(),
+ 1664 +                    ArrowDataType::Binary | ArrowDataType::LargeBinary
+ 1665 +                ) {
+ 1666 +                    return Ok(Self::passthrough(input_field));
+ 1667 +                }
+ 1668                  return Err(Error::invalid_input(format!(
+ 1669                      "Blob v2 field '{}' has non-struct input type {:?}",
+ 1670                      field.name,
+
+@@ -1668,9 +1673,14 @@ impl BlobV2FieldRewritePlan {
+ 1673              };
+ 1674              let output_field = match BlobV2Layout::classify(input_children) {
+ 1675                  Some(BlobV2Layout::Logical) => Arc::new(input_field.clone()),
+ 1671 -                Some(BlobV2Layout::Descriptor) => {
+ 1672 -                    transformed_arrow_field(field, BLOB_V2_LOGICAL_TYPE.clone())
+ 1673 -                }
+ 1676 +                Some(BlobV2Layout::Descriptor) => transformed_arrow_field(
+ 1677 +                    field,
+ 1678 +                    if preserve_managed {
+ 1679 +                        lance_core::datatypes::BLOB_V2_PREPARED_TYPE.clone()
+ 1680 +                    } else {
+ 1681 +                        BLOB_V2_LOGICAL_TYPE.clone()
+ 1682 +                    },
+ 1683 +                ),
+ 1684                  Some(actual) => {
+ 1685                      return Err(Error::invalid_input(format!(
+ 1686                          "Blob v2 field '{}' has {actual} input layout; expected logical or descriptor layout during rewrite",
+
+@@ -1705,7 +1715,7 @@ impl BlobV2FieldRewritePlan {
+ 1715                      .children
+ 1716                      .iter()
+ 1717                      .zip(input_children.iter())
+ 1708 -                    .map(|(child, input_child)| Self::try_new(child, input_child))
+ 1718 +                    .map(|(child, input_child)| Self::try_new(child, input_child, preserve_managed))
+ 1719                      .collect::<Result<Vec<_>>>()?;
+ 1720                  let output_children = children
+ 1721                      .iter()
+
+@@ -1727,7 +1737,7 @@ impl BlobV2FieldRewritePlan {
+ 1737                          field.name
+ 1738                      ))
+ 1739                  })?;
+ 1730 -                let child = Box::new(Self::try_new(child, input_child)?);
+ 1740 +                let child = Box::new(Self::try_new(child, input_child, preserve_managed)?);
+ 1741                  Ok(Self::List {
+ 1742                      field_name: field.name.clone(),
+ 1743                      output_field: arrow_field_with_data_type(
+
+@@ -1744,7 +1754,7 @@ impl BlobV2FieldRewritePlan {
+ 1754                          field.name
+ 1755                      ))
+ 1756                  })?;
+ 1747 -                let child = Box::new(Self::try_new(child, input_child)?);
+ 1757 +                let child = Box::new(Self::try_new(child, input_child, preserve_managed)?);
+ 1758                  Ok(Self::LargeList {
+ 1759                      field_name: field.name.clone(),
+ 1760                      output_field: arrow_field_with_data_type(
+
+@@ -1783,12 +1793,15 @@ impl BlobV2FieldRewritePlan {
+ 1793                  Self::Blob {
+ 1794                      field_id,
+ 1795                      field_name,
+ 1786 -                    ..
+ 1796 +                    output_field,
+ 1797                  } => {
+ 1798                      let struct_arr = array.as_struct();
+ 1799                      match BlobV2Layout::classify(struct_arr.fields()) {
+ 1800                          Some(BlobV2Layout::Logical) => Ok(array),
+ 1801                          Some(BlobV2Layout::Descriptor) => {
+ 1802 +                            if matches!(output_field.data_type(), ArrowDataType::Struct(fields) if BlobV2Layout::classify(fields) == Some(BlobV2Layout::Prepared)) {
+ 1803 +                                return super::blob::preserve_managed_descriptors(dataset, *field_id, struct_arr, &row_addrs, output_field).await;
+ 1804 +                            }
+ 1805                              let descriptor =
+ 1806                                  BlobV2Descriptor::try_from_struct(struct_arr, field_name)?;
+ 1807                              let classification =
+
+@@ -1954,6 +1967,7 @@ impl BlobV2BatchRewritePlan {
+ 1967          schema: &lance_core::datatypes::Schema,
+ 1968          input_schema: &ArrowSchema,
+ 1969          keep_row_addr: bool,
+ 1970 +        preserve_managed: bool,
+ 1971      ) -> Result<Self> {
+ 1972          let row_addr_idx = input_schema
+ 1973              .column_with_name(lance_core::ROW_ADDR)
+
+@@ -1975,7 +1989,7 @@ impl BlobV2BatchRewritePlan {
+ 1989                  continue;
+ 1990              }
+ 1991              let field_plan = if let Some(field) = schema.field(input_field.name()) {
+ 1978 -                BlobV2FieldRewritePlan::try_new(field, input_field)?
+ 1992 +                BlobV2FieldRewritePlan::try_new(field, input_field, preserve_managed)?
+ 1993              } else {
+ 1994                  BlobV2FieldRewritePlan::passthrough(input_field)
+ 1995              };
+
+@@ -2035,7 +2049,8 @@ pub(crate) async fn transform_blob_v2_batch(
+ 2049      batch: RecordBatch,
+ 2050      keep_row_addr: bool,
+ 2051  ) -> Result<RecordBatch> {
+ 2038 -    let plan = BlobV2BatchRewritePlan::try_new(schema, batch.schema().as_ref(), keep_row_addr)?;
+ 2052 +    let plan =
+ 2053 +        BlobV2BatchRewritePlan::try_new(schema, batch.schema().as_ref(), keep_row_addr, false)?;
+ 2054      plan.transform_batch(dataset, batch).await
+ 2055  }
+ 2056  
+
+@@ -2336,6 +2351,41 @@ async fn unremappable_index_coverage(dataset: &Dataset) -> Result<Vec<(String, R
+ 2351      Ok(coverage)
+ 2352  }
+ 2353  
+ 2354 +/// Indexes that use the row ids instead of row addresses.
+ 2355 +///
+ 2356 +/// Row id indexes are a legacy we are migrating away from.  These are not compatible
+ 2357 +/// with stable row id and the fragment reuse index.
+ 2358 +async fn row_id_domain_indices(dataset: &Dataset) -> Result<Vec<String>> {
+ 2359 +    Ok(load_all_indices(dataset)
+ 2360 +        .await?
+ 2361 +        .iter()
+ 2362 +        .filter(|index| !is_system_index(index) && !index.results_are_row_addrs())
+ 2363 +        .map(|index| index.name.clone())
+ 2364 +        .collect())
+ 2365 +}
+ 2366 +
+ 2367 +/// Refuse a deferred remap that would strand a row-id-domain index under an FRI.
+ 2368 +async fn reject_deferred_remap_with_row_id_indices(
+ 2369 +    dataset: &Dataset,
+ 2370 +    options: &CompactionOptions,
+ 2371 +) -> Result<()> {
+ 2372 +    if !options.defer_index_remap || !dataset.manifest.uses_stable_row_ids() {
+ 2373 +        return Ok(());
+ 2374 +    }
+ 2375 +    let blocked = row_id_domain_indices(dataset).await?;
+ 2376 +    if blocked.is_empty() {
+ 2377 +        return Ok(());
+ 2378 +    }
+ 2379 +    Err(Error::invalid_input(format!(
+ 2380 +        "defer_index_remap=true is not supported on a dataset with stable row IDs that carries \
+ 2381 +         index(es) {:?}: those report matches as row ids, which a rewrite leaves valid, while the \
+ 2382 +         fragment-reuse index a deferred remap writes remaps row addresses. Applying it to them \
+ 2383 +         would corrupt them. Compact without defer_index_remap, which keeps their row ids and \
+ 2384 +         costs only the coverage of any address-domain index.",
+ 2385 +        blocked,
+ 2386 +    )))
+ 2387 +}
+ 2388 +
+ 2389  /// Refuse a plan that rewrites fragments an index this build cannot read covers.
+ 2390  ///
+ 2391  /// [`DefaultCompactionPlanner`] keeps those fragments out of the plan, but
+
+@@ -2401,10 +2451,11 @@ pub struct RewriteResult {
+ 2451      pub row_addrs: Option<Vec<u8>>,
+ 2452  }
+ 2453  
+ 2454 +/// Returns the version the reservation committed at; `dataset` is not moved to it.
+ 2455  async fn reserve_fragment_ids(
+ 2456      dataset: &Dataset,
+ 2457      fragments: impl ExactSizeIterator<Item = &mut Fragment>,
+ 2407 -) -> Result<()> {
+ 2458 +) -> Result<u64> {
+ 2459      let transaction = Transaction::new(
+ 2460          dataset.manifest.version,
+ 2461          Operation::ReserveFragments {
+
+@@ -2434,7 +2485,7 @@ async fn reserve_fragment_ids(
+ 2485          fragment.id = new_id as u64;
+ 2486      }
+ 2487  
+ 2437 -    Ok(())
+ 2488 +    Ok(manifest.version)
+ 2489  }
+ 2490  
+ 2491  /// Rewrite the files in a single task.
+
+@@ -2478,10 +2529,14 @@ async fn rewrite_files(
+ 2529          .map(|f| f.physical_rows.unwrap() as u64)
+ 2530          .sum::<u64>();
+ 2531      // Capturing row addresses is only useful if something will consume them:
+ 2481 -    // an index to remap now, or a deferred remap through the FRI.
+ 2482 -    let capture_row_addrs = !dataset.manifest.uses_stable_row_ids()
+ 2483 -        && (options.defer_index_remap
+ 2484 -            || load_indices_for_remapping(dataset.as_ref())
+ 2532 +    // a deferred remap through the FRI, or an address-domain index to remap
+ 2533 +    // immediately. Stable row ids keep indices valid across the rewrite
+ 2534 +    // without an immediate remap (see `commit_compaction`'s `needs_remapping`),
+ 2535 +    // so an eager, non-deferred compaction on a stable-row-id dataset never
+ 2536 +    // uses the addresses and capturing them would be pure waste.
+ 2537 +    let capture_row_addrs = options.defer_index_remap
+ 2538 +        || (!dataset.manifest.uses_stable_row_ids()
+ 2539 +            && load_indices_for_remapping(dataset.as_ref())
+ 2540                  .await?
+ 2541                  .is_some());
+ 2542      let mut new_fragments: Vec<Fragment>;
+
+@@ -2541,6 +2596,10 @@ async fn rewrite_files(
+ 2596                  dataset.schema(),
+ 2597                  schema.as_ref(),
+ 2598                  false,
+ 2599 +                matches!(
+ 2600 +                    write_version,
+ 2601 +                    ConcreteFileVersion::V2_2 | ConcreteFileVersion::V2_3
+ 2602 +                ),
+ 2603              )?);
+ 2604              let transformed_schema = rewrite_plan.output_schema.clone();
+ 2605              let transformed = reader_with_progress.then(move |batch_result| {
+
+@@ -2729,34 +2788,46 @@ async fn rewrite_files(
+ 2788      // Wrap in an async block so `?` returns into `row_addrs_result` and we can
+ 2789      // run cleanup before propagating the error.
+ 2790      let row_addrs_result: Result<Option<Vec<u8>>> = async {
+ 2732 -        if let Some(row_ids_rx) = row_ids_rx {
+ 2733 -            let captured_ids = row_ids_rx
+ 2734 -                .try_recv()
+ 2735 -                .map_err(|err| Error::internal(format!("Failed to receive row ids: {}", err)))?;
+ 2736 -            let mut row_addrs = captured_ids.row_addrs(None)?.into_owned();
+ 2737 -            // Compaction reads whole fragments, so the captured addresses are
+ 2738 -            // dense per-fragment ranges; run containers (standard roaring
+ 2739 -            // format) shrink the persisted blob from O(rows) to O(runs) bytes.
+ 2740 -            row_addrs.optimize();
+ 2741 -            let mut serialized = Vec::with_capacity(row_addrs.serialized_size());
+ 2742 -            row_addrs.serialize_into(&mut serialized)?;
+ 2743 -            Ok(Some(serialized))
+ 2744 -        } else {
+ 2745 -            if dataset.manifest.uses_stable_row_ids() {
+ 2746 -                log::info!("Compaction task {}: rechunking stable row ids", task_id);
+ 2747 -                match lineage_plan {
+ 2748 -                    Some(planned) => {
+ 2749 -                        place_planned_row_lineage(dataset.as_ref(), &mut new_fragments, planned)
+ 2750 -                            .await?
+ 2751 -                    }
+ 2752 -                    None => {
+ 2753 -                        rechunk_row_lineage(dataset.as_ref(), &mut new_fragments, &fragments)
+ 2754 -                            .await?
+ 2755 -                    }
+ 2791 +        // The new fragments need their own row-id sequences whether or not this
+ 2792 +        // task also captures addresses for the FRI.
+ 2793 +        if dataset.manifest.uses_stable_row_ids() {
+ 2794 +            log::info!("Compaction task {}: rechunking stable row ids", task_id);
+ 2795 +            match lineage_plan {
+ 2796 +                Some(planned) => {
+ 2797 +                    place_planned_row_lineage(dataset.as_ref(), &mut new_fragments, planned).await?
+ 2798 +                }
+ 2799 +                None => {
+ 2800 +                    rechunk_row_lineage(dataset.as_ref(), &mut new_fragments, &fragments).await?
+ 2801                  }
+ 2802              }
+ 2758 -            Ok(None)
+ 2803          }
+ 2804 +
+ 2805 +        let Some(row_ids_rx) = row_ids_rx else {
+ 2806 +            return Ok(None);
+ 2807 +        };
+ 2808 +        let captured_ids = row_ids_rx
+ 2809 +            .try_recv()
+ 2810 +            .map_err(|err| Error::internal(format!("Failed to receive row ids: {}", err)))?;
+ 2811 +        // Stable row ids are captured as a sequence, and only the row-id index
+ 2812 +        // knows the address each one sat at before the rewrite. Every id that
+ 2813 +        // was captured was read from `fragments` (this task's own original
+ 2814 +        // fragments), so an index scoped to just those -- rather than
+ 2815 +        // `get_row_id_index`'s whole-dataset index -- has everything needed
+ 2816 +        // to look them up, without paying to index fragments this rewrite
+ 2817 +        // never touches.
+ 2818 +        let row_id_index = if dataset.manifest.uses_stable_row_ids() {
+ 2819 +            Some(load_row_id_index_for_fragments(dataset.as_ref(), &fragments).await?)
+ 2820 +        } else {
+ 2821 +            None
+ 2822 +        };
+ 2823 +        let mut row_addrs = captured_ids.row_addrs(row_id_index.as_ref())?.into_owned();
+ 2824 +        // Compaction reads whole fragments, so the captured addresses are
+ 2825 +        // dense per-fragment ranges; run containers (standard roaring
+ 2826 +        // format) shrink the persisted blob from O(rows) to O(runs) bytes.
+ 2827 +        row_addrs.optimize();
+ 2828 +        let mut serialized = Vec::with_capacity(row_addrs.serialized_size());
+ 2829 +        row_addrs.serialize_into(&mut serialized)?;
+ 2830 +        Ok(Some(serialized))
+ 2831      }
+ 2832      .await;
+ 2833  
+
+@@ -3187,6 +3258,7 @@ pub async fn commit_compaction(
+ 3258      if !dataset.manifest.uses_stable_row_ids() && !options.defer_index_remap {
+ 3259          reject_unremappable_rewrite(dataset, &completed_tasks).await?;
+ 3260      }
+ 3261 +    reject_deferred_remap_with_row_id_indices(dataset, options).await?;
+ 3262  
+ 3263      let has_address_style = completed_tasks.iter().any(|t| t.row_addrs.is_some());
+ 3264      // Address-style results require immediate index remapping unless it is deferred.
+
+@@ -3231,15 +3303,20 @@ pub async fn commit_compaction(
+ 3303          .collect();
+ 3304  
+ 3305      // Single reserve_fragment_ids for all address-style tasks
+ 3306 +    let mut reserved_version = None;
+ 3307      if has_address_style {
+ 3308          let frags: Vec<&mut Fragment> = completed_tasks
+ 3309              .iter_mut()
+ 3310              .filter(|t| t.row_addrs.is_some())
+ 3311              .flat_map(|t| t.new_fragments.iter_mut())
+ 3312              .collect();
+ 3240 -        if let Err(e) = reserve_fragment_ids(dataset, frags.into_iter()).await {
+ 3241 -            cleanup_compaction_files_after_reservation_failure(dataset, &all_new_fragments).await;
+ 3242 -            return Err(e);
+ 3313 +        match reserve_fragment_ids(dataset, frags.into_iter()).await {
+ 3314 +            Ok(version) => reserved_version = Some(version),
+ 3315 +            Err(e) => {
+ 3316 +                cleanup_compaction_files_after_reservation_failure(dataset, &all_new_fragments)
+ 3317 +                    .await;
+ 3318 +                return Err(e);
+ 3319 +            }
+ 3320          }
+ 3321      }
+ 3322  
+
+@@ -3469,7 +3546,7 @@ pub async fn commit_compaction(
+ 3546      // transitions riding the in-memory rewrite intent that
+ 3547      // `build_frag_reuse_rewrite_entry` assembles onto the entry at every
+ 3548      // commit attempt -- is decided HERE, at commit time, from the freshest
+ 3472 -    // state this handle has (the id reservations above advanced it), not
+ 3549 +    // state this handle has (the id reservations above do not advance it), not
+ 3550      // from a sample taken when the compaction started: another writer may
+ 3551      // have tagged the table in between. The record's BASE, however, is the
+ 3552      // snapshot at `tasks_read_version`: the commit path works out what the
+
+@@ -3560,7 +3637,18 @@ pub async fn commit_compaction(
+ 3637                      .await?,
+ 3638              )
+ 3639          } else {
+ 3563 -            Some(build_new_frag_reuse_index(dataset, frag_reuse_groups, new_fragment_bitmap).await?)
+ 3640 +            // The rewrite publishes right after the reservation unless another commit
+ 3641 +            // lands in between, in which case `finish_rewrite` restamps it.
+ 3642 +            let dataset_version = reserved_version.unwrap_or(dataset.manifest.version);
+ 3643 +            Some(
+ 3644 +                build_new_frag_reuse_index(
+ 3645 +                    dataset,
+ 3646 +                    frag_reuse_groups,
+ 3647 +                    new_fragment_bitmap,
+ 3648 +                    dataset_version,
+ 3649 +                )
+ 3650 +                .await?,
+ 3651 +            )
+ 3652          }
+ 3653      } else {
+ 3654          if options.defer_index_remap {

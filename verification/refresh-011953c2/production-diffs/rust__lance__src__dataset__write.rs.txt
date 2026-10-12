@@ -1,0 +1,77 @@
+@@ -1779,38 +1779,13 @@ pub(crate) async fn write_fragments_internal_with_file_row_counts(
+ 1779          target_bases_info,
+ 1780          file_row_counts,
+ 1781          None,
+ 1782 +        false,
+ 1783      )
+ 1784      .await
+ 1785  }
+ 1786  
+ 1787  #[allow(clippy::too_many_arguments)]
+ 1787 -pub(crate) async fn write_fragments_internal_to_file(
+ 1788 -    storage_version: ConcreteFileVersion,
+ 1789 -    dataset: Option<&Dataset>,
+ 1790 -    object_store: Arc<ObjectStore>,
+ 1791 -    base_dir: &Path,
+ 1792 -    schema: Schema,
+ 1793 -    data: SendableRecordBatchStream,
+ 1794 -    params: WriteParams,
+ 1795 -    preassigned_data_file_name: Arc<String>,
+ 1796 -) -> Result<(Vec<Fragment>, Schema)> {
+ 1797 -    write_fragments_internal_impl(
+ 1798 -        storage_version,
+ 1799 -        dataset,
+ 1800 -        object_store,
+ 1801 -        base_dir,
+ 1802 -        schema,
+ 1803 -        data,
+ 1804 -        params,
+ 1805 -        None,
+ 1806 -        None,
+ 1807 -        Some(preassigned_data_file_name),
+ 1808 -    )
+ 1809 -    .await
+ 1810 -}
+ 1811 -
+ 1812 -#[allow(clippy::too_many_arguments)]
+ 1813 -async fn write_fragments_internal_impl(
+ 1788 +pub(crate) async fn write_fragments_internal_impl(
+ 1789      storage_version: ConcreteFileVersion,
+ 1790      dataset: Option<&Dataset>,
+ 1791      object_store: Arc<ObjectStore>,
+
+@@ -1821,6 +1796,7 @@ async fn write_fragments_internal_impl(
+ 1796      target_bases_info: Option<Vec<TargetBaseInfo>>,
+ 1797      file_row_counts: Option<Vec<usize>>,
+ 1798      preassigned_data_file_name: Option<Arc<String>>,
+ 1799 +    keep_field_ids: bool,
+ 1800  ) -> Result<(Vec<Fragment>, Schema)> {
+ 1801      let mut params = params;
+ 1802  
+
+@@ -1840,6 +1816,7 @@ async fn write_fragments_internal_impl(
+ 1816          target_bases_info,
+ 1817          file_row_counts,
+ 1818          preassigned_data_file_name,
+ 1819 +        keep_field_ids,
+ 1820      )
+ 1821      .await
+ 1822  }
+
+@@ -1858,10 +1835,15 @@ pub(super) fn prepare_write_schema(
+ 1835      normalized_converted_schema: Schema,
+ 1836      params: &WriteParams,
+ 1837      mut schema_compare_options: lance_core::datatypes::SchemaCompareOptions,
+ 1838 +    keep_field_ids: bool,
+ 1839  ) -> Result<Schema> {
+ 1840      let schema = if dataset.is_none() {
+ 1841          let mut schema = normalized_converted_schema;
+ 1864 -        schema.try_reassign_field_ids(None)?;
+ 1842 +        if keep_field_ids {
+ 1843 +            schema.try_set_field_id(None)?;
+ 1844 +        } else {
+ 1845 +            schema.try_reassign_field_ids(None)?;
+ 1846 +        }
+ 1847          schema
+ 1848      } else if let Some(dataset) = dataset
+ 1849          && matches!(params.mode, WriteMode::Append | WriteMode::Create)

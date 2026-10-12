@@ -1,0 +1,263 @@
+{
+  "iteration": 42,
+  "files": [
+    {
+      "path": "rust/lance-table/src/transaction/index_maintenance.rs",
+      "module": "L1-modules/rust-lance-table.md",
+      "reviewed": true,
+      "role": "Transaction index invalidation/retention and rewrite helpers;16 runtime methods plus30 local metadata tests. Public methods are reachable through Transaction despite private child module.",
+      "ranges": [
+        [
+          1,
+          26,
+          "SPDX and module documentation frame index coverage/retention rules; its statement that every rule has a unit test is intent, not complete branch coverage. Imports overlay staleness, metadata, tagged lineage/name recognition, system-index classifier, Transaction operations, Schema/Error, Roaring, maps/sets and UUID. All runtime helpers here are synchronous metadata transformations without physical file IO or unsafe blocks. Logs do not delete index files."
+        ],
+        [
+          27,
+          58,
+          "Transaction::register_pure_rewrite_rows_update_frags_in_indices is pub(super). Empty pure-update IDs return Ok before examining anything. For each index, skip row-address-domain metadata, then any indexed field in the caller preservation-exclusion set, then unknown coverage. Indexed i32 IDs use checked u32 conversion followed by unwrap: negative IDs can panic unless an earlier short circuit skips them. Field-set name refers to values updated; preserving coverage is allowed only for indices disjoint from that set."
+        ],
+        [
+          59,
+          93,
+          "Require every original fragment ID in the stored bitmap; empty originals pass vacuously and u64 IDs cast to u32 unchecked. Compute overlay staleness over the entire caller-supplied original_overlaid_frags map, not an intersection with original IDs here. Any stale fragment prevents extension. Otherwise insert every pure-update ID using unchecked as u32 into the existing bitmap. Does not update version, UUID or files; duplicates deduplicate. Fallible staleness evaluation can return after earlier indices were already mutated. No explicit system-index exemption."
+        ],
+        [
+          94,
+          141,
+          "Public rewritten_physical_columns classifies Update only when fields_modified nonempty, yielding every updated fragment with a cloned field list, independent of update mode. Merge delegates to merge_rewritten_fields. DataReplacement combines DataFile.schema(schema).field_ids with raw new_file.fields, keeps nonnegative IDs, sorts/deduplicates, and preserves a pair even if fields empty. All other operations return empty. This computes invalidation metadata; it neither rewrites bytes nor validates target existence."
+        ],
+        [
+          142,
+          181,
+          "Public withdraw_in_place_rewrites returns immediately for empty pairs. With Some lineage, expands every rewritten field through schema descendants then calls withdraw_rewritten_coverage. With None, builds temporary Fragment::new(id) per pair and calls direct prune_updated_fields_from_indices; that route does not expand descendants, reason about retired provenance or retire empty segments. It is therefore distinct from directly calling withdraw_rewritten_coverage with None."
+        ],
+        [
+          182,
+          218,
+          "Private expand_rewritten_fields maps all pairs preserving fragment order. with_descendants always includes each input u32; if convertible to i32 and found in schema, traverses its children using an explicit stack. Negative child IDs are skipped as outputs but their descendants still visited. Missing/out-of-range fields stay as original IDs; output sorted/deduplicated. Repeated ancestor inputs can repeat traversal before deduplication; no memoization or recursion."
+        ],
+        [
+          219,
+          258,
+          "Withdrawal documentation explains stored source provenance versus live coverage, transitive destinations including retired intermediates, and preserving unknown bitmap metadata. It states that surviving live-only coverage outside history cannot be handled by the translating reader after retired-source withdrawal, motivating whole-segment clearing. Reader/query/cleanup implementations remain outside this file; this rationale is documented without asserting their complete execution behavior. Callers must pre-expand rewritten fields."
+        ],
+        [
+          259,
+          301,
+          "Public withdraw_rewritten_coverage skips system indices and unknown coverage, converts nonnegative indexed fields into a set, and computes retired sources once as stored bitmap minus live fragments. For each overlapping rewritten field set, checked u64->u32 fragment conversion failing skips that pair. Add a directly covered ID. For each retired source, known destinations containing rewrite ID withdraw source; known destinations not containing it (including empty) leave it; unavailable lineage/walk withdraws every retired source conservatively. It does not require rewritten ID to be live. Repeated per-source/per-rewrite graph walks allocate; no cache here."
+        ],
+        [
+          302,
+          350,
+          "Subtract union of direct and retired IDs. Only if a retired source was withdrawn and something remains, decide whether reader translation can continue: any remaining retired ID suffices, otherwise any lineage.mentions(id) true or unknown suffices. If all remainder is live and known unmentioned, warn, include all remainder in withdrawn set and clear bitmap. Empty result records UUID; warn logs counts. After all indices, retire_emptied_segments handles metadata retirement. No Result/rollback; failures such as allocation panic could leave partial changes. With None lineage, mentions defaults true, so live remainder survives conservative retired withdrawal."
+        ],
+        [
+          351,
+          394,
+          "Private retire_emptied_segments finds first matching metadata name for each emptied UUID and marks it removable only if a different UUID with same name has unknown or nonempty bitmap. Compute all removable IDs before retaining; retain removes every matching UUID and logs info. If every same-name segment is empty, all remain; this does not select one oldest definition. Assumes UUID uniqueness without validating it; duplicates can affect first-name lookup/removal. Repeated linear searches and temporary Vecs cost proportional to emptied segments times indices, plus membership scans. No index-file deletion."
+        ],
+        [
+          395,
+          422,
+          "Public prune_updated_fields_from_indices returns on empty field list, otherwise any exact indexed-field overlap with a HashSet of references causes every updated fragment ID (unchecked as u32) to be removed from known bitmap. i32->u32 unwrap occurs before bitmap-option test and can panic on negative indexed fields; prior indices may already be changed. No descendant expansion, system exemption, lineage, retirement, logging or Result."
+        ],
+        [
+          423,
+          436,
+          "Private fragment_field_paths maps each nonnegative base-file field ID to its path string; later duplicate field occurrences overwrite earlier ones. Excludes overlays, base_id, column mappings, versions and cached sizes. Returned strings borrow fragment files. This deliberately narrower identity is not the full physical-file comparison used in validation."
+        ],
+        [
+          437,
+          466,
+          "Public merge_rewritten_fields indexes previous fragments by ID (last duplicate wins), then walks proposed order including duplicates. Only field IDs present in both old and new base-file maps whose path strings differ count; newly added/dropped fields and new fragments do not. Sort changed field IDs and omit empty pairs. Changes only to base_id/version/column indices/overlays are invisible to this classifier. Complete merge physical validation has separate broader checks."
+        ],
+        [
+          467,
+          516,
+          "Pub(super) prune_overlay_stale_fields_from_indices computes per-group maximum committed_version per nonnegative raw overlay field ID over all old fragments. Coverage emptiness and row membership do not affect the maximum. If any exact index field has overlay version greater than index dataset_version, remove all new group IDs (unchecked u64->u32) from known bitmap. Equality remains fresh. No ancestry expansion, key-only distinction, system skip, logging or empty-segment retirement; every index.fields value participates."
+        ],
+        [
+          517,
+          554,
+          "Pub(crate) retain_relevant_indices first drops indices with missing schema field IDs unless is_system_index; empty fields pass all(). Groups remaining indices by name except reserved fragment-reuse name, cloning names. Builds live-fragment bitmap with unchecked u64->u32 casts. System exemption applies to missing-field pruning; name/coverage retention is a separate subsequent rule. No file IO."
+        ],
+        [
+          555,
+          625,
+          "If any remaining entry satisfies is_tagged, retain every grouped UUID including empty/retired coverage; policy uses tagged entry recognition, not manifest reader flags here. Otherwise unknown None coverage is always retained. For >1 known segment, compare effective coverage (stored bitmap intersect live IDs): if all empty, stable-sort by dataset_version and keep oldest, first input wins ties; if some nonempty, keep all nonempty and remove empty. With exactly one known segment, keep it even if empty, independently of unknown siblings. Finally keep reserved frag-reuse name or selected UUIDs. Stored bitmaps remain unchanged. UUID collisions can retain extra entries; MemWAL/system names except FRI still undergo coverage pruning."
+        ],
+        [
+          626,
+          656,
+          "Pub(super) ordered_rewrite_groups clones all groups when reordered sources absent. Otherwise count old IDs in source bitmap using unchecked u64->u32 casts: zero overlap keeps group, complete overlap omits group, partial overlap returns InvalidInput. Empty-old groups have zero overlap and survive; no check that destinations/mappings match. Input unchanged on error; output copies fragment vectors."
+        ],
+        [
+          657,
+          690,
+          "Pub(super) recalculate_fragment_bitmap clones old bitmap, then evaluates each group membership against original old bitmap, not progressively updated result. All old covered removes all old IDs and adds new IDs; partial covered errors; none covered does nothing, including empty-old group even though all() vacuously true. Uses unchecked u64->u32. Input unchanged on error; group overlap/order assumptions are not validated and new IDs from prior groups can interact with later removals."
+        ],
+        [
+          691,
+          731,
+          "Pub(super) handle_rewrite_indices rejects repeated old UUIDs before lookup, even if missing from current indices. Missing current UUID is skipped. Found index must have Some bitmap; recalculate may error before this index assignment. On success replaces bitmap, UUID and files with new_index_files (None clears old list), but does not assign RewrittenIndex.new_index_details or new_index_version and does not change dataset version. Earlier indices remain modified on later error; changed UUIDs affect subsequent lookups. Duplicate new UUIDs not rejected."
+        ],
+        [
+          732,
+          769,
+          "Pub(super) handle_rewrite_fragments processes groups in order and uses old_fragments[0] unchecked: empty old group panics. Missing first old ID returns CommitConflict with manifest version. Contiguity loop accesses final_fragments[start_pos+i] without bounds check, so matching prefix past vector end panics. First mismatch selects noncontiguous fallback; absent later old IDs need not trigger a conflict. _next_row_id parameter unused. No upfront atomic validation of all groups."
+        ],
+        [
+          770,
+          792,
+          "Clone new fragments through fragments_with_ids, which assigns IDs only to zero placeholders and increments caller counter; preassigned IDs remain. Contiguous group splices in place. Noncontiguous group removes all entries matching any old ID then appends replacements, changing order and tolerating absent later old IDs. No uniqueness validation or metadata restamping here. Prior groups/counter remain changed after later error/panic. Allocates replacement Vec and may repeatedly scan retained fragments. Contextual assignment is rust/lance-table/src/transaction/manifest_build.rs:126-140."
+        ],
+        [
+          793,
+          837,
+          "cfg(test) module imports BTreeMap, Arrow schema types, fragment-reuse metadata helpers and parent internals. Ordered-group fixture has old0/1->10 and old2->11. None retains both; reordered sources0/1 excludes first; mixed old1/2 group errors. Mapping payload is not needed for this helper. These are metadata unit tests, not row-address remap execution."
+        ],
+        [
+          838,
+          888,
+          "Fragment rewrite test starts IDs0..9; contiguous1/2 replaced by15/16 and noncontiguous5/8 replaced by zero placeholder assigned20. Counter advances21; final order asserted0,15,16,3,4,6,7,9,20. Empty metadata fragments suffice. Does not cover empty groups, truncated contiguous suffix, missing later old IDs or rollback."
+        ],
+        [
+          889,
+          925,
+          "Missing-field retention test removes field99 and keeps fields1/2. System test preserves reserved FRI and MemWAL entries despite field99, removes ordinary invalid index. These exercise schema-field exemption, not arbitrary system coverage sibling cases."
+        ],
+        [
+          926,
+          981,
+          "Tests preserve fragment-reuse entry and a sole empty scalar or vector definition. Each fixture uses explicit bitmap state and schema IDs. Empty coverage is intentionally not equivalent to absent definition."
+        ],
+        [
+          982,
+          1026,
+          "Tests keep sole nonempty scalar/vector indices and sole unknown None bitmap scalar/vector indices. They assert metadata count/name/bitmap presence as appropriate; do not load index data or measure query correctness."
+        ],
+        [
+          1027,
+          1082,
+          "Unknown plus nonempty same-name sibling both survive. Separate scalar/vector all-empty multi-segment tests retain oldest dataset_version1. Versions differ, so stable-sort tie behavior is not covered. Unknown plus multiple empty known siblings is not directly tested here."
+        ],
+        [
+          1083,
+          1123,
+          "Mixed scalar empty/nonempty case keeps nonempty versions2/4; vector counterpart keeps version2. Uses live fragments to evaluate coverage, then checks retained versions. No tagged history in these cases."
+        ],
+        [
+          1124,
+          1178,
+          "Stored bitmap1/2/3/4 with live1/2 remains unchanged. Sole scalar/vector bitmap1/2/3 with live5/6 also survives, exercising single-definition retention despite no effective coverage. The former test comments discuss pruning but does not invoke multi-known-segment effective partitioning."
+        ],
+        [
+          1179,
+          1230,
+          "Different names are retained independently; empty indices Vec stays empty. Test named all_indices_removed actually retains the valid empty vector index while removing invalid-field metadata, so name overstates assertion. No disk cleanup tested."
+        ],
+        [
+          1231,
+          1290,
+          "Complex retention fixture has11 metadata entries across FRI and five names, mixed scalar/vector empties/live coverage and invalid field. Expects6: FRI, oldest idx_a1 and vec_b1, nonempty idx_c2/3, idx_d; invalid idx_e removed. Asserts per-name versions, not physical files or query output."
+        ],
+        [
+          1291,
+          1352,
+          "Missing rewritten-index test passes one RewrittenIndex absent from empty current list and no groups, expects Ok. Overlay test old fragment0 carries field1 overlay version5 into new7; index version2 loses7, equal version5 retains7, unrelated field2 retains7. Does not exercise descendant IDs, empty/sparse coverage or malformed negative index fields."
+        ],
+        [
+          1353,
+          1398,
+          "create_test_index generates random UUID, one field, empty covering_fields, chosen ScalarIndexDetails/VectorIndexDetails Any with empty value bytes, dataset version/bitmap from caller, index_version1 and optional metadata None. Legacy FRI helper builds system metadata then sets index_version0 to force untagged mode. These fixture type URLs classify metadata without valid physical index payloads."
+        ],
+        [
+          1399,
+          1432,
+          "Tagged-history test creates9 entries: FRI version1, retired and live idx_a segments, two retired vec_b segments, two empty idx_c definitions and invalid-field idx_e. Confirms FRI is_tagged, then retains8 entries—all except invalid field. Demonstrates tagged coverage retention does not bypass schema-field filtering."
+        ],
+        [
+          1433,
+          1474,
+          "create_system_index uses SystemIndexDetails type URL, random UUID, one arbitrary field, bitmap1/2 and version1. create_test_schema builds Arrow Int32 nonnullable field names then mutates generated IDs via repeated mut_field_by_id(i); collisions between requested IDs and later lookup IDs can retarget an earlier field. Tests rely on membership rather than position; fixture does not validate resulting schema. No production constructor behavior inferred from this helper."
+        ],
+        [
+          1475,
+          1498,
+          "Separate cfg(test) withdrawal module supplies segment helper from shared sample_index, field/bitmap override, inline lineage builder with double unwrap, and tagged history1/2->3->4 plus6->8. Unknown bitmap uses None. Helpers exercise metadata, not persisted files."
+        ],
+        [
+          1499,
+          1542,
+          "Withdrawal test rewriting live4 field0 removes retired sources1/2 from1/2/6, retaining6 and system entry unchanged. Next test1/2/9 clears all after retired-source withdrawal because surviving live9 is not mentioned by known history. Assert bitmap outcomes."
+        ],
+        [
+          1543,
+          1581,
+          "History-mentioned live8 remainder survives after1/2 withdrawal. Directly withdrawing only live4 from4/9 keeps9, because whole-segment fallback requires a retired source to have been withdrawn. Tests distinguish these two conditions."
+        ],
+        [
+          1582,
+          1622,
+          "Mixed retired intermediate3 and directlive4 both disappear. Separate fixture leaves unrelated retired6, index on unmodified field1 covering1/2, and field0 unknown None coverage unchanged. No local test verifies retirement with covered/unknown same-name siblings or descendant expansion."
+        ],
+        [
+          1623,
+          1639,
+          "Without a walkable ledger, rewrite4 withdraws retired6 conservatively but preserves live9 because mentions is unknown and defaults to translation eligibility. TaggedLineage::new(entry,None) is used directly. Across this file30 tests (23 main,7 withdrawal) inspect metadata only; no runtime test executed. Missing malformed/bounds/rollback cases are analysis deductions, not reproduced bugs."
+        ]
+      ],
+      "limits": "Every1639 physical lines read in seven bounded chunks. Consumer snippets in manifest_build/conflict_resolver are contextual only; full commit orchestration, actual reader translation and cleanup remain pending. Runtime panic/partial-mutation/performance properties are deductions from source; no source builds/tests/edits/network."
+    },
+    {
+      "path": "rust/lance-table/src/system_index/frag_reuse/lineage.rs",
+      "module": "L1-modules/rust-lance-table.md",
+      "reviewed": true,
+      "role": "Public optional tagged-history view, entry selection, conservative coverage membership and direct/transitive destination walks. Ledger type remains a separate pending dependency.",
+      "ranges": [
+        [
+          1,
+          22,
+          "SPDX/module docs describe shared tagged-history view for commit preparation, conflict resolution and index replay; consumer paths remain independently scoped. Imports FragReuseLedger, is_tagged, IndexMetadata, Error/Result, Roaring, HashSet and Arc. Synchronous metadata view with no IO/unsafe or local test module."
+        ],
+        [
+          23,
+          35,
+          "Public Debug TaggedLineage stores private optional cloned fragment bitmap and optional shared Arc ledger. Bitmap None means unknown coverage, distinct from unavailable ledger. Type does not expose fields publicly and does not derive Clone; Arc sharing is internal. Public module declared in rust/lance-table/src/system_index/frag_reuse.rs:6-6."
+        ],
+        [
+          36,
+          44,
+          "Public new clones entry.fragment_bitmap and filters supplied ledger out if it has unsupported transitions. Does not check entry is tagged, compare ledger identity with entry, or decode details. Unsupported ledger becomes None without error while bitmap still retained."
+        ],
+        [
+          45,
+          79,
+          "Public from_indices_with_ledger selects first is_tagged entry or returns Ok(None), ignoring supplied ledger when no entry exists. Supplied ledger bypasses inline decode. Otherwise requires index_details, calls FragReuseLedger::decode_inline(index_version,details), propagates decoding errors, and requires Some inline ledger; missing details or non-inline absent-prefetch case returns InvalidInput. Calls new, so unsupported-transition ledger can yield Some view with no usable ledger. No external fetch; caller must preload external history. Recognition implementation context is rust/lance-table/src/system_index/frag_reuse/metadata.rs:16-18."
+        ],
+        [
+          80,
+          94,
+          "has_ledger reports retained ledger presence. mentions(fragment) returns None if absent, otherwise Some(ledger.contains_fragment(fragment)); this is a history membership question, distinct from stored coverage and destination reachability. It does not prove fragment currently live."
+        ],
+        [
+          95,
+          105,
+          "contains(fragment) tests cloned entry bitmap; absent bitmap defaults true. Independent of ledger availability and mentions(). Thus unknown stored coverage is conservative membership, not known empty coverage."
+        ],
+        [
+          106,
+          117,
+          "immediate_destinations_of requires ledger. If ledger.consumer(source) absent, returns Some(empty Vec). Otherwise converts every destination fragment digest ID to u32, returning None on any overflow; preserves destination order and duplicates. No distinction in return type between no ledger and invalid ID."
+        ],
+        [
+          118,
+          140,
+          "destinations_of walks transitive consumers with pending stack, seen HashSet and reached Vec; includes retired intermediate destinations, deduplicates reached IDs, and follows branches in stack order. Every destination u64 must fit u32 or whole result None. Missing consumer ends branch; root not initially in seen, so a cycle can include source once before traversal terminates. Seen bounds repeat visits but does not validate ledger graph. Each call allocates/walks anew, no memoization. Missing ledger returns None; known leaf returns Some(empty). Full ledger validation/index semantics remain pending."
+        ]
+      ],
+      "limits": "Every140 physical lines read. No local tests. FragReuseLedger decoding, graph validation and consumers need their own full analysis; no IO or runtime execution performed."
+    }
+  ]
+}

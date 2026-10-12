@@ -1,0 +1,95 @@
+@@ -40,6 +40,7 @@ use datafusion::scalar::ScalarValue;
+   40  use datafusion_expr::ExprSchemable;
+   41  use datafusion_expr::execution_props::ExecutionProps;
+   42  use datafusion_functions::core::getfield::GetFieldFunc;
+   43 +use datafusion_physical_expr::aggregate::LoweredAggregateBuilder;
+   44  use datafusion_physical_expr::expressions::{Column, Literal};
+   45  use datafusion_physical_expr::{LexOrdering, Partitioning, PhysicalExpr, create_physical_expr};
+   46  use datafusion_physical_plan::joins::PartitionMode;
+
+@@ -1595,7 +1596,27 @@ impl Scanner {
+ 1596      /// select *part* of a nested field — `meta` narrowed to just its `a` child.
+ 1597      /// Expressions cannot express that, so a nested projection must come
+ 1598      /// through here.
+ 1598 -    pub(crate) fn project_with_schema(
+ 1599 +    ///
+ 1600 +    /// `projection` must be a subset of the dataset schema. Fields are matched
+ 1601 +    /// by name, nested children included, and their types must agree; anything
+ 1602 +    /// the dataset does not have is an error rather than a silently narrower
+ 1603 +    /// projection. Field ids are resolved against the dataset, so a schema
+ 1604 +    /// numbered independently of it is accepted as long as the names and types
+ 1605 +    /// line up.
+ 1606 +    ///
+ 1607 +    /// The resulting plan contains no complex expressions. See
+ 1608 +    /// [`ProjectionPlan::from_schema`].
+ 1609 +    ///
+ 1610 +    /// ```
+ 1611 +    /// # use lance::{Dataset, Result};
+ 1612 +    /// # use lance_core::datatypes::Schema;
+ 1613 +    /// # fn example(dataset: &Dataset, projection: &Schema) -> Result<()> {
+ 1614 +    /// let mut scan = dataset.scan();
+ 1615 +    /// scan.project_with_schema(projection)?;
+ 1616 +    /// # Ok(())
+ 1617 +    /// # }
+ 1618 +    /// ```
+ 1619 +    pub fn project_with_schema(
+ 1620          &mut self,
+ 1621          projection: &lance_core::datatypes::Schema,
+ 1622      ) -> Result<&mut Self> {
+
+@@ -2765,9 +2786,6 @@ impl Scanner {
+ 2786      }
+ 2787  
+ 2788      #[allow(clippy::type_complexity)]
+ 2768 -    // TODO(datafusion-54): migrate off the deprecated
+ 2769 -    // create_aggregate_expr_and_maybe_filter to LoweredAggregateBuilder.
+ 2770 -    #[allow(deprecated)]
+ 2789      fn build_physical_aggregate_expr(
+ 2790          &self,
+ 2791          expr: &Expr,
+
+@@ -2777,19 +2795,37 @@ impl Scanner {
+ 2795          Arc<datafusion_physical_expr::aggregate::AggregateFunctionExpr>,
+ 2796          Option<Arc<dyn PhysicalExpr>>,
+ 2797      )> {
+ 2780 -        use datafusion::physical_planner::create_aggregate_expr_and_maybe_filter;
+ 2781 -
+ 2798          let coerced_expr = self.coerce_aggregate_expr(expr, df_schema)?;
+ 2799  
+ 2784 -        // Note: order_by is already embedded in the AggregateFunctionExpr for ordered aggregates
+ 2785 -        let (agg_expr, filter, _order_by) = create_aggregate_expr_and_maybe_filter(
+ 2800 +        // Name and display the aggregate the way the deprecated
+ 2801 +        // `create_aggregate_expr_and_maybe_filter` did, so plans and their
+ 2802 +        // output column names stay the same.
+ 2803 +        let (name, human_display) = match &coerced_expr {
+ 2804 +            Expr::Alias(alias) => (
+ 2805 +                Some(alias.name.clone()),
+ 2806 +                coerced_expr.human_display().to_string(),
+ 2807 +            ),
+ 2808 +            Expr::AggregateFunction(_) => (
+ 2809 +                Some(coerced_expr.schema_name().to_string()),
+ 2810 +                coerced_expr.human_display().to_string(),
+ 2811 +            ),
+ 2812 +            _ => (None, String::new()),
+ 2813 +        };
+ 2814 +        let execution_props = ExecutionProps::default();
+ 2815 +        let mut builder = LoweredAggregateBuilder::new(
+ 2816              &coerced_expr,
+ 2817              df_schema,
+ 2818              input_schema.as_ref(),
+ 2789 -            &ExecutionProps::default(),
+ 2790 -        )?;
+ 2819 +            &execution_props,
+ 2820 +        )
+ 2821 +        .with_human_display(human_display);
+ 2822 +        if let Some(name) = name {
+ 2823 +            builder = builder.with_name(name);
+ 2824 +        }
+ 2825  
+ 2792 -        Ok((agg_expr, filter))
+ 2826 +        // Note: order_by is already embedded in the AggregateFunctionExpr for ordered aggregates
+ 2827 +        let lowered = builder.build()?;
+ 2828 +        Ok((lowered.aggregate, lowered.filter))
+ 2829      }
+ 2830  
+ 2831      /// Apply type coercion to aggregate arguments for UserDefined signature functions.

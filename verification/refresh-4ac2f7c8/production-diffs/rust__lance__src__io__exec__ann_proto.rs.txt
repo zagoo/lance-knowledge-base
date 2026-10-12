@@ -1,0 +1,48 @@
+@@ -97,6 +97,7 @@ fn approx_mode_from_proto(value: i32) -> ApproxMode {
+   97  }
+   98  
+   99  pub fn query_to_proto(query: &Query) -> Result<pb::VectorQueryProto> {
+  100 +    query.validate_search_effort()?;
+  101      let query_vector_arrow_ipc = query_vector_to_ipc_bytes(query.key.as_ref())?;
+  102  
+  103      let metric_type = query
+
+@@ -111,6 +112,7 @@ pub fn query_to_proto(query: &Query) -> Result<pb::VectorQueryProto> {
+  112          upper_bound: query.upper_bound,
+  113          minimum_nprobes: Some(query.minimum_nprobes as u32),
+  114          maximum_nprobes: query.maximum_nprobes.map(|n| n as u32),
+  115 +        search_effort: (query.search_effort != 0.5).then_some(query.search_effort),
+  116          ef: query.ef.map(|n| n as u32),
+  117          refine_factor: query.refine_factor,
+  118          metric_type,
+
+@@ -136,7 +138,7 @@ pub fn query_from_proto(proto: pb::VectorQueryProto) -> Result<Query> {
+  138          })
+  139          .transpose()?;
+  140  
+  139 -    Ok(Query {
+  141 +    let query = Query {
+  142          column: proto.column,
+  143          key,
+  144          k: proto.k as usize,
+
+@@ -144,6 +146,7 @@ pub fn query_from_proto(proto: pb::VectorQueryProto) -> Result<Query> {
+  146          upper_bound: proto.upper_bound,
+  147          minimum_nprobes: proto.minimum_nprobes.unwrap_or(1) as usize,
+  148          maximum_nprobes: proto.maximum_nprobes.map(|n| n as usize),
+  149 +        search_effort: proto.search_effort.unwrap_or(0.5),
+  150          ef: proto.ef.map(|n| n as usize),
+  151          refine_factor: proto.refine_factor,
+  152          metric_type,
+
+@@ -151,7 +154,9 @@ pub fn query_from_proto(proto: pb::VectorQueryProto) -> Result<Query> {
+  154          query_parallelism: proto.query_parallelism.unwrap_or(DEFAULT_QUERY_PARALLELISM),
+  155          dist_q_c: proto.dist_q_c.unwrap_or(0.0),
+  156          approx_mode: approx_mode_from_proto(proto.approx_mode),
+  154 -    })
+  157 +    };
+  158 +    query.validate_search_effort()?;
+  159 +    Ok(query)
+  160  }
+  161  
+  162  // =============================================================================

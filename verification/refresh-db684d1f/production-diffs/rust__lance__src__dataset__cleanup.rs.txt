@@ -1,0 +1,464 @@
+@@ -39,7 +39,6 @@ use crate::{Dataset, utils::temporal::utc_now};
+   39  use chrono::{DateTime, TimeDelta, Utc};
+   40  use dashmap::DashSet;
+   41  use futures::future::try_join_all;
+   42 -use futures::stream::BoxStream;
+   42  use futures::{StreamExt, TryStreamExt, stream};
+   43  use humantime::parse_duration;
+   44  use lance_core::{
+
+@@ -62,15 +61,16 @@ use lance_table::{
+   61  };
+   62  use object_store::ObjectMeta;
+   63  use object_store::path::Path;
+   64 +use prost::Message;
+   65  use std::fmt::Debug;
+   66  use std::{
+   67      collections::{HashMap, HashSet},
+   68      future,
+   69 -    sync::{Mutex, MutexGuard},
+   69 +    sync::{Arc, Mutex, MutexGuard},
+   70      time::Duration,
+   71  };
+   72 +use tokio::sync::OnceCell;
+   73  use tokio::time::{MissedTickBehavior, interval};
+   73 -use tokio_stream::wrappers::IntervalStream;
+   74  use tracing::{Span, debug, info, instrument, warn};
+   75  
+   76  #[derive(Clone, Debug, Default)]
+
+@@ -300,6 +300,7 @@ fn remove_prefix(path: &Path, prefix: &Path) -> Path {
+  300  
+  301  #[derive(Clone, Debug)]
+  302  struct CleanupTask<'a> {
+  303 +    delete_limiter: Option<Arc<tokio::sync::Mutex<tokio::time::Interval>>>,
+  304      dataset: &'a Dataset,
+  305      policy: CleanupPolicy,
+  306      action: CleanupAction,
+
+@@ -309,6 +310,18 @@ struct CleanupTask<'a> {
+  310      include_referenced_branches: bool,
+  311  }
+  312  
+  313 +/// The visible descriptor rows and base namespace used by one fragment scan.
+  314 +#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+  315 +struct ManagedScanKey {
+  316 +    store_prefix: String,
+  317 +    data_dir: Path,
+  318 +    bases: Vec<(u32, String, bool)>,
+  319 +    fragment: Vec<u8>,
+  320 +    fields: Vec<arrow_schema::Field>,
+  321 +    field_ids: Vec<i32>,
+  322 +    retained: bool,
+  323 +}
+  324 +
+  325  /// A manifest that has aged out and is queued for deletion.
+  326  #[derive(Clone, Debug)]
+  327  struct ExpiredManifest {
+
+@@ -321,6 +334,9 @@ struct ExpiredManifest {
+  334  /// Information about the dataset that we learn by inspecting all of the manifests
+  335  #[derive(Clone, Debug, Default)]
+  336  struct CleanupInspection {
+  337 +    // Completed scans have already added their paths to the sets below. Keep
+  338 +    // only whether they found owner paths, not another copy of all references.
+  339 +    managed_scans: HashMap<ManagedScanKey, Arc<OnceCell<bool>>>,
+  340      old_manifests: HashMap<Path, ExpiredManifest>,
+  341      /// Store records to retire once their manifests are gone, by version;
+  342      /// see `CommitHandler::forget_version`.
+
+@@ -451,6 +467,8 @@ impl<'a> CleanupTask<'a> {
+  467      fn new(dataset: &'a Dataset, policy: CleanupPolicy, action: CleanupAction) -> Self {
+  468          let track_removed_manifests = policy.clean_referenced_branches;
+  469          let include_referenced_branches = action.candidate_file_limit().is_some();
+  470 +        let delete_limiter =
+  471 +            create_delete_limiter(policy.delete_rate_limit.filter(|_| action.deletes_files()));
+  472          Self::new_with_ignored_manifests(
+  473              dataset,
+  474              policy,
+
+@@ -458,6 +476,7 @@ impl<'a> CleanupTask<'a> {
+  476              HashSet::new(),
+  477              track_removed_manifests,
+  478              include_referenced_branches,
+  479 +            delete_limiter,
+  480          )
+  481      }
+  482  
+
+@@ -468,8 +487,10 @@ impl<'a> CleanupTask<'a> {
+  487          ignored_manifests: HashSet<Path>,
+  488          track_removed_manifests: bool,
+  489          include_referenced_branches: bool,
+  490 +        delete_limiter: Option<Arc<tokio::sync::Mutex<tokio::time::Interval>>>,
+  491      ) -> Self {
+  492          Self {
+  493 +            delete_limiter,
+  494              dataset,
+  495              policy,
+  496              action,
+
+@@ -570,6 +591,95 @@ impl<'a> CleanupTask<'a> {
+  591          Ok(inspection.into_inner().unwrap())
+  592      }
+  593  
+  594 +    async fn inspect_managed_blobs(
+  595 +        &self,
+  596 +        dataset: &Dataset,
+  597 +        retained: bool,
+  598 +        inspection: &Mutex<CleanupInspection>,
+  599 +    ) -> Result<bool> {
+  600 +        let names = dataset
+  601 +            .schema()
+  602 +            .fields
+  603 +            .iter()
+  604 +            .filter(|field| super::blob::field_contains_blob(field))
+  605 +            .map(|field| field.name.as_str())
+  606 +            .collect::<Vec<_>>();
+  607 +        if names.is_empty() {
+  608 +            return Ok(false);
+  609 +        }
+  610 +        let projection = dataset.schema().project(&names)?;
+  611 +        let fields = projection
+  612 +            .fields
+  613 +            .iter()
+  614 +            .map(arrow_schema::Field::from)
+  615 +            .collect::<Vec<_>>();
+  616 +        let field_ids = projection.field_ids();
+  617 +        let mut bases = dataset
+  618 +            .manifest
+  619 +            .base_paths
+  620 +            .iter()
+  621 +            .map(|(id, base)| (*id, base.path.clone(), base.is_dataset_root))
+  622 +            .collect::<Vec<_>>();
+  623 +        bases.sort_unstable();
+  624 +        let mut found = false;
+  625 +        // Manifests are already read concurrently. Scan their fragments in order
+  626 +        // to avoid multiplying concurrent descriptor buffers and path sets.
+  627 +        for fragment in dataset.get_fragments() {
+  628 +            let key = ManagedScanKey {
+  629 +                store_prefix: dataset.object_store.store_prefix.clone(),
+  630 +                data_dir: dataset.data_dir(),
+  631 +                bases: bases.clone(),
+  632 +                fragment: lance_table::format::pb::DataFragment::from(&fragment.metadata)
+  633 +                    .encode_to_vec(),
+  634 +                fields: fields.clone(),
+  635 +                field_ids: field_ids.clone(),
+  636 +                retained,
+  637 +            };
+  638 +            let cell = inspection
+  639 +                .lock()
+  640 +                .unwrap()
+  641 +                .managed_scans
+  642 +                .entry(key)
+  643 +                .or_default()
+  644 +                .clone();
+  645 +            let scanned = cell
+  646 +                .get_or_try_init(|| async {
+  647 +                    let paths =
+  648 +                        super::blob::managed_paths(dataset, self.dataset, fragment.scan()).await?;
+  649 +                    let found = !paths.is_empty();
+  650 +                    let mut inspection = inspection.lock().unwrap();
+  651 +                    for path in paths {
+  652 +                        let relative = remove_prefix(&path, &self.dataset.base);
+  653 +                        if retained {
+  654 +                            inspection
+  655 +                                .verified_files
+  656 +                                .managed_blob_paths
+  657 +                                .remove(&relative);
+  658 +                            inspection
+  659 +                                .referenced_files
+  660 +                                .managed_blob_paths
+  661 +                                .insert(relative);
+  662 +                        } else {
+  663 +                            inspection
+  664 +                                .verified_files
+  665 +                                .managed_blob_paths
+  666 +                                .insert(relative);
+  667 +                        }
+  668 +                    }
+  669 +                    Ok::<_, Error>(found)
+  670 +                })
+  671 +                .await;
+  672 +            match scanned {
+  673 +                Ok(has_paths) => found |= *has_paths,
+  674 +                // An expired descriptor can disappear during concurrent cleanup.
+  675 +                // Do not mark failed scans complete: retained reads must still fail.
+  676 +                Err(error) if !retained && error.is_not_found() => {}
+  677 +                Err(error) => return Err(error),
+  678 +            }
+  679 +        }
+  680 +        Ok(found)
+  681 +    }
+  682 +
+  683      async fn process_manifest_file(
+  684          &self,
+  685          location: ManifestLocation,
+
+@@ -621,33 +731,15 @@ impl<'a> CleanupTask<'a> {
+  731          let is_latest = self.read_version <= manifest.version;
+  732          let is_tagged = tagged_versions.contains(&manifest.version);
+  733          let in_working_set = is_latest || !self.policy.should_clean(&manifest) || is_tagged;
+  624 -        let managed_paths = if manifest.has_managed_blobs() {
+  734 +        if manifest.has_managed_blobs() {
+  735              let snapshot = self
+  736                  .dataset
+  737                  .checkout_version((manifest.branch.as_deref(), Some(manifest.version)))
+  738                  .await?;
+  629 -            match super::blob::managed_paths(&snapshot, self.dataset).await {
+  630 -                Ok(paths) => paths,
+  631 -                // A concurrent cleanup may already have removed expired data
+  632 -                // files. Losing deletion proof is safe; losing retained references
+  633 -                // is not. Other failures still stop cleanup before any deletion.
+  634 -                Err(error) if !in_working_set && error.is_not_found() => HashSet::new(),
+  635 -                Err(error) => return Err(error),
+  636 -            }
+  637 -        } else {
+  638 -            HashSet::new()
+  639 -        };
+  739 +            self.inspect_managed_blobs(&snapshot, in_working_set, inspection)
+  740 +                .await?;
+  741 +        }
+  742          let mut inspection = inspection.lock().unwrap();
+  641 -        let references = if in_working_set {
+  642 -            &mut inspection.referenced_files
+  643 -        } else {
+  644 -            &mut inspection.verified_files
+  645 -        };
+  646 -        references.managed_blob_paths.extend(
+  647 -            managed_paths
+  648 -                .into_iter()
+  649 -                .map(|path| remove_prefix(&path, &self.dataset.base)),
+  650 -        );
+  743  
+  744          // Track tagged old versions in case we want to return a `CleanupError` later.
+  745          // Only track tagged when it is old.
+
+@@ -939,7 +1031,7 @@ impl<'a> CleanupTask<'a> {
+ 1031              .boxed();
+ 1032  
+ 1033          let all_files = stream::iter(vec![unreferenced_files, manifest_files]).flatten();
+  942 -        let all_files_to_remove = all_files.map(|file| {
+ 1034 +        let all_files_to_remove = all_files.map(|file| -> Result<CleanupFile> {
+ 1035              let file = file?;
+ 1036              if deletes_files {
+ 1037                  let mode = if file.unverified {
+
+@@ -979,26 +1071,17 @@ impl<'a> CleanupTask<'a> {
+ 1071          });
+ 1072  
+ 1073          if deletes_files {
+  982 -            let files_to_delete: BoxStream<Result<CleanupFile>> =
+  983 -                if let Some(rate) = self.policy.delete_rate_limit {
+  984 -                    let duration = calculate_duration(rate);
+  985 -                    let mut ticker = interval(duration);
+  986 -                    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+  987 -                    IntervalStream::new(ticker)
+  988 -                        .zip(all_files_to_remove)
+  989 -                        .map(|(_, file)| file)
+  990 -                        .boxed()
+  991 -                } else {
+  992 -                    all_files_to_remove.boxed()
+  993 -                };
+  994 -
+ 1074              // Deleting here rather than through `remove_stream` keeps each outcome
+ 1075              // attached to its file, which is what lets the stats below count what was
+ 1076              // actually removed instead of what was merely attempted.
+ 1077              let store = &self.dataset.object_store;
+  999 -            files_to_delete
+ 1078 +            all_files_to_remove
+ 1079                  .map(|file| async move {
+ 1080                      let file = file?;
+ 1081 +                    if let Some(limiter) = &self.delete_limiter {
+ 1082 +                        let mut ticker = limiter.lock().await;
+ 1083 +                        ticker.tick().await;
+ 1084 +                    }
+ 1085                      let outcome = match store.delete(&file.path).await {
+ 1086                          Ok(()) => Ok(()),
+ 1087                          // Cleanup lists first and deletes after, so a concurrent
+
+@@ -1487,14 +1570,18 @@ impl<'a> CleanupTask<'a> {
+ 1570                              .await?;
+ 1571                          let ignored_manifests =
+ 1572                              final_result.lock().unwrap().removed_manifests.clone();
+ 1490 -                        if let Some(result) = cleanup_cascade_branch_run(
+ 1491 -                            &branch_dataset,
+ 1492 -                            branch_dataset.manifest.as_ref(),
+ 1493 -                            action,
+ 1494 -                            ignored_manifests,
+ 1495 -                        )
+ 1496 -                        .await?
+ 1573 +                        if let Some(policy) =
+ 1574 +                            build_cleanup_policy(&branch_dataset, branch_dataset.manifest.as_ref())
+ 1575 +                                .await?
+ 1576                          {
+ 1577 +                            let result = cleanup_cascade_branch_run(
+ 1578 +                                &branch_dataset,
+ 1579 +                                policy,
+ 1580 +                                action,
+ 1581 +                                ignored_manifests,
+ 1582 +                                self.delete_limiter.clone(),
+ 1583 +                            )
+ 1584 +                            .await?;
+ 1585                              final_result
+ 1586                                  .lock()
+ 1587                                  .unwrap()
+
+@@ -1651,14 +1738,15 @@ impl<'a> CleanupTask<'a> {
+ 1738              read_manifest(&self.dataset.object_store, &location.path, location.size).await?;
+ 1739          ensure_can_read_manifest(&manifest)?;
+ 1740          ensure_can_write_manifest(&manifest)?;
+ 1654 -        let managed_paths = if manifest.has_managed_blobs() {
+ 1741 +        let managed_referenced = if manifest.has_managed_blobs() {
+ 1742              let snapshot = self
+ 1743                  .dataset
+ 1744                  .checkout_version((manifest.branch.as_deref(), Some(manifest.version)))
+ 1745                  .await?;
+ 1659 -            super::blob::managed_paths(&snapshot, self.dataset).await?
+ 1746 +            self.inspect_managed_blobs(&snapshot, true, inspection)
+ 1747 +                .await?
+ 1748          } else {
+ 1661 -            HashSet::new()
+ 1749 +            false
+ 1750          };
+ 1751          let indexes =
+ 1752              read_manifest_indexes(&self.dataset.object_store, &location, &manifest).await?;
+
+@@ -1692,19 +1780,7 @@ impl<'a> CleanupTask<'a> {
+ 1780          }
+ 1781  
+ 1782          let mut inspection = inspection.lock().unwrap();
+ 1695 -        let mut is_referenced = false;
+ 1696 -        for path in managed_paths {
+ 1697 -            let relative = remove_prefix(&path, &self.dataset.base);
+ 1698 -            inspection
+ 1699 -                .verified_files
+ 1700 -                .managed_blob_paths
+ 1701 -                .remove(&relative);
+ 1702 -            inspection
+ 1703 -                .referenced_files
+ 1704 -                .managed_blob_paths
+ 1705 -                .insert(relative);
+ 1706 -            is_referenced = true;
+ 1707 -        }
+ 1783 +        let mut is_referenced = managed_referenced;
+ 1784  
+ 1785          for fragment in manifest.fragments.iter() {
+ 1786              for file in fragment.referenced_lance_files() {
+
+@@ -1830,6 +1906,16 @@ async fn expired_manifest_size(
+ 1906      }
+ 1907  }
+ 1908  
+ 1909 +fn create_delete_limiter(
+ 1910 +    rate: Option<u64>,
+ 1911 +) -> Option<Arc<tokio::sync::Mutex<tokio::time::Interval>>> {
+ 1912 +    rate.map(|rate| {
+ 1913 +        let mut ticker = interval(calculate_duration(rate));
+ 1914 +        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+ 1915 +        Arc::new(tokio::sync::Mutex::new(ticker))
+ 1916 +    })
+ 1917 +}
+ 1918 +
+ 1919  /// The interval between delete permits for a `delete_rate_limit` of `rate` requests/s.
+ 1920  ///
+ 1921  /// One permit issues exactly one `delete`, so the interval is the reciprocal of the
+
+@@ -1865,6 +1951,8 @@ pub struct CleanupPolicy {
+ 1951      /// cleanup. Cleanup deletes one path per request, so this is also the number of
+ 1952      /// paths removed per second. For example, `Some(100)` limits deletions to 100
+ 1953      /// delete requests per second.
+ 1954 +    /// The budget is shared by this cleanup and all cascaded branches, ignoring
+ 1955 +    /// their own rate settings. `None` leaves the entire operation unthrottled.
+ 1956      pub delete_rate_limit: Option<u64>,
+ 1957  }
+ 1958  
+
+@@ -1978,7 +2066,7 @@ impl CleanupPolicyBuilder {
+ 2066      ///
+ 2067      /// By default (None), deletions run at full speed. Set this to a positive value to
+ 2068      /// throttle deletions and avoid hitting object store request rate limits (e.g. S3 HTTP 503).
+ 1981 -    /// On backends with bulk delete APIs, effective path throughput scales with batch size.
+ 2069 +    /// The request budget is shared with all cascaded branches, overriding their rate settings.
+ 2070      ///
+ 2071      /// # Errors
+ 2072      ///
+
+@@ -2039,38 +2127,44 @@ pub async fn cleanup_cascade_branch(
+ 2127      dataset: &Dataset,
+ 2128      manifest: &Manifest,
+ 2129  ) -> Result<Option<RemovalStats>> {
+ 2042 -    Ok(
+ 2043 -        cleanup_cascade_branch_run(dataset, manifest, CleanupAction::Execute, HashSet::new())
+ 2044 -            .await?
+ 2045 -            .map(|result| result.stats),
+ 2130 +    let Some(policy) = build_cleanup_policy(dataset, manifest).await? else {
+ 2131 +        return Ok(None);
+ 2132 +    };
+ 2133 +    let delete_limiter = create_delete_limiter(policy.delete_rate_limit);
+ 2134 +    let result = cleanup_cascade_branch_run(
+ 2135 +        dataset,
+ 2136 +        policy,
+ 2137 +        CleanupAction::Execute,
+ 2138 +        HashSet::new(),
+ 2139 +        delete_limiter,
+ 2140      )
+ 2141 +    .await?;
+ 2142 +    Ok(Some(result.stats))
+ 2143  }
+ 2144  
+ 2145  async fn cleanup_cascade_branch_run(
+ 2146      dataset: &Dataset,
+ 2051 -    manifest: &Manifest,
+ 2147 +    mut policy: CleanupPolicy,
+ 2148      action: CleanupAction,
+ 2149      ignored_manifests: HashSet<Path>,
+ 2054 -) -> Result<Option<CleanupRunResult>> {
+ 2055 -    let policy = build_cleanup_policy(dataset, manifest).await?;
+ 2056 -    if let Some(mut policy) = policy {
+ 2057 -        policy.clean_referenced_branches = false;
+ 2058 -        policy.error_if_tagged_old_versions = false;
+ 2059 -        if action.deletes_files() {
+ 2060 -            info!(target: TRACE_DATASET_EVENTS, event=DATASET_CLEANING_EVENT, uri=&dataset.uri);
+ 2061 -        }
+ 2062 -        let cleanup = CleanupTask::new_with_ignored_manifests(
+ 2063 -            dataset,
+ 2064 -            policy,
+ 2065 -            action,
+ 2066 -            ignored_manifests,
+ 2067 -            true,
+ 2068 -            false,
+ 2069 -        );
+ 2070 -        Ok(Some(cleanup.run().await?))
+ 2071 -    } else {
+ 2072 -        Ok(None)
+ 2150 +    delete_limiter: Option<Arc<tokio::sync::Mutex<tokio::time::Interval>>>,
+ 2151 +) -> Result<CleanupRunResult> {
+ 2152 +    policy.clean_referenced_branches = false;
+ 2153 +    policy.error_if_tagged_old_versions = false;
+ 2154 +    if action.deletes_files() {
+ 2155 +        info!(target: TRACE_DATASET_EVENTS, event=DATASET_CLEANING_EVENT, uri=&dataset.uri);
+ 2156      }
+ 2157 +    CleanupTask::new_with_ignored_manifests(
+ 2158 +        dataset,
+ 2159 +        policy,
+ 2160 +        action,
+ 2161 +        ignored_manifests,
+ 2162 +        true,
+ 2163 +        false,
+ 2164 +        delete_limiter,
+ 2165 +    )
+ 2166 +    .run()
+ 2167 +    .await
+ 2168  }
+ 2169  
+ 2170  pub async fn build_cleanup_policy(
+
+@@ -2142,6 +2236,7 @@ pub async fn build_cleanup_policy(
+ 2236          // Map config to policy flag controlling whether referenced branches are cleaned
+ 2237          builder = builder.clean_referenced_branches(clean_referenced);
+ 2238      }
+ 2239 +
+ 2240      if let Some(delete_rate_limit) = manifest.config.get("lance.auto_cleanup.delete_rate_limit") {
+ 2241          let rate: u64 = match delete_rate_limit.parse() {
+ 2242              Ok(r) => r,

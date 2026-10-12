@@ -1,0 +1,493 @@
+{
+  "iteration": 48,
+  "files": [
+    {
+      "path": "rust/lance-table/src/io/commit.rs",
+      "module": "L1-modules/rust-lance-table-commit.md",
+      "reviewed": true,
+      "role": "Manifest naming, listing/latest/version resolution, version-hint optimization, backend routing, commit policy extension traits and concrete unsafe/lease/rename/conditional publication. Owns single-version publication and resolver policy hooks; dataset operation conflict resolution, retry/cleanup, predecessor-capable external stores and underlying atomic IO remain separate.",
+      "ranges": [
+        [
+          1,
+          24,
+          "SPDX/module docs define commit as publication of next manifest exactly once across concurrent writers and introduce CommitHandler/CommitLock. Their default-handler statements are comments to compare against actual routing below, not independently current backend guarantees; full store atomicity is outside this file."
+        ],
+        [
+          25,
+          69,
+          "Imports async streams/futures, Arc/AtomicBool/local DirEntry, manifest body writer, ObjectWriter/WriteResult/get_etag, underlying object-store APIs, tracing/log and URL. Canonical footer constants come from lance_file::format, not table format facade. external_manifest module always public; dynamodb child and AWS credentials/config helpers gated on feature dynamodb."
+        ],
+        [
+          70,
+          90,
+          "Public VERSIONS_DIR is _versions. Private extension manifest, detached prefix d and hint filename latest_version_hint.json. Public Copy/Eq ManifestNamingScheme has V1 and V2. V2 doc says _manifests, but manifest_path below uses _versions for both; zero-padding/inversion optimize lexically ordered listing, distinct from Lance data-file format version."
+        ],
+        [
+          91,
+          113,
+          "Public manifest_path borrows scheme/base and accepts u64. Detached-bit versions always become base/_versions/d{version}.manifest independent of scheme; attached V1 uses decimal version, V2 uses u64MAX-version padded to20 digits. No IO or version allocation. Lexical detached separation is naming, not visibility/commit validation."
+        ],
+        [
+          114,
+          137,
+          "parse_version parses digits before first dot without checking remaining suffix; V1 returns raw number, V2 subtracts from u64MAX. d-prefixed names fail ordinary numeric parse. parse_detached_version requires leading d and parses number before first dot, but does not enforce extension or set/check detached mask despite doc saying returned number has mask. Malformed parse returnsNone."
+        ],
+        [
+          138,
+          164,
+          "detect_scheme returnsV2 for any leading d without validating suffix or digits; otherwise requires ends_with(manifest), classifies byte length20+1+extension length asV2 and every other length asV1. detect_scheme_staging uses character index20 equals dot elseV1, without parse/extension/mask validation. These are naming heuristics, not robust file validators."
+        ],
+        [
+          165,
+          186,
+          "Public async migrate_scheme_to_v2 docs require quiescent store and completion before other work; list underlying base/_versions and retain locations with filename classifiedV1. Does not validate numeric version during filtering or wrap operation in atomic directory transaction."
+        ],
+        [
+          187,
+          198,
+          "Migration processes retained entries concurrently up to object_store.io_parallelism, unwraps filename and V1 numeric parse, builds V2 path and calls unconditional inner.rename. Malformed classifier-accepted numeric name can panic; individual rename errors propagate after prior/concurrent renames may succeed. Idempotency documented for valid complete migration, not rollback of partial work; no hint or external-index update here."
+        ],
+        [
+          199,
+          230,
+          "Public ManifestWriter is higher-ranked fn borrowing ObjectStore/Manifest/Path and owning optional indices/transaction, returning BoxFuture<Result<WriteResult>> (not merely size as comment says). Public canonical write_manifest_file_to_path returns a boxed async future: await ObjectWriter construction, body serialization, footer using lance-file constants, shutdown, then audit create and return result. Body mutations/bytes precede later failures; no cleanup/arbitration in this writer."
+        ],
+        [
+          231,
+          264,
+          "Public Clone/Debug ManifestLocation exposes version,path,size,naming_scheme,e_tag,identity. Path doc says relative root but functions construct supplied-base-qualified paths. SizeNone means unknown. ETag is opaque physical generation, explicitly not content/logical/dataset incarnation identity; None proves no sameness. identity is a distinct optional external-store manifest-record incarnation token. Generic external workflow promises not to persist/validate ETag; implementation is separate pending child."
+        ],
+        [
+          265,
+          288,
+          "TryFrom<ObjectMeta> requires filename, detected scheme and numeric parse, mapping failures to Internal with filename context. Moves path/ETag, stores Some(size), sets identityNone. d-prefixed detached metadata fails numeric parse even though detect_scheme returnsV2; detached converter is separate. No manifest bytes or version field consistency is read."
+        ],
+        [
+          289,
+          314,
+          "Private async current_manifest_path first tries synchronous current_manifest_local only for direct local paths; only Ok(Some) returns, with errors/None silently falling through. Because hint is else-if, direct-local failure bypasses hint entirely. Other stores consult hint only if uses_version_hint; success returns, otherwise full listing. Local optimization does blocking filesystem work inline in async caller."
+        ],
+        [
+          315,
+          336,
+          "Private serde VersionHint contains u64version only. Environment name LANCE_USE_VERSION_HINT is parsed once process-wide via function-local OnceLock: trimmed ASCII-lowercased 0/false/off disable; all other strings or env errors (including non-Unicode) enable. Docs mention0/false but implementation alsooff. Changes after first lookup have no effect."
+        ],
+        [
+          337,
+          354,
+          "Public uses_version_hint combines cached global enable with !list_is_lexically_ordered; storage kind names are explanatory examples, not actual routing predicates. Private hint path is base/_versions/latest_version_hint.json."
+        ],
+        [
+          355,
+          372,
+          "Public async write_version_hint no-ops for detached or nonbenefiting stores. Serialize VersionHint toVec with expect, then ordinary object_store.put; write error logs warn and is swallowed. No monotonic CAS: concurrent/out-of-order commits can overwrite hint with older version. Correctness relies on verified upward probes and fallback assumptions, not hint durability. No Result return."
+        ],
+        [
+          373,
+          386,
+          "read_version_from_hint full inner.get plus bytes then serde parse, converting all GET/body/JSON errors toNone. Returns any decodedu64 without mask/range validation, HEAD or freshness checks; caller decides fallback. Entire small-but-unbounded object is buffered."
+        ],
+        [
+          387,
+          411,
+          "read_version_hint_and_probe reads hint, calls upward probe and suppresses every error/None. Pops last collected pair and constructs location with scheme-generated path, metadata size/ETag and identityNone. Latest lookup retains all probed metadata though only last needed; no hint refresh here."
+        ],
+        [
+          412,
+          443,
+          "MAX_HINT_PROBE_GAP=1000 gates the later since-version path, not all upward probing. Probe docs assume attached versions contiguous above start and cleanup removes only old versions; first missing ends history, errors invalidate result. Private async probe returns optional(latest,scheme,Vec(version,ObjectMeta)); no explicit bound/mask check in signature."
+        ],
+        [
+          444,
+          466,
+          "Probe HEADs V2 path at starting version, falls back toV1 only on NotFound, returnsNone only when both missing. Other errors propagate. Chosen scheme remains fixed for subsequent probes; if both schemes exist V2 wins and no mixed-scheme validation occurs. Detached input maps to same d path in both attempts."
+        ],
+        [
+          467,
+          489,
+          "Store initial metadata, then sequentially HEAD version+1 in chosen scheme until NotFound; success appends metadata and advances, other errors propagate discarding local collected result. Ordinary u64 increment may overflow; crossing attached/detached boundary not guarded. Work/memory linear in successful range; no concurrency or 1000 cap here. Gaps can hide later versions under documented contiguity assumption."
+        ],
+        [
+          490,
+          526,
+          "Private since-hint reader returnsNone if hint unavailable or hint.saturating_sub(since)>1000. Starts at hint if newer, otherwise since+1. Missing newer hint triggers listing fallback; missing since+1 yields Some(empty). Any probe error falls back. Ordinary since+1 unchecked, and threshold limits initial backward gap only, not stale-hint upward distance."
+        ],
+        [
+          527,
+          540,
+          "Map probed entries newer than since into locations carrying scheme-generated path, size/ETag and identityNone; retain a Vec of all observed metadata. No byte reads or commit identity resolution."
+        ],
+        [
+          541,
+          572,
+          "If hint>since+1, fill intervening versions by HEAD in chosen scheme with buffer_unordered(io_parallelism); any error including NotFound yieldsNone for full fallback. On success append gap locations then sort descendingversion. This materializes all results and repeats requests on fallback; no minimum1 normalization shown. Local no-missing assumption does not inspect unprobed other scheme."
+        ],
+        [
+          573,
+          593,
+          "resolve_version_from_listing lists base/_versions through wrapper and filters names using detect_scheme plus successful numeric parse, skipping detached and invalid names. filename unwrap assumes list entries always have filenames; listing errors propagate. Hint JSON/temp names filter out."
+        ],
+        [
+          594,
+          618,
+          "Take first valid manifest. If schemeV2 and store advertises lexical ordering, return immediately with actual listed path/size/ETag and identityNone. Deliberately avoids checking remaining pages/scheme uniformity, assuming all manifests useV2. Thus mixed-name validation is absent on this fast path and later listing errors are unobserved."
+        ],
+        [
+          619,
+          658,
+          "Otherwise scan every valid entry, requiring same naming scheme or Internal error with migration instruction. Track highest numericversion; equalversion preserves earlier metadata. Return stored actual path/size/ETag, identityNone; zero valid entries =>NotFound(base/_versions). Stream errors abort, not best-effort partial latest."
+        ],
+        [
+          659,
+          694,
+          "Private current_manifest_local converts base/_versions to local path, synchronously read_dir and scans entries without per-entry metadata initially. Lossy filename conversion then scheme detection; scheme consistency is checked before numeric parse, so even d-prefixed unparseable names can establish/conflict with scheme. Entry/read-dir or mixed-scheme errors propagate as io errors to caller, which may fall back to listing."
+        ],
+        [
+          695,
+          722,
+          "Local scan skips failed numeric parse, retains strictly largestversion, then loads metadata only for chosen entry. Returns scheme-generated path rather than observed filename path, Some(len), get_etag(metadata) and identityNone. No file-type check; classifier-accepted directory or noncanonical name can select a reconstructed path. Empty=>Ok(None); chosen metadata failure propagates."
+        ],
+        [
+          723,
+          738,
+          "Private list_manifests streams read_dir_all and silently drops metadata-to-location conversion errors by ok(), while storage errors survive transpose. Returned boxed stream is not sorted here, does not validate uniform naming or read bytes, and excludes detached numeric parse failures."
+        ],
+        [
+          739,
+          754,
+          "Private detached converter requires filename and parse_detached_version only, moves actualpath/ETag, sets Some(size), namingV2 and identityNone. Because parser only checks d+number+dot, neither extension nor detached mask is enforced."
+        ],
+        [
+          755,
+          771,
+          "Public list_detached_manifests streams read_dir_all, maps detached converter, drops unrecognized names while preserving store errors through transpose. No sorting, payload validation, deduplication, identity lookup or mask check beyond converter."
+        ],
+        [
+          772,
+          780,
+          "Crate-visible make_staging_manifest_path generates UUIDv4, appends hyphenUUID to supplied base string, parsesPath and maps parse error to IO source; no filesystem creation or reservation. Under dynamodb feature private URL query key is exactly ddbTableName. Following doc introduces object-store resolver boundary."
+        ],
+        [
+          781,
+          799,
+          "Crate-visible default_list_manifest_locations returns the underlying boxed stream immediately when sorted_descending is false. Nested sort_stream collects every entry, propagates the first error, sorts by Reverse(version), and emits an owned stream. Memory scales with metadata entries, not manifest bytes."
+        ],
+        [
+          800,
+          834,
+          "Sorted lexical stores peek the first result: V2 passes the remaining stream through; empty or error also selects this branch so the original error remains streamed. First V1 collects and sorts. Nonlexical stores always collect and sort. No mixed-scheme validation occurs here; the optimized order assumes the first scheme applies throughout."
+        ],
+        [
+          835,
+          866,
+          "Crate-visible since-version default without hints uses descending listing and try_take_while(version > since), stopping at the first older or equal version. With hints it clones the base into a lazy future, accepts Some locations or falls back to collecting all ordinary listings, filtering and sorting. Once/try_flatten exposes the resulting stream; IO errors propagate."
+        ],
+        [
+          867,
+          899,
+          "Public async_trait CommitHandler requires Debug + Send + Sync. All concurrent writers must use the same handler type by contract. Defaults are is_version_not_found_definitive=false and propagate_commit_error_after_success=true, protecting cleanup under delayed visibility and preserving custom-handler errors after matching readback. These hooks do not themselves implement readback."
+        ],
+        [
+          900,
+          916,
+          "Default async resolve_latest_location delegates current_manifest_path; resolve_version_location delegates default_resolve_version using the underlying store. Neither decodes manifest bytes. The exact-version resolver can return an unproven fallback path."
+        ],
+        [
+          917,
+          936,
+          "Default version_exists HEADs the path from the supplied scheme: success yields true, NotFound false, other errors propagate. Although documented for attached versions, it does not reject detached input. It does not try another naming scheme or external authority; such handlers must override it."
+        ],
+        [
+          937,
+          962,
+          "Default detached listing delegates the public detached stream in arbitrary order. Default attached listing delegates the sorted/unsorted helper. Returned streams borrow the store and own needed path state. There is no implicit external authority lookup."
+        ],
+        [
+          963,
+          993,
+          "Default list_manifest_locations_since delegates the hint-aware helper. Required commit mutably borrows Manifest, owns optional indices/transaction, and receives base/store/function-pointer writer/scheme. It returns Result<ManifestLocation, CommitError>; existing versions should produce CommitConflict by contract. The trait does not enforce atomicity or callback behavior."
+        ],
+        [
+          994,
+          1019,
+          "Predecessor hooks default to unsupported: supports_predecessor_condition=false; async latest and specific identity queries return Ok(None) without IO. None means no supplied identity, not a zero version or token."
+        ],
+        [
+          1020,
+          1056,
+          "commit_after requires reservation conditioned on predecessor identity, with mismatch PrerequisiteFailed rather than conflict. Its default returns OtherError(NotSupported) without invoking the writer. Default forget_version and delete are async no-ops; neither deletes manifest objects. Identity-conditional retirement is an implementer obligation."
+        ],
+        [
+          1057,
+          1075,
+          "For detached input, default_resolve_version returns a deterministic d path with V2 and unknown size/ETag/identity without any existence check. A successful location result does not prove an object exists."
+        ],
+        [
+          1076,
+          1102,
+          "For attached input, HEAD only the V2 path. Success returns size/ETag with identity None. V2 NotFound returns a V1 path with unknown size and ETag without HEADing V1; other errors propagate. Later byte reads establish fallback existence."
+        ],
+        [
+          1103,
+          1138,
+          "DynamoDB-only OSObjectStoreToAwsCredAdaptor implements ProvideCredentials. Each future fetches provider credentials, maps errors, and creates AWS credentials with copied key/secret, cloned token, artificial expiry now+600 seconds via checked_add.expect, and empty provider name. Actual provider expiry is not preserved here. No credential values are logged."
+        ],
+        [
+          1139,
+          1170,
+          "DynamoDB builder configures latest SDK behavior, supplied region/credentials, no identity cache because the provider owns caching, and standard retry max_attempts=5 including the initial request. An optional endpoint overrides the SDK endpoint. It builds a Client and awaits child new_external_store. Child schema and remote IO behavior remain pending."
+        ],
+        [
+          1171,
+          1198,
+          "Public commit_handler_from_url chooses Rename locally on Windows and ConditionalPut otherwise. Parse failure or a Windows single-character scheme returns local. file/file-object-store use local; s3, gs, az, abfss, memory, oss, tos, shared-memory and goosefs use ConditionalPut; cos uses TencentCosCommitHandler. This contradicts the module default-handler comments. Routing does not probe backend atomicity."
+        ],
+        [
+          1199,
+          1226,
+          "s3+ddb without the feature returns InvalidInput. With the feature, require exactly one query pair, ddbTableName, nonempty value, and both strings Cow::Borrowed. Decoding that produces owned key/value strings fails this pattern even if decoded text matches. Wrong count/key/ownership use the query diagnostic; an empty borrowed value has its own error."
+        ],
+        [
+          1227,
+          1264,
+          "For accepted DDB input, clone/default ObjectStoreParams; extract raw storage options, endpoint, S3 options, optional region, accessor and provider scheme; await credential construction with refresh offset and optional supplied credentials. Build ExternalManifestCommitHandler using app name lancedb. Delegated errors propagate. Every other parsed scheme chooses UnsafeCommitHandler."
+        ],
+        [
+          1265,
+          1273,
+          "DynamoDB endpoint lookup prefers raw option dynamodb_endpoint, including an empty string, over DYNAMODB_ENDPOINT. Missing or non-Unicode environment values become None. This environment lookup happens per invocation, unlike the cached hint setting."
+        ],
+        [
+          1274,
+          1297,
+          "Public Debug CommitError has CommitConflict and OtherError(Error). Converting from core Error wraps it. Converting back unwraps OtherError, but turns CommitConflict into Internal with text Commit conflict, losing the dedicated discriminant. No Display/Error implementation appears locally."
+        ],
+        [
+          1298,
+          1316,
+          "Global AtomicBool WARNED_ON_UNSAFE_COMMIT starts false. Public UnsafeCommitHandler advertises definitive NotFound and suppressible errors after successful readback. Its separate relaxed load/store warning guard below is not atomic test-and-set, so concurrent first uses may log more than once."
+        ],
+        [
+          1317,
+          1358,
+          "Unsafe commit warns as needed, computes final path, awaits injected writer directly there, writes the best-effort hint, and returns writer size/ETag with current manifest version and identity None. No lock, condition, staging or readback. Writer error skips the hint. A custom writer may mutate Manifest; the path was computed before that callback. Debug prints the unit type name."
+        ],
+        [
+          1359,
+          1388,
+          "Public CommitLock: Debug associates a CommitLease and asynchronously locks a version. Docs require waiting and returning conflict if already committed, and recommend at least 30 seconds of timeout; the trait supplies no TTL or fencing. CommitLease: Send + Sync releases with a success flag and should tolerate repeated calls because cancellation can trigger a later release(false)."
+        ],
+        [
+          1389,
+          1423,
+          "Private LeaseGuard owns Option<L>. Its consuming explicit release keeps the lease inside the guard while awaiting, then clears the option even when release returns Err. Completed release errors get no background retry; cancellation while awaiting leaves ownership for Drop. The expect relies on private construction and the consuming method."
+        ],
+        [
+          1424,
+          1448,
+          "Drop takes the lease and, if a current Tokio handle exists, spawns release(false), ignoring its result without warning or join. Runtime shutdown may prevent completion. Without a runtime the lease is dropped; TTL recovery mentioned in comments is not enforced by the trait. Blanket CommitHandler for a Send+Sync CommitLock with static lease sets definitive NotFound=true but retains propagate-after-success=true."
+        ],
+        [
+          1449,
+          1483,
+          "Lock commit computes a path, awaits acquisition, then wraps the returned lease immediately. Under the lease, HEAD success releases(false) before returning conflict; NotFound proceeds; other HEAD errors release(false) before returning the error. Release failures take precedence through ?. Cancellation during acquisition has no guard yet and is the custom lock responsibility."
+        ],
+        [
+          1484,
+          1503,
+          "Await the writer under the lease and retain its Result. Release with res.is_ok() before unwrapping that result. A release error can mask a writer error or report failure after successful publication. Only successful write and release reach hint writing and the returned location. No renewal, fencing or CAS is implemented; safety depends on effective shared locking."
+        ],
+        [
+          1504,
+          1540,
+          "The Arc<T: CommitLock + Send + Sync> CommitHandler implementation forwards the definitive and propagation hooks plus commit arguments to the inner value. Other methods retain trait defaults. This is not a general Arc<dyn CommitHandler> adapter."
+        ],
+        [
+          1541,
+          1578,
+          "Public RenameCommitHandler requires atomic rename-if-absent by contract, sets definitive NotFound=true and propagate-after-success=false. Compute final and UUID staging paths, await the writer at staging, then invoke underlying rename_if_not_exists. Writer errors and cancellation have no cleanup guard here."
+        ],
+        [
+          1579,
+          1611,
+          "Rename success writes the hint and returns writer size but no ETag because renaming may change it. AlreadyExists tries deleting staging, ignores cleanup errors, and returns conflict. Other rename errors return OtherError without cleanup. Therefore the comment about cleaning up on failure is broader than implementation. Ambiguous transport outcomes need caller recovery. Debug prints the unit name."
+        ],
+        [
+          1612,
+          1647,
+          "Public ConditionalPutCommitHandler has definitive NotFound=true and propagate-after-success=false. It creates a fresh memory store, calls the injected writer at dummy, ignores its WriteResult, then reads all dummy bytes and derives actual size. Manifest mutations precede durable publication, and complete serialized bytes remain in memory. A callback that does not create dummy fails at readback."
+        ],
+        [
+          1648,
+          1678,
+          "Publish full bytes through inner.put_opts with PutMode::Create and default remaining options. AlreadyExists or Precondition maps to conflict; other errors map to OtherError. Success writes the hint and returns actual byte size and put ETag, identity None. No local retry, predecessor condition or incarnation protection. Atomicity depends on backend Create semantics; cancellation may leave an unknown outcome."
+        ],
+        [
+          1679,
+          1723,
+          "Conditional Debug prints its unit name. Private TencentCosCommitHandler documents bucket-versioning history as the reason conditional create is unsafe; this is source rationale, not live validation. It retains default reads/listings and definitive NotFound=true, while commit immediately returns NotSupported requesting a distributed Python commit_lock or custom Rust handler. No callback or storage invocation. Propagation policy remains the default true."
+        ],
+        [
+          1724,
+          1748,
+          "Public PredecessorIdentity derives Clone/Eq and stores version plus String identity; physical-incarnation uniqueness is a handler contract rather than type validation. Public CommitConfig has num_retries:u32 and skip_auto_cleanup:bool, defaulting to 20 and false. The isolation-level TODO has no field. This file declares configuration but does not run retry or cleanup loops."
+        ],
+        [
+          1749,
+          1781,
+          "Private test module imports synchronization counters, TempObjDir and ProxyObjectStore policy. Naming fixture checks attached versions 0/42 under V1 decimal and V2 inverted 20-digit filenames, both in base/_versions. No detached generation, staging detection or malformed names are tested here."
+        ],
+        [
+          1782,
+          1803,
+          "The naming fixture parses attached 0/42 and staged UUID-suffix variants under both schemes, detects ordinary V1/V2 names and rejects unrelated text. Parsing accepts suffix text after the first dot whereas detection is stricter. Mixed schemes and numeric overflow are not tested."
+        ],
+        [
+          1804,
+          1836,
+          "Migration memory fixture writes an irrelevant empty object, V1 version 0 and V2 version 1; its comment misstates the count/types. It migrates once and asserts the exact listed paths. No second invocation, concurrent rename, malformed name or collision case establishes idempotency or recovery."
+        ],
+        [
+          1837,
+          1872,
+          "Sorted-list matrix crosses lexical flag with V1/V2. Lexical uses memory; nonlexical uses a real local store and asserts its flag is false. Twelve empty manifest-named objects are written from 11 down to 0. Sorted handler listing must return exact paths in that order. No bytes are decoded."
+        ],
+        [
+          1873,
+          1899,
+          "Current-path matrix crosses lexical flag with V1/V2 but uses memory for both, avoiding the direct-local optimization. Shuffled versions 0 through 11 must resolve to version 11 with matching scheme/path. Changing the flag selects the algorithm without making memory listing physically unordered."
+        ],
+        [
+          1900,
+          1927,
+          "non_lexical_memory_store changes only the memory wrapper ordering flag. Hint-write fixture asserts no hint for lexical stores, then writes and reads 42 followed by 100 on the nonlexical wrapper. Tests depend on the cached global environment setting; no explicit override is installed."
+        ],
+        [
+          1928,
+          1948,
+          "Writing detached mask|7 must leave hint 100 unchanged. Replacing the hint with non-JSON bytes must read as None. Failed put warnings, backward overwrites, environment parsing and maximum version are not tested."
+        ],
+        [
+          1949,
+          1979,
+          "V1/V2 hint-probe matrix starts with missing hint None, creates versions 1 through 5, writes stale hint 3, and expects latest 5 with the chosen scheme. It assumes contiguous history and does not inject transport errors."
+        ],
+        [
+          1980,
+          1995,
+          "The probe fixture then writes hint 5 and expects latest 5; nonexistent future hint 10 returns None. It does not measure HEAD count or inspect generation tokens."
+        ],
+        [
+          1996,
+          2032,
+          "Since-hint fixture creates V2 versions 1 through 10. Missing hint returns None; hint 10 with since 10 gives Some(empty); since 7 gives descending [10,9,8], exercising gap filling. It asserts versions, not token values or concurrency limits."
+        ],
+        [
+          2033,
+          2051,
+          "The same since fixture writes stale hint 8 and still expects [10,9,8], then future hint 20 returns None. No threshold-above-1000, intermediate gap, hint-behind-since or overflow case appears here."
+        ],
+        [
+          2052,
+          2071,
+          "Nonlexical current-path fixture writes V2 versions 1 through 100 and hint 98, then expects version 100. This is memory-store simulation, not S3 Express performance or IO-count evidence."
+        ],
+        [
+          2072,
+          2089,
+          "Future-hint fallback fixture stores only V2 version 5 but hint 10; current_manifest_path must return 5. It does not count listing calls or inject HEAD/GET errors."
+        ],
+        [
+          2090,
+          2117,
+          "Detached parser fixture accepts d12345.manifest as Some(12345), explicitly without the detached mask, and also accepts d2^63. It rejects unprefixed decimal, ordinary V2 and a d-number with no dot. Thus parser/tests do not enforce the mask implied by documentation; alternate extensions and overflow remain untested."
+        ],
+        [
+          2118,
+          2143,
+          "Detached-list fixture writes regular V2 versions 1/2/3 and three d-prefixed versions mask|100/200/300 as empty objects. Detached names are constructed manually; no manifest payload is serialized."
+        ],
+        [
+          2144,
+          2162,
+          "Collect detached listing, require three results all marked V2, sort found and expected version vectors, then compare. Output order, paths, sizes, ETags and mask rejection are not asserted."
+        ],
+        [
+          2163,
+          2186,
+          "Nine URL cases memory/shared-memory/s3/gs/az/abfss/oss/tos/goosefs call the factory with no options and assert the ConditionalPutCommitHandler Debug name. They test routing only, not remote credentials, storage or atomic create. Local, unknown and DDB routing are absent from this fixture."
+        ],
+        [
+          2187,
+          2216,
+          "TrackingLock and TrackingLease share an AtomicBool. Lock returns immediately regardless of version; release ignores its success argument and stores true with SeqCst ordering. They track invocation but do not serialize writers or model TTL."
+        ],
+        [
+          2217,
+          2262,
+          "HangingReleaseLock/Lease share a call counter and released flag. The first release increments the counter then remains pending forever; later calls mark released. Success is ignored. This models cancellation during explicit release, not a real distributed lease."
+        ],
+        [
+          2263,
+          2292,
+          "succeeding_manifest_writer immediately returns default WriteResult without writing any object or mutating Manifest. test_manifest constructs nonnullable Int32 i, empty fragments/base paths and resolved Stable storage. The fake allows lease tests to reach release without proving publication."
+        ],
+        [
+          2293,
+          2319,
+          "COS fixture asserts factory Debug name, then calls commit with memory store, fake writer and V2. It requires OtherError(NotSupported) with distributed commit_lock in the message. It does not instrument callback invocation or qualify custom COS locking."
+        ],
+        [
+          2320,
+          2333,
+          "hanging_manifest_writer ignores every argument and returns a permanently pending future followed by unreachable code. No IO occurs; it models cancellation while the commit owns a lease."
+        ],
+        [
+          2334,
+          2363,
+          "First cancellation fixture creates TrackingLock and invokes commit with the hanging writer. A 50 ms timeout must expire. The missing-path HEAD precedes the writer, but no separate signal asserts which stage was reached."
+        ],
+        [
+          2364,
+          2376,
+          "After timeout, poll released up to 100 times with 10 ms sleeps and require true. This checks background release invocation under Tokio, not its success flag, TTL/fencing, no-runtime behavior or runtime shutdown."
+        ],
+        [
+          2377,
+          2409,
+          "Second cancellation fixture uses HangingReleaseLock and the successful fake writer, again requiring a 50 ms timeout. Explicit release(true) hangs on its first call; the fake writer has not actually published a manifest."
+        ],
+        [
+          2410,
+          2428,
+          "Poll the released flag up to 100 times at 10 ms and require exactly two release calls: one hung explicit call and one drop-path attempt. Completed release errors, background errors and cancellation before acquisition are not covered."
+        ],
+        [
+          2429,
+          2463,
+          "Lexical resolver regression has clean(false,1) and leftover_staging(true,2) cases. It writes V2 versions 0 through 9 and optionally a UUID staging name for version 10 that sorts before version 9. Comments relate pulled entries to billing, but this fixture counts metadata events, not cloud requests/pages/billing."
+        ],
+        [
+          2464,
+          2490,
+          "Proxy policy increments an AtomicUsize only for list metadata and passes entries unchanged. Resolve latest, assert version 9 and counts 1 or 2. This pins stopping at the first valid entry and staging-name filtering in memory. No concurrent write, error, mixed scheme or backend pagination case. All source tests were read, not run."
+        ]
+      ],
+      "limits": "All 2490 physical lines read in complete bounded outputs and assigned authored contiguous ranges, including every local test. No source builds/tests or remote storage calls performed. Cloud behavior claims are source contracts/rationale, not measured guarantees. ExternalManifestCommitHandler, DynamoDB implementation and complete Dataset commit orchestration remain pending."
+    },
+    {
+      "path": "rust/lance-table/src/io.rs",
+      "module": "L1-modules/rust-lance-table-io.md",
+      "reviewed": true,
+      "role": "Public table IO module routing with no runtime work of its own.",
+      "ranges": [
+        [
+          1,
+          6,
+          "SPDX prelude and unconditional public commit, deletion and manifest submodules. Complete parent commit resolver/publication, manifest body IO and deletion serialization are now analyzed. Commit child external_manifest and feature-gated dynamodb implementations remain pending. Module declarations alone supply no storage atomicity guarantees."
+        ]
+      ],
+      "limits": "All six lines covered; child implementation coverage is tracked independently. No runtime command executed."
+    }
+  ]
+}

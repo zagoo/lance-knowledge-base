@@ -1,0 +1,441 @@
+{
+  "iteration": 26,
+  "files": [
+    {
+      "path": "rust/lance-table/src/format/index.rs",
+      "module": "L1-modules/rust-lance-table.md",
+      "reviewed": true,
+      "role": "Index identity, dependency and coverage metadata, protobuf validation, index-list cache codec and file-size discovery.",
+      "ranges": [
+        [
+          1,
+          20,
+          "SPDX, module purpose and imports: HashMap/HashSet/Arc, chrono, StreamExt, DeepSizeOf, object-store abstractions, RoaringBitmap, Uuid, protobuf and cache entry IO. These are metadata operations; implementations of index algorithms and store listing live elsewhere."
+        ],
+        [
+          21,
+          29,
+          "IndexFile derives Debug/Clone/PartialEq/DeepSizeOf and exposes path:String relative to an index directory and size_bytes:u64. The type itself enforces neither relative-path syntax nor size correctness."
+        ],
+        [
+          30,
+          68,
+          "IndexMetadata derives Debug/Clone/PartialEq. Public uuid identifies the index, fields lists dependency IDs, covering_fields is documented as a proper suffix carried but not searched, name is human readable, dataset_version records the training/update snapshot and fragment_bitmap is optional coverage that may include deleted fragments. None means unknown, not empty. The documented fields[0] convention has a system-index empty-list exception implemented below."
+        ],
+        [
+          69,
+          95,
+          "Remaining public fields: optional Arc<prost_types::Any> details, i32 index_version, optional UTC created_at, optional external-base u32 ID and optional Vec<IndexFile>. Details/time/files are optional for older metadata; newer-details presence is a comment, not validated here. File-size metadata is intended to avoid HEAD calls and serve describe output; actual consuming IO is outside this file."
+        ],
+        [
+          96,
+          118,
+          "effective_fragment_bitmap returns None for unknown coverage, otherwise allocates intersection with supplied existing fragments. file_size_map clones paths into a HashMap, with later duplicate paths overwriting earlier sizes; None and Some(empty) both yield empty maps. No store lookup or metadata mutation."
+        ],
+        [
+          119,
+          136,
+          "total_size_bytes returns None only for absent files and sums every recorded u64 size, including duplicate paths, with ordinary unchecked arithmetic; Some(empty) is Some(0). deleted_fragment_bitmap returns stored-minus-existing or None if unknown, allocating the result."
+        ],
+        [
+          137,
+          155,
+          "results_are_row_addrs is a type-URL heuristic only. ZoneMapIndexDetails and BloomFilterIndexDetails use case-sensitive ends_with on the entire URL without namespace validation. FM requires a slash, then compares its final component case-insensitively with the full lance.index.pb.FMIndexDetails name. Missing details or other types return false. It never decodes Any bytes, checks index version or calls ScalarIndex; comments about rewrite/remap are design intent, not implemented here."
+        ],
+        [
+          156,
+          180,
+          "keyed_fields slices the prefix of fields using len.saturating_sub(covering_fields.len); overlong or all-covering lists yield an empty prefix. It does not check actual suffix content. keyed_field returns Some(id) only for exactly one prefix entry; empty and composite prefixes return None. Directly constructed malformed metadata can bypass decode validation."
+        ],
+        [
+          181,
+          211,
+          "validate_covering_fields returns Ok immediately for empty covering_fields, including empty fields. Otherwise first collects all covering IDs absent from fields and returns InvalidInput including index name, missing IDs and both lists. Membership uses repeated linear contains: O(covering_count*field_count); schema existence, negative IDs and index-kind capabilities are not checked. Error precedence favors missing IDs."
+        ],
+        [
+          212,
+          244,
+          "Validation next finds first duplicate covering ID with a HashSet; then rejects covering length >= fields length; finally requires exact ordered suffix equality. Errors carry name and relevant values, and success returns Ok. Duplicate IDs elsewhere in fields are not rejected; for example fields=[7,7], covering=[7] passes. No whole-schema or at-most-one-key rule is enforced."
+        ],
+        [
+          245,
+          260,
+          "Custom DeepSizeOf sums UUID byte children, fields/covering/name/dataset-version children, optional bitmap serialized_size and files children. It omits heap held by index_details Any and uses serialized bitmap size as an estimate rather than measured allocation. Inline fields are covered by the trait outer size; this function alone is not total retained memory."
+        ],
+        [
+          261,
+          287,
+          "TryFrom protobuf first maps zero-length bitmap bytes to None, otherwise deserializes Roaring and propagates its IO error through core Error. A valid encoded empty bitmap remains Some(empty). Empty repeated files becomes None; nonempty entries move path/size into IndexFile without validation."
+        ],
+        [
+          288,
+          318,
+          "Decoder requires UUID presence and delegates its byte-length validation, moves metadata fields, wraps Any in Arc, defaults absent index_version to0 and maps timestamp u64 as i64 milliseconds. Chrono rejection triggers expect panic, not Result error. After construction, validate_covering_fields runs and propagates InvalidInput. No feature-word, Any payload, file path/size, fragment-ID or creation-time range validation beyond that occurs."
+        ],
+        [
+          319,
+          337,
+          "Protobuf encoder clones the optional bitmap, optimizes run containers and serializes into Vec, preserving original bitmap. Unexpected serialization error logs then clears bytes, which future decoding interprets as unknown coverage. Conversion has no Result. Contiguous-ID compression motivation in comments is not a universal bound or measured performance result."
+        ],
+        [
+          338,
+          370,
+          "Encoding clones file records (None and Some(empty) both become empty repeated field), UUID/name/fields/covering/details, always emits Some(index_version), casts signed timestamp milliseconds to u64, and preserves base ID. It does not call covering validation. Any contents are cloned out of Arc; negative timestamps wrap at the cast."
+        ],
+        [
+          371,
+          384,
+          "Cache codec documentation describes pb::IndexSection wrapping repeated metadata and orphan-rule reason for callback construction. ArcAny is a private Arc<dyn Any+Send+Sync> alias. Type ID is exactly lance.table.IndexMetadataList; body version constant is1. Cache envelope framing belongs to core, not this protobuf section."
+        ],
+        [
+          385,
+          397,
+          "serialize_index_metadata downcasts ArcAny to Vec<IndexMetadata> with expect (wrong type panics), converts all elements into pb::IndexSection and calls writer.write_header, propagating that Result. Allocates the protobuf list and cloned payloads; no streaming index-by-index persistence."
+        ],
+        [
+          398,
+          416,
+          "deserialize_index_metadata reads one pb::IndexSection header, converts all elements with IndexMetadata::try_from, aborts on first error, then returns Arc<Vec<_>> erased as ArcAny. It neither branches on reader.version nor checks trailing data. index_metadata_codec constructs CacheCodec from exact type ID, version1 and these callbacks; core handles envelope version/type failures separately. Timestamp conversion panics are not converted to local errors."
+        ],
+        [
+          417,
+          443,
+          "Async list_index_files_with_sizes consumes ObjectStore::read_dir_all(index_dir,None) in stream order into Vec. First listing error aborts and discards accumulated output. Relative paths use string strip_prefix and trim all leading slashes, falling back to filename or empty string; no path-component-boundary check occurs locally. Size is metadata.size. No explicit HEAD, sort, deduplication or filtering; memory grows with all paths. Actual store traversal semantics and callers remain pending."
+        ],
+        [
+          444,
+          481,
+          "cfg(test) module and run-optimization fixture: coverage0..1_000_000, encode, assert serialized bytes <1% of unoptimized size, decode and assert bitmap equality. This is source-level test intent, not an executed benchmark or compression guarantee for arbitrary IDs."
+        ],
+        [
+          482,
+          553,
+          "Codec roundtrip fixture creates two metadata records with distinct optional bitmap/base/files values, uses HashMap<String,Vec<u8>> as simulated disk and asserts decoded UUID/name/fields/dataset_version/bitmap/index_version/base/files. It is not real disk-cache IO and does not assert every field (covering/details/time are omitted from its equality checks)."
+        ],
+        [
+          554,
+          579,
+          "Covering-field protobuf roundtrip fixture uses fields[7,11,13], covering[11,13], asserts wire covering list, then full metadata equality after decode. It establishes this valid suffix case, not all validation cases."
+        ],
+        [
+          580,
+          604,
+          "Malformed covering protobuf fixture replaces valid covering[11] with prefix[7], expects InvalidInput and message must come last. It tests validation at decode rather than only the direct validator."
+        ],
+        [
+          605,
+          628,
+          "Seven rstest keyed-prefix cases cover ordinary single key, one/two carried columns, composite with/without covering, empty system metadata and overlong invalid covering. Test asserts exact prefix and singleton helper using the shared metadata constructor. It does not validate malformed non-suffix data before prefix slicing."
+        ],
+        [
+          629,
+          644,
+          "Test helper index_metadata_with constructs uuid/name/version and supplied fields/covering, with no bitmap/details/time/base/files. Defaults are fixture choices, not a production Default implementation."
+        ],
+        [
+          645,
+          661,
+          "Six rstest type-URL cases assert row-address classification for ZoneMap, Bloom, FM, case-insensitive FM, foreign FM namespace false and BTree false. It builds opaque Any with empty bytes; no actual index is loaded. Missing details/no-slash FM/foreign ZoneMap suffix are not covered here."
+        ],
+        [
+          662,
+          707,
+          "Eleven rstest validation cases cover empty/system lists, valid suffixes, non-suffix and wrong order, missing IDs, all fields carried, duplicate covering and error precedence. Success asserts Ok; failures match InvalidInput and message fragment. All tests were read, not executed; invalid timestamp/cache downcast panic, file listing and memory-estimate behavior have no direct fixture here."
+        ]
+      ],
+      "limits": "Every707 lines read; public index types/functions are reexported by format facade though defining module is private. Consumers, index algorithms, manifest index IO and release compatibility remain incomplete. No source/build/test/benchmark mutation or execution."
+    },
+    {
+      "path": "rust/lance-table/src/format/overlay.rs",
+      "module": "L1-modules/rust-lance-table.md",
+      "reviewed": true,
+      "role": "Physical cell coverage metadata, stable overlay order, tombstoning and Roaring serialization boundaries.",
+      "ranges": [
+        [
+          1,
+          35,
+          "SPDX and module contract: coverage uses physical offsets including deleted rows, never live-row numbering; values align to bitmap rank (number of set bits below the offset), one value column per field, no offset-key column. Shared coverage is dense, per-field coverage sparse. Parsed bitmaps are Arc-shared. Highest committed version wins; equal versions use later list position. Replacing base fields must tombstone stale slots without shifting per-field coverage. These are format invariants described here; actual rank-based reading/writing and commit retry stamping are outside this module."
+        ],
+        [
+          36,
+          55,
+          "Exports child staleness module (implementation pending), imports core errors/deepsize, Roaring/serde, Path, DataFile and protobuf. Public TOMBSTONE_FIELD_ID:i32=-2 marks obsolete field slots. Negative IDs other than-2 are not implicitly tombstones in the helper below."
+        ],
+        [
+          56,
+          75,
+          "OverlayCoverage derives clone/equality and custom serde through private OverlayCoverageBytes. Shared contains Arc<RoaringBitmap> for all fields; PerField contains Vec<Arc<RoaringBitmap>> position-aligned with data_file.fields by contract. Types themselves impose no length/cardinality/physical-row bound. Clones share bitmap contents but clone the Vec of handles."
+        ],
+        [
+          76,
+          96,
+          "Private serialized enum has Shared(Vec<u8>) and PerField(Vec<Vec<u8>>), preserving Roaring bytes. deserialize_roaring maps Roaring decode error to CorruptFile with supplied path and original error text. There is no explicit exhaustion check for trailing bytes. Serde uses an empty path because owner context is unavailable."
+        ],
+        [
+          97,
+          116,
+          "serialize_roaring clones and optimize()s a bitmap, preallocates serialized_size bytes and unwraps Vec serialization; unexpected error would panic. From<OverlayCoverage> consumes Arc handles/Vec and serializes each bitmap via this helper without mutating shared originals. No cross-field equality deduplication in output."
+        ],
+        [
+          117,
+          136,
+          "TryFrom serialized coverage uses Path::default, deserializes every bitmap into a new Arc, and propagates first error. Empty per-field Vec is accepted. It cannot check alignment with data_file.fields because coverage is decoded in isolation."
+        ],
+        [
+          137,
+          164,
+          "DeepSizeOf deduplicates each Arc bitmap by pointer in shared Context. First visit adds size_of<RoaringBitmap> plus serialized_size proxy; later visits add0. PerField also adds Vec capacity times Arc handle size. Refcount allocation overhead is excluded and closeness of serialized-size proxy is a source comment, not measured memory. Distinct cloned Vec allocations are still charged separately."
+        ],
+        [
+          165,
+          176,
+          "dense wraps supplied owned bitmap in one Arc; sparse maps each supplied owned bitmap into its own Arc. Neither checks field count, offset range, overlap or rank cardinality."
+        ],
+        [
+          177,
+          191,
+          "DataOverlayFile exposes data_file, coverage and committed_version:u64, with Debug/Clone/equality/serde/DeepSizeOf derives. Version is documented as commit-time stamp restamped on retry; this struct has no commit or stamp routine and accepts arbitrary versions."
+        ],
+        [
+          192,
+          214,
+          "coverage_for_field returns an Arc clone. Shared returns its bitmap for any requested usize without checking field bounds. PerField gets only its bitmap Vec index and returns InvalidInput with bitmap count/requested position if absent. It does not compare data_file.fields length or reject tombstoned fields."
+        ],
+        [
+          215,
+          222,
+          "sort_overlays_newest_last uses stable slice.sort_by_key on committed_version ascending, preserving original order for ties. It mutates ordering only; no versions, fields or coverage change."
+        ],
+        [
+          223,
+          241,
+          "verify_overlays_newest_last scans adjacent windows and returns InvalidInput on first strictly descending version pair with both values. Empty/singleton/equal versions pass. This validates order only, not coverage/field shape or commit ownership; callers must invoke it to obtain write-side protection."
+        ],
+        [
+          242,
+          276,
+          "tombstone_overlay_fields rebuilds every overlay field list, replacing nonnegative IDs whose u32 value occurs in supplied fields with-2. Coverage and column indices are left in place, preserving position. It then retains overlays with any field !=-2, so empty field lists/all-2 overlays are removed and other negative IDs remain. Even untouched overlays get a fresh field Arc/list; supplied-field membership is linear for every field. It does not delete physical files, recompute sizes or validate schema."
+        ],
+        [
+          277,
+          296,
+          "From<&DataOverlayFile> always emits Some(data_file) and Some(coverage), selecting SharedOffsetBitmap or FieldCoverage with optimized serialized bitmaps, preserving version. DataFile conversion is delegated. No physical write, sorting, tombstoning or alignment validation."
+        ],
+        [
+          297,
+          328,
+          "TryFrom protobuf first requires data_file (InvalidInput), derives its path, then requires coverage (InvalidInput) and parses Roaring with that path (CorruptFile). Converts DataFile only after coverage parsing, preserves committed_version, and accepts empty/mismatched per-field bitmap counts. No validate/sort/version support check runs here."
+        ],
+        [
+          329,
+          358,
+          "cfg(test) missing-field fixture constructs no-coverage and no-data-file protobufs and asserts diagnostic substrings. It tests required option presence but not corrupted bitmap bytes or shape/cardinality errors."
+        ],
+        [
+          359,
+          386,
+          "Run-optimization fixture encodes dense offsets0..1_000_000, asserts <1% of prior serialized size and recovered coverage equality. It uses a legacy DataFile metadata constructor without writing a legacy file. Not executed."
+        ],
+        [
+          387,
+          405,
+          "Serde JSON roundtrip loops dense populated/empty, sparse populated+empty and zero-bitmap sparse coverage, asserting exact equality. These cases confirm intended empty representations, not field-count validation or persisted historical fixtures."
+        ],
+        [
+          406,
+          444,
+          "Tombstone fixture has sparse[3,5], single[5], untouched[7]; replacing5 leaves two overlays, first fields[3,-2] and last[7]. It does not assert coverage/column arrays or physically remove files; implementation leaves those arrays untouched."
+        ],
+        [
+          445,
+          459,
+          "Ordering test accepts empty and versions[1,2,2,5], rejects[2,1] with newest-last diagnostic. Stable tie sorting itself is covered in fragment tests, not here."
+        ],
+        [
+          460,
+          475,
+          "Sparse coverage lookup fixture accepts positions0/1 and rejects5 with field-position diagnostic. No Shared out-of-range or mismatch-length fixture. All tests read, not run."
+        ]
+      ],
+      "limits": "Every475 lines read. Module invariants are distinguished from enforcement. Reader rank merge, staleness implementation, transaction stamps and file IO remain pending; no runtime qualification."
+    },
+    {
+      "path": "rust/lance-table/src/format/key_existence.rs",
+      "module": "L1-modules/rust-lance-table.md",
+      "reviewed": true,
+      "role": "Merge-insert conflict key representation, Bloom builder, exact/Bloom overlap policy and Arrow key extraction.",
+      "ranges": [
+        [
+          1,
+          29,
+          "SPDX and module purpose: merge-insert join keys enter transaction-carried Bloom data for concurrent conflict checks. Imports HashSet/DefaultHasher, Arrow arrays/types, protobuf and core Sbbf/DeepSizeOf. Defaults are8192 expected items and0.00057 probability; comment says16KiB, while actual sizing delegates SbbfBuilder. Consumer condition that ON matches primary key is not enforced here."
+        ],
+        [
+          30,
+          41,
+          "KeyValue derives Debug/Clone/PartialEq/Eq/Hash; variants String, Int64, UInt64, Binary, List, Struct and Composite own their values. Structural derived equality/hash and explicit byte/hash_value methods are distinct representations. There is no Null or generic Arrow scalar variant."
+        ],
+        [
+          42,
+          59,
+          "to_bytes clones UTF8/binary bytes or writes little-endian8-byte signed/unsigned integers. List/Struct/Composite recursively concatenate each child bytes followed by a zero byte, with no type tag, length prefix or escaping. This is not injective: String and Binary with equal bytes coincide, positive Int64/UInt64 coincide, collection variant boundaries are not distinguished, and embedded NUL can create ambiguous child partitions. Empty containers all encode empty. Allocates a fresh Vec and nested temporary Vecs per call."
+        ],
+        [
+          60,
+          66,
+          "hash_value hashes the resulting Vec<u8> with a newly created std DefaultHasher and returns u64. It is not the derived KeyValue::hash and not Sbbf byte hashing. No explicit persisted hash-version or algorithm contract is stored here; equal resulting bytes imply equal hash. ExactSet below stores these hashes, not original keys, and its exactness is only about hash membership."
+        ],
+        [
+          67,
+          88,
+          "KeyExistenceFilterBuilder owns Sbbf, supplied ordered field_ids and item_count; derives Debug/Clone. new sets fixed expected items/probability via SbbfBuilder and expects success, panicking if configuration construction fails. It accepts empty/duplicate/negative field IDs and does not inspect schema."
+        ],
+        [
+          89,
+          104,
+          "insert consumes KeyValue, allocates to_bytes, inserts into Sbbf, increments item_count with ordinary arithmetic and always returns Ok locally; duplicate inserts count again. contains allocates same byte representation and checks membership. might_intersect delegates Sbbf comparison and translates its error to InvalidInput; field_ids are not compared and filter never grows here."
+        ],
+        [
+          105,
+          120,
+          "field_ids borrows the input list, estimated_size_bytes returns Sbbf bitmap size only (not all owned metadata/temporary allocations), len counts insertion calls and is_empty tests count==0. These are not distinct-key cardinality estimates."
+        ],
+        [
+          121,
+          133,
+          "build borrows builder and clones field IDs plus serializes Sbbf bytes into FilterType::Bloom. num_bits=(size_bytes as u32)*8, number_of_items remains default expected capacity8192, probability remains default; actual insertion count is not persisted. Builder remains usable afterward."
+        ],
+        [
+          134,
+          149,
+          "From<&builder> to transaction protobuf directly emits the same Bloom bitmap/config and field IDs without first constructing KeyExistenceFilter. Again number_of_items is capacity configuration, not observed row count; no validation or serialization error branch."
+        ],
+        [
+          150,
+          169,
+          "FilterType derives Debug/Clone/DeepSizeOf/PartialEq, containing ExactSet(HashSet<u64>) or Bloom{bitmap,num_bits,number_of_items,probability}. KeyExistenceFilter publicly exposes ordered field IDs and filter with same derives. Comment says only created for primary-key matching ON columns, but public fields and constructors do not enforce that condition."
+        ],
+        [
+          170,
+          186,
+          "from_bloom_filter is a forwarding build convenience. intersects returns tuple(intersection,possible_false_positive). Exact/Exact checks whether any u64 hash from left is in right and returns(has,false), including false for empty sets. Mixed Exact/Bloom returns(true,true) unconditionally, even for empties, because representations use different hashes. No field-ID comparison or original-value confirmation."
+        ],
+        [
+          187,
+          214,
+          "Bloom/Bloom first compares expected item count and absolute probability difference >f64::EPSILON, errors InvalidInput with both config pairs on mismatch, then delegates Sbbf::bytes_might_intersect and maps errors to InvalidInput. num_bits and field_ids are ignored. Returns(has,has), so disjoint is(false,false), overlap(true,true). NaN or equal infinities can evade probability-difference rejection because the comparison is false for NaN. Byte-length/layout compatibility is delegated; core method checks only equal lengths and any shared bit, not element-level overlap."
+        ],
+        [
+          215,
+          245,
+          "From<&filter> preserves field_ids, emits Exact hashes in HashSet iteration order (not canonical) or clones all Bloom fields unchanged. No config, num_bits/bitmap consistency, hash-version or field validation. It constructs protobuf but does not write transaction files."
+        ],
+        [
+          246,
+          281,
+          "TryFrom<&protobuf> deduplicates exact hashes by HashSet; for Bloom copies bytes/num_bits and replaces only zero number_of_items/probability with defaults8192/0.00057 for compatibility. Other values including NaN/negative probabilities are accepted. Missing data becomes empty ExactSet. Clones field_ids and always returns Ok locally; malformed bitmaps are not decoded/validated here."
+        ],
+        [
+          282,
+          310,
+          "extract_key_value_from_batch visits on_columns in supplied order, resolves exact top-level schema names, returns None if missing, null at row_idx or unsupported extraction. Empty column list returns None, one returns bare key, many Composite. Duplicate column names are allowed; no dotted nested-path resolution or row bounds check. A bad row index can trigger Arrow access panic rather than None. Owns copied strings/binary/nested data."
+        ],
+        [
+          311,
+          344,
+          "Private extractor supports Utf8/LargeUtf8 -> owned String, UInt64/Int64 directly, UInt32/Int32 widened to64 bits, Binary/LargeBinary -> owned Vec. String/binary downcast failures return None; numeric AsArray casts rely on matching concrete Arrow representation. This helper does not itself check top-level validity; its callers do. Floats, bool, decimals, dates/timestamps, small integers and view types fall through unsupported."
+        ],
+        [
+          345,
+          372,
+          "List and LargeList downcast with unwrap, obtain row child array then recursively extract each element in order. Any null/unsupported child aborts entire key. Empty list yields Some(List(empty)); both list widths share representation. Capacity preallocated to child length; arbitrary nesting may recurse and allocate repeatedly. FixedSizeList is not handled."
+        ],
+        [
+          373,
+          390,
+          "Struct downcasts fallibly, walks columns in schema order at same row index, rejects any null/unsupported child and recursively creates Struct(Vec). Field names/type metadata are not encoded in KeyValue. Empty struct would produce empty Struct. All other data types return None; successful branch wrapped Some."
+        ],
+        [
+          391,
+          449,
+          "cfg(test) imports and Int32 list fixture produces[1,2] and[3,4,5], asserts widened Int64 elements/lengths and differing hash_value for these two samples. It does not prove collision freedom."
+        ],
+        [
+          450,
+          478,
+          "Empty Int32 list fixture asserts extraction succeeds with empty List. It does not test null list versus empty or filter encoding equivalences."
+        ],
+        [
+          479,
+          526,
+          "UTF8 list fixture asserts lists[a,bc] and[de] contents/lengths and differing explicit hashes. No embedded-NUL or ambiguous-boundary case."
+        ],
+        [
+          527,
+          564,
+          "List null-child fixture accepts[1,2] and returns None for[3,null], checking both content and null rejection. Outer list null, deeply nested null and unsupported children are not covered."
+        ],
+        [
+          565,
+          619,
+          "Int32 struct fixture with columns a,b extracts[1,2] and[3,4] as widened Int64 Struct, verifies contents and differing sample hashes. Names are used only to construct Arrow schema, not included in keys."
+        ],
+        [
+          620,
+          674,
+          "UTF8 struct fixture extracts alice/smith and bob/jones in column order, verifies contents/length and differing hashes. No composite multi-ON-column fixture here."
+        ],
+        [
+          675,
+          718,
+          "Struct null-child fixture accepts first row[1,2] and rejects second[null,3]. All tests read, not executed. This file has no direct builder/config/intersection/protobuf roundtrip fixture; core Bloom tests cover lower-level algorithms, not full concurrent transaction correctness."
+        ]
+      ],
+      "limits": "Every718 lines read. Public module exposes filter/key APIs, but primary-key eligibility, commit conflict callers, serialization sites and concurrent transaction outcomes remain pending. Hash collisions/ambiguous bytes are local deductions, not reproduced failures. No build/test/benchmark run."
+    },
+    {
+      "path": "rust/lance-table/src/format.rs",
+      "module": "L1-modules/rust-lance-table.md",
+      "reviewed": true,
+      "role": "Public metadata facade, generated table bindings, manifest footer identifiers and UUID conversions.",
+      "ranges": [
+        [
+          1,
+          14,
+          "Imports Arrow byte-slice conversion and UUID. fragment, index, manifest, row_ids and transaction are private child modules, while key_existence and overlay are public. Visibility of reexported types is determined by the following explicit facade declarations."
+        ],
+        [
+          15,
+          30,
+          "Reexports the three row dataset-version types from rowids::version; every public fragment item; IndexFile/IndexMetadata/index_metadata_codec/list_index_files_with_sizes; the listed manifest/version/schema-reader helpers; external/inline row-id types and reserved field IDs; Transaction and operation_may_change_schema. Private-module paths themselves remain inaccessible externally. Fragment, manifest and row-ID/transaction wrappers are now covered in their L2 entries; index metadata is now covered; row-version implementation targets remain pending."
+        ],
+        [
+          31,
+          38,
+          "Uses core Error/Result. Public Index aliases IndexMetadata with deprecated(since=0.36.1, note=Use IndexMetadata instead); the preceding comment attributes the rename to trait-name conflicts. No wrapper object or conversion is introduced."
+        ],
+        [
+          39,
+          50,
+          "Public pb module includes OUT_DIR/lance.table.rs generated during the build. Generated code relaxes the named Clippy/naming/unused/improper_ctypes lints locally. The module contains no handwritten wire definitions."
+        ],
+        [
+          51,
+          56,
+          "Manifest footer identifiers are signed i16 MAJOR_VERSION=0, MINOR_VERSION=1 and four-byte MAGIC=LANC. These are table-manifest identifiers; this file does not specify footer byte order or data-file v2 version handling."
+        ],
+        [
+          57,
+          70,
+          "TryFrom<&pb::Uuid> for uuid::Uuid rejects lengths other than16 with InvalidInput text Protobuf UUID is malformed. Otherwise copies bytes into a stack [u8;16] and constructs Uuid::from_bytes. It validates length, not UUID version/variant semantics."
+        ],
+        [
+          71,
+          78,
+          "From<&Uuid> for pb::Uuid copies the UUID bytes into a new Vec field. Conversion is infallible and does not parse or format a textual UUID."
+        ]
+      ],
+      "limits": "Only this file is analyzed; imported implementations and downstream consumers remain pending unless separately listed in the manifest. No Rust build or test was run."
+    }
+  ]
+}

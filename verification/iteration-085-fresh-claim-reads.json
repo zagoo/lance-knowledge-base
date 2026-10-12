@@ -1,0 +1,128 @@
+[
+  {
+    "id": 1,
+    "path": "rust/lance-encoding/src/encodings/physical/rle.rs",
+    "start": 1084,
+    "end": 1118,
+    "unit": "lines",
+    "read_at": "2026-10-04T16:16:38.086Z",
+    "evidence": "1084 |                     &all_buffers,\n1085 |                     &chunks,\n1086 |                     1,\n1087 |                     self.run_length_width.bits_per_value(),\n1088 |                     self.run_lengths_compression,\n1089 |                     self.use_child_bitpacking,\n1090 |                 )?;\n1091 |                 let (values, run_lengths) =\n1092 |                     Self::select_child_candidates(values_candidates, run_lengths_candidates);\n1093 |                 let chunks = chunks\n1094 |                     .into_iter()\n1095 |                     .enumerate()\n1096 |                     .map(|(idx, chunk)| MiniBlockChunk {\n1097 |                         buffer_sizes: vec![values.chunk_sizes[idx], run_lengths.chunk_sizes[idx]],\n1098 |                         log_num_values: chunk.log_num_values,\n1099 |                     })\n1100 |                     .collect();\n1101 | \n1102 |                 let compressed = MiniBlockCompressed {\n1103 |                     data: vec![values.data, run_lengths.data],\n1104 |                     chunks,\n1105 |                     num_values,\n1106 |                 };\n1107 | \n1108 |                 let encoding = ProtobufUtils21::rle(values.encoding, run_lengths.encoding);\n1109 | \n1110 |                 Ok((compressed, encoding))\n1111 |             }\n1112 |             _ => Err(Error::invalid_input_source(\n1113 |                 \"RLE encoding only supports FixedWidth data blocks\".into(),\n1114 |             )),\n1115 |         }\n1116 |     }\n1117 | }\n1118 | "
+  },
+  {
+    "id": 2,
+    "path": "rust/lance-encoding/src/compression.rs",
+    "start": 2341,
+    "end": 2382,
+    "unit": "lines",
+    "read_at": "2026-10-04T16:16:38.087Z",
+    "evidence": "2341 |     #[test]\n2342 |     #[cfg(feature = \"bitpacking\")]\n2343 |     fn test_rle_miniblock_strategy_bitpacks_child_values_when_smaller() {\n2344 |         let field = create_test_field(\"dict_indices\", DataType::Int32);\n2345 | \n2346 |         let mut values = Vec::with_capacity(8192 * 4);\n2347 |         for value in 0..8192 {\n2348 |             values.extend(std::iter::repeat_n(value, 4));\n2349 |         }\n2350 |         let mut data = FixedWidthDataBlock {\n2351 |             bits_per_value: 32,\n2352 |             data: LanceBuffer::reinterpret_vec(values),\n2353 |             num_values: 8192 * 4,\n2354 |             block_info: BlockInfo::default(),\n2355 |         };\n2356 |         data.compute_stat();\n2357 |         let data = DataBlock::FixedWidth(data);\n2358 | \n2359 |         let strategy = strategy(TestEncoding::StructuralSparse, CompressionParams::default());\n2360 |         let compressor = strategy.create_miniblock_compressor(&field, &data).unwrap();\n2361 |         let debug_str = format!(\"{compressor:?}\");\n2362 |         assert!(debug_str.contains(\"RleEncoder\"));\n2363 | \n2364 |         let (_compressed, encoding) = compressor.compress(miniblock_context(), data).unwrap();\n2365 |         let Compression::Rle(rle) = encoding.compression.as_ref().unwrap() else {\n2366 |             panic!(\"expected RLE encoding\");\n2367 |         };\n2368 |         assert!(matches!(\n2369 |             rle.values.as_ref().unwrap().compression.as_ref().unwrap(),\n2370 |             Compression::OutOfLineBitpacking(_)\n2371 |         ));\n2372 |         assert!(matches!(\n2373 |             rle.run_lengths\n2374 |                 .as_ref()\n2375 |                 .unwrap()\n2376 |                 .compression\n2377 |                 .as_ref()\n2378 |                 .unwrap(),\n2379 |             Compression::Flat(_)\n2380 |         ));\n2381 |     }\n2382 | "
+  },
+  {
+    "id": 6,
+    "path": "rust/lance-encoding/src/repdef.rs",
+    "start": 2143,
+    "end": 2196,
+    "unit": "lines",
+    "read_at": "2026-10-04T16:16:38.087Z",
+    "evidence": "2143 | /// A [`ControlWordIterator`] when there are both repetition and definition levels\n2144 | ///\n2145 | /// The iterator will put the repetition level in the upper bits and the definition\n2146 | /// level in the lower bits.  The number of bits used for each level is determined\n2147 | /// by the width of the repetition and definition levels.\n2148 | #[derive(Debug)]\n2149 | pub struct BinaryControlWordIterator<I: Iterator<Item = (u16, u16)>, W> {\n2150 |     repdef: I,\n2151 |     def_width: usize,\n2152 |     max_rep: u16,\n2153 |     max_visible_def: u16,\n2154 |     rep_mask: u16,\n2155 |     def_mask: u16,\n2156 |     bits_rep: u8,\n2157 |     bits_def: u8,\n2158 |     phantom: std::marker::PhantomData<W>,\n2159 | }\n2160 | \n2161 | impl<I: Iterator<Item = (u16, u16)>> BinaryControlWordIterator<I, u8> {\n2162 |     fn append_next(&mut self, buf: &mut Vec<u8>) -> Option<ControlWordDesc> {\n2163 |         let next = self.repdef.next()?;\n2164 |         let control_word: u8 =\n2165 |             (((next.0 & self.rep_mask) as u8) << self.def_width) + ((next.1 & self.def_mask) as u8);\n2166 |         buf.push(control_word);\n2167 |         let is_new_row = next.0 == self.max_rep;\n2168 |         let is_visible = next.1 <= self.max_visible_def;\n2169 |         let is_valid_item = next.1 == 0;\n2170 |         Some(ControlWordDesc {\n2171 |             is_new_row,\n2172 |             is_visible,\n2173 |             is_valid_item,\n2174 |         })\n2175 |     }\n2176 | }\n2177 | \n2178 | impl<I: Iterator<Item = (u16, u16)>> BinaryControlWordIterator<I, u16> {\n2179 |     fn append_next(&mut self, buf: &mut Vec<u8>) -> Option<ControlWordDesc> {\n2180 |         let next = self.repdef.next()?;\n2181 |         let control_word: u16 =\n2182 |             ((next.0 & self.rep_mask) << self.def_width) + (next.1 & self.def_mask);\n2183 |         let control_word = control_word.to_le_bytes();\n2184 |         buf.push(control_word[0]);\n2185 |         buf.push(control_word[1]);\n2186 |         let is_new_row = next.0 == self.max_rep;\n2187 |         let is_visible = next.1 <= self.max_visible_def;\n2188 |         let is_valid_item = next.1 == 0;\n2189 |         Some(ControlWordDesc {\n2190 |             is_new_row,\n2191 |             is_visible,\n2192 |             is_valid_item,\n2193 |         })\n2194 |     }\n2195 | }\n2196 | "
+  },
+  {
+    "id": 7,
+    "path": "rust/lance-core/src/error.rs",
+    "start": 1076,
+    "end": 1095,
+    "unit": "lines",
+    "read_at": "2026-10-04T16:16:38.087Z",
+    "evidence": "1076 | struct DisplayError(Error);\n1077 | \n1078 | impl fmt::Debug for DisplayError {\n1079 |     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {\n1080 |         fmt::Display::fmt(self, f)\n1081 |     }\n1082 | }\n1083 | \n1084 | impl fmt::Display for DisplayError {\n1085 |     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {\n1086 |         fmt::Display::fmt(&self.0, f)\n1087 |     }\n1088 | }\n1089 | \n1090 | impl std::error::Error for DisplayError {\n1091 |     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {\n1092 |         Some(&self.0)\n1093 |     }\n1094 | }\n1095 | "
+  },
+  {
+    "id": 8,
+    "path": "rust/lance-file/src/reader.rs",
+    "start": 2375,
+    "end": 2400,
+    "unit": "lines",
+    "read_at": "2026-10-04T16:16:38.088Z",
+    "evidence": "2375 |     fn try_from_self_described_lance(bytes: Bytes) -> Result<Self>\n2376 |     where\n2377 |         Self: Sized,\n2378 |     {\n2379 |         let footer = FileReader::decode_footer(&bytes)?;\n2380 |         let file_version = FileReader::current_file_version(&footer)?;\n2381 | \n2382 |         let file_len = bytes.len() as u64;\n2383 |         let gbo_table = FileReader::do_decode_gbo_table(\n2384 |             &bytes.slice(footer.global_buff_offsets_start as usize..),\n2385 |             &footer,\n2386 |         )?;\n2387 |         FileReader::validate_gbo_table(&gbo_table, file_len, file_version)?;\n2388 |         if gbo_table.is_empty() {\n2389 |             return Err(Error::internal(\n2390 |                 \"File did not contain any global buffers, schema expected\".to_string(),\n2391 |             ));\n2392 |         }\n2393 |         let schema_range = gbo_table[0].checked_range(0, file_len)?;\n2394 |         let schema_start = schema_range.start as usize;\n2395 |         let schema_end = schema_range.end as usize;\n2396 | \n2397 |         let schema_bytes = bytes.slice(schema_start..schema_end);\n2398 |         let (_, schema) = FileReader::decode_schema(schema_bytes)?;\n2399 |         let projection = versions::reader_projection_from_whole_schema(&schema, file_version);\n2400 | "
+  },
+  {
+    "id": 9,
+    "path": "rust/lance-table/src/transaction/operation.rs",
+    "start": 113,
+    "end": 136,
+    "unit": "lines",
+    "read_at": "2026-10-04T16:16:38.088Z",
+    "evidence": "113 |     /// Replace data in a column in the dataset with new data. This is used for\n114 |     /// null column population where we replace an entirely null column with a\n115 |     /// new column that has data.\n116 |     ///\n117 |     /// This operation will only allow replacing files that contain the same schema\n118 |     /// e.g. if the original files contain columns A, B, C and the new files contain\n119 |     /// only columns A, B then the operation is not allowed. As we would need to split\n120 |     /// the original files into two files, one with column A, B and the other with column C.\n121 |     ///\n122 |     /// Corollary to the above: the operation will also not allow replacing files unless the\n123 |     /// affected columns all have the same datafile layout across the fragments being replaced.\n124 |     ///\n125 |     /// e.g. if fragments being replaced contain files with different schema layouts on\n126 |     /// the column being replaced, the operation is not allowed.\n127 |     /// say `frag_1: [A] [B, C]` and `frag_2: [A, B] [C]` and we are trying to replace column A\n128 |     /// with a new column A, the operation is not allowed.\n129 |     DataReplacement {\n130 |         replacements: Vec<DataReplacementGroup>,\n131 |     },\n132 |     /// Attach overlay files to fragments, supplying new values for a subset of\n133 |     /// `(physical offset, field)` cells without rewriting the fragments' base\n134 |     /// data files. See [`DataOverlayFile`] and the Data Overlay Files\n135 |     /// specification for resolution, coverage, and versioning rules.\n136 |     DataOverlay { groups: Vec<DataOverlayGroup> },"
+  },
+  {
+    "id": 10,
+    "path": "rust/lance-file/src/writer.rs",
+    "start": 281,
+    "end": 294,
+    "unit": "lines",
+    "read_at": "2026-10-04T16:16:38.088Z",
+    "evidence": "281 |     /// Return the field-id to physical-column mapping.\n282 |     pub fn field_id_to_column_indices(&self) -> &[(u32, u32)] {\n283 |         match self {\n284 |             Self::V2_0(writer) => writer.field_id_to_column_indices(),\n285 |             Self::V2_1(writer) => writer.field_id_to_column_indices(),\n286 |             Self::V2_2(writer) => writer.field_id_to_column_indices(),\n287 |             Self::V2_3(writer) => writer.field_id_to_column_indices(),\n288 |         }\n289 |     }\n290 | }\n291 | \n292 | #[cfg(test)]\n293 | #[path = \"writer_tests.rs\"]\n294 | mod writer_tests;"
+  },
+  {
+    "id": 11,
+    "path": "rust/lance-encoding/src/encoder.rs",
+    "start": 36,
+    "end": 54,
+    "unit": "lines",
+    "read_at": "2026-10-04T16:16:49.914Z",
+    "evidence": "36 | /// The minimum alignment for a page buffer.  Writers must respect this.\n37 | pub const MIN_PAGE_BUFFER_ALIGNMENT: u64 = 8;\n38 | \n39 | /// An array encoded with the `pb::ArrayEncoding` grammar.\n40 | #[derive(Debug)]\n41 | pub struct EncodedArray {\n42 |     pub data: DataBlock,\n43 |     pub encoding: pb::ArrayEncoding,\n44 | }\n45 | \n46 | impl EncodedArray {\n47 |     pub fn new(data: DataBlock, encoding: pb::ArrayEncoding) -> Self {\n48 |         Self { data, encoding }\n49 |     }\n50 | \n51 |     pub fn into_buffers(self) -> (Vec<LanceBuffer>, pb::ArrayEncoding) {\n52 |         (self.data.into_buffers(), self.encoding)\n53 |     }\n54 | }"
+  },
+  {
+    "id": 12,
+    "path": "rust/lance-core/src/cache/mod.rs",
+    "start": 570,
+    "end": 592,
+    "unit": "lines",
+    "read_at": "2026-10-04T16:16:49.915Z",
+    "evidence": "570 | /// A weak reference to a LanceCache, used by indices to avoid circular references.\n571 | /// When the original cache is dropped, operations on this will gracefully no-op.\n572 | #[derive(Clone, Debug)]\n573 | pub struct WeakLanceCache {\n574 |     state: Weak<CacheState>,\n575 |     namespace: key::CacheNamespace,\n576 | }\n577 | \n578 | impl WeakLanceCache {\n579 |     pub fn from(cache: &LanceCache) -> Self {\n580 |         Self {\n581 |             state: Arc::downgrade(&cache.state),\n582 |             namespace: cache.namespace,\n583 |         }\n584 |     }\n585 | \n586 |     pub fn with_key_prefix(&self, prefix: &str) -> Self {\n587 |         Self {\n588 |             state: self.state.clone(),\n589 |             namespace: self.namespace.child(prefix),\n590 |         }\n591 |     }\n592 | "
+  },
+  {
+    "id": 14,
+    "path": "rust/lance-core/src/utils/row_addr_remap.rs",
+    "start": 518,
+    "end": 553,
+    "unit": "lines",
+    "read_at": "2026-10-04T16:16:49.915Z",
+    "evidence": "518 | impl Hasher for IntHasher {\n519 |     /// Folds the high half down: multiplication only carries upward, so without this\n520 |     /// the low bits — which hashbrown uses to pick the bucket — would ignore the high\n521 |     /// bits of the key, and fragment ids strided by a power of two would all land in\n522 |     /// one bucket.\n523 |     #[inline]\n524 |     fn finish(&self) -> u64 {\n525 |         self.0 ^ (self.0 >> 32)\n526 |     }\n527 | \n528 |     #[inline]\n529 |     fn write(&mut self, bytes: &[u8]) {\n530 |         // Fallback for key types this module does not use.\n531 |         for &b in bytes {\n532 |             self.0 = (self.0 ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3);\n533 |         }\n534 |     }\n535 | \n536 |     #[inline]\n537 |     fn write_u32(&mut self, value: u32) {\n538 |         self.0 = u64::from(value).wrapping_mul(0x9E37_79B9_7F4A_7C15);\n539 |     }\n540 | \n541 |     #[inline]\n542 |     fn write_u64(&mut self, value: u64) {\n543 |         self.0 = value.wrapping_mul(0x9E37_79B9_7F4A_7C15);\n544 |     }\n545 | \n546 |     #[inline]\n547 |     fn write_usize(&mut self, value: usize) {\n548 |         self.write_u64(value as u64);\n549 |     }\n550 | }\n551 | \n552 | /// `HashMap` over single-integer keys, hashed with [`IntHasher`].\n553 | type IntMap<K, V> = HashMap<K, V, BuildHasherDefault<IntHasher>>;"
+  },
+  {
+    "id": 15,
+    "path": "rust/lance-table/src/transaction/conflicts.rs",
+    "start": 726,
+    "end": 733,
+    "unit": "lines",
+    "read_at": "2026-10-04T16:16:49.915Z",
+    "evidence": "726 |             (\n727 |                 Self::UpdateMemWalState {\n728 |                     compacted_sstables: a_compacted,\n729 |                 },\n730 |                 Self::UpdateMemWalState {\n731 |                     compacted_sstables: b_compacted,\n732 |                 },\n733 |             ) => compare_vec(a_compacted, b_compacted),"
+  },
+  {
+    "id": 16,
+    "path": "rust/lance-core/src/cache/backend_uri.rs",
+    "start": 199,
+    "end": 221,
+    "unit": "lines",
+    "read_at": "2026-10-04T16:16:49.915Z",
+    "evidence": "199 |     #[test]\n200 |     fn test_parse_host_style() {\n201 |         // Redis-style URI with host:port + path segment. All of it lives\n202 |         // under the \"path\" option; the backend is responsible for\n203 |         // interpreting it.\n204 |         let cfg = parse_backend_uri(\"redis://localhost:6379/0?prefix=lance\").unwrap();\n205 |         assert_eq!(cfg.kind, \"redis\");\n206 |         assert_eq!(\n207 |             cfg.options.get(\"path\").map(String::as_str),\n208 |             Some(\"localhost:6379/0\"),\n209 |         );\n210 |         assert_eq!(cfg.options.get(\"prefix\").map(String::as_str), Some(\"lance\"));\n211 |     }\n212 | \n213 |     #[test]\n214 |     fn test_scheme_is_lowercased() {\n215 |         // Different upper/lower cases must resolve to the same registry\n216 |         // key, otherwise `Moka://` and `moka://` would look up different\n217 |         // backends.\n218 |         let cfg = parse_backend_uri(\"MOKA://?capacity=1\").unwrap();\n219 |         assert_eq!(cfg.kind, \"moka\");\n220 |     }\n221 | "
+  },
+  {
+    "id": 17,
+    "path": "rust/lance-table/src/transaction/manifest_build.rs",
+    "start": 3058,
+    "end": 3092,
+    "unit": "lines",
+    "read_at": "2026-10-04T16:16:49.915Z",
+    "evidence": "3058 |     #[test]\n3059 |     fn test_create_index_build_manifest_keeps_unremoved_same_name_indices() {\n3060 |         let manifest = sample_manifest();\n3061 |         let first_index = sample_index_metadata(\"vector_idx\");\n3062 |         let second_index = sample_index_metadata(\"vector_idx\");\n3063 |         let third_index = sample_index_metadata(\"vector_idx\");\n3064 | \n3065 |         let transaction = Transaction::new(\n3066 |             manifest.version,\n3067 |             Operation::CreateIndex {\n3068 |                 new_indices: vec![third_index.clone()],\n3069 |                 removed_indices: vec![second_index.clone()],\n3070 |             },\n3071 |             None,\n3072 |         );\n3073 | \n3074 |         let (_, final_indices) = transaction\n3075 |             .build_manifest(\n3076 |                 Some(&manifest),\n3077 |                 vec![first_index.clone(), second_index.clone()],\n3078 |                 \"txn\",\n3079 |                 &default_build_config(),\n3080 |             )\n3081 |             .unwrap();\n3082 | \n3083 |         assert_eq!(final_indices.len(), 2);\n3084 |         assert!(final_indices.iter().any(|idx| idx.uuid == first_index.uuid));\n3085 |         assert!(final_indices.iter().any(|idx| idx.uuid == third_index.uuid));\n3086 |         assert!(\n3087 |             !final_indices\n3088 |                 .iter()\n3089 |                 .any(|idx| idx.uuid == second_index.uuid)\n3090 |         );\n3091 |     }\n3092 | "
+  },
+  {
+    "id": 20,
+    "path": "rust/lance-table/src/transaction/index_maintenance.rs",
+    "start": 793,
+    "end": 837,
+    "unit": "lines",
+    "read_at": "2026-10-04T16:16:49.916Z",
+    "evidence": "793 | #[cfg(test)]\n794 | mod tests {\n795 |     use super::*;\n796 |     use crate::transaction::test_support::overlay_with_field;\n797 |     use uuid::Uuid;\n798 | \n799 |     #[test]\n800 |     fn test_ordered_rewrite_groups_split_and_mixed() {\n801 |         use crate::format::pb::fragment_reuse_index_details as pb_fri;\n802 |         let group = |old_ids: &[u64], new_ids: &[u64]| RewriteGroup {\n803 |             old_fragments: old_ids.iter().map(|&id| Fragment::new(id)).collect(),\n804 |             new_fragments: new_ids.iter().map(|&id| Fragment::new(id)).collect(),\n805 |         };\n806 |         let groups = vec![group(&[0, 1], &[10]), group(&[2], &[11])];\n807 | \n808 |         // No stable partition: every group takes part in bitmap maintenance.\n809 |         assert_eq!(\n810 |             Transaction::ordered_rewrite_groups(&groups, None)\n811 |                 .unwrap()\n812 |                 .len(),\n813 |             2\n814 |         );\n815 | \n816 |         // Group [0, 1] is reordered: only group [2] remains ordered.\n817 |         let digest = |id: u64| pb_fri::FragmentDigest {\n818 |             id,\n819 |             physical_rows: 4,\n820 |             num_deleted_rows: 0,\n821 |         };\n822 |         let reordered = crate::transaction::reordered_sources(&[pb_fri::Transition {\n823 |             sources: vec![digest(0), digest(1)],\n824 |             destinations: vec![digest(10), digest(10)],\n825 |             mapping: None,\n826 |         }])\n827 |         .unwrap();\n828 |         let ordered = Transaction::ordered_rewrite_groups(&groups, Some(&reordered)).unwrap();\n829 |         assert_eq!(ordered.len(), 1);\n830 |         assert_eq!(ordered[0].old_fragments[0].id, 2);\n831 | \n832 |         // A group straddling reordered and order-preserving sources is\n833 |         // rejected.\n834 |         let mixed = vec![group(&[1, 2], &[10])];\n835 |         assert!(Transaction::ordered_rewrite_groups(&mixed, Some(&reordered)).is_err());\n836 |     }\n837 | "
+  }
+]

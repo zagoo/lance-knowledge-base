@@ -1,0 +1,225 @@
+@@ -0,0 +1,423 @@
+    1 +// SPDX-License-Identifier: Apache-2.0
+    2 +// SPDX-FileCopyrightText: Copyright The Lance Authors
+    3 +// SPDX-FileCopyrightText: Copyright 2023 Datafuse Labs
+    4 +// Adapted from databendlabs/jsonb at commit fba895c5ebe77ce2539e187f9c652f51cbf195c3.
+    5 +
+    6 +use super::constants::*;
+    7 +use super::error::Error;
+    8 +use super::error::ParseErrorCode;
+    9 +
+   10 +#[allow(clippy::zero_prefixed_literal)]
+   11 +static HEX: [u8; 256] = {
+   12 +    const __: u8 = 255; // not a hex digit
+   13 +    [
+   14 +        //   1   2   3   4   5   6   7   8   9   A   B   C   D   E   F
+   15 +        __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, // 0
+   16 +        __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, // 1
+   17 +        __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, // 2
+   18 +        00, 01, 02, 03, 04, 05, 06, 07, 08, 09, __, __, __, __, __, __, // 3
+   19 +        __, 10, 11, 12, 13, 14, 15, __, __, __, __, __, __, __, __, __, // 4
+   20 +        __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, // 5
+   21 +        __, 10, 11, 12, 13, 14, 15, __, __, __, __, __, __, __, __, __, // 6
+   22 +        __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, // 7
+   23 +        __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, // 8
+   24 +        __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, // 9
+   25 +        __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, // A
+   26 +        __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, // B
+   27 +        __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, // C
+   28 +        __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, // D
+   29 +        __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, // E
+   30 +        __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, // F
+   31 +    ]
+   32 +};
+   33 +
+   34 +pub fn parse_string(mut data: &[u8], len: usize, idx: &mut usize) -> Result<String, Error> {
+   35 +    let mut buf = Vec::with_capacity(len);
+   36 +    let mut str_buf = String::with_capacity(4);
+   37 +    while !data.is_empty() {
+   38 +        *idx += 1;
+   39 +        let byte = data[0];
+   40 +        if byte == b'\\' {
+   41 +            data = &data[1..];
+   42 +            data = parse_escaped_string(data, idx, &mut str_buf)?;
+   43 +            buf.extend_from_slice(str_buf.as_bytes());
+   44 +            str_buf.clear();
+   45 +        } else {
+   46 +            buf.push(byte);
+   47 +            data = &data[1..];
+   48 +        }
+   49 +    }
+   50 +    String::from_utf8(buf).map_err(|_| Error::Syntax(ParseErrorCode::InvalidStringValue, *idx))
+   51 +}
+   52 +
+   53 +fn parse_escaped_string<'a>(
+   54 +    mut data: &'a [u8],
+   55 +    idx: &mut usize,
+   56 +    str_buf: &mut String,
+   57 +) -> Result<&'a [u8], Error> {
+   58 +    if data.is_empty() {
+   59 +        return Err(Error::Syntax(
+   60 +            ParseErrorCode::UnexpectedEndOfHexEscape,
+   61 +            *idx,
+   62 +        ));
+   63 +    }
+   64 +
+   65 +    let byte = data[0];
+   66 +    *idx += 1;
+   67 +    data = &data[1..];
+   68 +    match byte {
+   69 +        b'\\' => str_buf.push(BS),
+   70 +        b'"' => str_buf.push(QU),
+   71 +        b'/' => str_buf.push(SD),
+   72 +        b'b' => str_buf.push(BB),
+   73 +        b'f' => str_buf.push(FF),
+   74 +        b'n' => str_buf.push(NN),
+   75 +        b'r' => str_buf.push(RR),
+   76 +        b't' => str_buf.push(TT),
+   77 +        b'u' => {
+   78 +            let mut numbers = [0u8; UNICODE_LEN];
+   79 +            // Parse the first Unicode escape sequence
+   80 +            data = parse_unicode_escape(data, idx, &mut numbers)?;
+   81 +            let hex = decode_hex_escape(&numbers, idx)?;
+   82 +
+   83 +            let c = match hex {
+   84 +                0xDC00..=0xDFFF => {
+   85 +                    // Low surrogate without preceding high surrogate
+   86 +                    encode_invalid_unicode(&numbers, str_buf);
+   87 +                    return Ok(data);
+   88 +                }
+   89 +
+   90 +                // Non-BMP characters are encoded as a sequence of two hex
+   91 +                // escapes, representing UTF-16 surrogates.
+   92 +                n1 @ 0xD800..=0xDBFF => {
+   93 +                    // High surrogate - check for following low surrogate
+   94 +                    if data.len() < 2 {
+   95 +                        encode_invalid_unicode(&numbers, str_buf);
+   96 +                        return Ok(data);
+   97 +                    }
+   98 +
+   99 +                    // Check for \u sequence
+  100 +                    if data[0] == b'\\' && data[1] == b'u' {
+  101 +                        *idx += 2;
+  102 +                        data = &data[2..];
+  103 +                    } else {
+  104 +                        encode_invalid_unicode(&numbers, str_buf);
+  105 +                        return Ok(data);
+  106 +                    }
+  107 +
+  108 +                    let mut lower_numbers = [0u8; UNICODE_LEN];
+  109 +                    // Parse the second Unicode escape sequence
+  110 +                    data = parse_unicode_escape(data, idx, &mut lower_numbers)?;
+  111 +                    let n2 = decode_hex_escape(&lower_numbers, idx)?;
+  112 +                    if !(0xDC00..=0xDFFF).contains(&n2) {
+  113 +                        encode_invalid_unicode(&numbers, str_buf);
+  114 +                        encode_invalid_unicode(&lower_numbers, str_buf);
+  115 +                        return Ok(data);
+  116 +                    }
+  117 +
+  118 +                    #[allow(clippy::precedence)]
+  119 +                    let n = (((n1 - 0xD800) as u32) << 10 | (n2 - 0xDC00) as u32) + 0x1_0000;
+  120 +
+  121 +                    match char::from_u32(n) {
+  122 +                        Some(ch) => ch,
+  123 +                        None => {
+  124 +                            // Handle invalid Unicode code points gracefully
+  125 +                            // If we somehow got an invalid code point, preserve the original escape sequence
+  126 +                            encode_invalid_unicode(&numbers, str_buf);
+  127 +                            encode_invalid_unicode(&lower_numbers, str_buf);
+  128 +                            return Ok(data);
+  129 +                        }
+  130 +                    }
+  131 +                }
+  132 +
+  133 +                // Regular Unicode code points
+  134 +                n => match char::from_u32(n as u32) {
+  135 +                    Some(ch) => ch,
+  136 +                    None => {
+  137 +                        // Handle invalid code points gracefully
+  138 +                        encode_invalid_unicode(&numbers, str_buf);
+  139 +                        return Ok(data);
+  140 +                    }
+  141 +                },
+  142 +            };
+  143 +            str_buf.push(c);
+  144 +        }
+  145 +        other => return Err(Error::Syntax(ParseErrorCode::InvalidEscaped(other), *idx)),
+  146 +    }
+  147 +    Ok(data)
+  148 +}
+  149 +
+  150 +/// Parse a Unicode escape sequence and return the updated data slice
+  151 +///
+  152 +/// This helper function handles both standard \uXXXX and extended \u{XXXX} formats,
+  153 +/// extracting the hex digits into the provided buffer.
+  154 +#[inline]
+  155 +fn parse_unicode_escape<'a>(
+  156 +    mut data: &'a [u8],
+  157 +    idx: &mut usize,
+  158 +    numbers: &mut [u8; UNICODE_LEN],
+  159 +) -> Result<&'a [u8], Error> {
+  160 +    if data.len() < UNICODE_LEN {
+  161 +        return Err(Error::Syntax(
+  162 +            ParseErrorCode::UnexpectedEndOfHexEscape,
+  163 +            *idx,
+  164 +        ));
+  165 +    }
+  166 +    // Handle \u{XXXX} format (with braces)
+  167 +    if data[0] == b'{' {
+  168 +        if data.len() < UNICODE_LEN + 2 {
+  169 +            return Err(Error::Syntax(
+  170 +                ParseErrorCode::UnexpectedEndOfHexEscape,
+  171 +                *idx,
+  172 +            ));
+  173 +        }
+  174 +
+  175 +        numbers.copy_from_slice(&data[1..UNICODE_LEN + 1]);
+  176 +        if data[UNICODE_LEN + 1] != b'}' {
+  177 +            return Err(Error::Syntax(
+  178 +                ParseErrorCode::UnexpectedEndOfHexEscape,
+  179 +                *idx,
+  180 +            ));
+  181 +        }
+  182 +
+  183 +        data = &data[UNICODE_LEN + 2..];
+  184 +        *idx += UNICODE_LEN + 2;
+  185 +    } else {
+  186 +        // Standard \uXXXX format
+  187 +        numbers.copy_from_slice(&data[..UNICODE_LEN]);
+  188 +        data = &data[UNICODE_LEN..];
+  189 +        *idx += UNICODE_LEN;
+  190 +    }
+  191 +
+  192 +    Ok(data)
+  193 +}
+  194 +
+  195 +// https://datatracker.ietf.org/doc/html/rfc8259#section-8.2
+  196 +// RFC8259 allow invalid Unicode
+  197 +#[inline]
+  198 +fn encode_invalid_unicode(numbers: &[u8], str_buf: &mut String) {
+  199 +    str_buf.push('\\');
+  200 +    str_buf.push('u');
+  201 +    for n in numbers {
+  202 +        str_buf.push((*n).into());
+  203 +    }
+  204 +}
+  205 +
+  206 +#[inline]
+  207 +fn decode_hex_val(val: u8) -> Option<u16> {
+  208 +    let n = HEX[val as usize] as u16;
+  209 +    if n == 255 { None } else { Some(n) }
+  210 +}
+  211 +
+  212 +#[inline]
+  213 +fn decode_hex_escape(numbers: &[u8], idx: &usize) -> Result<u16, Error> {
+  214 +    let mut n = 0;
+  215 +    for number in numbers {
+  216 +        if let Some(hex) = decode_hex_val(*number) {
+  217 +            n = (n << 4) + hex;
+  218 +        } else {
+  219 +            return Err(Error::Syntax(ParseErrorCode::InvalidHex(*number), *idx));
+  220 +        }
+  221 +    }
+  222 +    Ok(n)
+  223 +}
+  224 +

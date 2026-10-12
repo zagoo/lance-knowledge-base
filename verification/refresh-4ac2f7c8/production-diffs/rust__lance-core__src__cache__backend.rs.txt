@@ -1,0 +1,85 @@
+@@ -45,6 +45,20 @@ use super::{CacheCodec, InternalCacheKey};
+   45  /// A type-erased cache entry.
+   46  pub type CacheEntry = Arc<dyn Any + Send + Sync>;
+   47  
+   48 +/// The tier that would serve a read of an entry, as
+   49 +/// [`CacheBackend::peek_tier`] predicts it.
+   50 +#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+   51 +pub enum CacheTier {
+   52 +    /// In RAM: a read is a memory hit.
+   53 +    Resident,
+   54 +    /// Not in RAM but held by a local tier below it, such as a persistent
+   55 +    /// store or a buffer of recently evicted entries: a read costs local I/O
+   56 +    /// at most, never the caller's loader.
+   57 +    Local,
+   58 +    /// Held by no tier: a read runs the caller's loader.
+   59 +    Absent,
+   60 +}
+   61 +
+   62  /// Low-level pluggable cache backend.
+   63  ///
+   64  /// Implementations store entries keyed by [`InternalCacheKey`] and return
+
+@@ -53,6 +67,62 @@ pub type CacheEntry = Arc<dyn Any + Send + Sync>;
+   67  /// backend authors only need to implement storage and eviction.
+   68  #[async_trait]
+   69  pub trait CacheBackend: Send + Sync + std::fmt::Debug {
+   70 +    /// Look up RAM only, without reading or promoting a persistent entry.
+   71 +    /// Backends without a resident lookup return a miss safely.
+   72 +    async fn get_resident(&self, _key: &InternalCacheKey) -> Option<CacheEntry> {
+   73 +        None
+   74 +    }
+   75 +
+   76 +    /// Report whether `key` is resident in RAM without counting as an access,
+   77 +    /// so a residency probe does not change what the backend evicts next.
+   78 +    /// The default uses [`get_resident`](Self::get_resident), which backends
+   79 +    /// with recency state may treat as an access.
+   80 +    async fn peek_resident(&self, key: &InternalCacheKey) -> bool {
+   81 +        self.get_resident(key).await.is_some()
+   82 +    }
+   83 +
+   84 +    /// Predict which tier would serve a read of `key`, without reading the
+   85 +    /// entry or counting as an access, so the check changes neither what the
+   86 +    /// backend evicts next nor its hit statistics. The default knows RAM only,
+   87 +    /// through [`peek_resident`](Self::peek_resident), and reports every other
+   88 +    /// entry as [`CacheTier::Absent`]; backends with a local tier below RAM
+   89 +    /// override it.
+   90 +    async fn peek_tier(&self, key: &InternalCacheKey) -> CacheTier {
+   91 +        if self.peek_resident(key).await {
+   92 +            CacheTier::Resident
+   93 +        } else {
+   94 +            CacheTier::Absent
+   95 +        }
+   96 +    }
+   97 +
+   98 +    /// Whether layered index planes should gate lower-plane RAM admission on
+   99 +    /// their sign plane being resident. Backends that admit plane entries
+  100 +    /// through their ordinary policy return `false`, so lower planes are
+  101 +    /// loaded and admitted like any other entry.
+  102 +    fn plane_admission_gated(&self) -> bool {
+  103 +        true
+  104 +    }
+  105 +
+  106 +    /// Read an entry without admitting a persistent hit into RAM.
+  107 +    /// Backends without this capability safely fall back to resident entries.
+  108 +    async fn get_without_promotion(
+  109 +        &self,
+  110 +        key: &InternalCacheKey,
+  111 +        _codec: Option<CacheCodec>,
+  112 +    ) -> Option<CacheEntry> {
+  113 +        self.get_resident(key).await
+  114 +    }
+  115 +
+  116 +    /// Gather selected rows from persistent storage, without RAM admission.
+  117 +    async fn get_rows(
+  118 +        &self,
+  119 +        _key: &InternalCacheKey,
+  120 +        _rows: &[u32],
+  121 +        _codec: Option<CacheCodec>,
+  122 +    ) -> Option<CacheEntry> {
+  123 +        None
+  124 +    }
+  125 +
+  126      /// Look up an entry by its key.
+  127      ///
+  128      /// `codec` is provided so that persistent backends can deserialize the

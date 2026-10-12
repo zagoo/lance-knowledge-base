@@ -1,0 +1,162 @@
+[
+  {
+    "id": 1,
+    "path": "rust/lance-table/src/system_index/frag_reuse/ledger.rs",
+    "start": 845,
+    "end": 877,
+    "read_at": "2026-10-03T18:30:24.005Z",
+    "evidence": "845 |     #[test]\n846 |     fn version_gate() {\n847 |         assert!(\n848 |             FragReuseLedger::decode_content(0, Bytes::new())\n849 |                 .unwrap()\n850 |                 .transitions()\n851 |                 .is_empty()\n852 |         );\n853 |         let error = FragReuseLedger::decode_content(2, Bytes::new()).unwrap_err();\n854 |         assert!(matches!(error, Error::NotSupported { .. }));\n855 |         assert!(error.to_string().contains(\"index_version 2\"));\n856 |         assert_corrupt(\n857 |             FragReuseLedger::decode_content(0, history(vec![partition(1, 2)])),\n858 |             \"index_version 1\",\n859 |         );\n860 |     }\n861 |     #[rstest]\n862 |     #[case::inline(false)]\n863 |     #[case::external(true)]\n864 |     #[tokio::test]\n865 |     async fn legacy_writer_round_trip_and_remap_equivalence(#[case] external: bool) {\n866 |         let group = |sources, destinations, addresses: &[u64]| {\n867 |             let transition = ordered(sources, destinations, addresses);\n868 |             let Some(transition::Mapping::OrderedCompaction(mapping)) = transition.mapping else {\n869 |                 unreachable!()\n870 |             };\n871 |             FragReuseGroup::try_from(pb::Group {\n872 |                 old_fragments: transition.sources,\n873 |                 new_fragments: transition.destinations,\n874 |                 changed_row_addrs: mapping.changed_row_addrs,\n875 |             })\n876 |             .unwrap()\n877 |         };"
+  },
+  {
+    "id": 2,
+    "path": "rust/lance-core/src/cache/moka.rs",
+    "start": 124,
+    "end": 134,
+    "read_at": "2026-10-03T18:30:24.005Z",
+    "evidence": "124 |     async fn get_or_insert<'a>(\n125 |         &self,\n126 |         key: &InternalCacheKey,\n127 |         loader: Pin<Box<dyn Future<Output = Result<(CacheEntry, usize)>> + Send + 'a>>,\n128 |         _codec: Option<CacheCodec>,\n129 |     ) -> Result<(CacheEntry, bool)> {\n130 |         // Avoid Moka's single-flight waiters when nothing can be cached.\n131 |         if self.capacity == 0 {\n132 |             return loader.await.map(|(entry, _)| (entry, false));\n133 |         }\n134 | "
+  },
+  {
+    "id": 3,
+    "path": "rust/lance-table/src/rowids.rs",
+    "start": 398,
+    "end": 430,
+    "read_at": "2026-10-03T18:30:24.005Z",
+    "evidence": "398 |     /// Find the row ids in the sequence.\n399 |     ///\n400 |     /// Returns the row ids sorted by their appearance in the sequence.\n401 |     /// Also returns the segment index and the range where that segment's\n402 |     /// row id matches are found in the returned row id vector.\n403 |     fn find_ids(\n404 |         &self,\n405 |         row_ids: impl IntoIterator<Item = u64>,\n406 |     ) -> (Vec<u64>, Vec<(usize, Range<usize>)>) {\n407 |         // Often, the row ids will already be provided in the order they appear.\n408 |         // So the optimal way to search will be to cycle through rather than\n409 |         // restarting the search from the beginning each time.\n410 |         let mut segment_iter = self.0.iter().enumerate().cycle();\n411 | \n412 |         let mut segment_matches = vec![Vec::new(); self.0.len()];\n413 | \n414 |         row_ids.into_iter().for_each(|row_id| {\n415 |             let mut i = 0;\n416 |             // If we've cycled through all segments, we know the row id is not in the sequence.\n417 |             while i < self.0.len() {\n418 |                 let (segment_idx, segment) = segment_iter.next().unwrap();\n419 |                 if segment.range().is_some_and(|range| range.contains(&row_id))\n420 |                     && let Some(offset) = segment.position(row_id)\n421 |                 {\n422 |                     segment_matches.get_mut(segment_idx).unwrap().push(offset);\n423 |                     // The row id was not found it the segment. It might be in a later segment.\n424 |                 }\n425 |                 i += 1;\n426 |             }\n427 |         });\n428 |         for matches in &mut segment_matches {\n429 |             matches.sort_unstable();\n430 |         }"
+  },
+  {
+    "id": 4,
+    "path": "rust/lance-table/src/system_index/frag_reuse/gate.rs",
+    "start": 113,
+    "end": 127,
+    "read_at": "2026-10-03T18:30:24.005Z",
+    "evidence": "113 |     // The history's own maintenance operation.\n114 |     if appends_transitions {\n115 |         return Ok(Admission::AppendsTransitions);\n116 |     }\n117 | \n118 |     // A rewrite that carries neither an entry nor transition intent is still\n119 |     // safe when no current index, the entry included (its bitmap holds the\n120 |     // recorded lineage), covers any rewritten fragment: it cannot invalidate\n121 |     // stored provenance or the lineage, and bitmap maintenance is a no-op for\n122 |     // fragments no bitmap contains. Deferred compaction of never-covered data\n123 |     // commits this shape instead of growing the history with untrimmable\n124 |     // transitions. Fragment ids beyond the row-address range can never appear\n125 |     // in an index bitmap, so they are uncovered by definition. Only histories\n126 |     // this writer understands (index_version 1) qualify: a future entry\n127 |     // version may change what its bitmap means. Empty rewrites stay refused."
+  },
+  {
+    "id": 5,
+    "path": "rust/lance-file/src/writer.rs",
+    "start": 117,
+    "end": 140,
+    "read_at": "2026-10-03T18:30:24.005Z",
+    "evidence": "117 | impl From<versions::v2_0::Writer> for FileWriter {\n118 |     fn from(writer: versions::v2_0::Writer) -> Self {\n119 |         Self::V2_0(Box::new(writer))\n120 |     }\n121 | }\n122 | \n123 | impl From<versions::v2_1::Writer> for FileWriter {\n124 |     fn from(writer: versions::v2_1::Writer) -> Self {\n125 |         Self::V2_1(Box::new(writer))\n126 |     }\n127 | }\n128 | \n129 | impl From<versions::v2_2::Writer> for FileWriter {\n130 |     fn from(writer: versions::v2_2::Writer) -> Self {\n131 |         Self::V2_2(Box::new(writer))\n132 |     }\n133 | }\n134 | \n135 | impl From<versions::v2_3::Writer> for FileWriter {\n136 |     fn from(writer: versions::v2_3::Writer) -> Self {\n137 |         Self::V2_3(Box::new(writer))\n138 |     }\n139 | }\n140 | "
+  },
+  {
+    "id": 6,
+    "path": "rust/lance-core/src/utils/stable_partition.rs",
+    "start": 683,
+    "end": 697,
+    "read_at": "2026-10-03T18:30:33.203Z",
+    "evidence": "683 |     #[test]\n684 |     fn test_translate_in_block_input_checks() {\n685 |         let labels = [Some(0), Some(1), None, Some(0)];\n686 |         let counts = build(&labels, 2, 4);\n687 |         let (values, validity) = block_slices(&labels, &counts, 0);\n688 |         // Wrong slice length and out-of-range row are rejected.\n689 |         assert!(translate_in_block(&counts, 0, &values[..3], None, 0).is_err());\n690 |         assert!(translate_in_block(&counts, 0, &values, validity.as_ref(), 4).is_err());\n691 |         // A label outside the destination list is data corruption.\n692 |         assert!(translate_in_block(&counts, 0, &[0, 9, 0, 0], None, 1).is_err());\n693 |         assert!(SweepTranslator::new(&counts, 1).is_err());\n694 |         let mut sweep = SweepTranslator::new(&counts, 0).unwrap();\n695 |         assert!(sweep.advance(Some(9)).is_err());\n696 |     }\n697 | }"
+  },
+  {
+    "id": 7,
+    "path": "rust/lance-table/src/rowids/version.rs",
+    "start": 916,
+    "end": 952,
+    "read_at": "2026-10-03T18:30:33.204Z",
+    "evidence": "916 |     #[test]\n917 |     fn test_partial_refresh_streams_many_lineage_runs() {\n918 |         const ROWS: usize = 10_000;\n919 |         let prior_sequence = RowDatasetVersionSequence {\n920 |             runs: (0..ROWS)\n921 |                 .map(|position| RowDatasetVersionRun {\n922 |                     span: U64Segment::Range(position as u64..position as u64 + 1),\n923 |                     version: (position % 2 + 1) as u64,\n924 |                 })\n925 |                 .collect(),\n926 |         };\n927 |         let mut fragment = Fragment::new(1);\n928 |         fragment.physical_rows = Some(ROWS);\n929 |         fragment.last_updated_at_version_meta =\n930 |             Some(RowDatasetVersionMeta::from_sequence(&prior_sequence).unwrap());\n931 | \n932 |         refresh_row_latest_update_meta_for_partial_frag_rewrite_cols(\n933 |             &mut fragment,\n934 |             &[ROWS - 1],\n935 |             3,\n936 |             1,\n937 |             &Default::default(),\n938 |         )\n939 |         .unwrap();\n940 | \n941 |         let refreshed = fragment\n942 |             .last_updated_at_version_meta\n943 |             .unwrap()\n944 |             .load_sequence()\n945 |             .unwrap();\n946 |         assert_eq!(refreshed.len(), ROWS as u64);\n947 |         assert_eq!(refreshed.version_at(0), Some(1));\n948 |         assert_eq!(refreshed.version_at(1), Some(2));\n949 |         assert_eq!(refreshed.version_at(ROWS - 2), Some(1));\n950 |         assert_eq!(refreshed.version_at(ROWS - 1), Some(3));\n951 |     }\n952 | "
+  },
+  {
+    "id": 8,
+    "path": "rust/lance-table/src/io/commit/external_manifest.rs",
+    "start": 1639,
+    "end": 1676,
+    "read_at": "2026-10-03T18:30:33.204Z",
+    "evidence": "1639 |         let pending = external_store\n1640 |             .get_manifest_location(base_path.as_ref(), version)\n1641 |             .await\n1642 |             .unwrap();\n1643 |         assert_ne!(pending.path, final_path);\n1644 |         object_store\n1645 |             .inner\n1646 |             .head(&pending.path)\n1647 |             .await\n1648 |             .expect(\"staging must remain until the external index is repaired\");\n1649 | \n1650 |         let repaired = handler\n1651 |             .resolve_version_location(&base_path, version, object_store.inner.as_ref())\n1652 |             .await\n1653 |             .expect(\"a reader must be able to repair the pending external index\");\n1654 |         assert_eq!(repaired.path, final_path);\n1655 |         assert!(\n1656 |             repaired.e_tag.is_some(),\n1657 |             \"a helping reader must receive the generation it observed\"\n1658 |         );\n1659 |         let indexed = external_store\n1660 |             .get_manifest_location(base_path.as_ref(), version)\n1661 |             .await\n1662 |             .unwrap();\n1663 |         assert_eq!(indexed.path, final_path);\n1664 |         assert_eq!(indexed.size, repaired.size);\n1665 |         assert_eq!(\n1666 |             indexed.e_tag, None,\n1667 |             \"the repaired index must not retain a physical object generation\"\n1668 |         );\n1669 |         let staging_error = object_store\n1670 |             .inner\n1671 |             .head(&pending.path)\n1672 |             .await\n1673 |             .expect_err(\"repair should garbage-collect the retained staging object\");\n1674 |         assert!(matches!(staging_error, ObjectStoreError::NotFound { .. }));\n1675 |     }\n1676 | "
+  },
+  {
+    "id": 9,
+    "path": "rust/lance-table/benches/row_id_index.rs",
+    "start": 364,
+    "end": 398,
+    "read_at": "2026-10-03T18:30:33.204Z",
+    "evidence": "364 | /// `start..end` minus about `holes_pct` percent of its slots, as sorted holes.\n365 | fn holes_segment(start: u64, end: u64, holes_pct: u8, seed: u64) -> pb::U64Segment {\n366 |     let holes: Vec<u32> = (0..(end - start))\n367 |         .filter(|offset| hash_byte(*offset, seed) % 100 < holes_pct)\n368 |         .map(|offset| offset as u32)\n369 |         .collect();\n370 |     let offsets = holes.iter().flat_map(|hole| hole.to_le_bytes()).collect();\n371 |     pb::U64Segment {\n372 |         segment: Some(pb::u64_segment::Segment::RangeWithHoles(\n373 |             pb::u64_segment::RangeWithHoles {\n374 |                 start,\n375 |                 end,\n376 |                 holes: Some(pb::EncodedU64Array {\n377 |                     array: Some(pb::encoded_u64_array::Array::U32Array(\n378 |                         pb::encoded_u64_array::U32Array {\n379 |                             base: start,\n380 |                             offsets,\n381 |                         },\n382 |                     )),\n383 |                 }),\n384 |             },\n385 |         )),\n386 |     }\n387 | }\n388 | \n389 | fn range_segment(start: u64, end: u64) -> pb::U64Segment {\n390 |     pb::U64Segment {\n391 |         segment: Some(pb::u64_segment::Segment::Range(pb::u64_segment::Range {\n392 |             start,\n393 |             end,\n394 |         })),\n395 |     }\n396 | }\n397 | \n398 | /// A live row id from `segment`, or `None` when the sampled slot is a hole."
+  },
+  {
+    "id": 10,
+    "path": "rust/lance-table/src/rowids.rs",
+    "start": 1090,
+    "end": 1113,
+    "read_at": "2026-10-03T18:30:33.205Z",
+    "evidence": "1090 |         ReadBatchParams::Range(range) => {\n1091 |             if range.end > sequence.len() as usize {\n1092 |                 return Err(out_of_bounds_err(range.end as u32));\n1093 |             }\n1094 |             let sequence = sequence.slice(range.start, range.end - range.start);\n1095 |             Ok(sequence.iter().collect())\n1096 |         }\n1097 |         ReadBatchParams::Ranges(ranges) => {\n1098 |             let num_rows = ranges\n1099 |                 .iter()\n1100 |                 .map(|r| (r.end - r.start) as usize)\n1101 |                 .sum::<usize>();\n1102 |             let mut result = Vec::with_capacity(num_rows);\n1103 |             for range in ranges.as_ref() {\n1104 |                 if range.end > sequence.len() {\n1105 |                     return Err(out_of_bounds_err(range.end as u32));\n1106 |                 }\n1107 |                 let sequence =\n1108 |                     sequence.slice(range.start as usize, (range.end - range.start) as usize);\n1109 |                 result.extend(sequence.iter());\n1110 |             }\n1111 |             Ok(result)\n1112 |         }\n1113 | "
+  },
+  {
+    "id": 11,
+    "path": "rust/lance-core/src/utils/bloomfilter/as_bytes.rs",
+    "start": 140,
+    "end": 153,
+    "read_at": "2026-10-03T18:30:41.558Z",
+    "evidence": "140 |     #[test]\n141 |     fn test_str_as_bytes() {\n142 |         let val = \"hello\";\n143 |         let bytes = AsBytes::as_bytes(val);\n144 |         assert_eq!(bytes.as_ref(), b\"hello\");\n145 |     }\n146 | \n147 |     #[test]\n148 |     fn test_slice_as_bytes() {\n149 |         let val: &[u8] = &[1, 2, 3, 4, 5];\n150 |         let bytes = val.as_bytes();\n151 |         assert_eq!(bytes.as_ref(), &[1, 2, 3, 4, 5]);\n152 |     }\n153 | "
+  },
+  {
+    "id": 12,
+    "path": "rust/lance-core/src/utils/tracing.rs",
+    "start": 71,
+    "end": 77,
+    "read_at": "2026-10-03T18:30:41.559Z",
+    "evidence": "71 | pub const TRACE_IO_EVENTS: &str = \"lance::io_events\";\n72 | pub const IO_TYPE_OPEN_SCALAR: &str = \"open_scalar_index\";\n73 | pub const IO_TYPE_OPEN_VECTOR: &str = \"open_vector_index\";\n74 | pub const IO_TYPE_OPEN_FRAG_REUSE: &str = \"open_frag_reuse_index\";\n75 | pub const IO_TYPE_OPEN_MEM_WAL: &str = \"open_mem_wal_index\";\n76 | pub const IO_TYPE_LOAD_VECTOR_PART: &str = \"load_vector_part\";\n77 | pub const IO_TYPE_LOAD_SCALAR_PART: &str = \"load_scalar_part\";"
+  },
+  {
+    "id": 13,
+    "path": "rust/lance-table/src/rowids/runs.rs",
+    "start": 173,
+    "end": 181,
+    "read_at": "2026-10-03T18:30:41.559Z",
+    "evidence": "173 |     /// Offset of the present value at `position`.\n174 |     pub fn offset_at(&self, position: u32) -> Option<u32> {\n175 |         if position >= self.present_len() {\n176 |             return None;\n177 |         }\n178 |         let k = self.runs_before_position(position);\n179 |         Some(position + self.missing_before(k))\n180 |     }\n181 | "
+  },
+  {
+    "id": 14,
+    "path": "rust/lance-table/src/rowids/version.rs",
+    "start": 375,
+    "end": 391,
+    "read_at": "2026-10-03T18:30:41.559Z",
+    "evidence": "375 | impl<'a> Iterator for VersionsIter<'a> {\n376 |     type Item = u64;\n377 | \n378 |     fn next(&mut self) -> Option<Self::Item> {\n379 |         if self.remaining_in_run == 0 {\n380 |             // Move to next run\n381 |             self.run_idx += 1;\n382 |             if self.run_idx >= self.runs.len() {\n383 |                 return None;\n384 |             }\n385 |             self.advance_run();\n386 |         }\n387 |         self.remaining_in_run = self.remaining_in_run.saturating_sub(1);\n388 |         Some(self.current_version)\n389 |     }\n390 | }\n391 | "
+  },
+  {
+    "id": 15,
+    "path": "rust/lance-core/src/error.rs",
+    "start": 1113,
+    "end": 1139,
+    "read_at": "2026-10-03T18:30:41.559Z",
+    "evidence": "1113 |         match &self.0 {\n1114 |             Error::NotFound { uri, .. } => Self(Error::wrapped(Box::new(DisplayError(\n1115 |                 Error::not_found(uri.clone()),\n1116 |             )))),\n1117 |             error if error.is_not_found() => Self(Error::wrapped(Box::new(DisplayError(\n1118 |                 Error::not_found(error.to_string()),\n1119 |             )))),\n1120 |             Error::Timeout { message, .. } => Self(Error::timeout(message.clone())),\n1121 |             Error::IO { source, .. } => Self(Error::io(source.to_string())),\n1122 |             // Callers react to these via `fence_reason` / `is_backpressure`\n1123 |             // rather than the message; collapsing them into a cloned string\n1124 |             // would silently drop that signal across the clone boundary.\n1125 |             Error::Fenced {\n1126 |                 reason, message, ..\n1127 |             } => Self(\n1128 |                 FencedSnafu {\n1129 |                     reason: *reason,\n1130 |                     message: message.clone(),\n1131 |                 }\n1132 |                 .build(),\n1133 |             ),\n1134 |             Error::Backpressure { message, .. } => Self(Error::backpressure(message.clone())),\n1135 |             error => Self(Error::cloned(error.to_string())),\n1136 |         }\n1137 |     }\n1138 | }\n1139 | "
+  },
+  {
+    "id": 16,
+    "path": "rust/lance-table/src/transaction/test_support.rs",
+    "start": 178,
+    "end": 199,
+    "read_at": "2026-10-03T18:30:48.322Z",
+    "evidence": "178 |     let details = crate::format::pb::FragmentReuseIndexDetails {\n179 |         content: Some(Content::Inline(InlineContent {\n180 |             legacy_versions: vec![],\n181 |             transitions: encoded,\n182 |         })),\n183 |     };\n184 |     let mut entry = sample_index_metadata(crate::system_index::frag_reuse::FRAG_REUSE_INDEX_NAME);\n185 |     entry.fields.clear();\n186 |     entry.fragment_bitmap = Some(\n187 |         transitions\n188 |             .iter()\n189 |             .flat_map(|(sources, destinations)| sources.iter().chain(destinations.iter()))\n190 |             .map(|id| *id as u32)\n191 |             .collect(),\n192 |     );\n193 |     entry.index_details = Some(Arc::new(prost_types::Any {\n194 |         type_url: \"/lance.table.FragmentReuseIndexDetails\".into(),\n195 |         value: details.encode_to_vec(),\n196 |     }));\n197 |     entry.index_version = 1;\n198 |     entry\n199 | }"
+  },
+  {
+    "id": 17,
+    "path": "rust/lance-table/src/transaction/manifest_build.rs",
+    "start": 5203,
+    "end": 5217,
+    "read_at": "2026-10-03T18:30:48.323Z",
+    "evidence": "5203 |         /// Two indexes advance independently: one covering, one behind.\n5204 |         #[test]\n5205 |         fn indexes_are_credited_independently() {\n5206 |             let shard = Uuid::new_v4();\n5207 |             let read = vec![\n5208 |                 user_index(\"fast\", Uuid::new_v4(), &[0, 1]),\n5209 |                 user_index(\"slow\", Uuid::new_v4(), &[0]),\n5210 |                 mem_wal_index(progress(shard, 6)),\n5211 |             ];\n5212 |             let mut after = read.clone();\n5213 |             apply(&mut after, &read, &[0, 1], &read).unwrap();\n5214 |             assert_eq!(coverage_for(&after, \"fast\"), Some(compacted(shard, 6)));\n5215 |             assert_eq!(coverage_for(&after, \"slow\"), None);\n5216 |         }\n5217 | "
+  },
+  {
+    "id": 18,
+    "path": "rust/lance-core/src/cache/codec.rs",
+    "start": 209,
+    "end": 230,
+    "read_at": "2026-10-03T18:30:48.323Z",
+    "evidence": "209 | pub trait CacheCodecImpl: Send + Sync {\n210 |     /// Stable identity for this entry type. **Must not change once shipped.**\n211 |     /// This is a deliberate author-assigned string, not `std::any::type_name`\n212 |     /// (which is not stable across compiler versions).\n213 |     const TYPE_ID: &'static str;\n214 | \n215 |     /// Body schema version this build writes. Bump when the body layout\n216 |     /// changes in a way protobuf field additions cannot express transparently\n217 |     /// (adding/removing/reordering sections, a raw-blob encoding change, etc.).\n218 |     const CURRENT_VERSION: u32;\n219 | \n220 |     /// Write the body: a header, then sections in a fixed order.\n221 |     fn serialize(&self, writer: &mut CacheEntryWriter<'_>) -> Result<()>;\n222 | \n223 |     /// Reconstruct from the body. Branch on\n224 |     /// [`reader.version()`](CacheEntryReader::version) for backward compat;\n225 |     /// sections are read in write order.\n226 |     fn deserialize(reader: &mut CacheEntryReader<'_>) -> Result<Self>\n227 |     where\n228 |         Self: Sized;\n229 | }\n230 | "
+  },
+  {
+    "id": 19,
+    "path": "rust/lance-file/src/writer.rs",
+    "start": 56,
+    "end": 66,
+    "read_at": "2026-10-03T18:30:48.323Z",
+    "evidence": "56 | impl FileWriterOptions {\n57 |     pub(crate) fn validate(&self) -> Result<()> {\n58 |         if self.max_page_bytes == Some(0) {\n59 |             return Err(Error::invalid_input(\n60 |                 \"max_page_bytes must be greater than 0, got 0\",\n61 |             ));\n62 |         }\n63 |         Ok(())\n64 |     }\n65 | }\n66 | "
+  },
+  {
+    "id": 20,
+    "path": "rust/lance-file/src/versions/v2_2/mod.rs",
+    "start": 84,
+    "end": 103,
+    "read_at": "2026-10-03T18:30:48.323Z",
+    "evidence": "84 |         if field.is_blob() {\n85 |             return Err(Error::invalid_input_source(\n86 |                 format!(\n87 |                     \"Blob encoding is not available for field '{}' with data type {}\",\n88 |                     field.name,\n89 |                     field.data_type()\n90 |                 )\n91 |                 .into(),\n92 |             ));\n93 |         }\n94 |         if let Some(encoder) = try_create_map(field, column_index, context)? {\n95 |             return Ok(encoder);\n96 |         }\n97 |         if let Some(encoder) = try_create_structural_fixed_size_list(field, column_index, context)?\n98 |         {\n99 |             return Ok(encoder);\n100 |         }\n101 |         if let Some(encoder) = self.primitive.try_create(field, column_index, context)? {\n102 |             return Ok(encoder);\n103 |         }"
+  }
+]

@@ -1,0 +1,101 @@
+[
+  {
+    "id": 2,
+    "path": "rust/lance-table/src/transaction/row_version.rs",
+    "start": 1105,
+    "end": 1142,
+    "unit": "lines",
+    "read_at": "2026-10-04T02:56:58.350Z",
+    "evidence": "1105 |     #[test]\n1106 |     fn test_update_version_tracking_source_fragment_no_created_at_defaults_to_1() {\n1107 |         // Source fragment has row_id_meta but no created_at_version_meta.\n1108 |         // The row IS found in the lookup, but the version defaults to 1.\n1109 |         let existing_seq = RowIdSequence::from([50u64, 51].as_slice());\n1110 |         let existing_fragment = Fragment {\n1111 |             id: 1,\n1112 |             files: vec![],\n1113 |             overlays: vec![],\n1114 |             deletion_file: None,\n1115 |             row_id_meta: Some(RowIdMeta::Inline(write_row_ids(&existing_seq).into())),\n1116 |             physical_rows: Some(2),\n1117 |             created_at_version_meta: None,\n1118 |             last_updated_at_version_meta: None,\n1119 |         };\n1120 | \n1121 |         let new_seq = RowIdSequence::from([50u64].as_slice());\n1122 |         let new_fragment = Fragment {\n1123 |             id: 10,\n1124 |             files: vec![],\n1125 |             overlays: vec![],\n1126 |             deletion_file: None,\n1127 |             row_id_meta: Some(RowIdMeta::Inline(write_row_ids(&new_seq).into())),\n1128 |             physical_rows: Some(1),\n1129 |             created_at_version_meta: None,\n1130 |             last_updated_at_version_meta: None,\n1131 |         };\n1132 | \n1133 |         let manifest = make_stable_row_id_manifest(vec![existing_fragment]);\n1134 |         let (result, _) = update_txn(vec![new_fragment])\n1135 |             .build_manifest(Some(&manifest), vec![], \"txn\", &default_build_config())\n1136 |             .unwrap();\n1137 | \n1138 |         // Row 50 is found in source but source has no created_at_version_meta → default 1\n1139 |         assert_eq!(created_at_versions(&result, 10), vec![1]);\n1140 |         assert_eq!(last_updated_at_versions(&result, 10), vec![5]);\n1141 |     }\n1142 | "
+  },
+  {
+    "id": 3,
+    "path": "rust/lance-table/src/transaction/conflicts.rs",
+    "start": 1011,
+    "end": 1022,
+    "unit": "lines",
+    "read_at": "2026-10-04T02:56:58.351Z",
+    "evidence": "1011 |     #[test]\n1012 |     fn test_table_metadata_conflicts_on_same_key() {\n1013 |         let left = table_metadata_update(vec![(\"key\", Some(\"1\"))], false);\n1014 |         let same_key = table_metadata_update(vec![(\"key\", Some(\"2\"))], false);\n1015 |         let different_key = table_metadata_update(vec![(\"other\", Some(\"2\"))], false);\n1016 |         let replace = table_metadata_update(vec![(\"other\", Some(\"2\"))], true);\n1017 | \n1018 |         assert!(left.modifies_same_metadata(&same_key));\n1019 |         assert!(!left.modifies_same_metadata(&different_key));\n1020 |         assert!(left.modifies_same_metadata(&replace));\n1021 |     }\n1022 | "
+  },
+  {
+    "id": 4,
+    "path": "rust/lance-core/src/cache/mod.rs",
+    "start": 1289,
+    "end": 1314,
+    "unit": "lines",
+    "read_at": "2026-10-04T02:56:58.351Z",
+    "evidence": "1289 |     #[tokio::test(flavor = \"multi_thread\", worker_threads = 2)]\n1290 |     async fn single_flight_coalesces_success_after_contenders_are_parked() {\n1291 |         const CONTENDERS: usize = 4;\n1292 | \n1293 |         let cache = Arc::new(LanceCache::with_capacity(4096));\n1294 |         let loader_calls = Arc::new(AtomicUsize::new(0));\n1295 |         let release = Arc::new(tokio::sync::Notify::new());\n1296 |         let (started_tx, started_rx) = tokio::sync::oneshot::channel();\n1297 | \n1298 |         let owner = {\n1299 |             let cache = cache.clone();\n1300 |             let loader_calls = loader_calls.clone();\n1301 |             let release = release.clone();\n1302 |             tokio::spawn(async move {\n1303 |                 cache\n1304 |                     .get_or_insert_with_key(TestKey::new(10), move || async move {\n1305 |                         loader_calls.fetch_add(1, Ordering::SeqCst);\n1306 |                         let _ = started_tx.send(());\n1307 |                         release.notified().await;\n1308 |                         Ok(vec![10])\n1309 |                     })\n1310 |                     .await\n1311 |             })\n1312 |         };\n1313 |         started_rx.await.unwrap();\n1314 | "
+  },
+  {
+    "id": 5,
+    "path": "rust/lance-table/src/rowids.rs",
+    "start": 706,
+    "end": 740,
+    "unit": "lines",
+    "read_at": "2026-10-04T02:56:58.351Z",
+    "evidence": "706 |                             let offset_start = offset;\n707 |                             if bitmap_segments > 1 {\n708 |                                 let cached = shared_cache.get_or_insert_with(|| {\n709 |                                     allow_list\n710 |                                         .row_addrs()\n711 |                                         .map(|selected| selected.map(u64::from).collect())\n712 |                                 });\n713 |                                 if let Some(ids) = cached {\n714 |                                     offset += bitmap.count_ones() as u64;\n715 |                                     let start = ids.partition_point(|id| *id < range.start);\n716 |                                     let end = ids.partition_point(|id| *id < range.end);\n717 |                                     ranges.extend(bitmap_selected_offsets(\n718 |                                         ids[start..end].iter().copied(),\n719 |                                         range,\n720 |                                         bitmap,\n721 |                                         offset_start,\n722 |                                     ));\n723 |                                     continue;\n724 |                                 }\n725 |                             } else if let Some(selected) = allow_list.row_addrs() {\n726 |                                 offset += bitmap.count_ones() as u64;\n727 |                                 let in_range = selected.filter_map(|address| {\n728 |                                     let row_id = u64::from(address);\n729 |                                     range.contains(&row_id).then_some(row_id)\n730 |                                 });\n731 |                                 ranges.extend(bitmap_selected_offsets(\n732 |                                     in_range,\n733 |                                     range,\n734 |                                     bitmap,\n735 |                                     offset_start,\n736 |                                 ));\n737 |                                 continue;\n738 |                             }\n739 |                         }\n740 |                     }"
+  },
+  {
+    "id": 6,
+    "path": "rust/lance-table/src/transaction/conflicts.rs",
+    "start": 919,
+    "end": 955,
+    "unit": "lines",
+    "read_at": "2026-10-04T02:56:58.351Z",
+    "evidence": "919 |     pub fn modifies_same_metadata(&self, other: &Self) -> bool {\n920 |         match (self, other) {\n921 |             (\n922 |                 Self::UpdateConfig {\n923 |                     table_metadata_updates,\n924 |                     schema_metadata_updates,\n925 |                     field_metadata_updates,\n926 |                     ..\n927 |                 },\n928 |                 Self::UpdateConfig {\n929 |                     table_metadata_updates: other_table_metadata,\n930 |                     schema_metadata_updates: other_schema_metadata,\n931 |                     field_metadata_updates: other_field_metadata,\n932 |                     ..\n933 |                 },\n934 |             ) => {\n935 |                 if Self::update_maps_conflict(\n936 |                     table_metadata_updates.as_ref(),\n937 |                     other_table_metadata.as_ref(),\n938 |                 ) {\n939 |                     return true;\n940 |                 }\n941 |                 if schema_metadata_updates.is_some() && other_schema_metadata.is_some() {\n942 |                     return true;\n943 |                 }\n944 |                 if !field_metadata_updates.is_empty() && !other_field_metadata.is_empty() {\n945 |                     for field in field_metadata_updates.keys() {\n946 |                         if other_field_metadata.contains_key(field) {\n947 |                             return true;\n948 |                         }\n949 |                     }\n950 |                 }\n951 |                 false\n952 |             }\n953 |             _ => false,\n954 |         }\n955 |     }"
+  },
+  {
+    "id": 11,
+    "path": "rust/lance-file/src/reader.rs",
+    "start": 1776,
+    "end": 1796,
+    "unit": "lines",
+    "read_at": "2026-10-04T02:57:12.144Z",
+    "evidence": "1776 |     async fn take_rows(\n1777 |         &self,\n1778 |         indices: Vec<u64>,\n1779 |         batch_size: u32,\n1780 |         prepared: PreparedProjection,\n1781 |     ) -> Result<BoxStream<'static, ReadBatchTask>> {\n1782 |         FileReader::do_take_rows(\n1783 |             prepared.column_infos,\n1784 |             self.scheduler.clone(),\n1785 |             self.cache.clone(),\n1786 |             self.decoder_plugins.clone(),\n1787 |             indices,\n1788 |             batch_size,\n1789 |             prepared.decoder_projection,\n1790 |             FilterExpression::no_filter(),\n1791 |             self.options.decoder_config.clone(),\n1792 |             self.options.batch_size_bytes,\n1793 |         )\n1794 |         .await\n1795 |     }\n1796 | "
+  },
+  {
+    "id": 12,
+    "path": "rust/lance-table/src/io/commit/external_manifest.rs",
+    "start": 1886,
+    "end": 1905,
+    "unit": "lines",
+    "read_at": "2026-10-04T02:57:12.145Z",
+    "evidence": "1886 |     #[tokio::test]\n1887 |     async fn test_missing_staging_rejects_missing_final_manifest() {\n1888 |         let object_store = ObjectStore::memory();\n1889 |         let staging_path = Path::from(\"dataset/_versions/1.manifest-missing\");\n1890 |         let final_path = Path::from(\"dataset/_versions/1.manifest\");\n1891 | \n1892 |         let error = copy_or_verify_final_manifest(\n1893 |             object_store.inner.as_ref(),\n1894 |             &staging_path,\n1895 |             &final_path,\n1896 |             1,\n1897 |             42,\n1898 |         )\n1899 |         .await\n1900 |         .expect_err(\"missing staging and canonical objects cannot establish a commit\");\n1901 | \n1902 |         assert!(matches!(error, Error::NotFound { .. }), \"{error:?}\");\n1903 |         assert!(error.to_string().contains(final_path.as_ref()), \"{error}\");\n1904 |     }\n1905 | "
+  },
+  {
+    "id": 14,
+    "path": "rust/lance-table/benches/row_id_index.rs",
+    "start": 205,
+    "end": 240,
+    "unit": "lines",
+    "read_at": "2026-10-04T02:57:12.145Z",
+    "evidence": "205 | fn bench_get_single(c: &mut Criterion) {\n206 |     let mut group = c.benchmark_group(\"row_id_index_get_single\");\n207 | \n208 |     for percent_deletions in [0.0, 0.02, 0.25, 0.5, 0.8] {\n209 |         let sequences = make_frag_sequences(num_rows(), 100, percent_deletions);\n210 | \n211 |         let fragment_indices: Vec<FragmentRowIdIndex> = sequences\n212 |             .iter()\n213 |             .map(|(frag_id, sequence)| FragmentRowIdIndex {\n214 |                 fragment_id: *frag_id,\n215 |                 row_id_sequence: sequence.clone(),\n216 |                 deletion_vector: Arc::new(DeletionVector::default()),\n217 |             })\n218 |             .collect();\n219 | \n220 |         let index = RowIdIndex::new(&fragment_indices).unwrap();\n221 | \n222 |         let mut i = 0;\n223 |         let total_rows: u64 = num_rows();\n224 |         let mut next_id = || {\n225 |             let id = i;\n226 |             i += 241861;\n227 |             i %= total_rows;\n228 |             id\n229 |         };\n230 | \n231 |         group.bench_with_input(\n232 |             BenchmarkId::new(\"GetIndex\", percent_deletions),\n233 |             &percent_deletions,\n234 |             |b, _| {\n235 |                 b.iter(|| {\n236 |                     let _ = index.get(next_id());\n237 |                 });\n238 |             },\n239 |         );\n240 | "
+  },
+  {
+    "id": 17,
+    "path": "rust/lance-file/src/versions/v1/encoding/binary.rs",
+    "start": 152,
+    "end": 164,
+    "unit": "lines",
+    "read_at": "2026-10-04T02:57:12.145Z",
+    "evidence": "152 | \n153 |     /// Get the position array for the batch.\n154 |     async fn get_positions(&self, index: Range<usize>) -> Result<Arc<Int64Array>> {\n155 |         let position_decoder = PlainDecoder::new(\n156 |             self.reader,\n157 |             &DataType::Int64,\n158 |             self.position,\n159 |             self.length + 1,\n160 |         )?;\n161 |         let values = position_decoder.get(index.start..index.end + 1).await?;\n162 |         Ok(Arc::new(as_primitive_array(&values).clone()))\n163 |     }\n164 | "
+  },
+  {
+    "id": 18,
+    "path": "rust/lance-table/src/transaction/manifest_build.rs",
+    "start": 3048,
+    "end": 3057,
+    "unit": "lines",
+    "read_at": "2026-10-04T02:57:12.146Z",
+    "evidence": "3048 |     fn sample_manifest_with_fragments(ids: std::ops::Range<u64>) -> Manifest {\n3049 |         let schema = ArrowSchema::new(vec![ArrowField::new(\"id\", DataType::Int32, false)]);\n3050 |         Manifest::new(\n3051 |             LanceSchema::try_from(&schema).unwrap(),\n3052 |             Arc::new(ids.map(Fragment::new).collect()),\n3053 |             DataStorageFormat::new(ConcreteFileVersion::V2_0),\n3054 |             HashMap::new(),\n3055 |         )\n3056 |     }\n3057 | "
+  },
+  {
+    "id": 20,
+    "path": "rust/lance-core/src/cache/quick.rs",
+    "start": 61,
+    "end": 75,
+    "unit": "lines",
+    "read_at": "2026-10-04T02:57:12.146Z",
+    "evidence": "61 | /// Minimum weight budget (4 GiB) per shard: shards don't borrow capacity, and\n62 | /// an entry heavier than ~its shard's budget is silently refused admission.\n63 | const MIN_SHARD_SHARE: usize = 4 << 30;\n64 | \n65 | /// Recommended shard count: `min(cpus / 2, capacity / 4 GiB)`, power of two\n66 | /// in `[1, 1024]`. The cpu term bounds lock contention; the capacity term\n67 | /// keeps each shard's budget >= 4 GiB so large entries stay admissible.\n68 | /// Rounded down because quick_cache rounds requests up.\n69 | pub fn recommended_cache_shards(capacity: usize) -> usize {\n70 |     let available_parallelism = std::thread::available_parallelism()\n71 |         .map(|n| n.get())\n72 |         .unwrap_or(2);\n73 |     recommended_cache_shards_for_parallelism(capacity, available_parallelism)\n74 | }\n75 | "
+  }
+]

@@ -1,0 +1,49 @@
+@@ -2770,6 +2770,15 @@ impl FilteredReadExec {
+ 2770              lazy_stream,
+ 2771          )))
+ 2772      }
+ 2773 +
+ 2774 +    fn retained_physical_row_count(&self, fragments: &[Fragment]) -> Option<u64> {
+ 2775 +        self.dataset.manifest().writer_version.as_ref()?;
+ 2776 +        fragments
+ 2777 +            .iter()
+ 2778 +            .map(|fragment| fragment.physical_rows)
+ 2779 +            .sum::<Option<usize>>()
+ 2780 +            .map(|physical_rows| physical_rows as u64)
+ 2781 +    }
+ 2782  }
+ 2783  
+ 2784  /// How many batches run concurrently.  Each batch's read already carries
+
+@@ -3353,13 +3362,24 @@ impl ExecutionPlan for FilteredReadExec {
+ 3362              .clone()
+ 3363              .unwrap_or_else(|| self.dataset.fragments().clone());
+ 3364  
+ 3356 -        if fragments.iter().any(|f| f.num_rows().is_none()) {
+ 3357 -            return Err(DataFusionError::Internal(
+ 3358 -                "Fragments are missing row count stats".to_string(),
+ 3359 -            ));
+ 3360 -        }
+ 3361 -
+ 3362 -        let total_rows: u64 = fragments.iter().map(|f| f.num_rows().unwrap() as u64).sum();
+ 3365 +        let total_rows = if self.options.with_deleted_rows {
+ 3366 +            if self.options.scan_range_before_filter.is_some()
+ 3367 +                || self.options.scan_range_after_filter.is_some()
+ 3368 +            {
+ 3369 +                return Ok(Arc::new(Statistics::new_unknown(self.schema().as_ref())));
+ 3370 +            }
+ 3371 +            let Some(total_rows) = self.retained_physical_row_count(fragments.as_ref()) else {
+ 3372 +                return Ok(Arc::new(Statistics::new_unknown(self.schema().as_ref())));
+ 3373 +            };
+ 3374 +            total_rows
+ 3375 +        } else {
+ 3376 +            if fragments.iter().any(|f| f.num_rows().is_none()) {
+ 3377 +                return Err(DataFusionError::Internal(
+ 3378 +                    "Fragments are missing row count stats".to_string(),
+ 3379 +                ));
+ 3380 +            }
+ 3381 +            fragments.iter().map(|f| f.num_rows().unwrap() as u64).sum()
+ 3382 +        };
+ 3383  
+ 3384          let Some(filter) = self.options.full_filter.as_ref() else {
+ 3385              // If there is no filter, we just return the total number of rows (sans any before-filter range)

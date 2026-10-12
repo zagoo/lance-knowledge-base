@@ -1,0 +1,209 @@
+@@ -0,0 +1,296 @@
+    1 +// SPDX-License-Identifier: Apache-2.0
+    2 +// SPDX-FileCopyrightText: Copyright The Lance Authors
+    3 +
+    4 +//! Metadata-only arithmetic range encoding for unsigned block sequences.
+    5 +
+    6 +use super::{checked_fixed_values, constant::ConstantEncoder, try_vec_with_capacity};
+    7 +use crate::{
+    8 +    buffer::LanceBuffer,
+    9 +    compression::{BlockCompressor, BlockDecompressor, require_no_block_payload},
+   10 +    data::{BlockInfo, DataBlock, FixedWidthDataBlock},
+   11 +    format::{ProtobufUtils21, pb21::CompressiveEncoding},
+   12 +};
+   13 +use lance_core::{Error, Result};
+   14 +
+   15 +pub(crate) fn checked_range_last(
+   16 +    bits_per_value: u64,
+   17 +    start: u64,
+   18 +    step: u64,
+   19 +    num_values: u64,
+   20 +) -> Result<u64> {
+   21 +    if !matches!(bits_per_value, 32 | 64) {
+   22 +        return Err(Error::invalid_input(format!(
+   23 +            "Range only supports 32 or 64-bit values, got {bits_per_value}"
+   24 +        )));
+   25 +    }
+   26 +    if step == 0 {
+   27 +        return Err(Error::invalid_input("Range step must be positive"));
+   28 +    }
+   29 +    if num_values < 2 {
+   30 +        return Err(Error::invalid_input(format!(
+   31 +            "Range requires at least 2 values, got {num_values}"
+   32 +        )));
+   33 +    }
+   34 +
+   35 +    let distance = step.checked_mul(num_values - 1).ok_or_else(|| {
+   36 +        Error::invalid_input(format!(
+   37 +            "Range step multiplication overflows: step={step}, num_values={num_values}"
+   38 +        ))
+   39 +    })?;
+   40 +    let last = start.checked_add(distance).ok_or_else(|| {
+   41 +        Error::invalid_input(format!(
+   42 +            "Range final value overflows: start={start}, step={step}, num_values={num_values}"
+   43 +        ))
+   44 +    })?;
+   45 +    if bits_per_value == 32 && last > u32::MAX as u64 {
+   46 +        return Err(Error::invalid_input(format!(
+   47 +            "Range final value {last} exceeds u32::MAX"
+   48 +        )));
+   49 +    }
+   50 +    Ok(last)
+   51 +}
+   52 +
+   53 +#[derive(Debug)]
+   54 +/// Encodes a validated arithmetic sequence without a payload buffer.
+   55 +pub struct RangeEncoder {
+   56 +    bits_per_value: u64,
+   57 +    start: u64,
+   58 +    step: u64,
+   59 +}
+   60 +
+   61 +impl RangeEncoder {
+   62 +    /// Creates a range codec for `u32` or `u64` values.
+   63 +    pub fn new(bits_per_value: u64, start: u64, step: u64) -> Self {
+   64 +        Self {
+   65 +            bits_per_value,
+   66 +            start,
+   67 +            step,
+   68 +        }
+   69 +    }
+   70 +
+   71 +    /// Describes a known arithmetic sequence without materializing its values.
+   72 +    /// Empty and singleton sequences use Constant; longer ranges are overflow-checked.
+   73 +    pub(crate) fn encoding(&self, num_values: u64) -> Result<CompressiveEncoding> {
+   74 +        if num_values < 2 {
+   75 +            return ConstantEncoder::new(self.bits_per_value, self.start).encoding(num_values);
+   76 +        }
+   77 +        checked_range_last(self.bits_per_value, self.start, self.step, num_values)?;
+   78 +        Ok(ProtobufUtils21::range(
+   79 +            self.bits_per_value,
+   80 +            self.start,
+   81 +            self.step,
+   82 +        ))
+   83 +    }
+   84 +}
+   85 +
+   86 +impl BlockCompressor for RangeEncoder {
+   87 +    fn compress(&self, data: DataBlock) -> Result<(Option<LanceBuffer>, CompressiveEncoding)> {
+   88 +        let DataBlock::FixedWidth(data) = data else {
+   89 +            return Err(Error::invalid_input(
+   90 +                "Range encoding requires a fixed-width data block",
+   91 +            ));
+   92 +        };
+   93 +        if data.bits_per_value != self.bits_per_value {
+   94 +            return Err(Error::invalid_input(format!(
+   95 +                "Range codec expects {}-bit values, got {}",
+   96 +                self.bits_per_value, data.bits_per_value
+   97 +            )));
+   98 +        }
+   99 +        let encoding = self.encoding(data.num_values)?;
+  100 +
+  101 +        match self.bits_per_value {
+  102 +            32 => validate_values(
+  103 +                checked_fixed_values::<u32>(&data, "Range input")?
+  104 +                    .iter()
+  105 +                    .map(|value| u64::from(*value)),
+  106 +                self.start,
+  107 +                self.step,
+  108 +            )?,
+  109 +            64 => validate_values(
+  110 +                checked_fixed_values::<u64>(&data, "Range input")?
+  111 +                    .iter()
+  112 +                    .copied(),
+  113 +                self.start,
+  114 +                self.step,
+  115 +            )?,
+  116 +            _ => unreachable!("range width was validated above"),
+  117 +        }
+  118 +        Ok((None, encoding))
+  119 +    }
+  120 +}
+  121 +
+  122 +fn validate_values(values: impl Iterator<Item = u64>, start: u64, step: u64) -> Result<()> {
+  123 +    for (index, value) in values.enumerate() {
+  124 +        let expected = step
+  125 +            .checked_mul(index as u64)
+  126 +            .and_then(|distance| start.checked_add(distance))
+  127 +            .ok_or_else(|| Error::invalid_input("Range value calculation overflows"))?;
+  128 +        if value != expected {
+  129 +            return Err(Error::invalid_input(format!(
+  130 +                "Range input mismatch at index {index}: expected {expected}, got {value}"
+  131 +            )));
+  132 +        }
+  133 +    }
+  134 +    Ok(())
+  135 +}
+  136 +
+  137 +#[derive(Debug)]
+  138 +pub(crate) struct RangeDecompressor {
+  139 +    bits_per_value: u64,
+  140 +    start: u64,
+  141 +    step: u64,
+  142 +}
+  143 +
+  144 +impl RangeDecompressor {
+  145 +    pub(crate) fn new(bits_per_value: u64, start: u64, step: u64) -> Self {
+  146 +        Self {
+  147 +            bits_per_value,
+  148 +            start,
+  149 +            step,
+  150 +        }
+  151 +    }
+  152 +}
+  153 +
+  154 +impl BlockDecompressor for RangeDecompressor {
+  155 +    fn decompress(&self, data: Option<LanceBuffer>, num_values: u64) -> Result<DataBlock> {
+  156 +        require_no_block_payload(data, "Range")?;
+  157 +        checked_range_last(self.bits_per_value, self.start, self.step, num_values)?;
+  158 +        materialize_range(self.bits_per_value, self.start, self.step, num_values)
+  159 +    }
+  160 +
+  161 +    fn requires_payload(&self) -> bool {
+  162 +        false
+  163 +    }
+  164 +}
+  165 +
+  166 +fn materialize_range(
+  167 +    bits_per_value: u64,
+  168 +    start: u64,
+  169 +    step: u64,
+  170 +    num_values: u64,
+  171 +) -> Result<DataBlock> {
+  172 +    let data = match bits_per_value {
+  173 +        32 => {
+  174 +            let mut current = u32::try_from(start).map_err(|_| {
+  175 +                Error::invalid_input(format!("Range value {start} exceeds u32::MAX"))
+  176 +            })?;
+  177 +            let step = u32::try_from(step)
+  178 +                .map_err(|_| Error::invalid_input(format!("Range step {step} exceeds u32::MAX")))?;
+  179 +            let mut values = try_vec_with_capacity::<u32>(num_values, "Range output")?;
+  180 +            for index in 0..num_values {
+  181 +                values.push(current);
+  182 +                if index + 1 < num_values {
+  183 +                    current += step;
+  184 +                }
+  185 +            }
+  186 +            LanceBuffer::reinterpret_vec(values)
+  187 +        }
+  188 +        64 => {
+  189 +            let mut current = start;
+  190 +            let mut values = try_vec_with_capacity::<u64>(num_values, "Range output")?;
+  191 +            for index in 0..num_values {
+  192 +                values.push(current);
+  193 +                if index + 1 < num_values {
+  194 +                    current += step;
+  195 +                }
+  196 +            }
+  197 +            LanceBuffer::reinterpret_vec(values)
+  198 +        }
+  199 +        _ => unreachable!("range width was validated before materialization"),
+  200 +    };
+  201 +    Ok(DataBlock::FixedWidth(FixedWidthDataBlock {
+  202 +        bits_per_value,
+  203 +        data,
+  204 +        num_values,
+  205 +        block_info: BlockInfo::default(),
+  206 +    }))
+  207 +}
+  208 +

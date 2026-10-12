@@ -1,0 +1,264 @@
+{
+  "iteration": 73,
+  "files": [
+    {
+      "path": "rust/lance-core/src/datatypes/field.rs",
+      "module": "L1-modules/rust-lance-core.md",
+      "reviewed": true,
+      "role": "Field tree representation and metadata keys, schema-comparison policy, Arrow conversion, dictionary attachment, blob layout transformations, projection/intersection/exclusion/merge and recursive field-ID operations. The module is private but its selected types/constants are re-exported by datatypes. This file includes tests of its contracts and selected Schema/Projection integration; those neighboring implementations are separately analyzed in schema.rs.",
+      "ranges": [
+        [
+          1,
+          36,
+          "SPDX and module introduction; imports supply ordering/max, HashMap/VecDeque, formatting, Arc, deep sizing, Arrow arrays and integer dictionary key types, Arrow extension/blob/JSON helpers, logical/dictionary/projection types, schema child-comparison functions, errors, canonical blob layouts and truthy parsing. Imported functions are dependencies, not implementations defined in this file."
+        ],
+        [
+          37,
+          63,
+          "Public metadata keys are lance-schema:unenforced-primary-key; lance-schema:unenforced-primary-key:position; lance-schema:unenforced-clustering-key:position; and lance:field_id. Comments specify primary-key leaf/non-null-ancestor/not-in-list constraints and one-based ordering positions; validation of those constraints is not implemented by these declarations. Field IDs are documented as nonnegative i32, with negative parsed values treated as -1. Private PACKED_KEYS accepts packed and lance-encoding:packed. The latter is an alias, not a separate packed representation."
+        ],
+        [
+          64,
+          81,
+          "Private has_blob_v2_extension checks exact ARROW extension-name metadata equality with the imported v2 extension constant. Public NullabilityComparison derives Default with Strict; OneWay means nullable expected accepts either actual nullability, while non-null expected rejects nullable actual; Ignore bypasses comparison. The concrete boolean formula is at rust/lance-core/src/datatypes/field.rs:411-421."
+        ],
+        [
+          82,
+          113,
+          "SchemaCompareOptions derives Default: compare_metadata/dictionary/field_ids, allow_missing_if_nullable, ignore_field_order and allow_subschema are false; compare_nullability defaults Strict. Comments describe nullable missing-field and source-subset behavior, implemented through schema helpers outside this file. Public BlobVersion defaults V1 (legacy position/size descriptor), with V2 for the newer descriptor. These options are data configuration, not a schema validation routine."
+        ],
+        [
+          114,
+          161,
+          "Public Encoding variants Plain, VarBinary, Dictionary and RLE describe this Field encoding metadata; do not equate them with the modern page-encoding tree. Public OnTypeMismatch has TakeSelf and Error. Public Field derives Debug, Clone, PartialEq and DeepSizeOf; every stored member is public: name, id, parent_id, logical_type, metadata, encoding, nullable, children, dictionary, unenforced_primary_key_position and unenforced_clustering_key_position. The TODO requesting private fields does not change visibility. Derived PartialEq compares the whole representation and differs from configurable compare_with_options. Position Options and logical text can be constructed without validation."
+        ],
+        [
+          162,
+          200,
+          "new_arrow constructs an ArrowField then invokes TryFrom. data_type reconstructs List/LargeList using children[0], fixed-size-list-of-struct by parsing the last logical-string component with expect and taking children[0], Struct from all children, and Map from children[0] with sorted=false; other logical strings parse through DataType::try_from(...).unwrap(). Malformed strings/missing required children can panic. has_dictionary_types checks whether the reconstructed own type is Dictionary or recursively checks Field children; it does not recursively walk every embedded Arrow DataType when no Field children exist."
+        ],
+        [
+          201,
+          273,
+          "merge_with_reference merges two child sequences using peekable cursors while traversing reference.children. A reference name equal to both heads recursively merges them; equality with one head clones/advances that one; neither equal advances neither input; exhaustion handles the remaining head similarly. It clones Self parent properties and replaces children. This preserves reference order only when relevant input heads already follow that order; it does not search/sort arbitrary children, and an unmatched head can prevent later children from appearing. Children absent from the reference are omitted. Field IDs are not the matching key; parent/type compatibility is not validated."
+        ],
+        [
+          274,
+          311,
+          "apply_projection treats Map and any is_blob field as atomic: only selection of the parent id retains it, and retention clones all children, including synthetic IDs. Other fields recursively filter children. An assertion rejects a selected nested parent with no remaining child when it originally had children. An unselected field with no surviving children returns None; otherwise a clone with projected children is passed through projection.blob_handling.unload_if_needed. Thus an unselected ancestor can survive selected descendants. BlobHandling policy is separately analyzed at rust/lance-core/src/datatypes/schema.rs:1110-1189."
+        ],
+        [
+          312,
+          397,
+          "pub(crate) explain_differences constructs a dotted path from the supplied prefix and this name (no escaping here). It reports name, optional id, logical type, nullability, optional dictionary and optional metadata differences. Child comparison delegates to explain_fields_difference, using only the shared minimal prefix when both fields are recognized logical v2 blobs; child messages are joined and wrapped. parent_id, encoding and separate primary/clustering position members are not compared by this method; metadata comparison may still observe their original metadata strings. Diagnostics retain actual/expected ordering and field-path text."
+        ],
+        [
+          398,
+          445,
+          "Public explain_difference returns None for no messages or their comma-joined string. compare_nullability(expected,actual,options) is equality for Strict, expected || !actual for OneWay, true for Ignore. compare_with_options computes children_match using the same logical-blob prefix rule, then checks name, logical type, configured nullability, children and optional id/dictionary/metadata. It does not require full derived Field equality. extension_name borrows the ARROW extension-name metadata value."
+        ],
+        [
+          446,
+          466,
+          "child/child_mut find the first immediate child with exact name. set_dictionary_values asserts that this field reconstructs as Dictionary, then attaches Arc-cloned values with offset0/length0. It does not validate the supplied values array type against the dictionary's declared value type; malformed field reconstruction can panic before the dictionary assertion."
+        ],
+        [
+          467,
+          523,
+          "set_dictionary dispatches eight integer dictionary key types to arr.as_dictionary::<T>().values() and panics on any other dictionary key type. Struct converts its field definitions, finds each mutable child by name with unwrap, casts arr.as_struct and recursively attaches column dictionaries. List/LargeList cast to i32/i64 list arrays and recurse into children[0]. Other types are no-ops, including Map and FixedSizeList. Array shape/type and child presence are caller invariants enforced only by casts/indexing/unwrap, not a Result boundary."
+        ],
+        [
+          524,
+          568,
+          "sub_field/sub_field_mut take a slice of path segments; empty means self, otherwise exact first-match child traversal. is_blob is true if BLOB_META_KEY exists regardless of its value, or if the v2 extension name matches. is_blob_v2's comment emphasizes explicit extension metadata, but implementation also recognizes the stored descriptor structurally through is_blob_v2_descriptor. Therefore a transformed descriptor without extension metadata can remain v2; ordinary arbitrary structs are not recognized solely by five names without blob metadata."
+        ],
+        [
+          569,
+          602,
+          "promote_blob_v2 recursively visits children of non-blob fields; already-v2 blobs are unchanged. A legacy blob becomes logical struct, encoding=None, with converted minimal data/uri children; it removes BLOB_META_KEY and inserts the v2 extension name. It preserves outer name/id/parent_id/nullability, dictionary, position members and other metadata. New child IDs and parent IDs start -1 and require later assignment. It returns Result and mutates logical_type/encoding before collecting converted children, so no general transactional rollback contract is encoded; built-in minimal fields are expected convertible."
+        ],
+        [
+          603,
+          643,
+          "Private blob_v2_layout requires the exact extension marker and an Arrow Struct before calling BlobV2Layout::classify. blob_v2_logical_shared_child_count returns min(child counts) only when both layouts classify Logical. Hence minimal versus complete logical blobs compare just data/uri, but two complete layouts compare all four children. is_blob_v2_descriptor requires blob metadata presence, descriptor logical type and exact child count/name/type; it ignores child nullability, child metadata, IDs, outer nullability and packed marker. is_compatible_blob_projection requires both is_blob and equal is_blob_v2 booleans, permitting loaded/descriptor representation differences."
+        ],
+        [
+          644,
+          659,
+          "unloaded_mut replaces logical_type, children and the entire metadata map with canonical v2 descriptor fields when is_blob_v2; otherwise uses the legacy descriptor for any blob; non-blobs remain unchanged. Name/id/parent_id/nullable, encoding, dictionary and position members are preserved. The cloned synthetic children carry unassigned IDs, not automatically reparented values. Replacing the metadata map discards unrelated metadata, including the extension name; structural recognition keeps a v2 descriptor recognizable."
+        ],
+        [
+          660,
+          696,
+          "binary_blob_mut returns immediately for a non-blob. Otherwise it captures v2 status, sets LargeBinary logical type with expect, clears children and sets VarBinary encoding. For v2 it removes the blob marker and both packed keys and sets the v2 extension marker; legacy metadata is retained. The comment describes later plain Arrow payload behavior, but this method retains v2 metadata and From<&Field> itself does not strip it. unload_blobs_recursive unloads a v2 field then stops recursion beneath it; otherwise it visits children. Legacy blobs are not directly unloaded by that recursive function despite its broad name."
+        ],
+        [
+          697,
+          748,
+          "project(path) clones all parent properties into a field with no children. Empty path restores all original children; a matching next child recursively projects only it. Missing next child returns Ok with empty children, rather than a missing-field error, which can later produce an invalid nested field. No atomic map/blob handling appears here. project_by_filter evaluates descendants first and retains a field if any child survives or its predicate returns true. The predicate is short-circuited for a parent with retained children. The final Returns None doc sentence omits the ancestor-retention exception, although preceding doc lines729-730 explicitly state it. Later reconstruction risk follows the child indexing at rust/lance-core/src/datatypes/field.rs:170-195."
+        ],
+        [
+          749,
+          785,
+          "pub(crate) project_by_ids recursively selects children, then returns the complete clone when the field id is selected and either no children were separately selected or include_all_children=true. If any child survives otherwise, it returns a trimmed clone; else None. Thus include_all_children=false plus parent-only selection still retains the whole subtree, while parent plus a selected child can trim it. IDs are tested with slice contains per node, not a bitmap; names and atomic blob/map semantics are not considered in this method."
+        ],
+        [
+          786,
+          817,
+          "project_by_field first rejects different names with Error::schema regardless of mode. Compatible blob representations immediately return Self unchanged. Equal booleans clone. For two primitive types or two binary-like types, unequal Arrow types produce a schema error before the fallback policy, so TakeSelf is not a universal permission to ignore type differences. These early branches must be preserved separately from the later mismatch fallback."
+        ],
+        [
+          818,
+          868,
+          "For two Structs, a blob Self is atomic and returned unchanged; otherwise project_by_field follows other.children order, looks up each requested child by exact name in Self, errors if missing, and recursively projects with the same mode. List/List, LargeList/LargeList and Map/Map recurse into children[0]; this can prune map entries and does not rerun Arrow map validation. Equal FixedSizeList child Arrow field and size, equal dictionary key/value, Null/Null and equal FixedSizeBinary width clone. Remaining mismatches return Error::schema under Error or Self under TakeSelf. Parent properties come from Self."
+        ],
+        [
+          869,
+          912,
+          "pub(crate) resolve appends self to the output chain, succeeds when no segments remain, otherwise pops the next segment and recursively follows an exact child. Failure leaves consumed input and a partial output chain. resolve_case_insensitive uses exact match first, then the first ASCII-case-insensitive match; ambiguous folded names are not diagnosed. Both are mutable traversal helpers, not rollback-safe parsers, and both exclude any independent validation of the initial root name."
+        ],
+        [
+          913,
+          952,
+          "pub(crate) do_intersection always errors with Error::arrow on differing names. If blob membership differs, ignore_types chooses whole Self when its id>=0, otherwise whole Other; strict mode errors. Compatible blobs use the same whole-field choice. This preserves a persisted field when paired with an unassigned projection, but ignore_types does not invariably preserve Self's type or metadata when Self has a negative id."
+        ],
+        [
+          953,
+          1011,
+          "After the preceding name/blob guards, Struct/Struct, List/List and Map/Map enter the matching-container branch. It first returns Self.clone() unchanged when Self is a blob, preserving its descriptor layout without child intersection or ID replacement. Otherwise it recurses over Self children in Self order, finds matching Other names, and filter_map discards every recursive error through .ok()?. Consequently strict intersection can silently omit an incompatible child and still succeed with empty children. Non-blob parent properties remain Self's except id selects Self when nonnegative else Other; parent_id is not similarly selected. LargeList and FixedSizeList do not enter this recursive branch. Outside it, strict mismatched types or different names return Error::arrow; name mismatch was already rejected at method entry. Otherwise whole-field choice follows id sign. Public intersection and intersection_ignore_types forward false/true respectively. (rust/lance-core/src/datatypes/field.rs:913-1011)"
+        ],
+        [
+          1012,
+          1047,
+          "exclude immediately returns None for a non-nested Self, without comparing parent names/types. For nested types it keeps Self children absent from Other, recursively excludes matching names, drops None results and returns None if none remain; retained parent properties are Self's. It does not implement blob atomicity or a parent compatibility check. Callers must establish the intended subtraction relationship."
+        ],
+        [
+          1048,
+          1086,
+          "pub(super) merge unions Struct children in existing Self order, recursively merging same-name children and appending new Other children. List and LargeList recurse into first children. FixedSizeList with equal size succeeds without comparing element types; equal-width FixedSizeBinary succeeds. Other pairs require exact Arrow type equality, so Map has no recursive union here. No root-name check or parent metadata merge occurs. Earlier mutations are not rolled back if a later child produces a schema error."
+        ],
+        [
+          1087,
+          1112,
+          "max_id recursively takes max(self.id, maximum child id or -1), so a leaf with id below -1 still contributes -1. set_id always sets parent_id, assigns/increments the seed only for any negative id, retains nonnegative ids without advancing the seed, and recurses with the field's resulting id. It does not validate seed sign, avoid collisions with retained ids, reserve system negative ids, or guard increment overflow. reset_id sets every id to -1 but leaves parent_id values unchanged. These helpers depend on higher-level allocation policy."
+        ],
+        [
+          1113,
+          1152,
+          "field_by_id_mut and field_by_id accept impl Into<i32>; mut_field_by_id is a separate pub(super) mutable helper. All search children first and recurse depth-first, returning the first matching descendant. None checks self.id. A caller expecting root-inclusive lookup must handle the root separately. Duplicate IDs therefore resolve by child traversal order rather than error."
+        ],
+        [
+          1153,
+          1178,
+          "is_packed_struct checks whether either accepted metadata key has a str_is_truthy value; it does not verify Struct datatype. Truthy matching is case-insensitive for values, not key lookup, and does not trim (rust/lance-core/src/utils/parse.rs:5-12). is_leaf is exactly children.is_empty(), which can include scalar-element FixedSizeList representations despite the simplified doc wording. is_unenforced_primary_key/is_unenforced_clustering_key test Option::is_some, including position0; they do not validate one-based numbering or non-null leaf constraints."
+        ],
+        [
+          1179,
+          1203,
+          "Field Display prints id, name and logical type, optional Debug dictionary metadata and recursively formatted children, with a trailing comma/space after each child. It omits parent_id, nullability, encoding, most metadata and key-position members, so Display output is not a full serialized schema or equality key."
+        ],
+        [
+          1204,
+          1226,
+          "TryFrom<&ArrowField> clones metadata and removes lance:field_id. A present value must parse as i32 or returns Error::invalid_input; parsed negatives clamp to -1 via max(-1), absent means -1. No trimming occurs. Struct recursively converts all children, List/LargeList convert one, and FixedSizeList stores a Field child only when the Arrow element is Struct. Other scalar fixed-size-list children are encoded in logical_type. The imported metadata field ID is intentionally absent from retained metadata."
+        ],
+        [
+          1227,
+          1257,
+          "Map conversion rejects keys_sorted=true, requires entries datatype Struct, requires at least two fields, and rejects a nullable first key field. It then converts the entries field recursively. It does not locally enforce exactly two entries children, names key/value, or non-null entries field. Error messages distinguish sorted, non-Struct, missing key/value and nullable-key cases. The guard is a conversion boundary, not proof that every publicly constructed Field has valid map structure."
+        ],
+        [
+          1258,
+          1293,
+          "Primary-key position parsing uses u32 .ok(); invalid text silently falls back to the legacy truthy primary-key flag, yielding Some(0), or None. Clustering position similarly parses to Option and drops invalid text. Zero is accepted locally despite one-based docs. V2 extension detection preserves/inserts that extension value. Arrow/Lance JSON helpers normalize metadata to the Lance JSON extension and logical_type json; otherwise v2 extension forces logical_type struct, without requiring the Arrow datatype itself to be a valid blob Struct here. All other fields use LogicalType::try_from."
+        ],
+        [
+          1294,
+          1326,
+          "Constructed Field uses parent_id=-1, original name/nullability, converted children, dictionary=None and parsed positions. Encoding selection uses original Arrow datatype: fixed stride=>Plain, binary-like=>VarBinary, Dictionary=>Dictionary, List/LargeList/Map=>Plain for offsets, otherwise None. V2/JSON logical-type overrides do not independently recompute this choice. Owned ArrowField TryFrom delegates to borrowed conversion; it adds no validation."
+        ],
+        [
+          1327,
+          1349,
+          "From<&Field> for ArrowField reconstructs datatype through the potentially panicking data_type(), preserves name/nullability, clones metadata, inserts blob metadata only for the literal blob logical type when absent, and normalizes literal json to the Lance JSON extension. It does not reinsert lance:field_id, derive metadata from the separate key-position members, or strip v2 extension metadata from a binary blob representation. Existing metadata key-position strings remain if previously retained."
+        ],
+        [
+          1350,
+          1370,
+          "Private tests import arrays, Arrow types, metadata constants and blob layouts. Helper blob_v2_logical_field builds a nullable blob Struct with exact v2 extension marker and converts it with unwrap. It supplies structural fixture shapes, not data batches."
+        ],
+        [
+          1371,
+          1438,
+          "Logical-blob compatibility test compares minimal and complete layouts (including required range fields) in both directions and expects default match/explanation None. Two complete layouts with differing range nullability fail Strict and pass Ignore. Changed data child metadata fails when compare_metadata=true. Nested minimal/complete blob fields also compare both directions. These assertions distinguish prefix equivalence from globally ignoring range/nullability or child metadata."
+        ],
+        [
+          1439,
+          1471,
+          "A malformed logical blob whose uri is LargeUtf8 fails comparison and yields explanations in both directions. Arrow-field metadata conversion test extracts field id42, removes its metadata key and preserves an unrelated metadata entry. These do not cover every malformed extension shape or negative/invalid id case."
+        ],
+        [
+          1472,
+          1530,
+          "Arrow-to-Field roundtrip loop covers Null, Boolean, eight integers, Float16/32/64, Decimal128, timestamp units and named timezone, valid time32/time64 units, duration units, FixedSizeBinary and scalar FixedSizeList. Assertions check name, reconstructed DataType and reverse ArrowField equality. Fixture labels are field names, not independent expected logical-string assertions."
+        ],
+        [
+          1531,
+          1598,
+          "View conversion tests expect Utf8View=>Utf8 logical string and BinaryView=>Binary logical binary. Nested-type tests pin list, list.struct, struct and map logical spellings only; these assertions do not convert through Field or assert retained children. These assert intended representation normalization, not zero-copy view preservation."
+        ],
+        [
+          1599,
+          1631,
+          "Struct field test verifies children and Arrow roundtrip. Map nullable-key test constructs a nullable first key field and asserts conversion error. It does not assert exact text or prove validation of all Arrow map constraints."
+        ],
+        [
+          1632,
+          1698,
+          "Map sorted test requires sorted=true failure with matching message and sorted=false success with false preserved. Further tests reject a non-Struct entries type and a one-child entries Struct with descriptive text. Extra entries children and nullable entries fields are not rejected/tested by these particular guards; no broader Arrow validation claim follows."
+        ],
+        [
+          1699,
+          1777,
+          "Null projection test accepts same-name Null, rejects a different name and rejects Int32 under Error mode. Scalar intersection accepts equal named Int32 and rejects name mismatch. Struct intersection preserves the common child c from Self[b,c] and Other[c,a]. These tests do not exercise child-error suppression or the TakeSelf early primitive branch."
+        ],
+        [
+          1778,
+          1851,
+          "test_compare constructs dictionary values and metadata/ID differences. Default comparison ignores dictionary, metadata and field IDs; enabling each corresponding option makes the difference visible. It explicitly assigns an ID through set_id for the ID case. This configurable policy differs from derived PartialEq, not from a mutation of the underlying field representation."
+        ],
+        [
+          1852,
+          2028,
+          "test_explain_difference asserts no message for equality, exact text for root name mismatch, child nullability mismatch with nested path, missing/unexpected children, and differing child order. Expected diagnostic ordering and path formatting are part of the assertions. Schema helper internals are separately analyzed at rust/lance-core/src/datatypes/schema.rs:930-1090. Remaining explanation assertions combine name/type differences, dictionary mismatch under its flag, metadata mismatch under its flag and field-ID mismatch under its flag. Full literal diagnostic strings are retained in the evidence appendix. These are exact assertion expectations, not logs from executed tests."
+        ],
+        [
+          2029,
+          2060,
+          "test_nullability_comparison is declared pub within the private cfg(test) module; it is not a production API export. Strict rejects both directions of differing nullability; OneWay accepts non-null actual against nullable expected and rejects the reverse; Ignore accepts both. This pins expected/actual argument direction."
+        ],
+        [
+          2061,
+          2112,
+          "Blob unloading test selects legacy versus v2 from metadata/shape. Legacy binary conversion retains blob metadata; legacy unload produces two children and is idempotent. V2 unload produces five children, removes extension-name metadata, remains is_blob_v2 via descriptor recognition, and is also idempotent. It checks shape/idempotence, not storage IO."
+        ],
+        [
+          2113,
+          2160,
+          "Recursive unloading fixture nests a legacy and a v2 field: after unload_blobs_recursive, legacy remains LargeBinary with no children and blob metadata, while v2 has the five-child descriptor. This explicitly prevents interpreting that method as unconditionally unloading all blob generations."
+        ],
+        [
+          2161,
+          2181,
+          "project_by_field accepts legacy loaded blob versus descriptor in both directions, preserving the Self layout in each result. It proves logical compatibility can bypass exact Arrow datatype equality for matching blob generation; unrelated type mismatches remain subject to earlier/later branches."
+        ],
+        [
+          2182,
+          2220,
+          "Descriptor projection test assigns IDs to a v2 blob, applies Projection::full with BlobsDescriptions, obtains a bare schema whose five synthetic child IDs are all -1, then projects that bare schema again and asserts all five children survive. This is evidence for atomic parent selection preserving unassigned synthetic children. It invokes Schema/Projection behavior but does not constitute full review of those definitions. All tests were read and none executed during KB creation."
+        ]
+      ],
+      "limits": "Public Field construction exposes invariants that fallible Arrow conversion only partly enforces; schema import adds checks as described at rust/lance-core/src/datatypes/schema.rs:328-383 and rust/lance-core/src/datatypes/schema.rs:835-908. Local call relationships include datatype/layout helpers in datatypes.rs, truthy parsing, Arrow casts, schema child-comparison helpers and Projection blob handling. Exact local bodies/signatures are retained in L2 and indexed in L3. Local schema projection resolution is separately analyzed; complete repository callers, query execution, persistence conversion, dictionary writer/reader lifecycles and runtime validation/version gates remain pending. No source modifications, runtime tests or dependency builds were performed. VERIFY73 correction: freshly reread lines913-1011 and made the same-container blob short-circuit explicit. Earlier full-file analysis remains the coverage basis; no fresh whole-file reread is claimed."
+    }
+  ]
+}

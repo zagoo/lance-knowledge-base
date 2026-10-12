@@ -1,0 +1,119 @@
+[
+  {
+    "id": 1,
+    "path": "protos/transaction.proto",
+    "start": 308,
+    "end": 323,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:00:23.872Z",
+    "evidence": "308 |   // The mode of update operation\n309 |   enum UpdateMode {\n310 | \n311 |     /* rows are deleted in current fragments and rewritten in new fragments.\n312 |      * This is most optimal when the majority of columns are being rewritten\n313 |      * or only a few rows are being updated.\n314 |      */\n315 |     REWRITE_ROWS = 0;\n316 | \n317 |     /* within each fragment, columns are fully rewritten and inserted as new data files.\n318 |      * Old versions of columns are tombstoned. This is most optimal when most rows are affected\n319 |      * but a small subset of columns are affected.\n320 |      */\n321 |     REWRITE_COLUMNS = 1;\n322 |   }\n323 | "
+  },
+  {
+    "id": 2,
+    "path": "rust/lance-table/src/rowids/segment.rs",
+    "start": 1450,
+    "end": 1501,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:00:23.873Z",
+    "evidence": "1450 |     #[test]\n1451 |     fn test_contains() {\n1452 |         // Test Range: contiguous sequence\n1453 |         let segment = U64Segment::Range(10..20);\n1454 |         assert!(segment.contains(10), \"Should contain 10\");\n1455 |         assert!(segment.contains(15), \"Should contain 15\");\n1456 |         assert!(segment.contains(19), \"Should contain 19\");\n1457 |         assert!(!segment.contains(9), \"Should not contain 9\");\n1458 |         assert!(!segment.contains(20), \"Should not contain 20\");\n1459 |         assert!(!segment.contains(25), \"Should not contain 25\");\n1460 | \n1461 |         // Test RangeWithHoles: sequence with holes\n1462 |         let segment = U64Segment::RangeWithHoles {\n1463 |             range: 10..20,\n1464 |             holes: EncodedU64Array::U64(vec![15, 17]),\n1465 |         };\n1466 |         assert!(segment.contains(10), \"Should contain 10\");\n1467 |         assert!(segment.contains(14), \"Should contain 14\");\n1468 |         assert!(!segment.contains(15), \"Should not contain 15 (hole)\");\n1469 |         assert!(segment.contains(16), \"Should contain 16\");\n1470 |         assert!(!segment.contains(17), \"Should not contain 17 (hole)\");\n1471 |         assert!(segment.contains(18), \"Should contain 18\");\n1472 |         assert!(\n1473 |             !segment.contains(20),\n1474 |             \"Should not contain 20 (out of range)\"\n1475 |         );\n1476 | \n1477 |         // Test RangeWithBitmap: sequence with bitmap\n1478 |         let mut bitmap = Bitmap::new_full(10);\n1479 |         bitmap.clear(3); // Clear position 3 (value 13)\n1480 |         bitmap.clear(7); // Clear position 7 (value 17)\n1481 |         let segment = U64Segment::RangeWithBitmap {\n1482 |             range: 10..20,\n1483 |             bitmap,\n1484 |         };\n1485 |         assert!(segment.contains(10), \"Should contain 10\");\n1486 |         assert!(segment.contains(12), \"Should contain 12\");\n1487 |         assert!(\n1488 |             !segment.contains(13),\n1489 |             \"Should not contain 13 (cleared in bitmap)\"\n1490 |         );\n1491 |         assert!(segment.contains(16), \"Should contain 16\");\n1492 |         assert!(\n1493 |             !segment.contains(17),\n1494 |             \"Should not contain 17 (cleared in bitmap)\"\n1495 |         );\n1496 |         assert!(segment.contains(19), \"Should contain 19\");\n1497 |         assert!(\n1498 |             !segment.contains(20),\n1499 |             \"Should not contain 20 (out of range)\"\n1500 |         );\n1501 | "
+  },
+  {
+    "id": 3,
+    "path": "rust/lance-table/src/rowids/version.rs",
+    "start": 420,
+    "end": 442,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:00:23.873Z",
+    "evidence": "420 | // Custom Serialize: convert Arc<[u8]> to slice for transparent JSON output\n421 | impl Serialize for RowDatasetVersionMeta {\n422 |     fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {\n423 |         #[derive(Serialize)]\n424 |         #[serde(untagged)]\n425 |         enum Helper<'a> {\n426 |             Inline { inline: &'a [u8] },\n427 |             Column { column: ColumnMarker },\n428 |         }\n429 | \n430 |         match self {\n431 |             Self::Inline(data) => Helper::Inline {\n432 |                 inline: data.as_ref(),\n433 |             }\n434 |             .serialize(serializer),\n435 |             Self::Column => Helper::Column {\n436 |                 column: ColumnMarker {},\n437 |             }\n438 |             .serialize(serializer),\n439 |         }\n440 |     }\n441 | }\n442 | "
+  },
+  {
+    "id": 5,
+    "path": "rust/lance-table/src/io/commit.rs",
+    "start": 1996,
+    "end": 2032,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:00:23.874Z",
+    "evidence": "1996 |     #[tokio::test]\n1997 |     async fn test_list_manifests_since_version_with_hint() {\n1998 |         let object_store = non_lexical_memory_store();\n1999 |         let base = Path::from(\"base\");\n2000 |         let scheme = ManifestNamingScheme::V2;\n2001 | \n2002 |         for version in 1..=10 {\n2003 |             object_store\n2004 |                 .put(&scheme.manifest_path(&base, version), b\"\".as_slice())\n2005 |                 .await\n2006 |                 .unwrap();\n2007 |         }\n2008 | \n2009 |         // No hint yet -> not usable, caller must fall back.\n2010 |         assert!(\n2011 |             list_manifests_since_version_with_hint(&object_store, &base, 7)\n2012 |                 .await\n2013 |                 .is_none()\n2014 |         );\n2015 | \n2016 |         // Hint exactly at the read version -> fast path, nothing new.\n2017 |         write_version_hint(&object_store, &base, 10).await;\n2018 |         assert!(matches!(\n2019 |             list_manifests_since_version_with_hint(&object_store, &base, 10).await,\n2020 |             Some(v) if v.is_empty()\n2021 |         ));\n2022 | \n2023 |         // Hint ahead of the read version, with a gap to fill (8, 9) plus probing\n2024 |         // from the hint (10). Results are descending by version.\n2025 |         let locations = list_manifests_since_version_with_hint(&object_store, &base, 7)\n2026 |             .await\n2027 |             .unwrap();\n2028 |         assert_eq!(\n2029 |             locations.iter().map(|l| l.version).collect::<Vec<_>>(),\n2030 |             vec![10, 9, 8]\n2031 |         );\n2032 | "
+  },
+  {
+    "id": 8,
+    "path": "rust/lance-core/src/cache/registry.rs",
+    "start": 52,
+    "end": 79,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:00:23.874Z",
+    "evidence": "52 | /// Normalize and validate a cache backend kind.\n53 | ///\n54 | /// Backend kinds share the same syntax as URI schemes. They are matched\n55 | /// case-insensitively and stored as lowercase ASCII so registry lookups,\n56 | /// config dictionaries, and URI parsing all address the same key.\n57 | pub fn normalize_backend_kind(kind: &str) -> Result<String> {\n58 |     let mut chars = kind.chars();\n59 |     match chars.next() {\n60 |         Some(c) if c.is_ascii_alphabetic() => {}\n61 |         _ => {\n62 |             return Err(Error::invalid_input(format!(\n63 |                 \"cache backend kind {:?}: must start with an ASCII letter\",\n64 |                 kind\n65 |             )));\n66 |         }\n67 |     }\n68 |     for c in chars {\n69 |         let ok = c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.');\n70 |         if !ok {\n71 |             return Err(Error::invalid_input(format!(\n72 |                 \"cache backend kind {:?}: invalid character {:?}\",\n73 |                 kind, c\n74 |             )));\n75 |         }\n76 |     }\n77 |     Ok(kind.to_ascii_lowercase())\n78 | }\n79 | "
+  },
+  {
+    "id": 9,
+    "path": "rust/lance-file/src/versions/mod.rs",
+    "start": 279,
+    "end": 314,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:00:23.874Z",
+    "evidence": "279 | /// Open a projected reader while keeping exact metadata-form selection in the\n280 | /// file layer.\n281 | ///\n282 | /// `open_indexed` returns `None` when the loaded index is not selective enough\n283 | /// to justify a projected reader. V2.0 never invokes it because indexed\n284 | /// metadata is not part of that reader's accepted grammar.\n285 | pub async fn open_projected_reader<OpenIndexed, IndexedFuture, OpenFull, FullFuture>(\n286 |     version: ConcreteFileVersion,\n287 |     projection: &ReaderProjection,\n288 |     prefer_indexed: bool,\n289 |     open_indexed: OpenIndexed,\n290 |     open_full: OpenFull,\n291 | ) -> Result<ProjectedFileReader>\n292 | where\n293 |     OpenIndexed: FnOnce() -> IndexedFuture + Send,\n294 |     IndexedFuture: Future<Output = Result<Option<ProjectedFileReader>>> + Send,\n295 |     OpenFull: FnOnce() -> FullFuture + Send,\n296 |     FullFuture: Future<Output = Result<ProjectedFileReader>> + Send,\n297 | {\n298 |     match version {\n299 |         ConcreteFileVersion::V1 => Err(Error::not_supported(\n300 |             \"projected current-format readers cannot open Lance v1 files\".to_string(),\n301 |         )),\n302 |         ConcreteFileVersion::V2_0 => open_full().await,\n303 |         ConcreteFileVersion::V2_1 | ConcreteFileVersion::V2_2 | ConcreteFileVersion::V2_3 => {\n304 |             if prefer_indexed\n305 |                 && FileMetadataProvider::projection_matches_indexed_metadata(projection)\n306 |                 && let Some(reader) = open_indexed().await?\n307 |             {\n308 |                 return Ok(reader);\n309 |             }\n310 |             open_full().await\n311 |         }\n312 |     }\n313 | }\n314 | "
+  },
+  {
+    "id": 13,
+    "path": "rust/lance-table/src/system_index/frag_reuse/metadata.rs",
+    "start": 71,
+    "end": 91,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:00:57.756Z",
+    "evidence": "71 | #[cfg(test)]\n72 | mod tests {\n73 |     use super::*;\n74 |     use uuid::Uuid;\n75 | \n76 |     fn entry(name: &str, index_version: i32) -> IndexMetadata {\n77 |         IndexMetadata {\n78 |             uuid: Uuid::nil(),\n79 |             fields: vec![],\n80 |             covering_fields: vec![],\n81 |             name: name.into(),\n82 |             dataset_version: 1,\n83 |             fragment_bitmap: None,\n84 |             index_details: None,\n85 |             index_version,\n86 |             created_at: None,\n87 |             base_id: None,\n88 |             files: None,\n89 |         }\n90 |     }\n91 | "
+  },
+  {
+    "id": 15,
+    "path": "rust/lance-file/src/reader/structural.rs",
+    "start": 297,
+    "end": 318,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:00:57.756Z",
+    "evidence": "297 |     if recurse {\n298 |         let enforce_children = comparable && children_share_parent_length(field);\n299 |         for child in &field.children {\n300 |             let child_rows =\n301 |                 validate_field_length(child, enforce_children, column_indices, cursor, column_len)?;\n302 |             let expected = *field_rows.get_or_insert(child_rows);\n303 |             if enforce_children && child_rows != expected {\n304 |                 return Err(Error::invalid_input(format!(\n305 |                     \"cannot read field '{}': its children have differing lengths (child '{}' has {} rows, but the field has {}); a struct's children must all have the same length\",\n306 |                     field.name, child.name, child_rows, expected\n307 |                 )));\n308 |             }\n309 |         }\n310 |     }\n311 |     field_rows.ok_or_else(|| {\n312 |         Error::invalid_input(format!(\n313 |             \"projected field '{}' maps to no columns\",\n314 |             field.name\n315 |         ))\n316 |     })\n317 | }\n318 | "
+  },
+  {
+    "id": 16,
+    "path": "rust/lance-table/benches/system_columns.rs",
+    "start": 163,
+    "end": 172,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:00:57.756Z",
+    "evidence": "163 |                     },\n164 |                 );\n165 |             }\n166 |         }\n167 |     }\n168 |     group.finish();\n169 | }\n170 | \n171 | criterion_group!(benches, bench_stream_row_ids);\n172 | criterion_main!(benches);"
+  },
+  {
+    "id": 17,
+    "path": "rust/lance-table/src/system_index/frag_reuse/ledger.rs",
+    "start": 452,
+    "end": 476,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:00:57.757Z",
+    "evidence": "452 | fn order_lineage(transitions: Vec<Transition>) -> Result<Vec<Transition>> {\n453 |     let mut producers = HashMap::new();\n454 |     let mut consumers = RoaringBitmap::new();\n455 |     for (index, transition) in transitions.iter().enumerate() {\n456 |         for destination in &transition.destinations {\n457 |             if producers\n458 |                 .insert(destination.id, (index, destination.physical_rows))\n459 |                 .is_some()\n460 |             {\n461 |                 return Err(corrupt(format!(\n462 |                     \"duplicate producer for fragment {}\",\n463 |                     destination.id\n464 |                 )));\n465 |             }\n466 |         }\n467 |         for source in &transition.sources {\n468 |             if !consumers.insert(source.id as u32) {\n469 |                 return Err(corrupt(format!(\n470 |                     \"duplicate consumer for fragment {}\",\n471 |                     source.id\n472 |                 )));\n473 |             }\n474 |         }\n475 |     }\n476 |     let mut incoming = vec![0; transitions.len()];"
+  },
+  {
+    "id": 18,
+    "path": "rust/lance-encoding/src/encodings/physical/packed.rs",
+    "start": 803,
+    "end": 836,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:00:57.757Z",
+    "evidence": "803 |         let mut children = Vec::with_capacity(self.fields.len());\n804 |         for (field, accumulator) in self.fields.iter().zip(accumulators) {\n805 |             match (field, accumulator) {\n806 |                 (\n807 |                     VariablePackedStructFieldDecoder {\n808 |                         kind: VariablePackedStructFieldKind::Fixed { decompressor, .. },\n809 |                     },\n810 |                     FieldAccumulator::Fixed(fixed_accumulator),\n811 |                 ) => {\n812 |                     let finished_accumulator = fixed_accumulator.finish()?;\n813 |                     let decoded = decompressor.decompress(finished_accumulator, num_values)?;\n814 |                     children.push(decoded);\n815 |                 }\n816 |                 (\n817 |                     VariablePackedStructFieldDecoder {\n818 |                         kind:\n819 |                             VariablePackedStructFieldKind::Variable {\n820 |                                 bits_per_length,\n821 |                                 decompressor,\n822 |                             },\n823 |                     },\n824 |                     FieldAccumulator::Variable32 { builder, .. },\n825 |                 ) => {\n826 |                     let DataBlock::VariableWidth(mut block) = builder.finish() else {\n827 |                         panic!(\"Expected variable-width datablock from builder\");\n828 |                     };\n829 |                     debug_assert_eq!(block.bits_per_offset, 32);\n830 |                     block.bits_per_offset = (*bits_per_length) as u8;\n831 |                     let decoded = decompressor.decompress(block)?;\n832 |                     children.push(decoded);\n833 |                 }\n834 |                 (\n835 |                     VariablePackedStructFieldDecoder {\n836 |                         kind:"
+  },
+  {
+    "id": 19,
+    "path": "rust/lance-table/src/transaction/manifest_build.rs",
+    "start": 1070,
+    "end": 1097,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:00:57.757Z",
+    "evidence": "1070 | \n1071 |                 if next_row_id.is_some() {\n1072 |                     // We can re-use indices, but need to rewrite the fragment bitmaps\n1073 |                     debug_assert!(rewritten_indices.is_empty());\n1074 |                     for index in final_indices.iter_mut() {\n1075 |                         // Its bitmap is lineage, not coverage, and a straddling\n1076 |                         // group would fail the recalculation.\n1077 |                         if is_frag_reuse_index_entry(index) {\n1078 |                             continue;\n1079 |                         }\n1080 |                         let results_are_row_addrs = index.results_are_row_addrs();\n1081 |                         if let Some(fragment_bitmap) = &mut index.fragment_bitmap {\n1082 |                             *fragment_bitmap = if results_are_row_addrs {\n1083 |                                 // Stable row ids survive a rewrite, so a row-id-domain index\n1084 |                                 // can simply follow its data to the new fragments. An\n1085 |                                 // address-domain index cannot: its stored addresses point into\n1086 |                                 // the fragments the rewrite dropped. Claiming coverage of the\n1087 |                                 // new fragments would make it answer queries with addresses\n1088 |                                 // that no longer resolve, so drop the rewritten fragments from\n1089 |                                 // its coverage instead and let the scanner fall back to a full\n1090 |                                 // scan for them.\n1091 |                                 Self::drop_rewritten_fragments(fragment_bitmap, &ordered_groups)\n1092 |                             } else {\n1093 |                                 Self::recalculate_fragment_bitmap(fragment_bitmap, &ordered_groups)?\n1094 |                             };\n1095 |                         }\n1096 |                     }\n1097 |                 } else {"
+  },
+  {
+    "id": 20,
+    "path": "rust/lance-table/src/io/commit.rs",
+    "start": 2293,
+    "end": 2319,
+    "unit": "lines",
+    "read_at": "2026-10-04T15:00:57.758Z",
+    "evidence": "2293 |     #[tokio::test]\n2294 |     async fn test_cos_commit_requires_custom_handler() {\n2295 |         let handler = commit_handler_from_url(\"cos://bucket-a/ds\", &None)\n2296 |             .await\n2297 |             .unwrap();\n2298 |         assert_eq!(format!(\"{:?}\", handler), \"TencentCosCommitHandler\");\n2299 | \n2300 |         let mut manifest = test_manifest();\n2301 |         let error = handler\n2302 |             .commit(\n2303 |                 &mut manifest,\n2304 |                 None,\n2305 |                 &Path::from(\"test\"),\n2306 |                 &ObjectStore::memory(),\n2307 |                 succeeding_manifest_writer,\n2308 |                 ManifestNamingScheme::V2,\n2309 |                 None,\n2310 |             )\n2311 |             .await\n2312 |             .unwrap_err();\n2313 |         let CommitError::OtherError(error) = error else {\n2314 |             panic!(\"expected a not-supported commit error\");\n2315 |         };\n2316 |         assert!(matches!(error, Error::NotSupported { .. }));\n2317 |         assert!(error.to_string().contains(\"distributed commit_lock\"));\n2318 |     }\n2319 | "
+  }
+]

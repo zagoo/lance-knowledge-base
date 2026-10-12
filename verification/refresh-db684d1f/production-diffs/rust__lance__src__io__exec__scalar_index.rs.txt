@@ -1,0 +1,178 @@
+@@ -81,13 +81,14 @@ impl ScalarIndexLoader for Dataset {
+   81      }
+   82  }
+   83  
+   84 -struct FragmentScopedScalarIndexLoader<'a> {
+   84 +struct ScopedScalarIndexLoader<'a> {
+   85      dataset: &'a Dataset,
+   86 -    fragments: &'a RoaringBitmap,
+   86 +    fragments: Option<&'a RoaringBitmap>,
+   87 +    segment_uuids: Option<&'a HashSet<uuid::Uuid>>,
+   88  }
+   89  
+   90  #[async_trait]
+   90 -impl ScalarIndexLoader for FragmentScopedScalarIndexLoader<'_> {
+   91 +impl ScalarIndexLoader for ScopedScalarIndexLoader<'_> {
+   92      async fn load_index(
+   93          &self,
+   94          column: &str,
+
+@@ -98,7 +99,8 @@ impl ScalarIndexLoader for FragmentScopedScalarIndexLoader<'_> {
+   99              self.dataset,
+  100              column,
+  101              index_name,
+  101 -            Some(self.fragments),
+  102 +            self.fragments,
+  103 +            self.segment_uuids,
+  104              metrics,
+  105          )
+  106          .await
+
+@@ -155,6 +157,7 @@ pub struct ScalarIndexExec {
+  157      metrics: ExecutionPlanMetricsSet,
+  158      result_format: IndexExprResultWireFormat,
+  159      fragment_scope: Option<Arc<RoaringBitmap>>,
+  160 +    segment_uuids: Option<Arc<HashSet<uuid::Uuid>>>,
+  161  }
+  162  
+  163  impl DisplayAs for ScalarIndexExec {
+
+@@ -189,6 +192,7 @@ impl ScalarIndexExec {
+  192              metrics: ExecutionPlanMetricsSet::new(),
+  193              result_format,
+  194              fragment_scope: None,
+  195 +            segment_uuids: None,
+  196          }
+  197      }
+  198  
+
+@@ -201,6 +205,12 @@ impl ScalarIndexExec {
+  205          self
+  206      }
+  207  
+  208 +    /// Restrict index loading to these physical scalar index segments.
+  209 +    pub(crate) fn with_segment_uuids(mut self, segment_uuids: Arc<HashSet<uuid::Uuid>>) -> Self {
+  210 +        self.segment_uuids = Some(segment_uuids);
+  211 +        self
+  212 +    }
+  213 +
+  214      pub fn dataset(&self) -> &Arc<Dataset> {
+  215          &self.dataset
+  216      }
+
+@@ -252,26 +262,39 @@ impl ScalarIndexExec {
+  262          plan_metrics: ExecutionPlanMetricsSet,
+  263          result_format: IndexExprResultWireFormat,
+  264          fragment_scope: Option<Arc<RoaringBitmap>>,
+  265 +        segment_uuids: Option<Arc<HashSet<uuid::Uuid>>>,
+  266      ) -> Result<RecordBatch> {
+  267          let metrics = IndexMetrics::new(&plan_metrics, 0);
+  268          let query_result = {
+  269              let search_time = plan_metrics.new_time(SCALAR_INDEX_SEARCH_TIME_METRIC, 0);
+  270              let _timer = search_time.timer();
+  260 -            match fragment_scope.as_deref() {
+  261 -                Some(fragments) if fragments.is_empty() => {
+  271 +            match (fragment_scope.as_deref(), segment_uuids.as_deref()) {
+  272 +                (Some(fragments), _) if fragments.is_empty() => {
+  273                      IndexExprResult::exact(RowAddrMask::allow_nothing())
+  274                  }
+  264 -                Some(fragments) => {
+  275 +                (Some(fragments), segment_uuids) => {
+  276 +                    expr.evaluate(
+  277 +                        &ScopedScalarIndexLoader {
+  278 +                            dataset: dataset.as_ref(),
+  279 +                            fragments: Some(fragments),
+  280 +                            segment_uuids,
+  281 +                        },
+  282 +                        &metrics,
+  283 +                    )
+  284 +                    .await?
+  285 +                }
+  286 +                (None, Some(segment_uuids)) => {
+  287                      expr.evaluate(
+  266 -                        &FragmentScopedScalarIndexLoader {
+  288 +                        &ScopedScalarIndexLoader {
+  289                              dataset: dataset.as_ref(),
+  268 -                            fragments,
+  290 +                            fragments: None,
+  291 +                            segment_uuids: Some(segment_uuids),
+  292                          },
+  293                          &metrics,
+  294                      )
+  295                      .await?
+  296                  }
+  274 -                None => expr.evaluate(dataset.as_ref(), &metrics).await?,
+  297 +                (None, None) => expr.evaluate(dataset.as_ref(), &metrics).await?,
+  298              }
+  299          };
+  300          let mut fragments_covered_by_result =
+
+@@ -324,6 +347,7 @@ impl ExecutionPlan for ScalarIndexExec {
+  347              self.metrics.clone(),
+  348              self.result_format,
+  349              self.fragment_scope.clone(),
+  350 +            self.segment_uuids.clone(),
+  351          );
+  352          let stream = futures::stream::iter(vec![batch_fut])
+  353              .then(|batch_fut| batch_fut.map_err(|err| err.into()))
+
+@@ -860,6 +884,8 @@ pub struct MaterializeIndexExec {
+  884      dataset: Arc<Dataset>,
+  885      expr: ScalarIndexExpr,
+  886      fragments: Arc<Vec<Fragment>>,
+  887 +    /// Physical segments to open. `None` loads the whole logical index.
+  888 +    segment_uuids: Option<Arc<HashSet<uuid::Uuid>>>,
+  889      /// Row addresses blocked from the index result due to data overlay files committed after the
+  890      /// index was built. ANDead into the candidate mask before row ID materialisation so that stale
+  891      /// index entries never reach downstream operators.
+
+@@ -936,12 +962,19 @@ impl MaterializeIndexExec {
+  962              dataset,
+  963              expr,
+  964              fragments,
+  965 +            segment_uuids: None,
+  966              overlay_block: None,
+  967              properties,
+  968              metrics: ExecutionPlanMetricsSet::new(),
+  969          }
+  970      }
+  971  
+  972 +    /// Restrict index loading to these physical scalar index segments.
+  973 +    pub(crate) fn with_segment_uuids(mut self, segment_uuids: Arc<HashSet<uuid::Uuid>>) -> Self {
+  974 +        self.segment_uuids = Some(segment_uuids);
+  975 +        self
+  976 +    }
+  977 +
+  978      /// Block specific row addresses (see the `overlay_block` field) from the index result.
+  979      pub fn with_overlay_block(mut self, block: RowAddrMask) -> Self {
+  980          self.overlay_block = Some(block);
+
+@@ -953,10 +986,18 @@ impl MaterializeIndexExec {
+  986          expr: ScalarIndexExpr,
+  987          dataset: Arc<Dataset>,
+  988          fragments: Arc<Vec<Fragment>>,
+  989 +        segment_uuids: Option<Arc<HashSet<uuid::Uuid>>>,
+  990          overlay_block: Option<RowAddrMask>,
+  991          metrics: Arc<IndexMetrics>,
+  992      ) -> Result<RecordBatch> {
+  959 -        let expr_result = expr.evaluate(dataset.as_ref(), metrics.as_ref());
+  993 +        // Legacy storage materializes index hits here. UUID selection has to be applied at load
+  994 +        // time; evaluating against the dataset opens every segment of the logical index.
+  995 +        let loader = ScopedScalarIndexLoader {
+  996 +            dataset: dataset.as_ref(),
+  997 +            fragments: None,
+  998 +            segment_uuids: segment_uuids.as_deref(),
+  999 +        };
+ 1000 +        let expr_result = expr.evaluate(&loader, metrics.as_ref());
+ 1001          let span = debug_span!("create_prefilter");
+ 1002          let prefilter = span.in_scope(|| {
+ 1003              let fragment_bitmap =
+
+@@ -1121,6 +1162,7 @@ impl ExecutionPlan for MaterializeIndexExec {
+ 1162              self.expr.clone(),
+ 1163              self.dataset.clone(),
+ 1164              self.fragments.clone(),
+ 1165 +            self.segment_uuids.clone(),
+ 1166              self.overlay_block.clone(),
+ 1167              metrics,
+ 1168          );

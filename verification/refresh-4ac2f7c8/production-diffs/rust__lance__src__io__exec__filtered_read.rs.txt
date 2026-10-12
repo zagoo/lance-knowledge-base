@@ -1,0 +1,511 @@
+@@ -51,7 +51,7 @@ use lance_file::reader::FileReaderOptions;
+   51  use lance_index::scalar::expression::FilterPlan;
+   52  use lance_io::scheduler::{ScanScheduler, SchedulerConfig};
+   53  use lance_select::{
+   54 -    IndexExprResult, RowAddrMask, RowAddrSelection, RowAddrTreeMap, bitmap_to_ranges,
+   54 +    IndexExprResult, RowAddrMask, RowAddrSelection, RowAddrTreeMap, RowSetOps, bitmap_to_ranges,
+   55      ranges_to_bitmap, result::IndexExprResultWireFormat,
+   56  };
+   57  use lance_table::format::Fragment;
+
+@@ -64,6 +64,7 @@ use tracing::{Instrument, instrument};
+   64  use crate::Dataset;
+   65  use crate::dataset::blob::{BlobMaterializationContext, MaterializedBlobBatch};
+   66  use crate::dataset::fragment::{BaseSchedulers, FileFragment, FragReadConfig};
+   67 +use crate::dataset::fragment_slice::validate_physical_rows;
+   68  use crate::dataset::rowids::load_row_id_sequence;
+   69  use crate::dataset::scanner::{
+   70      BATCH_SIZE_FALLBACK, DEFAULT_FRAGMENT_READAHEAD, get_default_batch_size,
+
+@@ -71,7 +72,7 @@ use crate::dataset::scanner::{
+   72  };
+   73  use crate::dataset::versions;
+   74  
+   74 -use super::utils::IoMetrics;
+   75 +use super::utils::{IoMetrics, estimated_bytes_per_row, estimated_total_byte_size};
+   76  
+   77  type MaterializedReadBatchFut = futures::future::BoxFuture<'static, Result<MaterializedBlobBatch>>;
+   78  type MaterializedReadBatchesFut =
+
+@@ -716,10 +717,7 @@ impl FilteredReadStream {
+  717          options: &FilteredReadOptions,
+  718      ) -> Result<Vec<LoadedFragment>> {
+  719          let io_parallelism = dataset.object_store.io_parallelism();
+  719 -        let fragments = options
+  720 -            .fragments
+  721 -            .clone()
+  722 -            .unwrap_or_else(|| dataset.fragments().clone());
+  720 +        let fragments = options.selected_fragments(dataset.as_ref());
+  721          // Ideally we don't need to collect here but if we don't we get "implementation of FnOnce is
+  722          // not general enough" false positives from rustc
+  723          let frag_futs = fragments
+
+@@ -895,6 +893,20 @@ impl FilteredReadStream {
+  893              let mut to_read: Vec<Range<u64>> =
+  894                  Self::full_frag_range(*num_physical_rows, deletion_vector);
+  895  
+  896 +            if let Some(rows) = &options.physical_row_addr_prefilter {
+  897 +                let fragment_id = fragment.id() as u32;
+  898 +                let Some(selection) = rows.get(&fragment_id) else {
+  899 +                    continue;
+  900 +                };
+  901 +                if let RowAddrSelection::Partial(bitmap) = selection {
+  902 +                    let requested = bitmap_to_ranges(bitmap);
+  903 +                    to_read = Self::intersect_ranges(&to_read, &requested);
+  904 +                    if to_read.is_empty() {
+  905 +                        continue;
+  906 +                    }
+  907 +                }
+  908 +            }
+  909 +
+  910              if let Some(range_before_filter) = &options.scan_range_before_filter {
+  911                  let range_start = range_offset;
+  912                  let range_end = if options.with_deleted_rows {
+
+@@ -1091,7 +1103,9 @@ impl FilteredReadStream {
+ 1103                          &index_result.lower,
+ 1104                          None,
+ 1105                      );
+ 1094 -                    fragments_to_read.insert(fragment_id, guaranteed_ranges.clone());
+ 1106 +                    // Candidates outside the lower bound still need a recheck if
+ 1107 +                    // the guaranteed matches cannot satisfy the requested limit.
+ 1108 +                    fragments_to_read.insert(fragment_id, to_read);
+ 1109  
+ 1110                      Self::apply_skip_take_to_ranges(&mut guaranteed_ranges, to_skip, to_take);
+ 1111                      scan_push_down_fragments_to_read.insert(fragment_id, guaranteed_ranges);
+
+@@ -1743,6 +1757,8 @@ pub struct FilteredReadOptions {
+ 1757      pub fragment_readahead: Option<usize>,
+ 1758      /// The fragments to read
+ 1759      pub fragments: Option<Arc<Vec<Fragment>>>,
+ 1760 +    /// Physical `(fragment_id, row_offset)` allow-list applied before filters.
+ 1761 +    pub(crate) physical_row_addr_prefilter: Option<Arc<RowAddrTreeMap>>,
+ 1762      /// The projection to use for the scan
+ 1763      pub projection: Projection,
+ 1764      /// If there is a scalar index input, and the index result we get from that input is exact,
+
+@@ -1791,6 +1807,7 @@ impl FilteredReadOptions {
+ 1807              file_reader_options: None,
+ 1808              fragment_readahead: None,
+ 1809              fragments: None,
+ 1810 +            physical_row_addr_prefilter: None,
+ 1811              projection,
+ 1812              refine_filter: None,
+ 1813              full_filter: None,
+
+@@ -1841,11 +1858,25 @@ impl FilteredReadOptions {
+ 1858      /// data as a column `count` that steps from 0 to 1000 and the filter is `count > 200`
+ 1859      /// and the range is 100..300, then scan will read rows 100..300 and return rows 200..300
+ 1860      pub fn with_scan_range_before_filter(mut self, scan_range: Range<u64>) -> Result<Self> {
+ 1861 +        if self.physical_row_addr_prefilter.is_some() {
+ 1862 +            return Err(Error::invalid_input(
+ 1863 +                "scan_range_before_filter cannot be combined with physical row selection",
+ 1864 +            ));
+ 1865 +        }
+ 1866          if self.with_deleted_rows {
+ 1867              return Err(Error::invalid_input_source(
+ 1868                  "with_deleted_rows is not supported when there is a scan range".into(),
+ 1869              ));
+ 1870          }
+ 1871 +        if scan_range.start > scan_range.end {
+ 1872 +            return Err(Error::invalid_input_source(
+ 1873 +                format!(
+ 1874 +                    "scan range start ({}) is greater than its end ({})",
+ 1875 +                    scan_range.start, scan_range.end
+ 1876 +                )
+ 1877 +                .into(),
+ 1878 +            ));
+ 1879 +        }
+ 1880          self.scan_range_before_filter = Some(scan_range);
+ 1881          Ok(self)
+ 1882      }
+
+@@ -1864,10 +1895,36 @@ impl FilteredReadOptions {
+ 1895                  "with_deleted_rows is not supported when there is a scan range".into(),
+ 1896              ));
+ 1897          }
+ 1898 +        if scan_range.start > scan_range.end {
+ 1899 +            return Err(Error::invalid_input_source(
+ 1900 +                format!(
+ 1901 +                    "scan range start ({}) is greater than its end ({})",
+ 1902 +                    scan_range.start, scan_range.end
+ 1903 +                )
+ 1904 +                .into(),
+ 1905 +            ));
+ 1906 +        }
+ 1907          self.scan_range_after_filter = Some(scan_range);
+ 1908          Ok(self)
+ 1909      }
+ 1910  
+ 1911 +    fn selected_fragments(&self, dataset: &Dataset) -> Arc<Vec<Fragment>> {
+ 1912 +        let fragments = self
+ 1913 +            .fragments
+ 1914 +            .clone()
+ 1915 +            .unwrap_or_else(|| dataset.fragments().clone());
+ 1916 +        match &self.physical_row_addr_prefilter {
+ 1917 +            Some(rows) => Arc::new(
+ 1918 +                fragments
+ 1919 +                    .iter()
+ 1920 +                    .filter(|fragment| rows.get(&(fragment.id as u32)).is_some())
+ 1921 +                    .cloned()
+ 1922 +                    .collect(),
+ 1923 +            ),
+ 1924 +            None => fragments,
+ 1925 +        }
+ 1926 +    }
+ 1927 +
+ 1928      /// Specify the fragments to read.
+ 1929      ///
+ 1930      /// Scan results will be returned in the order of the fragments given here.
+
+@@ -1876,6 +1933,11 @@ impl FilteredReadOptions {
+ 1933          self
+ 1934      }
+ 1935  
+ 1936 +    pub(crate) fn with_physical_row_addr_prefilter(mut self, rows: Arc<RowAddrTreeMap>) -> Self {
+ 1937 +        self.physical_row_addr_prefilter = Some(rows);
+ 1938 +        self
+ 1939 +    }
+ 1940 +
+ 1941      /// Specify the batch size to use for the read
+ 1942      ///
+ 1943      /// This will be a maximum number of rows per batch.  It is possible for batches to be smaller
+
+@@ -1937,6 +1999,8 @@ impl FilteredReadOptions {
+ 1999  
+ 2000      /// An alternative to [`Self::with_filter`] to set the filters from a FilterPlan if you already have one
+ 2001      pub fn with_filter_plan(mut self, filter_plan: FilterPlan) -> Self {
+ 2002 +        // This infallible setter does not validate the refine/full pairing, so
+ 2003 +        // statistics must check for refine filters even without a full filter.
+ 2004          self.physical_filters.clear();
+ 2005          self.refine_filter = filter_plan.refine_expr;
+ 2006          self.full_filter = filter_plan.full_expr;
+
+@@ -2071,6 +2135,8 @@ impl FilteredReadOptions {
+ 2135  pub struct FilteredReadExec {
+ 2136      dataset: Arc<Dataset>,
+ 2137      options: FilteredReadOptions,
+ 2138 +    /// Cached from the output schema and dataset blob metadata at construction.
+ 2139 +    bytes_per_row: Option<f64>,
+ 2140      materialization_context: Arc<BlobMaterializationContext>,
+ 2141      properties: Arc<PlanProperties>,
+ 2142      metrics: ExecutionPlanMetricsSet,
+
+@@ -2181,6 +2247,14 @@ impl FilteredReadExec {
+ 2247          options: FilteredReadOptions,
+ 2248          input: Option<Arc<dyn ExecutionPlan>>,
+ 2249      ) -> Result<Self> {
+ 2250 +        // Validate here as well as in setters: options can be assembled in either order.
+ 2251 +        if options.physical_row_addr_prefilter.is_some()
+ 2252 +            && options.scan_range_before_filter.is_some()
+ 2253 +        {
+ 2254 +            return Err(Error::invalid_input(
+ 2255 +                "scan_range_before_filter cannot be combined with physical row selection",
+ 2256 +            ));
+ 2257 +        }
+ 2258          if options.materialization_readahead_bytes == Some(0) {
+ 2259              return Err(Error::invalid_input_source(
+ 2260                  "materialization_readahead_bytes must be greater than 0, got 0".into(),
+
+@@ -2290,6 +2364,7 @@ impl FilteredReadExec {
+ 2364                  &materialization_output_schema,
+ 2365              ),
+ 2366          ));
+ 2367 +        let bytes_per_row = estimated_bytes_per_row(output_schema.as_ref(), dataset.schema());
+ 2368  
+ 2369          // Row-stream reads preserve input order, but can drop identity columns.
+ 2370          // Remap sort expressions to the output schema and retain only valid prefixes.
+
+@@ -2372,6 +2447,7 @@ impl FilteredReadExec {
+ 2447              options,
+ 2448              properties,
+ 2449              metrics: ExecutionPlanMetricsSet::new(),
+ 2450 +            bytes_per_row,
+ 2451              input: RowSelector::RowStream(Arc::new(RowStreamSource {
+ 2452                  plan: input,
+ 2453                  key_column,
+
+@@ -2444,6 +2520,7 @@ impl FilteredReadExec {
+ 2520              }
+ 2521          }
+ 2522          let output_schema = public_blob_v2_binary_projection_schema(&options.projection);
+ 2523 +        let bytes_per_row = estimated_bytes_per_row(output_schema.as_ref(), dataset.schema());
+ 2524          let num_partitions = match options.threading_mode {
+ 2525              FilteredReadThreadingMode::OnePartitionMultipleThreads(_) => 1,
+ 2526              FilteredReadThreadingMode::MultiplePartitions(n) => n,
+
+@@ -2465,6 +2542,7 @@ impl FilteredReadExec {
+ 2542              ),
+ 2543              dataset,
+ 2544              options,
+ 2545 +            bytes_per_row,
+ 2546              properties,
+ 2547              running_stream: Arc::new(AsyncMutex::new(None)),
+ 2548              metrics,
+
+@@ -2520,6 +2598,9 @@ impl FilteredReadExec {
+ 2598      ) -> Result<&'a FilteredReadInternalPlan> {
+ 2599          plan_cell
+ 2600              .get_or_try_init(|| async {
+ 2601 +                if let Some(rows) = &options.physical_row_addr_prefilter {
+ 2602 +                    validate_physical_rows(&dataset, rows).await?;
+ 2603 +                }
+ 2604                  // Execute index if present
+ 2605                  let mut evaluated_index = None;
+ 2606                  if let Some(index_input) = index_input {
+
+@@ -2540,10 +2621,7 @@ impl FilteredReadExec {
+ 2621  
+ 2622                  // Load fragments to compute the plan
+ 2623                  let io_parallelism = dataset.object_store.io_parallelism();
+ 2543 -                let fragments = options
+ 2544 -                    .fragments
+ 2545 -                    .clone()
+ 2546 -                    .unwrap_or_else(|| dataset.fragments().clone());
+ 2624 +                let fragments = options.selected_fragments(dataset.as_ref());
+ 2625  
+ 2626                  let with_deleted_rows = options.with_deleted_rows;
+ 2627                  // A range before filtering is expressed in dataset/fragment order. Planning it
+
+@@ -2798,7 +2876,11 @@ impl FilteredReadExec {
+ 2876          let metrics = self.metrics.clone();
+ 2877          let materialization_context = self.materialization_context.clone();
+ 2878  
+ 2879 +        let options = self.options.clone();
+ 2880          let lazy_stream = futures::stream::once(async move {
+ 2881 +            if let Some(rows) = &options.physical_row_addr_prefilter {
+ 2882 +                validate_physical_rows(&dataset, rows).await?;
+ 2883 +            }
+ 2884              let row_stream_read = Arc::new(RowStreamRead::new(
+ 2885                  dataset,
+ 2886                  source,
+
+@@ -2808,9 +2890,9 @@ impl FilteredReadExec {
+ 2890                  partition,
+ 2891                  materialization_context,
+ 2892              ));
+ 2811 -            row_stream_read.apply(input_stream)
+ 2893 +            Ok::<_, DataFusionError>(row_stream_read.apply(input_stream))
+ 2894          })
+ 2813 -        .flatten();
+ 2895 +        .try_flatten();
+ 2896          Ok(Box::pin(RecordBatchStreamAdapter::new(
+ 2897              self.schema(),
+ 2898              lazy_stream,
+
+@@ -2924,6 +3006,7 @@ impl RowStreamRead {
+ 3006      fn plan_batch_from_addresses(
+ 3007          addrs: &RowAddrTreeMap,
+ 3008          fragments: &StreamFragments,
+ 3009 +        physical_row_addr_prefilter: Option<&RowAddrTreeMap>,
+ 3010      ) -> FilteredReadInternalPlan {
+ 3011          let mut rows: BTreeMap<u32, Vec<Range<u64>>> = BTreeMap::new();
+ 3012          for (fragment_id, requested) in addrs.iter() {
+
+@@ -2935,6 +3018,16 @@ impl RowStreamRead {
+ 3018                  RowAddrSelection::Full => vec![0..fragment.num_physical_rows],
+ 3019                  RowAddrSelection::Partial(bitmap) => bitmap_to_ranges(bitmap),
+ 3020              };
+ 3021 +            let requested = match physical_row_addr_prefilter {
+ 3022 +                Some(allowed) => match allowed.get(fragment_id) {
+ 3023 +                    Some(RowAddrSelection::Full) => requested,
+ 3024 +                    Some(RowAddrSelection::Partial(bitmap)) => {
+ 3025 +                        FilteredReadStream::intersect_ranges(&requested, &bitmap_to_ranges(bitmap))
+ 3026 +                    }
+ 3027 +                    None => continue,
+ 3028 +                },
+ 3029 +                None => requested,
+ 3030 +            };
+ 3031              let valid = FilteredReadStream::full_frag_range(
+ 3032                  fragment.num_physical_rows,
+ 3033                  &fragment.deletion_vector,
+
+@@ -2957,6 +3050,7 @@ impl RowStreamRead {
+ 3050          ids: RowAddrTreeMap,
+ 3051          keys: &arrow_array::PrimitiveArray<UInt64Type>,
+ 3052          fragments: &StreamFragments,
+ 3053 +        physical_row_addr_prefilter: Option<&RowAddrTreeMap>,
+ 3054      ) -> FilteredReadInternalPlan {
+ 3055          let mut rows: BTreeMap<u32, Vec<Range<u64>>> = BTreeMap::new();
+ 3056          let (Some(min_key), Some(max_key)) = (arrow::compute::min(keys), arrow::compute::max(keys))
+
+@@ -2980,13 +3074,24 @@ impl RowStreamRead {
+ 3074              if offsets.is_empty() {
+ 3075                  continue;
+ 3076              }
+ 3077 +            let fragment_id = fragment.fragment.id() as u32;
+ 3078 +            let offsets = match physical_row_addr_prefilter {
+ 3079 +                Some(allowed) => match allowed.get(&fragment_id) {
+ 3080 +                    Some(RowAddrSelection::Full) => offsets,
+ 3081 +                    Some(RowAddrSelection::Partial(bitmap)) => {
+ 3082 +                        FilteredReadStream::intersect_ranges(&offsets, &bitmap_to_ranges(bitmap))
+ 3083 +                    }
+ 3084 +                    None => continue,
+ 3085 +                },
+ 3086 +                None => offsets,
+ 3087 +            };
+ 3088              let valid = FilteredReadStream::full_frag_range(
+ 3089                  fragment.num_physical_rows,
+ 3090                  &fragment.deletion_vector,
+ 3091              );
+ 3092              let matched = FilteredReadStream::intersect_ranges(&valid, &offsets);
+ 3093              if !matched.is_empty() {
+ 2989 -                rows.insert(fragment.fragment.id() as u32, matched);
+ 3094 +                rows.insert(fragment_id, matched);
+ 3095              }
+ 3096          }
+ 3097          FilteredReadInternalPlan {
+
+@@ -3032,12 +3137,26 @@ impl RowStreamRead {
+ 3137          drop(compute_timer);
+ 3138  
+ 3139          let fragments = self.load_fragments().await?;
+ 3140 +        let physical_row_addr_prefilter = self
+ 3141 +            .source
+ 3142 +            .read_options
+ 3143 +            .physical_row_addr_prefilter
+ 3144 +            .as_deref();
+ 3145          // Row ids equal row addresses when the dataset does not use stable
+ 3146          // row ids, so either key resolves directly by position
+ 3147          if self.source.key_column == ROW_ADDR || !self.dataset.manifest.uses_stable_row_ids() {
+ 3038 -            Ok(Self::plan_batch_from_addresses(&batch_keys, fragments))
+ 3148 +            Ok(Self::plan_batch_from_addresses(
+ 3149 +                &batch_keys,
+ 3150 +                fragments,
+ 3151 +                physical_row_addr_prefilter,
+ 3152 +            ))
+ 3153          } else {
+ 3040 -            Ok(Self::plan_batch_from_row_ids(batch_keys, keys, fragments))
+ 3154 +            Ok(Self::plan_batch_from_row_ids(
+ 3155 +                batch_keys,
+ 3156 +                keys,
+ 3157 +                fragments,
+ 3158 +                physical_row_addr_prefilter,
+ 3159 +            ))
+ 3160          }
+ 3161      }
+ 3162  
+
+@@ -3397,16 +3516,21 @@ impl ExecutionPlan for FilteredReadExec {
+ 3516      ) -> datafusion::error::Result<Arc<Statistics>> {
+ 3517          if let RowSelector::RowStream(source) = &self.input {
+ 3518              // At most one output row per input row
+ 3519 +            let num_rows = source.plan.partition_statistics(partition)?.num_rows;
+ 3520 +            let num_rows = if self.options.physical_row_addr_prefilter.is_some() {
+ 3521 +                // Row-stream inputs may repeat keys, so bitmap cardinality is not
+ 3522 +                // an output bound. Filtering can only reduce the input estimate.
+ 3523 +                num_rows.to_inexact()
+ 3524 +            } else {
+ 3525 +                num_rows
+ 3526 +            };
+ 3527              return Ok(Arc::new(Statistics {
+ 3401 -                num_rows: source.plan.partition_statistics(partition)?.num_rows,
+ 3528 +                num_rows,
+ 3529 +                total_byte_size: estimated_total_byte_size(num_rows, self.bytes_per_row),
+ 3530                  ..Statistics::new_unknown(self.schema().as_ref())
+ 3531              }));
+ 3532          }
+ 3405 -        let fragments = self
+ 3406 -            .options
+ 3407 -            .fragments
+ 3408 -            .clone()
+ 3409 -            .unwrap_or_else(|| self.dataset.fragments().clone());
+ 3533 +        let fragments = self.options.selected_fragments(&self.dataset);
+ 3534  
+ 3535          let total_rows = if self.options.with_deleted_rows {
+ 3536              if self.options.scan_range_before_filter.is_some()
+
+@@ -3426,6 +3550,12 @@ impl ExecutionPlan for FilteredReadExec {
+ 3550              }
+ 3551              fragments.iter().map(|f| f.num_rows().unwrap() as u64).sum()
+ 3552          };
+ 3553 +        let total_rows = self
+ 3554 +            .options
+ 3555 +            .physical_row_addr_prefilter
+ 3556 +            .as_ref()
+ 3557 +            .and_then(|rows| rows.len())
+ 3558 +            .map_or(total_rows, |selected| total_rows.min(selected));
+ 3559  
+ 3560          let Some(filter) = self.options.full_filter.as_ref() else {
+ 3561              // If there is no filter, we just return the total number of rows (sans any before-filter range)
+
+@@ -3441,6 +3571,16 @@ impl ExecutionPlan for FilteredReadExec {
+ 3571                      total_rows
+ 3572                  };
+ 3573  
+ 3574 +            // Legal here alongside a row-set input, where it limits what the node
+ 3575 +            // returns from the rows the index selected.
+ 3576 +            let total_rows =
+ 3577 +                if let Some(scan_range_after_filter) = &self.options.scan_range_after_filter {
+ 3578 +                    let end = scan_range_after_filter.end.min(total_rows);
+ 3579 +                    end.saturating_sub(scan_range_after_filter.start)
+ 3580 +                } else {
+ 3581 +                    total_rows
+ 3582 +                };
+ 3583 +
+ 3584              let total_rows = if partition.is_some() {
+ 3585                  match self.options.threading_mode {
+ 3586                      FilteredReadThreadingMode::MultiplePartitions(num_partitions) => {
+
+@@ -3453,8 +3593,20 @@ impl ExecutionPlan for FilteredReadExec {
+ 3593                  total_rows
+ 3594              };
+ 3595  
+ 3596 +            // An index search, a refine filter or a row-address prefilter can select
+ 3597 +            // rows without a full filter expression, so the fragment row count is then
+ 3598 +            // only an estimate.
+ 3599 +            let nothing_selects = self.input.row_set_plan().is_none()
+ 3600 +                && self.options.refine_filter.is_none()
+ 3601 +                && self.options.physical_row_addr_prefilter.is_none();
+ 3602 +            let num_rows = if nothing_selects {
+ 3603 +                Precision::Exact(total_rows as usize)
+ 3604 +            } else {
+ 3605 +                Precision::Inexact(total_rows as usize)
+ 3606 +            };
+ 3607              return Ok(Arc::new(Statistics {
+ 3457 -                num_rows: Precision::Exact(total_rows as usize),
+ 3608 +                num_rows,
+ 3609 +                total_byte_size: estimated_total_byte_size(num_rows, self.bytes_per_row),
+ 3610                  ..datafusion::physical_plan::Statistics::new_unknown(self.schema().as_ref())
+ 3611              }));
+ 3612          };
+
+@@ -3499,8 +3651,12 @@ impl ExecutionPlan for FilteredReadExec {
+ 3651          // is applied in the mock input)
+ 3652          let total_rows =
+ 3653              if let Some(scan_range_after_filter) = &self.options.scan_range_after_filter {
+ 3654 +                // Saturating: the setters reject an inverted range, but the field
+ 3655 +                // is public, so the subtraction could still wrap.
+ 3656                  df_stats.num_rows.min(&Precision::Exact(
+ 3503 -                    scan_range_after_filter.end as usize - scan_range_after_filter.start as usize,
+ 3657 +                    scan_range_after_filter
+ 3658 +                        .end
+ 3659 +                        .saturating_sub(scan_range_after_filter.start) as usize,
+ 3660                  ))
+ 3661              } else {
+ 3662                  df_stats.num_rows
+
+@@ -3529,6 +3685,10 @@ impl ExecutionPlan for FilteredReadExec {
+ 3685              }
+ 3686          });
+ 3687  
+ 3688 +        // Recompute rather than keep what `FilterExec` derived: that figure covers
+ 3689 +        // the filter-only columns we just dropped and predates the range clamp above.
+ 3690 +        df_stats.total_byte_size = estimated_total_byte_size(df_stats.num_rows, self.bytes_per_row);
+ 3691 +
+ 3692          Ok(Arc::new(df_stats))
+ 3693      }
+ 3694  
+
+@@ -3633,7 +3793,10 @@ impl ExecutionPlan for FilteredReadExec {
+ 3793              // a scalar-index result) the rows are selected by that input, so a pre-range
+ 3794              // would apply before selection and keep the wrong rows; leave the limit to a
+ 3795              // node above the read instead.
+ 3636 -            if self.options.scan_range_before_filter.is_some() || self.index_input().is_some() {
+ 3796 +            if self.options.scan_range_before_filter.is_some()
+ 3797 +                || self.options.physical_row_addr_prefilter.is_some()
+ 3798 +                || self.index_input().is_some()
+ 3799 +            {
+ 3800                  return None;
+ 3801              }
+ 3802              updated_options.scan_range_before_filter = Some(0..(limit as u64));

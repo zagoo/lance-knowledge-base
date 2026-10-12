@@ -1,0 +1,152 @@
+@@ -28,6 +28,7 @@ public class Query {
+   28    private final int k;
+   29    private final int minimumNprobes;
+   30    private final Optional<Integer> maximumNprobes;
+   31 +  private final Optional<Double> searchEffort;
+   32    private final Optional<Integer> ef;
+   33    private final Optional<Integer> refineFactor;
+   34    private final Optional<DistanceType> distanceType;
+
+@@ -47,16 +48,17 @@ public class Query {
+   48            "Batch query buffer length must be a positive multiple of the query vector dimension");
+   49      }
+   50      this.queryVectorDim = builder.queryVectorDim;
+   51 +    Optional<Integer> fixedNprobes =
+   52 +        builder.searchEffort.isPresent() ? Optional.empty() : builder.nprobes;
+   53 +    this.minimumNprobes = builder.minimumNprobes.orElse(fixedNprobes.orElse(1));
+   54 +    this.maximumNprobes = builder.maximumNprobes.or(() -> fixedNprobes);
+   55      Preconditions.checkArgument(builder.k > 0, "K must be greater than 0");
+   56 +    Preconditions.checkArgument(minimumNprobes > 0, "Minimum Nprobes must be greater than 0");
+   57      Preconditions.checkArgument(
+   52 -        builder.minimumNprobes > 0, "Minimum Nprobes must be greater than 0");
+   53 -    Preconditions.checkArgument(
+   54 -        !builder.maximumNprobes.isPresent()
+   55 -            || builder.maximumNprobes.get() >= builder.minimumNprobes,
+   58 +        !maximumNprobes.isPresent() || maximumNprobes.get() >= minimumNprobes,
+   59          "Maximum Nprobes must be greater than minimum Nprobes");
+   60      this.k = builder.k;
+   58 -    this.minimumNprobes = builder.minimumNprobes;
+   59 -    this.maximumNprobes = builder.maximumNprobes;
+   61 +    this.searchEffort = builder.searchEffort;
+   62      this.ef = builder.ef;
+   63      this.refineFactor = builder.refineFactor;
+   64      this.distanceType = builder.distanceType;
+
+@@ -95,6 +97,21 @@ public class Query {
+   97      return maximumNprobes;
+   98    }
+   99  
+  100 +  /** Returns the resolved initial IVF search effort; absent effort resolves to 0.5. */
+  101 +  public double getSearchEffort() {
+  102 +    return searchEffort.orElse(0.5);
+  103 +  }
+  104 +
+  105 +  /**
+  106 +   * Returns the configured effort, or empty when it was omitted.
+  107 +   *
+  108 +   * <p>An explicit effort, including 0.5, ignores fixed nprobes. For example, {@code new
+  109 +   * Query.Builder().setColumn("vector").setKey(vector).build() .getSearchEffortOption()} is empty.
+  110 +   */
+  111 +  public Optional<Double> getSearchEffortOption() {
+  112 +    return searchEffort;
+  113 +  }
+  114 +
+  115    public Optional<Integer> getEf() {
+  116      return ef;
+  117    }
+
+@@ -136,6 +153,7 @@ public class Query {
+  153          .add("k", k)
+  154          .add("minimumNprobes", minimumNprobes)
+  155          .add("maximumNprobes", maximumNprobes.orElse(null))
+  156 +        .add("searchEffort", searchEffort.orElse(null))
+  157          .add("ef", ef.orElse(null))
+  158          .add("refineFactor", refineFactor.orElse(null))
+  159          .add("distanceType", distanceType.orElse(null))
+
+@@ -150,8 +168,10 @@ public class Query {
+  168      private float[] key;
+  169      private int queryVectorDim = 0;
+  170      private int k = 10;
+  153 -    private int minimumNprobes = 1;
+  171 +    private Optional<Integer> nprobes = Optional.empty();
+  172 +    private Optional<Integer> minimumNprobes = Optional.empty();
+  173      private Optional<Integer> maximumNprobes = Optional.empty();
+  174 +    private Optional<Double> searchEffort = Optional.empty();
+  175      private Optional<Integer> ef = Optional.empty();
+  176      private Optional<Integer> refineFactor = Optional.empty();
+  177      private Optional<DistanceType> distanceType = Optional.empty();
+
+@@ -243,14 +263,14 @@ public class Query {
+  263      /**
+  264       * Sets the number of probes to load and search.
+  265       *
+  246 -     * <p>This sets both the minimum and maximum number of probes to the same value.
+  266 +     * <p>Used only when search effort is absent. Explicit minimum and maximum bounds override the
+  267 +     * corresponding fixed-count bounds, regardless of setter order.
+  268       *
+  269       * @param nprobes The number of probes.
+  270       * @return The Builder instance for method chaining.
+  271       */
+  272      public Builder setNprobes(int nprobes) {
+  252 -      this.minimumNprobes = nprobes;
+  253 -      this.maximumNprobes = Optional.of(nprobes);
+  273 +      this.nprobes = Optional.of(nprobes);
+  274        return this;
+  275      }
+  276  
+
+@@ -264,18 +284,17 @@ public class Query {
+  284       * @return The Builder instance for method chaining.
+  285       */
+  286      public Builder setMinimumNprobes(int minimumNprobes) {
+  267 -      this.minimumNprobes = minimumNprobes;
+  287 +      this.minimumNprobes = Optional.of(minimumNprobes);
+  288        return this;
+  289      }
+  290  
+  291      /**
+  292       * Sets the maximum number of partitions to search.
+  293       *
+  274 -     * <p>These partitions will only be loaded and searched if we have not found the desired number
+  275 -     * of results after searching the minimum number of partitions. Increasing this number can avoid
+  276 -     * false negatives on queries with a highly selective prefilter. This setting does not affect
+  277 -     * the recall of the query and will only affect the latency if the prefilter is highly
+  278 -     * selective.
+  294 +     * <p>This bounds both the initial budget and later probing to find enough candidates. An unset
+  295 +     * maximum allows all available partitions. With {@link #setSearchEffort(double)} set to 1, all
+  296 +     * partitions up to this limit are included in the initial search. At lower efforts, additional
+  297 +     * partitions may be searched if the initial budget does not find enough candidates.
+  298       *
+  299       * @param maximumNprobes The maximum number of partitions to search.
+  300       * @return The Builder instance for method chaining.
+
+@@ -285,6 +304,28 @@ public class Query {
+  304        return this;
+  305      }
+  306  
+  307 +    /**
+  308 +     * Sets the initial IVF search effort, a finite value in [0, 1].
+  309 +     *
+  310 +     * <p>Absent effort resolves to 0.5 and preserves Auto. Zero starts at the caller minimum (at
+  311 +     * least one available partition); one starts at all available partitions, subject to the caller
+  312 +     * maximum. Intermediate values interpolate geometrically. Later expansion to find enough
+  313 +     * candidates is unchanged. This is independent of approximation mode, HNSW ef and refinement,
+  314 +     * and is not a recall guarantee. Any explicit effort, including 0.5, ignores fixed nprobes
+  315 +     * regardless of setter order. Explicit minimum and maximum bounds remain effective. Effort
+  316 +     * validation occurs in the Rust core when the query is executed.
+  317 +     *
+  318 +     * <p>Example: {@code new
+  319 +     * Query.Builder().setColumn("vector").setKey(vector).setSearchEffort(0.75).build()}.
+  320 +     *
+  321 +     * @param searchEffort The initial partition search effort.
+  322 +     * @return The Builder instance for method chaining.
+  323 +     */
+  324 +    public Builder setSearchEffort(double searchEffort) {
+  325 +      this.searchEffort = Optional.of(searchEffort);
+  326 +      return this;
+  327 +    }
+  328 +
+  329      /**
+  330       * Sets the number of candidates to reserve while searching. This is an optional parameter for
+  331       * HNSW related index types.

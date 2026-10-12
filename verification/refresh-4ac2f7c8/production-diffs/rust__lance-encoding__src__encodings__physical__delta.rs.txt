@@ -1,0 +1,238 @@
+@@ -0,0 +1,354 @@
+    1 +// SPDX-License-Identifier: Apache-2.0
+    2 +// SPDX-FileCopyrightText: Copyright The Lance Authors
+    3 +
+    4 +//! Delta encoding for non-decreasing unsigned block sequences.
+    5 +
+    6 +use super::{checked_fixed_values, try_vec_with_capacity};
+    7 +use crate::{
+    8 +    buffer::LanceBuffer,
+    9 +    compression::{BlockCompressor, BlockDecompressor, validate_delta_child_encoding},
+   10 +    data::{BlockInfo, DataBlock, FixedWidthDataBlock},
+   11 +    format::{ProtobufUtils21, pb21::CompressiveEncoding},
+   12 +};
+   13 +use lance_core::{Error, Result};
+   14 +
+   15 +#[derive(Debug)]
+   16 +/// Encodes adjacent differences with a concrete child block codec.
+   17 +pub struct DeltaEncoder {
+   18 +    bits_per_value: u64,
+   19 +    base: u64,
+   20 +    child: Box<dyn BlockCompressor>,
+   21 +}
+   22 +
+   23 +impl DeltaEncoder {
+   24 +    /// Creates a delta codec with the first value and child difference codec.
+   25 +    pub fn new(bits_per_value: u64, base: u64, child: Box<dyn BlockCompressor>) -> Self {
+   26 +        Self {
+   27 +            bits_per_value,
+   28 +            base,
+   29 +            child,
+   30 +        }
+   31 +    }
+   32 +}
+   33 +
+   34 +impl BlockCompressor for DeltaEncoder {
+   35 +    fn compress(&self, data: DataBlock) -> Result<(Option<LanceBuffer>, CompressiveEncoding)> {
+   36 +        let DataBlock::FixedWidth(data) = data else {
+   37 +            return Err(Error::invalid_input(
+   38 +                "Delta encoding requires a fixed-width data block",
+   39 +            ));
+   40 +        };
+   41 +        if data.bits_per_value != self.bits_per_value {
+   42 +            return Err(Error::invalid_input(format!(
+   43 +                "Delta codec expects {}-bit values, got {}",
+   44 +                self.bits_per_value, data.bits_per_value
+   45 +            )));
+   46 +        }
+   47 +        let deltas = encode_deltas(data, self.base)?;
+   48 +        let (payload, child_encoding) = self.child.compress(DataBlock::FixedWidth(deltas))?;
+   49 +        validate_delta_child_encoding(&child_encoding, self.bits_per_value)?;
+   50 +        Ok((
+   51 +            payload,
+   52 +            ProtobufUtils21::delta(self.bits_per_value, self.base, child_encoding),
+   53 +        ))
+   54 +    }
+   55 +}
+   56 +
+   57 +fn encode_deltas(data: FixedWidthDataBlock, expected_base: u64) -> Result<FixedWidthDataBlock> {
+   58 +    if !matches!(data.bits_per_value, 32 | 64) {
+   59 +        return Err(Error::invalid_input(format!(
+   60 +            "Delta only supports 32 or 64-bit values, got {}",
+   61 +            data.bits_per_value
+   62 +        )));
+   63 +    }
+   64 +    if data.num_values < 2 {
+   65 +        return Err(Error::invalid_input(format!(
+   66 +            "Delta requires at least 2 values, got {}",
+   67 +            data.num_values
+   68 +        )));
+   69 +    }
+   70 +
+   71 +    let deltas = match data.bits_per_value {
+   72 +        32 => {
+   73 +            let values = checked_fixed_values::<u32>(&data, "Delta input")?;
+   74 +            if u64::from(values[0]) != expected_base {
+   75 +                return Err(Error::invalid_input(format!(
+   76 +                    "Delta base mismatch: codec expects {expected_base}, input starts with {}",
+   77 +                    values[0]
+   78 +                )));
+   79 +            }
+   80 +            let mut deltas = try_vec_with_capacity::<u32>(data.num_values - 1, "Delta output")?;
+   81 +            for (index, pair) in values.windows(2).enumerate() {
+   82 +                deltas.push(pair[1].checked_sub(pair[0]).ok_or_else(|| {
+   83 +                    Error::invalid_input(format!(
+   84 +                        "Delta input decreases at index {}: {} -> {}",
+   85 +                        index + 1,
+   86 +                        pair[0],
+   87 +                        pair[1]
+   88 +                    ))
+   89 +                })?);
+   90 +            }
+   91 +            LanceBuffer::reinterpret_vec(deltas)
+   92 +        }
+   93 +        64 => {
+   94 +            let values = checked_fixed_values::<u64>(&data, "Delta input")?;
+   95 +            if values[0] != expected_base {
+   96 +                return Err(Error::invalid_input(format!(
+   97 +                    "Delta base mismatch: codec expects {expected_base}, input starts with {}",
+   98 +                    values[0]
+   99 +                )));
+  100 +            }
+  101 +            let mut deltas = try_vec_with_capacity::<u64>(data.num_values - 1, "Delta output")?;
+  102 +            for (index, pair) in values.windows(2).enumerate() {
+  103 +                deltas.push(pair[1].checked_sub(pair[0]).ok_or_else(|| {
+  104 +                    Error::invalid_input(format!(
+  105 +                        "Delta input decreases at index {}: {} -> {}",
+  106 +                        index + 1,
+  107 +                        pair[0],
+  108 +                        pair[1]
+  109 +                    ))
+  110 +                })?);
+  111 +            }
+  112 +            LanceBuffer::reinterpret_vec(deltas)
+  113 +        }
+  114 +        _ => unreachable!("delta width was validated above"),
+  115 +    };
+  116 +    Ok(FixedWidthDataBlock {
+  117 +        bits_per_value: data.bits_per_value,
+  118 +        data: deltas,
+  119 +        num_values: data.num_values - 1,
+  120 +        block_info: BlockInfo::default(),
+  121 +    })
+  122 +}
+  123 +
+  124 +#[derive(Debug)]
+  125 +pub(crate) struct DeltaDecompressor {
+  126 +    bits_per_value: u64,
+  127 +    base: u64,
+  128 +    child: Box<dyn BlockDecompressor>,
+  129 +}
+  130 +
+  131 +impl DeltaDecompressor {
+  132 +    pub(crate) fn new(bits_per_value: u64, base: u64, child: Box<dyn BlockDecompressor>) -> Self {
+  133 +        Self {
+  134 +            bits_per_value,
+  135 +            base,
+  136 +            child,
+  137 +        }
+  138 +    }
+  139 +}
+  140 +
+  141 +impl BlockDecompressor for DeltaDecompressor {
+  142 +    fn decompress(&self, data: Option<LanceBuffer>, num_values: u64) -> Result<DataBlock> {
+  143 +        validate_delta_header(self.bits_per_value, self.base, num_values)?;
+  144 +        let child = self.child.decompress(data, num_values - 1)?;
+  145 +        reconstruct_deltas(child, self.bits_per_value, self.base, num_values)
+  146 +    }
+  147 +
+  148 +    fn requires_payload(&self) -> bool {
+  149 +        self.child.requires_payload()
+  150 +    }
+  151 +}
+  152 +
+  153 +pub(crate) fn validate_delta_header(bits_per_value: u64, base: u64, num_values: u64) -> Result<()> {
+  154 +    if !matches!(bits_per_value, 32 | 64) {
+  155 +        return Err(Error::invalid_input(format!(
+  156 +            "Delta only supports 32 or 64-bit values, got {bits_per_value}"
+  157 +        )));
+  158 +    }
+  159 +    if bits_per_value == 32 && base > u32::MAX as u64 {
+  160 +        return Err(Error::invalid_input(format!(
+  161 +            "Delta base {base} exceeds u32::MAX"
+  162 +        )));
+  163 +    }
+  164 +    if num_values < 2 {
+  165 +        return Err(Error::invalid_input(format!(
+  166 +            "Delta requires at least 2 values, got {num_values}"
+  167 +        )));
+  168 +    }
+  169 +    Ok(())
+  170 +}
+  171 +
+  172 +fn reconstruct_deltas(
+  173 +    child: DataBlock,
+  174 +    bits_per_value: u64,
+  175 +    base: u64,
+  176 +    num_values: u64,
+  177 +) -> Result<DataBlock> {
+  178 +    let DataBlock::FixedWidth(child) = child else {
+  179 +        return Err(Error::invalid_input(
+  180 +            "Delta child decoded to a non fixed-width block",
+  181 +        ));
+  182 +    };
+  183 +    if child.bits_per_value != bits_per_value || child.num_values != num_values - 1 {
+  184 +        return Err(Error::invalid_input(format!(
+  185 +            "Delta child decoded {} {}-bit values, expected {} {}-bit values",
+  186 +            child.num_values,
+  187 +            child.bits_per_value,
+  188 +            num_values - 1,
+  189 +            bits_per_value
+  190 +        )));
+  191 +    }
+  192 +
+  193 +    let data = match bits_per_value {
+  194 +        32 => {
+  195 +            let deltas = checked_fixed_values::<u32>(&child, "Delta child")?;
+  196 +            let mut values = try_vec_with_capacity::<u32>(num_values, "Delta output")?;
+  197 +            let mut current = u32::try_from(base)
+  198 +                .map_err(|_| Error::invalid_input(format!("Delta base {base} exceeds u32::MAX")))?;
+  199 +            values.push(current);
+  200 +            for (index, delta) in deltas.iter().enumerate() {
+  201 +                current = current.checked_add(*delta).ok_or_else(|| {
+  202 +                    Error::invalid_input(format!(
+  203 +                        "Delta prefix sum overflows u32 at index {}",
+  204 +                        index + 1
+  205 +                    ))
+  206 +                })?;
+  207 +                values.push(current);
+  208 +            }
+  209 +            LanceBuffer::reinterpret_vec(values)
+  210 +        }
+  211 +        64 => {
+  212 +            let deltas = checked_fixed_values::<u64>(&child, "Delta child")?;
+  213 +            let mut values = try_vec_with_capacity::<u64>(num_values, "Delta output")?;
+  214 +            let mut current = base;
+  215 +            values.push(current);
+  216 +            for (index, delta) in deltas.iter().enumerate() {
+  217 +                current = current.checked_add(*delta).ok_or_else(|| {
+  218 +                    Error::invalid_input(format!(
+  219 +                        "Delta prefix sum overflows u64 at index {}",
+  220 +                        index + 1
+  221 +                    ))
+  222 +                })?;
+  223 +                values.push(current);
+  224 +            }
+  225 +            LanceBuffer::reinterpret_vec(values)
+  226 +        }
+  227 +        _ => unreachable!("delta header was validated before reconstruction"),
+  228 +    };
+  229 +
+  230 +    Ok(DataBlock::FixedWidth(FixedWidthDataBlock {
+  231 +        bits_per_value,
+  232 +        data,
+  233 +        num_values,
+  234 +        block_info: BlockInfo::default(),
+  235 +    }))
+  236 +}
+  237 +

@@ -1,0 +1,133 @@
+@@ -2,6 +2,7 @@
+    2  // SPDX-FileCopyrightText: Copyright The Lance Authors
+    3  
+    4  use lance_core::utils::row_addr_remap::RowAddrRemap;
+    5 +use lance_index_core::remapping::RowAddrTranslator;
+    6  use std::{
+    7      ops::Bound,
+    8      sync::{Arc, Mutex},
+
+@@ -101,6 +102,22 @@ impl Index for JsonIndex {
+  102      }
+  103  }
+  104  
+  105 +impl JsonIndex {
+  106 +    /// The JSON index over a rewritten target index.
+  107 +    fn wrap_target(&self, target_created: CreatedIndex) -> Result<CreatedIndex> {
+  108 +        let json_details = crate::pb::JsonIndexDetails {
+  109 +            path: self.path.clone(),
+  110 +            target_details: Some(target_created.index_details),
+  111 +        };
+  112 +        Ok(CreatedIndex {
+  113 +            index_details: prost_types::Any::from_msg(&json_details)?,
+  114 +            // TODO: We should store the target index version in the details
+  115 +            index_version: JSON_INDEX_VERSION,
+  116 +            files: target_created.files,
+  117 +        })
+  118 +    }
+  119 +}
+  120 +
+  121  #[async_trait]
+  122  impl ScalarIndex for JsonIndex {
+  123      async fn search(
+
+@@ -134,16 +151,19 @@ impl ScalarIndex for JsonIndex {
+  151          dest_store: &dyn IndexStore,
+  152      ) -> Result<CreatedIndex> {
+  153          let target_created = self.target_index.remap(mapping, dest_store).await?;
+  137 -        let json_details = crate::pb::JsonIndexDetails {
+  138 -            path: self.path.clone(),
+  139 -            target_details: Some(target_created.index_details),
+  140 -        };
+  141 -        Ok(CreatedIndex {
+  142 -            index_details: prost_types::Any::from_msg(&json_details)?,
+  143 -            // TODO: We should store the target index version in the details
+  144 -            index_version: JSON_INDEX_VERSION,
+  145 -            files: target_created.files,
+  146 -        })
+  154 +        self.wrap_target(target_created)
+  155 +    }
+  156 +
+  157 +    async fn remap_streaming(
+  158 +        &self,
+  159 +        translator: &RowAddrTranslator,
+  160 +        dest_store: &dyn IndexStore,
+  161 +    ) -> Result<CreatedIndex> {
+  162 +        let target_created = self
+  163 +            .target_index
+  164 +            .remap_streaming(translator, dest_store)
+  165 +            .await?;
+  166 +        self.wrap_target(target_created)
+  167      }
+  168  
+  169      async fn update(
+
+@@ -230,6 +250,7 @@ enum JsonIndexTargetType {
+  250      Int64,
+  251      Float64,
+  252      Utf8,
+  253 +    // Retained for parameters derived from legacy array/object indices.
+  254      LargeBinary,
+  255  }
+  256  
+
+@@ -584,7 +605,11 @@ impl JsonIndexPlugin {
+  605                  JsonbType::Int64 => DataType::Int64,
+  606                  JsonbType::Float64 => DataType::Float64,
+  607                  JsonbType::String => DataType::Utf8,
+  587 -                JsonbType::Array | JsonbType::Object => DataType::LargeBinary,
+  608 +                JsonbType::Array | JsonbType::Object => {
+  609 +                    return Err(Error::invalid_input(format!(
+  610 +                        "Cannot create a JSON index for JSON path '{path}' with JSON type {jsonb_type:?}; only scalar values are supported"
+  611 +                    )));
+  612 +                }
+  613              };
+  614              return Ok(Some(data_type));
+  615          }
+
+@@ -907,6 +932,12 @@ impl BasicTrainer for JsonIndexPlugin {
+  932          }
+  933  
+  934          let params = serde_json::from_str::<JsonIndexParameters>(params)?;
+  935 +        if params.target_data_type == Some(JsonIndexTargetType::LargeBinary) {
+  936 +            return Err(Error::invalid_input(format!(
+  937 +                "Cannot create a JSON index for JSON path '{}' with target data type LargeBinary (arrays or objects); only scalar values are supported",
+  938 +                params.path
+  939 +            )));
+  940 +        }
+  941          // Initial builds infer the type from the data. Derived rebuild parameters
+  942          // carry the learned type so every new segment uses the same target schema.
+  943          let target_type = params
+
+@@ -1069,6 +1100,7 @@ impl ScalarIndexPlugin for JsonIndexPlugin {
+ 1100          &self,
+ 1101          index_store: Arc<dyn IndexStore>,
+ 1102          index_details: &prost_types::Any,
+ 1103 +        _index_version: u32,
+ 1104          frag_reuse_index: Option<Arc<dyn RowIdRemapper>>,
+ 1105          cache: &LanceCache,
+ 1106      ) -> Result<Arc<dyn ScalarIndex>> {
+
+@@ -1076,8 +1108,21 @@ impl ScalarIndexPlugin for JsonIndexPlugin {
+ 1108          let json_details = crate::pb::JsonIndexDetails::decode(index_details.value.as_slice())?;
+ 1109          let target_details = json_details.target_details.as_ref().expect_ok()?;
+ 1110          let target_plugin = registry.get_plugin_by_details(target_details).unwrap();
+ 1111 +        // `_index_version` is this *wrapper's* version (`JSON_INDEX_VERSION`,
+ 1112 +        // currently always 0 -- see the `// TODO` in `remap`/`update` below), not
+ 1113 +        // the target's; `JsonIndexDetails` does not yet record the target's own
+ 1114 +        // version. Every target this wrapper builds comes from a fresh training
+ 1115 +        // pass in this same codebase, so it is always at that plugin's current
+ 1116 +        // format; passing the target's own max version is the accurate stand-in
+ 1117 +        // until the target's version is recorded here directly.
+ 1118          let target_index = target_plugin
+ 1080 -            .load_index(index_store, target_details, frag_reuse_index, cache)
+ 1119 +            .load_index(
+ 1120 +                index_store,
+ 1121 +                target_details,
+ 1122 +                target_plugin.version(),
+ 1123 +                frag_reuse_index,
+ 1124 +                cache,
+ 1125 +            )
+ 1126              .await?;
+ 1127          Ok(Arc::new(JsonIndex::new(target_index, json_details.path)))
+ 1128      }

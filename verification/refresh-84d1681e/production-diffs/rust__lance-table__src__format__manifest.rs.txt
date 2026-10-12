@@ -1,0 +1,61 @@
+@@ -171,6 +171,11 @@ impl From<ManifestSummary> for BTreeMap<String, String> {
+  171  }
+  172  
+  173  impl Manifest {
+  174 +    /// Whether this table requires independently addressed Managed Blob support.
+  175 +    pub fn has_managed_blobs(&self) -> bool {
+  176 +        self.reader_feature_flags & crate::feature_flags::FLAG_MANAGED_BLOBS != 0
+  177 +    }
+  178 +
+  179      pub fn new(
+  180          schema: Schema,
+  181          fragments: Arc<Vec<Fragment>>,
+
+@@ -642,6 +647,25 @@ pub struct BasePath {
+  647  }
+  648  
+  649  impl BasePath {
+  650 +    /// Choose an unused exact base ID without reserving zero or overflowing at
+  651 +    /// `u32::MAX`. The caller must publish the binding with its references and
+  652 +    /// reject a concurrent attempt to bind the chosen ID to another location.
+  653 +    pub fn unused_id(bases: impl IntoIterator<Item = u32>) -> Result<u32> {
+  654 +        let mut ids = bases.into_iter().collect::<Vec<_>>();
+  655 +        ids.sort_unstable();
+  656 +        ids.dedup();
+  657 +        let mut candidate = 0u32;
+  658 +        for id in ids {
+  659 +            if id != candidate {
+  660 +                break;
+  661 +            }
+  662 +            candidate = candidate
+  663 +                .checked_add(1)
+  664 +                .ok_or_else(|| Error::invalid_input("All u32 base IDs are already registered"))?;
+  665 +        }
+  666 +        Ok(candidate)
+  667 +    }
+  668 +
+  669      /// Create a new BasePath
+  670      ///
+  671      /// # Arguments
+
+@@ -1040,7 +1064,10 @@ impl TryFrom<pb::Manifest> for Manifest {
+ 1064              } else {
+ 1065                  Some(p.transaction_file)
+ 1066              },
+ 1043 -            transaction_section: p.transaction_section.map(|i| i as usize),
+ 1067 +            transaction_section: p
+ 1068 +                .transaction_section
+ 1069 +                .or(p.transaction_section_deprecated)
+ 1070 +                .map(|i| i as usize),
+ 1071              fragment_offsets,
+ 1072              next_row_id: p.next_row_id,
+ 1073              data_storage_format,
+
+@@ -1119,6 +1146,7 @@ impl From<&Manifest> for pb::Manifest {
+ 1146                  })
+ 1147                  .collect(),
+ 1148              transaction_section: m.transaction_section.map(|i| i as u64),
+ 1149 +            transaction_section_deprecated: None,
+ 1150          }
+ 1151      }
+ 1152  }

@@ -1,0 +1,884 @@
+{
+  "iteration": 76,
+  "files": [
+    {
+      "path": "rust/lance-table/src/transaction/manifest_build.rs",
+      "module": "L1-modules/rust-lance-table-manifest-build.md",
+      "reviewed": true,
+      "role": "Transaction manifest candidate assembly, prepared index coverage and MemWAL catchup accounting, restore metadata loading, and local regression fixtures. Complete runtime and cfg(test) lines; synchronous main builder is not storage publication.",
+      "ranges": [
+        [
+          1,
+          58,
+          "SPDX/module docs identify build_manifest as operation-to-candidate metadata center. Imports feature flags/read-write gates, overlay/types, CommitHandler plus manifest readers, row-ID/version helpers, FRI gate/recognizers, MemWAL helpers, UpdateMode, preparation/validation/update-map functions, operation payloads, key metadata names, truthy parser, exact file versions, object store/path, Roaring, ordered/hash collections, Arc and UUID. Imported commit/manifest IO powers restoration; main candidate building is synchronous."
+        ],
+        [
+          59,
+          80,
+          "Public RANGE_SEGMENTS_CONFIG_KEY is exactly lance.row_ids.range_segments. Docs say opt-in converts bitmap row-ID segments to a compact in-memory Ranges form serialized as existing Range records; older readers may be slow, and turning off only stops new conversions. Private range_segments_enabled looks in manifest.config and uses str_is_truthy directly: missing/unrecognized false, recognized case-insensitive spellings true, no whitespace trim (rust/lance-core/src/utils/parse.rs:5-11). This is persisted config, not an environment setting."
+        ],
+        [
+          81,
+          108,
+          "Private apply_range_segments returns Ok immediately unless destination manifest enables conversion. If current manifest also enables it, build HashMap fragment ID to starting raw byte pointer for only inline row-ID entries; otherwise empty. Duplicate IDs overwrite earlier pointer entries. Equality later is ID plus pointer, not encoded-content digest or bytes. Raw pointers are compared, never dereferenced; no unsafe block."
+        ],
+        [
+          109,
+          124,
+          "Arc::make_mut detaches fragment vector when shared, then visit each inline row-ID sequence. Same ID/start pointer in enabled current manifest skips decode; other inline entries decode fallibly, run use_range_segments and replace bytes only when it reports change. Column/missing metadata skipped. Decoder errors can follow earlier local fragment changes; no rollback within helper. New allocation with equal bytes is decoded; pointer equality assumes valid unmodified shared backing. Enabling on a previously disabled table attempts every inline fragment. No storage IO."
+        ],
+        [
+          125,
+          141,
+          "Transaction::fragments_with_ids is pub(super), generic IntoIterator<Item=Fragment> with returned lazy iterator borrowing mutable u64 counter for lifetime a. Each consumed fragment with id0 gets current counter then ordinary increment; nonzero IDs pass unchanged without advancing/reserving counter. Allocation happens on iteration, not method call. No collision/u32-limit/overflow validation; valid externally assigned IDs and counter state are caller responsibilities. Counter0 can assign legitimate0 and still advance."
+        ],
+        [
+          142,
+          166,
+          "Private data_storage_format_from_files takes fragments and optional exact request. Explicit V1 first infers homogeneous existing file version and errors if it is non-V1; inference errors propagate. Explicit non-V1 wins without inference, allowing mixed prewritten versions for later finalization. No request uses inferred version. None after empty-file inference becomes DataStorageFormat::default. This chooses default metadata, not actual file conversion or complete final file-version validation."
+        ],
+        [
+          167,
+          188,
+          "Public async Transaction::restore_old_manifest borrows store/CommitHandler/base/config/current and accepts target version/tx path; returns owned Manifest and index Vec. Await version location, await manifest read, then require both read and write capability before mutating metadata or reading indices. Set supplied timestamp/transaction path, await index read, then validate tagged paired flags. IO/errors propagate in this order; cancellation can drop awaits/local candidate, with no write/publication performed here."
+        ],
+        [
+          189,
+          206,
+          "Restore raises target max_fragment_id and next_row_id to maxima with current high-water marks. Rejects current stable-ID table restored to target without stable IDs, with target version/context: reverting to physical-address identity could collide with allocated IDs. Then inherit sticky feature flags and return. Target manifest version itself is not incremented here, and contents/config/index entries remain restored state apart from listed metadata changes. No data-file existence/rewrite/cleanup checks here."
+        ],
+        [
+          207,
+          228,
+          "Public logical_index_segments filters system indices using exact reserved-name predicate, groups all other physical segments by owned name in BTreeMap, clones UUID plus Option bitmap into CoverageIdentity, then unstable-sorts each Vec by UUID only. Order-independent equality assumes unique segment UUIDs; duplicates with different bitmaps can retain differing tie order because tie key excludes bitmap. Duplicate entries are not removed. No file/detail/version/timestamp comparison; allocations include names, vectors and cloned bitmaps."
+        ],
+        [
+          229,
+          257,
+          "Public apply_mem_wal_index_coverage mutates final index slice from prior logical-segment snapshot, optional original read-version manifest/indices and new version. Docs derive credit from covering all fragments live at original read_version, capped by current compacted progress; merely reported claims could become stale on rebase. Missing catchup is documented differently in required-coverage versus legacy read modes. This method signature has no explicit coverage-mode flag and its actual early returns follow below; global reader policy requires separate analysis."
+        ],
+        [
+          258,
+          277,
+          "Find first final index named __lance_mem_wal; absence returns Ok. Decode a clone; only if both compacted_sstables and index_catchup are empty return unchanged. Compute logical segments after and take catchup vector out of local decoded details. Missing/invalid Any errors before any caller mutation. This branch does not directly inspect a feature flag or maintain_all_indexes. Duplicate reserved entries ignored after first."
+        ],
+        [
+          278,
+          314,
+          "Optional read-version state searches its first reserved-name entry, clones/decodes with Option/Result transpose, and propagates malformed details even when credit might ultimately be absent. Build one tuple per current compacted marker in its order: shard UUID,current generation,min(first read marker generation or0,current). Current duplicate shard markers stay duplicated. Read state missing or missing shard contributes0. Capping by current protects against credit from a subsequently rolled-back compaction; no monotonic-state validation performed."
+        ],
+        [
+          315,
+          350,
+          "Build optional RoaringBitmap of every read-manifest fragment ID cast unchecked u64->u32. covers_read_version returns false if no read state or empty required set, explicitly refusing vacuous credit because historical UpdateMemWalState could omit fragments while SSTables remain sole data copy. Otherwise union every physical segment bitmap; any None returns false even if other segments already cover all required IDs. Return required subset of union. No row counts, deletion vectors, field identity or per-generation fragment mapping is checked."
+        ],
+        [
+          351,
+          369,
+          "For each after logical index in BTreeMap name order, unchanged means full CoverageIdentity Vec equals segments_before[name], including bitmap and Option shape. Only unchanged names may carry first matching prior catchup entry. Independently recompute proof of read-version coverage. If neither carried nor proven, omit name. Changed UUID or in-place bitmap narrowing can remove credit; additional outer metadata fields do not affect equality. Prior duplicate name entries beyond first are not merged."
+        ],
+        [
+          370,
+          392,
+          "For each current compacted shard tuple, prior generation is first carried shard match or0; new credit is capped read generation only when proven, else0. Emit min(max(prior,credited),committed). This keeps higher prior credit on unchanged index while clamping rollback and never credits post-read generations. Emit all current shard tuples including zeros if any generation positive; omit the entire name if all zero, also true for no shards. Explicitly sort rebuilt names, though BTreeMap traversal already sorted them. No removal of duplicate shard tuples."
+        ],
+        [
+          393,
+          415,
+          "Sort old catchup entries by name and compare to rebuilt with order-sensitive nested Vec equality. Equal returns without touching final metadata, preserving UUID and actual prior byte ordering even if only names had been unsorted. Otherwise find old names absent from rebuilt (nested scans, duplicates may log repeatedly), info-log dropped names, store rebuilt details and replace selected slot through fresh metadata constructor. Errors before assignment leave caller slice unchanged; info log can precede constructor error. Successful replacement changes UUID/timestamp and constructor outer defaults as documented in mem_wal.rs598-618; no physical file IO."
+        ],
+        [
+          416,
+          452,
+          "Public withdraw_coverage_invalidated_after_build accepts changed logical names and candidate version. Empty names or absent reserved MemWAL entry returns Ok. Decode copy, retain catchup names not contained in changed slice, return unchanged if no entry removed. Otherwise log the complete supplied changed list and replace same index slot with newly encoded metadata. It only removes credit, never derives new credit; duplicates/missing names harmless, contains scans give O(catchup*changed) comparisons. Failure before replacement preserves caller slice. Docs identify post-build migrate_indices bitmap recalculation as caller rationale, full caller still pending."
+        ],
+        [
+          453,
+          481,
+          "Public prepare_indices takes current optional manifest, owned current indices, config, optional decoded Arc ledger and settled FragReuseUpdate. Docs require per-attempt current state and explain inline decode versus unprefetched external rejection. It prepares in-place Update/Merge/DataReplacement coverage through lineage; it does not itself open external history. Missing read capability is not silently treated as no lineage by the called parser."
+        ],
+        [
+          482,
+          515,
+          "Run pure tagged write gate before cloning indices. With a current manifest compute rewritten physical columns; only nonempty rewrites construct TaggedLineage from original metadata/caller ledger, collect live fragment IDs using checked u32 conversion dropping out-of-range values, and withdraw coverage in cloned prepared list. Thus invalid ledger can remain unparsed when no physical rewrite is present. Current manifest and input index elements are not mutated; errors drop local clone."
+        ],
+        [
+          516,
+          542,
+          "Return PreparedIndices with optional current version, owned original Vec, cloned/adjusted Vec and settled FRI update. Public build_manifest forwards to build_manifest_with_read_version with None read state; no local operation validation or disk publication in wrapper. Signatures return an owned candidate Manifest plus owned final index list."
+        ],
+        [
+          543,
+          579,
+          "Public build_manifest_with_read_version takes optional borrowed ReadVersionState but prepares with no ledger and FragReuseUpdate::None, then calls prepared builder. External history rejection applies when preparation needs to decode it; tagged intent admission follows classifier, not a universal prohibition on every tagged operation. Documentation calls creation/detached cases None; API does not verify that read state corresponds to transaction.read_version."
+        ],
+        [
+          580,
+          611,
+          "Public build_manifest_prepared first compares prepared.manifest_version() to current Option version, rejecting mismatch with both values. Equality of version numbers is the only binding check here, not manifest content/UUID identity. Re-run gate against prepared original indices and settled FRI intent, then consume into_parts. Comments say publishes final list, but this synchronous builder returns metadata; actual storage publication occurs elsewhere."
+        ],
+        [
+          612,
+          642,
+          "If config requests stable IDs for existing nonstable table without migration_next_row_id, return NotSupported with migration advice. Independently collect names of every original index except exact FRI name; migration Some with any blockers errors, including MemWAL. This exclusion checks name only, not details/type. Creating migration config does not itself validate row IDs or apply publication. Conditions distinguish config request from already-active manifest flag."
+        ],
+        [
+          643,
+          674,
+          "Clone current base_paths or create empty map. Overwrite initial_bases Some is accepted only for dataset creation; loop rejects repeated IDs before inserting cloned BasePath entries. Existing dataset returns InvalidInput even for Some(empty), reiterating validation should have caught it. URI uniqueness, access and base resolution are not checked in this local registration step. All mutations are to local candidate map."
+        ],
+        [
+          675,
+          700,
+          "Select schema from Overwrite/Merge/Project payload, otherwise clone current schema or Internal if absent. Compute next fragment ID as current max_fragment_id()+1 or0; additions are ordinary arithmetic with no checked overflow here. Allocate empty final fragment Vec and take prepared indices. High-water-mark comment explains avoiding reused row-address/cache/deletion identity, but arbitrary supplied nonzero fragment IDs are not rejected by this setup."
+        ],
+        [
+          701,
+          719,
+          "Migration config removes all final indices named FRI. If any original MemWAL reserved-name entry existed, snapshot non-system CoverageIdentity sets from originals before preparation, otherwise skip cloning cost. Drop original metadata Vec afterward. This activation depends on original list; adding MemWAL for the first time does not enable this before/after hook in the same build."
+        ],
+        [
+          720,
+          740,
+          "Stable allocation state precedence: existing reader FLAG_STABLE_ROW_IDS always uses existing next_row_id even if config.use_stable_row_ids=false; new table plus true starts0; false otherwise uses None; existing nonstable plus true requires supplied migration next value or NotSupported. Migration_next_row_id Some with false does not independently activate this Option, although earlier migration-specific checks/removal still run. No validation of supplied migration watermark occurs here."
+        ],
+        [
+          741,
+          759,
+          "Prepare Result<&Vec<Fragment>> lazily from optional current manifest, with operation-name Internal error, then compute candidate version1 or current.version+1 unchecked. Operations consume the missing-manifest error only when using ?. Clone explicitly returns Internal that it should not enter builder. Operation validation and conflict resolution are not called by this section."
+        ],
+        [
+          760,
+          775,
+          "Append requires current fragments, clones/preserves them in order, allocates placeholder IDs for cloned new fragments, then when stable allocation active assigns row IDs and overwrites both created/update metadata from build_version_meta(new_version). Append new fragments afterward. Count/lineage preconditions and helper panic behavior remain those of assign_row_ids/build_version_meta; no actual file writes or schema mutation."
+        ],
+        [
+          776,
+          797,
+          "Delete constructs deleted-ID HashSet and updated-ID HashMap with last duplicate update winning. Clone current fragments, remove deleted IDs, then replace only deletion_file on surviving matching IDs. Other staged post-image fields are deliberately ignored to preserve rebased current overlays/files/lineage. Missing updated/deleted IDs have no direct error here; deletion wins if an ID is in both. Retain relevant indices against final fragments/schema."
+        ],
+        [
+          798,
+          823,
+          "Update borrows removed/updated/new fragments, modified fields, compacted SSTables, index-preservation fields, mode and offset map. Requires current fragments. Removed-ID set deduplicates; updated_by_id inserts with or_insert so first duplicate wins, unlike Delete. Build live schema field-ID set by preorder, including nested fields. None of these maps validates duplicate contradictions itself."
+        ],
+        [
+          824,
+          860,
+          "Scan current fragments in order. Remove listed IDs first. For each surviving updated ID clone staged post-image, replace overlays with current overlays, and prune staged base files that contain neither current schema fields nor the staged fragment's spilled lineage IDs. RewriteColumns mode tombstones overlays for fields_modified; other modes carry them intact. Unchanged fragments are current clones; updated payload IDs absent from current are ignored. Deletion/file/lineage state otherwise comes from staged post-image, not a full merge with current."
+        ],
+        [
+          861,
+          896,
+          "An empty if next_row_id.is_some block and comments do not stamp any metadata. Extend final_fragments with updated survivors. Partial latest-update stamping runs only with active stable allocation, explicit RewriteColumns, present nonempty offset map. For each final fragment require matching map entry, updated_by_id membership, nonempty bitmap and preexisting latest-update metadata; skipped cases remain unchanged. This prevents fabricating historical stamps for fragments lacking metadata."
+        ],
+        [
+          897,
+          928,
+          "For each eligible partial update, linearly find original physical_rows, using fallback1<<24 if missing. Reject bitmap cardinality greater than limit before rejecting maximum offset>=limit, with detailed values. Then collect sorted bitmap offsets as Vec<usize> and call partial refresh with new_version, previous current.version or0 and preloaded spilled lineage. Earlier candidate fragments may already be modified on failure, but candidate is local to this Result-returning builder. Helper may have additional count/decode errors; no IO performed here."
+        ],
+        [
+          929,
+          959,
+          "Coverage withdrawal already happened in prepare_indices. Clone new update fragments through placeholder ID iterator, prune their base files against current schema plus each new fragment's spilled IDs, assign missing row IDs when stable allocation active, then resolve created/latest metadata from original existing fragments and preloaded lineage. Ordering matters: resolver sees allocated IDs. A staged file retaining at least one live field stays whole; this pruning does not rewrite its field mapping."
+        ],
+        [
+          960,
+          996,
+          "Index reuse for RewriteRows tests config.use_stable_row_ids, not merely active next_row_id. Collect pure-update new fragment IDs, concatenate removed IDs plus every updated payload ID as source list, and build map of current overlaid source fragments keyed by unchecked u32 cast. Invoke register_pure_rewrite_rows_update_frags_in_indices with preservation fields/schema. It can error or modify candidate index coverage; existing source overlays are considered to avoid carrying stale values. A stable table with false config skips this optional reuse branch."
+        ],
+        [
+          997,
+          1016,
+          "Call assign_row_ids a second time when stable allocation active, relying on existing metadata to avoid reallocating; preserve version metadata from resolver. Source comment's numeric line references1627-1755 are stale and do not define execution order. Build target_ids HashSet of new fragments but do not read it afterward in this arm, so it incurs allocation with no local semantic effect. Append new fragments, retain relevant indices, and only then strictly update nonempty MemWAL compacted markers with new_version; helper errors abort candidate return."
+        ],
+        [
+          1017,
+          1039,
+          "Overwrite clones only supplied fragments and overwrites every incoming fragment ID with sequential high-water IDs, including nonzero IDs. Ordinary increments unchecked. With stable allocation, assign missing row IDs and restamp both version metadata uniformly from new version. Replace final fragment list and discard every index. Carried-over fragment rejection is delegated to earlier validate_operation, not performed here; direct builder callers must respect that precondition."
+        ],
+        [
+          1040,
+          1069,
+          "Rewrite clones existing fragments then delegates handle_rewrite_fragments with groups, mutable fragment counter, current version and optional stable row watermark. Obtain optional TaggedRewriteAssembly only from prepared FragReuseUpdate::Rewrite. ordered_rewrite_groups excludes groups whose sources were reordered by stable-partition transitions so provenance remains on retired sources rather than falsely claiming destination coverage. Group intersection validation delegates helper."
+        ],
+        [
+          1070,
+          1097,
+          "With active stable IDs, debug_assert rewritten_indices empty (not a release error), skip indices recognized as FRI by name/details predicate, and transform each present bitmap. Row-address-domain indices drop ordered rewritten sources without following destinations; row-ID-domain indices recalculate source-to-destination coverage fallibly. Unknown bitmap None stays None. This path ignores provided rewritten-index replacements after the debug assertion and does not inspect row-map file contents."
+        ],
+        [
+          1098,
+          1110,
+          "Without stable IDs, handle_rewrite_indices applies rewritten metadata and ordered-group bitmap rules. In both branches prune overlay-stale index fields for every rewrite group afterward because fresh base data materializes overlays. These are in-memory metadata changes; no index files are copied, removed or rebuilt in this code."
+        ],
+        [
+          1111,
+          1146,
+          "If prepared assembly exists, select first current final FRI-name entry dataset_version and compare Option with assembly.base_entry_version; mismatch errors with both versions and commit-path advice. This is a consistency check, not CAS or proof of entire history identity; comments place concurrency protection in external per-attempt assembly/CAS. Retain entries whose name differs from assembly.entry.name and append cloned assembly entry, ignoring operation's own FRI payload. It validates neither assembly UUID nor full bytes here."
+        ],
+        [
+          1147,
+          1179,
+          "Without assembly, Some legacy FRI entry is spliced by removing all same-name indices and appending clone; no local byte decode, preserving existing snapshot behavior after gate. None does nothing. CreateIndex preserves current fragments, removes existing entries whose UUID appears in removed or new lists, validates covering fields on every new entry, then extends with clones in supplied order. No deduplication of repeated new UUID/name occurs here; validation failure only damages local candidate state."
+        ],
+        [
+          1180,
+          1222,
+          "ReserveFragments/UpdateConfig initially carry current fragments unchanged. Merge clones supplied full fragment list, not a union with current. With active stable IDs, map original fragments by ID (last duplicate wins); physically rewritten existing fragments receive full latest-update refresh, unchanged ones retain staged metadata; new IDs receive full refresh then creation metadata cloned from latest. No fragment-ID or stable-row-ID assignment is done in this Merge arm. Extend final list then retain indices relevant to new schema/fragments; preparation already withdrew in-place changed-column coverage."
+        ],
+        [
+          1223,
+          1249,
+          "Project clones current fragments, collects all remaining schema IDs, and retains each base file if any raw field ID is still in schema or is a spilled lineage ID required by that fragment. It does not tombstone other field mappings or prune overlays here. Retain relevant indices afterward. Restore is unreachable! and can panic for a direct builder call reaching this arm; normal restore path is separate async method."
+        ],
+        [
+          1250,
+          1282,
+          "DataReplacement warns that operation is unstable, then unzips borrowed replacement IDs/files. Require all new files' ordered fields Arc slices equal via HashSet cardinality<=1; empty replacement list passes. Difference errors with per-file field arrays. This checks field-ID arrays, not column_indices/version/schema isomorphism; error text and comments claiming same fields do not establish same physical layout."
+        ],
+        [
+          1283,
+          1323,
+          "Require current fragments. Compute replaced_fields from first new file's reconstructed logical schema field IDs plus raw file field IDs, filtering negatives and retaining duplicates in Vec. For each replacement in input order find first original fragment with that ID or InvalidInput, then clone it. Compute replacement_ids from each new file's logical plus raw IDs into HashSet, including negatives here. Explicit TODO leaves new-file/fragment row-count equality unchecked. Repeated fragment replacements independently clone the same original rather than accumulate."
+        ],
+        [
+          1324,
+          1345,
+          "Walk all cloned existing files. Exact raw fields plus equal major/minor causes path, cached size and base_id replacement; column_indices and other metadata stay from old file. Every matching file is changed, not just first, and replaced_in_place is remembered. Independently union logical and raw coverage across files. Then require new_file.file_version() to decode; no file bytes or length are read. Invalid existing versions may be encountered through schema reconstruction or later checks."
+        ],
+        [
+          1346,
+          1373,
+          "If replacement coverage is disjoint from existing coverage, append full new DataFile (all-null missing columns becoming values). Otherwise partial replacement requires no exact match, replacement coverage subset of existing coverage, and every file either known non-V1 or raw-field-disjoint from replacement. V1 fields require exact replacement because tombstoning would shift reader page-table interpretation per comment. Overlapping-but-not-subset coverage and blocked V1 layouts perform no mutation and later fail unchanged check."
+        ],
+        [
+          1374,
+          1414,
+          "Partial replacement loops every file, propagates file_version errors even for unrelated unknown-version files, skips V1, and rewrites any raw replacement field ID to TOMBSTONE_FIELD_ID while preserving physical column_indices. Collect current schema live IDs; retain files having any live or required spilled-lineage field, then append cloned new file. This prunes empty/dead field-only carriers but preserves sole hidden lineage data. No on-disk rewrite or physical deletion occurs; old bytes become unreachable/dead space by metadata."
+        ],
+        [
+          1415,
+          1441,
+          "Before overlay processing, reject if new fragment still equals original, including same path/size/base exact replacement. For changed fragment, partition current overlays by committed_version<=transaction.read_version. Tombstone replaced nonnegative fields only in older/equal overlays; append newer overlays unchanged after them and store. Partition preserves relative order within groups; final global ordering validation still applies. Newer concurrent overlays win over replacement base values. Push each independently changed fragment in replacement-input order."
+        ],
+        [
+          1442,
+          1475,
+          "Build changed-ID HashSet, then append original fragments absent from it. Duplicate replacement IDs can produce duplicate candidate fragments here; later sorting does not deduplicate. With active stable IDs, full latest-update refresh every changed fragment using candidate version, preserving creation metadata as helper dictates. Prep already withdrew replaced-field index coverage; this arm has no separate retain_relevant_indices call. Empty replacements effectively carry all originals and stamp none."
+        ],
+        [
+          1476,
+          1506,
+          "DataOverlay recomputes candidate version and requires existing fragments. Group all borrowed overlays by target ID, extending in original group/list order so repeated target groups are retained. Build current-ID set once, then reject any absent target with ID context; even a group with empty overlay list creates a key and is checked. Error selection across multiple missing targets follows HashMap iteration. No payload-file or offset validation in this lookup stage."
+        ],
+        [
+          1507,
+          1540,
+          "Clone every current fragment in order. For targeted fragments with active stable IDs, union all shared coverage bitmaps or all per-field bitmaps into one Roaring set. If nonempty, materialize Vec<usize> offsets and call partial latest-update refresh with candidate version, fallback1 and preloaded spilled lineage. Unlike RewriteColumns Update, this does not skip absent prior version metadata or impose the local1<<24 bound; the helper silently ignores offsets outside its materialized base-version vector and separately errors for unsupported missing spilled lineage. Fallback1 preserves documented scan behavior for uncovered rows; creation metadata is not changed here. Offset membership is tested with pos < base_versions.len(), not rejected at this helper boundary. (rust/lance-table/src/rowids/version.rs:721-780; rust/lance-table/src/rowids/version.rs:783-812)"
+        ],
+        [
+          1541,
+          1570,
+          "Append cloned new overlays to current list and overwrite every new committed_version with candidate version, preserving concurrent overlays and same-commit order. Push all fragments, including unaffected ones. UpdateMemWalState clones current fragments then invokes strict compacted-generation helper; it does not drop base fragments. UpdateBases also carries current fragments and indices; base-map changes occur later. End exhaustive16-operation match; the builder has not published anything."
+        ],
+        [
+          1571,
+          1597,
+          "Stable-sort final fragments by ID, preserving duplicate-ID order rather than rejecting duplicates. Remove base files containing only tombstone fields via helper; validate newest-last ordering for every nonempty overlay list, rejecting rather than sorting. Validate hidden row-lineage carriers for every fragment including untouched ones, catching missing/duplicate/V1 carriers before candidate return. These are metadata checks; they do not prove referenced files exist or decode successfully."
+        ],
+        [
+          1598,
+          1616,
+          "Choose requested storage default: explicit config.storage_format exact version wins over use_legacy_format; otherwise true maps V1, false maps V2_0, absent maps None. This builder does not reject simultaneous explicit/legacy config fields. If original MemWAL snapshot exists, apply catchup derivation once to final index list with original read-version state and candidate version. This precedes blob schema promotion and final Manifest construction."
+        ],
+        [
+          1617,
+          1643,
+          "Collect schema field IDs recognized as legacy blob (blob but not v2). Only when nonempty, traverse every referenced Lance file including overlays, parse its exact version, and for V2_2/V2_3 collect matching legacy blob root IDs into ordered BTreeSet. Even an unrelated file with invalid version errors during this traversal. It checks metadata field IDs, not actual blob data/encoding. No file rewrite occurs; older referenced files are retained."
+        ],
+        [
+          1644,
+          1683,
+          "Compute next logical field ID as max(current manifest max_field_id, candidate schema max_field_id, -1)+1 with ordinary i32 arithmetic. Promote collected roots to blob-v2 logical shape and call set_id with original parent and shared counter, retaining assigned root and allocating new children by helper contract. Existing dataset builds Manifest::new_from_previous with candidate fragments; only Overwrite plus explicit requested version changes default. Other existing operations ignore that request locally. New dataset infers/chooses default from files and constructs Manifest::new with registered reference_paths."
+        ],
+        [
+          1684,
+          1699,
+          "Copy transaction tag. If config.auto_set_feature_flags, inherit active stable-ID intent with config request before apply_feature_flags, passing disable_transaction_file. This prevents an internal default config from clearing stable IDs. Errors drop local candidate. With auto=false, this call is skipped; later covering/sticky/tagged flags still run. No transaction file is written or disabled by this flag-setting call itself."
+        ],
+        [
+          1700,
+          1725,
+          "After auto flag derivation, set both covering-index flags if any final metadata has nonempty covering_fields. Comment specifies constructors start without this bit and it is freshly derived, so dropping last covering index can lift the fence; loop does not independently clear it. Then inherit sticky flags from current manifest when present. Covering flags prevent readers/writers treating merely carried fields as index keys; actual query/write enforcement lies in other modules."
+        ],
+        [
+          1726,
+          1757,
+          "Set configured timestamp and update max fragment ID from candidate before operation-specific config changes. Overwrite Some config upserts extends existing candidate config rather than clears it. UpdateConfig separately clones/applies/replaces config, table metadata and schema metadata using UpdateMap semantics; absence leaves each map unchanged. These mutations precede field-key validation and range-segment opt-in application; any later error prevents returning candidate but does not restore local temporary maps."
+        ],
+        [
+          1758,
+          1789,
+          "Capture ordered primary-key and clustering-key field ID vectors before field updates. Compute writes_primary_key from any UpdateMap entry naming legacy primary flag or explicit position; compute writes_clustering_key from its position key. These flags count deletions and same-value writes, not only effective changes, and ignore replace-induced key disappearance unless after-vector comparison catches it. Original schema-level metadata updates already happened, but these properties live on fields."
+        ],
+        [
+          1790,
+          1816,
+          "Iterate HashMap of field updates in unspecified order. Missing field ID returns InvalidInput. Apply each field metadata map, then synchronize parsed primary position: parse explicit u32, otherwise truthy legacy flag=>0, otherwise None. Clustering position only parses u32. Malformed explicit primary position can fall back to a true legacy marker; this stage does not independently reject every malformed reserved string. Other metadata keys remain map content; no schema-wide validation runs per field."
+        ],
+        [
+          1817,
+          1843,
+          "If prior primary-key vector nonempty, reject any reserved-key write even same-value, or any changed after-vector (including replacement clearing). If prior empty and a reserved write leaves no primary key, reject invalid install. When writes_primary_key true and earlier rules pass, call schema.verify_primary_key for type/nullability/order constraints. No verification call when no reserved key entry exists. Policy operates on parsed fields and write-entry presence, not byte equality of metadata maps."
+        ],
+        [
+          1844,
+          1871,
+          "Clustering guard mirrors immutable nonempty vector and invalid-empty install rules, rejecting reserved touches even if final vector unchanged. Unlike primary path, no verify_clustering_key or equivalent schema-wide validator is called here after successful install. Other operations bypass this UpdateConfig-specific guard. Then apply_range_segments on candidate config, so enabling this commit triggers conversion and disabling stops further conversions; failures can follow all prior local assembly."
+        ],
+        [
+          1872,
+          1903,
+          "UpdateBases iterates proposals after candidate construction/range conversion. Reject if any existing BasePath has equal Option name OR equal path; two absent names therefore conflict too. For id0 allocate current maximum ID+1 or1 with ordinary arithmetic. Nonzero supplied ID is inserted without separate collision check, so it can overwrite a different same-ID entry if name/path checks pass. New proposals see previously inserted proposals; no mutation to current manifest, no URI reachability/path normalization check here."
+        ],
+        [
+          1904,
+          1919,
+          "ReserveFragments raises candidate max_fragment_id from existing Option.unwrap_or(0) by num_fragments, unchecked; even empty current can become Some. Always set transaction_file Some supplied path, regardless of disable_transaction_file flag setting earlier. Write next_row_id only when allocation Option active. If any final index satisfies tagged name/nonzero-version predicate, OR paired FRI feature bits, then return candidate manifest and indices. No validate_operation, storage finalization, compare-and-swap, file existence check, cleanup or conflict retry executes in this synchronous return path."
+        ],
+        [
+          1920,
+          1943,
+          "Private remove_tombstoned_data_files retains any file with at least one raw field ID !=-2; empty fields are removed by any false, and other negatives/out-of-schema IDs alone survive this helper. Private drop_rewritten_fragments clones old bitmap, removes every group source ID cast unchecked to u32, and returns it without destination additions or partial-coverage errors. Both preserve source inputs except supplied mutable fragment files in first. End Transaction impl; tests follow."
+        ],
+        [
+          1944,
+          1976,
+          "Private cfg(test) module imports overlay/protobuf/deletion/lineage types, row-ID codec, shared fixtures, Arrow schema, exact/public version selectors, CachedFileSize and collections. tagged_sample_manifest uses sample_manifest, sets both FRI bits and builds inline history5->0; it does not write/read a persisted dataset. All tests below are source evidence, not executed verification."
+        ],
+        [
+          1977,
+          1994,
+          "row_mutation helper selects delete fragment0 with predicate true, shared empty update transaction, or UpdateConfig with all maps absent/empty; unknown kind panics. These are small in-memory operation fixtures rather than realistic data writes."
+        ],
+        [
+          1995,
+          2035,
+          "Five rstest cases delete/update/config/project/merge build against tagged sample. Project and Merge clone unchanged schema/fragments. Each successful build must retain a reserved-name entry with identical UUID and index_version. It does not compare Any bytes, flags, all indices or resulting fragment values in these cases; comment's broader unchanged claim exceeds the precise assertions."
+        ],
+        [
+          2036,
+          2060,
+          "Overwrite fixture supplies Fragment::new(0), unchanged schema and no config/bases, then asserts final index list empty and reader FRI bit retained. Writer bit is not asserted here; no actual overwrite file data. Tests sticky bookkeeping after dropping tagged entry."
+        ],
+        [
+          2061,
+          2088,
+          "Stable-ID migration test uses unchanged Merge, migration_next_row_id Some100 and default build config against tagged history. Expects Error::NotSupported and stable row id migration message, verifying gate rejection before conversion/publication."
+        ],
+        [
+          2089,
+          2122,
+          "manifest_with_file creates live fragment0 field0/column0 V2_0 at caller path and sets paired FRI flags. translating_segment_and_entry gives id_idx bitmap{5} and history5->0. user_bitmap finds first id_idx and unwraps present bitmap clone; missing/unknown fixture would panic. No row-map IO in helpers."
+        ],
+        [
+          2123,
+          2167,
+          "in_place_rewrite constructs update by replacing shared fixture updated_fragments with empty Fragment0 and setting fields_modified; Merge creates b.lance fragment0 with caller fields castu32->i32 and column_indices[0], unchanged schema; DataReplacement builds analogous file and target0. Unknown kind unreachable. The fixture can use shape not representing valid production files; builder tests focus coverage metadata."
+        ],
+        [
+          2168,
+          2203,
+          "Three Update/Merge/DataReplacement cases rewrite field0 reached only through history5->0. Build must keep FRI UUID and leave id_idx bitmap empty. This asserts withdrawal of retired-source provenance instead of claiming destination; no scanner fallback or physical rows are executed."
+        ],
+        [
+          2204,
+          2235,
+          "Three analogous cases start user bitmap{0,5}, mixing direct destination and retired source. Successful build must leave bitmap empty, preventing source provenance from rederiving stale coverage. No explicit FRI payload equality asserted in this test."
+        ],
+        [
+          2236,
+          2281,
+          "Unwalkable lineage fixture history5->0 and6->8, user bitmap{0,5,6,7}, live{0,7,8}. TaggedLineage::new(entry,None) has no ledger; direct withdrawal of fragment0/field0 leaves{7}, removing every retired source. Decode inline ledger then repeat same withdrawal leaves{6,7}; unrelated retired source survives known graph. Direct helper test does not run full manifest build or simulate external read failure."
+        ],
+        [
+          2282,
+          2318,
+          "Serving-sibling fixture creates live0/1 files, translating id_idx{5}, independent same-name sibling{1} with new UUID, and other_idx unknown bitmap None. Update field0 is constructed against that manifest. Setup distinguishes empty metadata from unknown coverage and physical segments of one logical index."
+        ],
+        [
+          2319,
+          2359,
+          "First sibling build asserts translating segment UUID/name absent, sibling bitmap unchanged and unknown segment bitmap still None. Assertions inspect selected entries rather than complete index list/FRI equality. Same-name serving sibling allows retiring emptied physical metadata; no index files deleted in this test."
+        ],
+        [
+          2360,
+          2400,
+          "Second sibling build omits serving sibling and asserts sole translating segment remains with empty bitmap as rebuild record. Following independent test history5->0 plus6->8 starts bitmap{6}, rewrites0 and asserts{6} survives. Both are local metadata assertions, not actual translated query recall."
+        ],
+        [
+          2401,
+          2424,
+          "Unreadable-history test sets fri.index_details=None, then performs in-place Update. Expects InvalidInput and history substring. Despite comment about noninline history, fixture specifically covers missing Any, not an external file descriptor/callback. Other external decode behavior must use separate tests."
+        ],
+        [
+          2425,
+          2454,
+          "Six parameter cases: direct coverage for Update/Merge/DataReplacement; unindexed field for Update/Merge; off-lineage for Update. Direct sets bitmap{0}; unindexed rewrites field1 while segment indexes0; off-lineage changes history5->7. Build operation uses same in-place fixture and tagged flag; setup intentionally isolates field/lineage choices."
+        ],
+        [
+          2455,
+          2477,
+          "All six cases require FRI UUID preserved. Direct case expects empty user bitmap; other two shapes expect original bitmap. No direct DataReplacement unindexed/off-lineage case is declared; test matrix is six selected combinations, not full3x3 Cartesian product."
+        ],
+        [
+          2478,
+          2504,
+          "User CreateIndex test adds id_idx to tagged table, asserts it exists, then finds original FRI UUID and compares Any details and fragment bitmap exactly. It covers creation only; comment's replaced/dropped behavior is not exercised in this fixture."
+        ],
+        [
+          2505,
+          2549,
+          "Three unsupported cases: UpdateMemWalState empty progress, bare Rewrite of covered fragment0 to10 with no FRI entry, and Rewrite with explicit index_version0 snapshot. Each must return NotSupported with Tagged FRI history maintenance. Bare uncovered rewrites are explicitly a separate supported case; this matrix does not reject every bare Rewrite."
+        ],
+        [
+          2550,
+          2591,
+          "Two tagged-snapshot rejection cases vary whether current table is tagged. Both construct a reserved-name new entry with cleared fields and Rewrite snapshot but no prepared assembly. Build must return InvalidInput containing must be assembled, even on initially untagged table. Current tagged fixture uses metadata shape rather than complete graph IO."
+        ],
+        [
+          2592,
+          2620,
+          "Sticky-flag-only manifest with no current index attempts v0 reserved snapshot Rewrite. Expects InvalidInput and sticky feature flag text. This pins record-form policy after entry trim; no migration or stored-history bytes are read."
+        ],
+        [
+          2621,
+          2658,
+          "tagged_history_allows_rewrite_of_uncovered_fragments uses fragments0..6, paired FRI bits and reserved entry bitmap{0}; bare Rewrite replaces fragment5 with10 and carries no new FRI snapshot. Successful build retains some final index with original FRI UUID. It asserts neither full metadata equality nor output fragment IDs; uncovered physical rewrite is the supported counterpart to covered bare-rewrite rejection."
+        ],
+        [
+          2659,
+          2680,
+          "out_of_range_transition_source_id_rejected passes reordered_sources a transition source u32::MAX+1, four physical rows, zero deletions, no destinations/mapping. unwrap_err message must contain row address range wording. Pins checked conversion; does not assert a particular Error variant."
+        ],
+        [
+          2681,
+          2732,
+          "tagged_history_allows_rewrite_appending_tagged_entry supplies current reserved entry dataset_version7 and prepared FragReuseUpdate::Rewrite with new entry, base_entry_version Some7 and empty reordered_sources. Rewrite groups and rewritten indices are empty. prepare_indices_with_inputs succeeds; build_manifest_prepared must yield one reserved entry with new UUID and reader FRI bit set. Synthetic assembled intent bypasses actual transition assembly/IO; does not assert writer bit or CAS publication."
+        ],
+        [
+          2733,
+          2777,
+          "frag_reuse_rewrite_guards_base_entry_version uses current dataset_version7 but assembled rewrite base_entry_version None. Preparation succeeds, prepared build fails InvalidInput with rebuild text. Tests Option-version mismatch, not full manifest identity/content comparison."
+        ],
+        [
+          2778,
+          2837,
+          "Three prepare_indices_keeps_original_and_withdraws_prepared cases Update/Merge/DataReplacement rewrite field0 on live fragment0. Original translating bitmap{5} with FRI history5->0 and6->8, unrelated other_idx{6}; prepare binds manifest version, preserves entire original metadata array, empties translating prepared bitmap, preserves unrelated bitmap. build_manifest_prepared final indices must equal prepared vector exactly. No persisted index IO or scan is exercised."
+        ],
+        [
+          2838,
+          2869,
+          "Three untagged Update/Merge/DataReplacement cases clear both FRI flags, start segment bitmap{0,3}, rewrite field0 on fragment0 and call prepare_indices only. Original entry remains exact and prepared bitmap becomes{3}; no final build is called in this test."
+        ],
+        [
+          2870,
+          2899,
+          "prepare_indices_restore_and_non_rewrites_are_identity loops Restore(version1), empty Append, Delete(fragment0) and helper Update with no modified fields against tagged manifest+translating/FRI entries. All preparation results retain original vector. Restore here never enters build_manifest's unreachable arm; only preparation identity is asserted."
+        ],
+        [
+          2900,
+          2940,
+          "prepare_indices_external_history_needs_the_supplied_ledger first decodes inline FRI, then removes copied entry.index_details. Preparation without ledger fails InvalidInput; supplying earlier Arc ledger succeeds and empties user bitmap. Despite test name, fixture has absent Any rather than ExternalFile descriptor: it proves caller-ledger use for missing details, not an external read or ledger identity check."
+        ],
+        [
+          2941,
+          2978,
+          "prepare_indices_corrupt_inline_details_is_an_error retains Any type URL but replaces bytes with five0xff. Both prepare_indices and build_manifest must return CorruptFile; corruption is not treated as missing/no lineage. No external history loading is involved."
+        ],
+        [
+          2979,
+          3007,
+          "Prepared-against-another-manifest test prepares against current then increments cloned manifest.version. build_manifest_prepared must fail InvalidInput containing prepared against. It does not test same-version changed fragments/indices, which the numeric binding alone cannot distinguish."
+        ],
+        [
+          3008,
+          3047,
+          "build_manifest_prepared_still_runs_the_gate constructs an unassembled tagged Rewrite snapshot with changed UUID and asserts both prepare_indices and build_manifest fail with assembled by commit path text. Despite name/doc, fixture never directly invokes build_manifest_prepared; its own gate is established by runtime source593-611, not this test call sequence."
+        ],
+        [
+          3048,
+          3057,
+          "sample_manifest_with_fragments creates a nonnullable Int32 id Arrow/Lance schema, Fragment::new for every supplied u64 range element, V2_0 storage and empty bases. Fragments contain no physical-row count or data files; this is a manifest metadata helper."
+        ],
+        [
+          3058,
+          3092,
+          "CreateIndex same-name preservation test starts first+second vector_idx entries, adds third and removes second UUID. Final length2 must contain first/third and exclude second. Removal is UUID-specific even when names match; no data/index payload writes occur."
+        ],
+        [
+          3093,
+          3133,
+          "CreateIndex relisted UUID test starts first+second, adds first+third and removes second. Final length2, first appears once, third present and second absent. Covers deduplication between retained old and supplied new entries, not duplicate UUIDs within the new vector."
+        ],
+        [
+          3134,
+          3174,
+          "Update replacement/removal fixture starts IDs0..5, removes1, supplies updated2 physical42,4 physical43 and absent99. Successful final IDs[0,2,3,4] and physical counts[None,42,None,43] prove replacements of existing entries and ignoring updated ID99; new vector empty and optional mode/offset data absent."
+        ],
+        [
+          3175,
+          3205,
+          "Projected-files Update test has three modes None/RewriteRows/RewriteColumns crossed with spilled-lineage false/true: six cases. Starts fragments0..3; spilled variant sets paired stable flags/next_row_id126, 42 physical rows each and disjoint inline ID ranges. These are in-memory fixtures, not writes."
+        ],
+        [
+          3206,
+          3238,
+          "Projected-files fixture gives fragment1 a retained field0 V2_0 file; staged updated image also contains dropped field1. New placeholder fragment0 similarly contains field0 and field1 files, both staged physical42. Expected file vectors initially contain only projected field0 base files."
+        ],
+        [
+          3239,
+          3269,
+          "Spilled-lineage variant sets row-ID/created/latest metadata to Column and appends three separate carrier files with reserved fields-3/-4/-5 at column0; expected vectors preserve those files. Paths lineage-{reservedid}.lance are fixtures, no hidden columns are loaded or validated against actual bytes here."
+        ],
+        [
+          3270,
+          3296,
+          "Projected-files Update supplies staged updated/new fragments, fields_modified[1], selected mode and empty compacted/preservation vectors. Build with default config must keep only expected field0 plus optional hidden carriers in existing position1 and new position3, preserve physical42 and manifest max_field_id0. Current stable flags can remain active even when default config.use_stable_row_ids is false."
+        ],
+        [
+          3297,
+          3358,
+          "Delete rebasing test uses current manifest version2, fragment2 projected field0 file, overlayfield0@2 and uniform latest2/physical42. Staged read-version1 image includes dropped field1 plus new Array deletion file and deletes fragments1/3. Build yields IDs0,2,4, merges deletion metadata into current fragment, preserves only projected file, current overlay@2, physical42, max_field_id0 and all latest versions2. No deletion file IO or conflict resolver is run."
+        ],
+        [
+          3359,
+          3418,
+          "remove_tombstoned_data_files fixture gives four raw V2_0 files: fields[1,2,3], all[-2,-2,-2], mixed[4,-2,5], all[-2] with sizes1000/500/750/250. Direct helper retains normal then mixed only. This checks metadata pruning, not disk deletion; empty field lists and other negative IDs are not tested here."
+        ],
+        [
+          3419,
+          3476,
+          "Partial RewriteColumns Update has five stable IDs/physical rows but no created/latest metadata, updates same fragment and supplies offsets{1,3}. Successful candidate must still have latest metadata None, preventing fabrication of prior versions. The fixture asserts latest only, not created metadata."
+        ],
+        [
+          3477,
+          3533,
+          "Bitmap cardinality test uses five physical rows with uniform created/latest1 and supplies offsets0..10 to RewriteColumns Update. Build must error with cardinality substring; no Error variant is asserted. Separately bounds number of offsets before maximum-offset validation."
+        ],
+        [
+          3534,
+          3590,
+          "Maximum-offset rejection uses five physical rows, inline IDs and uniform created/latest1; offsets{0,100} have valid cardinality2 but exceed the row bound. RewriteColumns build must fail with max offset substring; no Error variant asserted. Complements cardinality rejection without conflating the two checks."
+        ],
+        [
+          3591,
+          3642,
+          "Exact-boundary test uses the same five-row fixture with offsets0..5 (0 through4). RewriteColumns build is expected to succeed; it does not inspect the resulting per-row version values. The boundary is maximum offset4, not an inclusive offset5."
+        ],
+        [
+          3643,
+          3694,
+          "Offsets-key validation constructs manifest fragments1/2, updated list containing1 only and offset map keyed2. Calls validate_operation directly and requires not in updated_fragments text. Does not invoke builder; fixture's single inline ID versus physical_rows5 is incidental and not validated by this assertion. Pins API validation of target membership before unrelated lineage can be stamped."
+        ],
+        [
+          3695,
+          3743,
+          "Protobuf offset roundtrip makes Update with bitmap map1->{1,3,5},2->{0,2,4,6}, no updated fragments. Encoding must leave legacy field9 vector-map empty and populate field10 bitmap-map with two entries. Decode must preserve both Roaring bitmaps exactly. Object conversion only; does not call operation validation, wire encode/decode or historical released fixture."
+        ],
+        [
+          3744,
+          3787,
+          "Legacy field9-read test constructs current protobuf Transaction with only UInt32List{1,3,5} for fragment1 and empty field10. Decode must produce one bitmap yielding those ordered offsets. Its comment calls this a manifest but actual object is pb::Transaction; no historical file is loaded."
+        ],
+        [
+          3788,
+          3835,
+          "Field10 precedence fixture serializes bitmap{10,20,30}, supplies conflicting legacy list{99,100} for same fragment1 and decodes current pb::Transaction. Result must yield field10 values exactly. Tests both-fields/same-key priority, not per-key merge when maps have disjoint keys or malformed bitmap fallback."
+        ],
+        [
+          3836,
+          3908,
+          "Stable-ID Merge changed-files test swaps before.lance to after.lance for same ID0, five inline IDs and missing prior lineage; reader stable flag set and next_row_id100. Build candidate version2 must provide latest version2 at first/last rows. Does not assert created metadata, all rows, or actual file contents."
+        ],
+        [
+          3909,
+          3987,
+          "Stable-ID Merge carry-forward fixture has unchanged same.lance, same row IDs, five physical rows and uniform latest1. Build preserves latest1 at first/last offsets; checks no blanket refresh for unchanged data files. Created metadata remains unasserted."
+        ],
+        [
+          3988,
+          4054,
+          "Nonstable Merge fixture explicitly asserts no stable reader flag, then swaps before/after file for five-row fragment without IDs/lineage. Build must leave latest metadata None. Uses stable-resolved file format but table stable-row-ID feature is disabled, distinguishing file version from row identity mode."
+        ],
+        [
+          4055,
+          4109,
+          "New-ID Merge setup has stable reader flag, manifest version1, existing fragment0 with three IDs and new fragment1 with four IDs absent from prior manifest. Both begin without created/latest metadata; next_row_id100 and stable-resolved files are metadata fixtures."
+        ],
+        [
+          4110,
+          4148,
+          "New-ID Merge supplies both fragments and builds version2. Find ID1 and require created and latest metadata, both first/last rows at2. Establishes two lineage fields for a new fragment ID, not assignment of new row IDs or rewriting existing fragment0 lineage."
+        ],
+        [
+          4149,
+          4214,
+          "DataOverlay multi-fragment test starts currentversion3: target0 already has overlay@3, target1 empty, untargeted2 overlay@3. Add overlays to0/1; candidateversion increases, existing0@3 stays before newly stamped overlay,1 gets stamped overlay,2 keeps original@3. Assertions count/order/versions, not on-disk overlay decoding or selected values."
+        ],
+        [
+          4215,
+          4245,
+          "Overlay-lineage setup: fragment1 four rows with uniform created/latest1 and IDs10..13; fragment2 two rows with IDs20/21 and no lineage, representing migrated rows whose documented scan default is1. make_stable_row_id_manifest produces currentversion4; no scan is run here."
+        ],
+        [
+          4246,
+          4306,
+          "DataOverlay applies dense row{0} plus sparse field bitmaps{2}/{3} to fragment1, dense{1} to fragment2. Build must yield latest[5,1,5,5] and[1,5], unioning all overlay coverage and initializing absent lineage with baseline1. It asserts every overlay on first result fragment stamped to candidateversion; second fragment stamps/created fields are not directly asserted."
+        ],
+        [
+          4307,
+          4366,
+          "DataReplacement overlay tombstone test replaces legacy basefield5 exactly, alongside basefield3 and old overlay[3,5]/overlay[5] at readversion1. Candidate must contain f5-new.lance, drop all-field5 overlay and retain one overlay with raw fields[3,-2]. No row data decode; legacy partial-overlay metadata tombstoning differs from forbidden partial legacy base-file replacement."
+        ],
+        [
+          4367,
+          4416,
+          "replace_fields helper builds nullable Int32 schema with explicit IDs3/4/5/6, one supplied fragment and selected currentversion. Stages V2_0 v-new.lance replacement for fragment0 with ordinal column indices at caller readversion, runs builder and returns cloned first result fragment. A missing/empty output would panic via indexing; helper does no IO."
+        ],
+        [
+          4417,
+          4426,
+          "replace_field_5 is a private test convenience fixing replaced fields to[5], forwarding fragment/current/read versions to replace_fields. It does not alter conflict or format behavior."
+        ],
+        [
+          4427,
+          4447,
+          "Legacy subset rejection fixture base[4,5] uses legacy format, stages V2 replacement of5 and requires error without asserting variant/message. Comment explains V1 page-table offset depends on first field and tombstoning a sibling can corrupt decoding; test does not read V1 pages."
+        ],
+        [
+          4448,
+          4485,
+          "Spanning V2 replacement starts ab[3,4] and cd[5,6], replaces[4,5]. Both old files survive with respectively[3,-2] and[-2,6], and new v-new.lance must exist. Tests multi-file tombstone-and-append, but not physical-row consistency or byte values."
+        ],
+        [
+          4486,
+          4511,
+          "Mixed-format spanning replacement uses V2 ab[3,4] and legacy cd[5,6], replaces[4,5] and requires failure. Error variant/message and external mutation rollback are not asserted; builder operates on local candidate clones."
+        ],
+        [
+          4512,
+          4539,
+          "Repeated tombstoning fixture V2 wide[4,-2,5] replaces5, expecting retained wide[4,-2,-2] plus new file. Existing tombstone positions and column layout remain; no physical rewrite of old file."
+        ],
+        [
+          4540,
+          4579,
+          "Newer-overlay preservation: V2 base[4,5], overlayfield5 committed7, transaction read6 against manifest7. Replacing5 follows partial-base path and must keep new base plus overlayfields[5]. Tests candidate recency semantics only; comment references conflict rebase but resolver is not invoked here."
+        ],
+        [
+          4580,
+          4619,
+          "Project hidden-carrier setup has four physical rows, row-ID Column and created Column; d.lance holds schemafields0/1, l.lance holds reserved row-ID/created fields, both V2_0. Schemaa/b and paired stable flags make hidden lineage necessary despite absence from schema IDs."
+        ],
+        [
+          4620,
+          4651,
+          "Project drops schemafield1, then asserts paths remain[d.lance,l.lance] and row_lineage_file for row-ID/created resolves l.lance. It preserves wider base files by intersection; does not assert rewriting raw data field lists, latest carrier or reading column bytes."
+        ],
+        [
+          4652,
+          4686,
+          "Two DataReplacement hidden-carrier parameter cases: standalone l.lance row-ID carrier next to wide3/4/5/6, replacing3/4 leaves wide[-2,-2,5,6]; in-file carrier wide3/4/5/6/rowID replacing all userfields leaves four tombstones plus rowID. Expected ordered files include appended v-new.lance and original carrier."
+        ],
+        [
+          4687,
+          4725,
+          "Carrier test builds V2 files with ordinal column indices and row-ID Column, runs replace_fields, asserts exact ordered(path,fields) vector and row_lineage_file resolves expected carrier. Covers metadata survival for two layouts, not hidden value contents or created/latest Column forms."
+        ],
+        [
+          4726,
+          4764,
+          "Two missing-carrier cases Merge row-ID Column with V2 field0 only or V1[0,rowID]. Builder must fail Error::Internal with fragment0 and reserved row-ID in message. Empty column_indices are deliberate; tests carrier IDs/version, not column-index validity or actual file schema."
+        ],
+        [
+          4765,
+          4796,
+          "Duplicate DataOverlay groups both target fragment0 with fields1 then2. Build must retain two overlays in input order with corresponding fields. Prevents last-group-wins HashMap collapse; version stamping tested elsewhere."
+        ],
+        [
+          4797,
+          4815,
+          "Unknown-fragment overlay targets99 in samplemanifest. build_manifest error must contain does not exist. No error variant asserted; empty-group unknown-target case is not tested here."
+        ],
+        [
+          4816,
+          4857,
+          "Nullability assertion codec test loops false/true for current pb::Project and pb::Merge, requiring decoded preserves_nullability exactly equal supplied bool. Comments connect default false to conservative legacy conflict behavior, but test invokes no resolver, absent historical wire message or builder; it validates current object mapping only."
+        ],
+        [
+          4858,
+          4899,
+          "Nested mem_wal_index_coverage module imports parent fixtures and typed MemWAL records. user_index builds field0 metadata with given name/UUID and known bitmap, default optional payloads; mem_wal_index creates reserved metadata at version1; coverage_for loads first reserved entry and returns first requested index's generation vector, panicking if absent system/invalid Any. compacted wraps one shard/generation. These helpers manipulate metadata only."
+        ],
+        [
+          4900,
+          4933,
+          "manifest_with constructs empty-schema/default-storage metadata for supplied fragment IDs. apply computes logical_index_segments from before, constructs read manifest, and calls production apply_mem_wal_index_coverage(after,before,Some(read state),2). It exercises exact local derivation, not whole build, migration or storage publication."
+        ],
+        [
+          4934,
+          4955,
+          "table helper pairs one idx user segment with system metadata; progress supplies compacted shard/generation with other defaults; progress_with_catchup also records idx caught generation. These allow inconsistent old/current progress intentionally for bound tests; constructors do not assert coverage."
+        ],
+        [
+          4956,
+          5005,
+          "Preparation-withdrawal integration starts idx{0,1}, progress5/catchup5 and Update of fragment0 field0. build_manifest_with_read_version must produce idx{1} and no catchup entry. Demonstrates before comparison uses original metadata, not already-pruned prepared vector; this test calls actual builder but no commit IO."
+        ],
+        [
+          5006,
+          5016,
+          "Covering-read-version case replaces user UUID but covers{0,1} against readfragments{0,1}, read/current progress5. apply grants shard5. Changed identity can earn fresh credit by complete read coverage."
+        ],
+        [
+          5017,
+          5027,
+          "Incomplete case covers{0} against read{0,1}, changed UUID and progress5; no catchup entry. Absence here means no proven position for this derivation; legacy reader interpretation depends on surrounding feature policy."
+        ],
+        [
+          5028,
+          5049,
+          "Same-UUID bitmap shrink test starts{0,1}/catchup5, changes to{0}, read{0,1}; resulting catchup absent. Comment says whole metadata, while runtime comparison identity is UUID plus bitmap, not every IndexMetadata field. Prevents carrying a position solely because UUID stayed equal."
+        ],
+        [
+          5050,
+          5065,
+          "Unchanged index{0} has recorded catchup2 and compacted5 but read{0,1}; derivation preserves2 and does not advance to5. Carrying old credit and proving new coverage are distinct."
+        ],
+        [
+          5066,
+          5078,
+          "Inconsistent carried9 with committed3 is capped to3 even for unchanged fully covering index. Test documents defensive clamp in this internal derivation; it is not an API accepting/clamping invalid user configuration."
+        ],
+        [
+          5079,
+          5090,
+          "Unchanged index with catchup9/committed9 and incomplete read coverage keeps9. Test name never lowered is conditional: preceding test establishes lowering to committed bound; here lack of fresh proof alone does not erase unchanged old credit."
+        ],
+        [
+          5091,
+          5102,
+          "Fresh proof from read progress9 with current committed3 grants3 for covering index. Prevents a rolled-back/high read progress from exceeding live commit's bound; no actual rollback operation is executed."
+        ],
+        [
+          5103,
+          5116,
+          "Read progress2 with current5 and covering changed index grants2 only. Complete coverage of fragments seen by transaction does not prove concurrent compaction generations after its fixed read snapshot."
+        ],
+        [
+          5117,
+          5134,
+          "Logical idx has known full-covering sibling{0,1} plus unknown None-bitmap sibling. With progress5 and no prior catchup, derivation yields none despite known sibling union covering all required IDs. Unknown coverage blocks new proof for whole name."
+        ],
+        [
+          5135,
+          5144,
+          "Dropping user idx while retaining system metadata with old catchup5 removes idx record. No live logical segment remains to earn/carry coverage."
+        ],
+        [
+          5145,
+          5158,
+          "New idx absent in before, covering readfragment0 in after, gets generation5 from read/current progress. Ordinary index creation can earn credit without a prior catchup entry or separate advance operation."
+        ],
+        [
+          5159,
+          5170,
+          "Unchanged covering index with compacted5 but no catchup record earns5. Pins self-healing metadata derivation; no reader/legacy version compatibility IO is tested."
+        ],
+        [
+          5171,
+          5202,
+          "Two-shard proof gives merged shard4 and idle shard0 in same catchup vector. Assertions find each by UUID, allowing order variation. Zero positions remain when at least one shard is positive; all-zero entry omission is separate."
+        ],
+        [
+          5203,
+          5217,
+          "Distinct fast/slow index names cover{0,1}/{0} against read{0,1}, progress6. fast gets6 and slow no record. Coverage proof is grouped by logical name, not shared across user indices."
+        ],
+        [
+          5218,
+          5229,
+          "Single idx segment with bitmapNone and progress5 cannot earn credit. Complements mixed known/unknown siblings; no prior catchup supplied."
+        ],
+        [
+          5230,
+          5239,
+          "No compaction progress/default details case compares entire after vector to untouched clone; derivation must leave all metadata unchanged. This no-op includes UUID preservation, not only missing catchup."
+        ],
+        [
+          5240,
+          5249,
+          "No MemWAL reserved entry case contains user idx only and asserts entire vector unchanged, establishing successful no-op without creating system metadata."
+        ],
+        [
+          5250,
+          5263,
+          "Without read state, unchanged idx/progress5/catchup5 retains generation5. Despite name nothing changes, test only compares returned catchup value; altered/removed-index withdrawal remains active without read state."
+        ],
+        [
+          5264,
+          5279,
+          "Separate untrained name has empty bitmap; trained name covers0. Against read{0},progress10, untrained gets no record and trained gets10. A sibling with a different logical name cannot establish its coverage."
+        ],
+        [
+          5280,
+          5318,
+          "Two-shard mixed carry/proof fixture: unchanged idx0, read compaction only advancing9, candidate compaction advancing10+quiet10, old quiet catchup7. After derivation sorted expected positions are advancing9,quiet7. Missing read-shard evidence gives zero new credit while existing unchanged quiet position remains."
+        ],
+        [
+          5319,
+          5331,
+          "Ordinary partial reindex replaces UUID, shrinks{0,1} to{0}, retains stale system catchup5 as input. Derivation succeeds and removes idx record. Test's never blocked language is scoped to valid supplied metadata, not malformed Any errors or all possible index jobs."
+        ],
+        [
+          5332,
+          5345,
+          "Unchanged idx with old catchup0 and incomplete read coverage remains all-zero; derivation omits the entire catchup entry rather than storing a known record at generation0. This differs from a zero shard retained alongside another positive shard."
+        ],
+        [
+          5346,
+          5380,
+          "Two unchanged unproven shard positions8/2 with committed10 each are preserved independently; sorted vector equality prevents leakage of larger position into lagging shard. Readfragments include uncovered1, so no new proof advances either."
+        ],
+        [
+          5381,
+          5403,
+          "Post-build narrowing test directly supplies migrated idx{0}, systemcatchup5 and invalidated name idx to withdraw_coverage_invalidated_after_build(candidateversion3). Entry must disappear. It does not execute migrate_indices or detect narrowing itself; caller supplies names."
+        ],
+        [
+          5404,
+          5420,
+          "Metadata-only migration test changes files to Some(empty) and created_at, reports no invalidated names, and verifies catchup5 remains. The withdrawal helper trusts empty name list; this test does not prove the upstream migration's detection logic."
+        ],
+        [
+          5421,
+          5440,
+          "Unchanged covering commit keeps reserved system index UUID equal before/after, avoiding needless cache-identity churn. Does not compare all metadata bytes; UUID assertion is explicit while equality shortcut is runtime evidence."
+        ],
+        [
+          5441,
+          5454,
+          "No read-state changed-UUID/shrunk bitmap case invokes derivation with None and removes catchup. Missing proof does not suppress withdrawal; complements unchanged no-read retention."
+        ],
+        [
+          5455,
+          5468,
+          "Two derivations against identical fixed read snapshot and cloned after metadata must yield equal catchup vectors. Fresh system UUIDs may differ and are not compared; test establishes accounting determinism, not byte-identical full candidates, CAS/retry safety or concurrent execution. Final braces close nested module and file tests."
+        ]
+      ],
+      "limits": "Source read and static analysis only. Repository builds/tests/lints were not run. Runtime helpers in covered sibling modules are linked; complete conflict resolver, table IO commit implementation, dataset call chain, external format/index/writer integrations remain pending. Tests construct current in-memory fixtures, not released historical compatibility data. No claim of full commit or format qualification."
+    }
+  ]
+}

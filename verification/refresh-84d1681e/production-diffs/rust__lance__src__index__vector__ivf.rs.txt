@@ -1,0 +1,250 @@
+@@ -68,6 +68,7 @@ use lance_file::{
+   68  use lance_index::metrics::MetricsCollector;
+   69  use lance_index::metrics::NoOpMetricsCollector;
+   70  use lance_index::prefilter::NoFilter;
+   71 +use lance_index::scalar::RowAddrTranslator;
+   72  use lance_index::vector::DISTANCE_TYPE_KEY;
+   73  use lance_index::vector::bq::builder::RabitQuantizer;
+   74  use lance_index::vector::flat::index::{FlatBinQuantizer, FlatIndex, FlatMetadata, FlatQuantizer};
+
+@@ -127,7 +128,9 @@ use serde_json::json;
+  128  use std::{
+  129      any::Any,
+  130      collections::{HashMap, HashSet},
+  131 +    future::Future,
+  132      ops::Range,
+  133 +    pin::Pin,
+  134      sync::{Arc, OnceLock},
+  135  };
+  136  use tokio::sync::mpsc;
+
+@@ -1555,6 +1558,13 @@ impl VectorIndex for IVFIndex {
+ 1558          ))
+ 1559      }
+ 1560  
+ 1561 +    async fn remap_streaming(&mut self, _translator: &RowAddrTranslator) -> Result<()> {
+ 1562 +        // No mapping to materialize: see `remap`.
+ 1563 +        Err(Error::index(
+ 1564 +            "Remapping IVF in this way not supported".to_string(),
+ 1565 +        ))
+ 1566 +    }
+ 1567 +
+ 1568      fn ivf_model(&self) -> &IvfModel {
+ 1569          &self.ivf
+ 1570      }
+
+@@ -2018,13 +2028,13 @@ impl RemapPageTask {
+ 2028          mut self,
+ 2029          reader: Arc<dyn Reader>,
+ 2030          index: &IVFIndex,
+ 2021 -        mapping: &RowAddrRemap,
+ 2031 +        mapping: &RowAddrTranslator,
+ 2032      ) -> Result<Self> {
+ 2033          let mut page = index
+ 2034              .sub_index
+ 2035              .load(reader, self.offset, self.length as usize)
+ 2036              .await?;
+ 2027 -        page.remap(mapping).await?;
+ 2037 +        page.remap_streaming(mapping).await?;
+ 2038          self.page = Some(page);
+ 2039          Ok(self)
+ 2040      }
+
+@@ -2063,12 +2073,33 @@ fn generate_remap_tasks(offsets: &[usize], lengths: &[u32]) -> Result<Vec<RemapP
+ 2073      Ok(tasks)
+ 2074  }
+ 2075  
+ 2076 +/// Runs one specialized builder's remap on the heap.
+ 2077 +///
+ 2078 +/// The eager compaction remap runs under Python's `block_on` on the calling
+ 2079 +/// thread, and in CI (dev-profile wheel, opt-level 0) it overflowed the
+ 2080 +/// Windows main-thread stack. `remap_index_file_v3` dispatches over an 11-arm
+ 2081 +/// match whose arms each await a different monomorphization of
+ 2082 +/// `IvfIndexBuilder::remap_streaming`; without the box the outer future embeds
+ 2083 +/// every specialized builder future, and at opt-level 0 each arm's future is
+ 2084 +/// also materialized as a separate stack temporary while it is polled. Boxing
+ 2085 +/// per arm, in the concrete `Pin<Box<impl Future>>` form (a `dyn Future`
+ 2086 +/// trait object would put a `dyn Send` obligation in front of the solver, see
+ 2087 +/// `DatasetIndexRemapper::remap_indices`), leaves one pointer per arm
+ 2088 +/// on the caller's stack. The builder moves into the heap future too, so the
+ 2089 +/// dispatching future does not hold a builder across the await either.
+ 2090 +fn remap_boxed<S: IvfSubIndex + 'static, Q: Quantization + 'static>(
+ 2091 +    mut builder: IvfIndexBuilder<S, Q>,
+ 2092 +    mapping: &RowAddrTranslator,
+ 2093 +) -> Pin<Box<impl Future<Output = Result<Vec<IndexFile>>> + Send + '_>> {
+ 2094 +    Box::pin(async move { builder.remap_streaming(mapping).await })
+ 2095 +}
+ 2096 +
+ 2097  #[allow(clippy::too_many_arguments)]
+ 2098  pub(crate) async fn remap_index_file_v3(
+ 2099      dataset: &Dataset,
+ 2100      new_uuid: &Uuid,
+ 2101      index: Arc<dyn VectorIndex>,
+ 2071 -    mapping: &RowAddrRemap,
+ 2102 +    mapping: &RowAddrTranslator,
+ 2103      column: String,
+ 2104  ) -> Result<Vec<IndexFile>> {
+ 2105      let dataset = dataset.clone();
+
+@@ -2077,17 +2108,21 @@ pub(crate) async fn remap_index_file_v3(
+ 2108      match index.sub_index_type() {
+ 2109          (SubIndexType::Flat, QuantizationType::Flat) => match element_type {
+ 2110              DataType::Float16 | DataType::Float32 | DataType::Float64 => {
+ 2080 -                IvfIndexBuilder::<FlatIndex, FlatQuantizer>::new_remapper(
+ 2081 -                    dataset, column, index_dir, index,
+ 2082 -                )?
+ 2083 -                .remap(mapping)
+ 2111 +                remap_boxed(
+ 2112 +                    IvfIndexBuilder::<FlatIndex, FlatQuantizer>::new_remapper(
+ 2113 +                        dataset, column, index_dir, index,
+ 2114 +                    )?,
+ 2115 +                    mapping,
+ 2116 +                )
+ 2117                  .await
+ 2118              }
+ 2119              DataType::UInt8 => {
+ 2087 -                IvfIndexBuilder::<FlatIndex, FlatBinQuantizer>::new_remapper(
+ 2088 -                    dataset, column, index_dir, index,
+ 2089 -                )?
+ 2090 -                .remap(mapping)
+ 2120 +                remap_boxed(
+ 2121 +                    IvfIndexBuilder::<FlatIndex, FlatBinQuantizer>::new_remapper(
+ 2122 +                        dataset, column, index_dir, index,
+ 2123 +                    )?,
+ 2124 +                    mapping,
+ 2125 +                )
+ 2126                  .await
+ 2127              }
+ 2128              _ => Err(Error::index(format!(
+
+@@ -2096,65 +2131,85 @@ pub(crate) async fn remap_index_file_v3(
+ 2131              ))),
+ 2132          },
+ 2133          (SubIndexType::Flat, QuantizationType::Product) => {
+ 2099 -            IvfIndexBuilder::<FlatIndex, ProductQuantizer>::new_remapper(
+ 2100 -                dataset, column, index_dir, index,
+ 2101 -            )?
+ 2102 -            .remap(mapping)
+ 2134 +            remap_boxed(
+ 2135 +                IvfIndexBuilder::<FlatIndex, ProductQuantizer>::new_remapper(
+ 2136 +                    dataset, column, index_dir, index,
+ 2137 +                )?,
+ 2138 +                mapping,
+ 2139 +            )
+ 2140              .await
+ 2141          }
+ 2142          (SubIndexType::Flat, QuantizationType::Scalar) => {
+ 2106 -            IvfIndexBuilder::<FlatIndex, ScalarQuantizer>::new_remapper(
+ 2107 -                dataset, column, index_dir, index,
+ 2108 -            )?
+ 2109 -            .remap(mapping)
+ 2143 +            remap_boxed(
+ 2144 +                IvfIndexBuilder::<FlatIndex, ScalarQuantizer>::new_remapper(
+ 2145 +                    dataset, column, index_dir, index,
+ 2146 +                )?,
+ 2147 +                mapping,
+ 2148 +            )
+ 2149              .await
+ 2150          }
+ 2151          (SubIndexType::Flat, QuantizationType::FlatBin) => {
+ 2113 -            IvfIndexBuilder::<FlatIndex, FlatBinQuantizer>::new_remapper(
+ 2114 -                dataset, column, index_dir, index,
+ 2115 -            )?
+ 2116 -            .remap(mapping)
+ 2152 +            remap_boxed(
+ 2153 +                IvfIndexBuilder::<FlatIndex, FlatBinQuantizer>::new_remapper(
+ 2154 +                    dataset, column, index_dir, index,
+ 2155 +                )?,
+ 2156 +                mapping,
+ 2157 +            )
+ 2158              .await
+ 2159          }
+ 2160          (SubIndexType::Flat, QuantizationType::Rabit) => {
+ 2120 -            IvfIndexBuilder::<FlatIndex, RabitQuantizer>::new_remapper(
+ 2121 -                dataset, column, index_dir, index,
+ 2122 -            )?
+ 2123 -            .remap(mapping)
+ 2161 +            remap_boxed(
+ 2162 +                IvfIndexBuilder::<FlatIndex, RabitQuantizer>::new_remapper(
+ 2163 +                    dataset, column, index_dir, index,
+ 2164 +                )?,
+ 2165 +                mapping,
+ 2166 +            )
+ 2167              .await
+ 2168          }
+ 2169          (SubIndexType::Hnsw, QuantizationType::Flat) => {
+ 2127 -            IvfIndexBuilder::<HNSW, FlatQuantizer>::new_remapper(dataset, column, index_dir, index)?
+ 2128 -                .remap(mapping)
+ 2129 -                .await
+ 2170 +            remap_boxed(
+ 2171 +                IvfIndexBuilder::<HNSW, FlatQuantizer>::new_remapper(
+ 2172 +                    dataset, column, index_dir, index,
+ 2173 +                )?,
+ 2174 +                mapping,
+ 2175 +            )
+ 2176 +            .await
+ 2177          }
+ 2178          (SubIndexType::Hnsw, QuantizationType::FlatBin) => {
+ 2132 -            IvfIndexBuilder::<HNSW, FlatBinQuantizer>::new_remapper(
+ 2133 -                dataset, column, index_dir, index,
+ 2134 -            )?
+ 2135 -            .remap(mapping)
+ 2179 +            remap_boxed(
+ 2180 +                IvfIndexBuilder::<HNSW, FlatBinQuantizer>::new_remapper(
+ 2181 +                    dataset, column, index_dir, index,
+ 2182 +                )?,
+ 2183 +                mapping,
+ 2184 +            )
+ 2185              .await
+ 2186          }
+ 2187          (SubIndexType::Hnsw, QuantizationType::Product) => {
+ 2139 -            IvfIndexBuilder::<HNSW, ProductQuantizer>::new_remapper(
+ 2140 -                dataset, column, index_dir, index,
+ 2141 -            )?
+ 2142 -            .remap(mapping)
+ 2188 +            remap_boxed(
+ 2189 +                IvfIndexBuilder::<HNSW, ProductQuantizer>::new_remapper(
+ 2190 +                    dataset, column, index_dir, index,
+ 2191 +                )?,
+ 2192 +                mapping,
+ 2193 +            )
+ 2194              .await
+ 2195          }
+ 2196  
+ 2197          (SubIndexType::Hnsw, QuantizationType::Scalar) => {
+ 2147 -            IvfIndexBuilder::<HNSW, ScalarQuantizer>::new_remapper(
+ 2148 -                dataset, column, index_dir, index,
+ 2149 -            )?
+ 2150 -            .remap(mapping)
+ 2198 +            remap_boxed(
+ 2199 +                IvfIndexBuilder::<HNSW, ScalarQuantizer>::new_remapper(
+ 2200 +                    dataset, column, index_dir, index,
+ 2201 +                )?,
+ 2202 +                mapping,
+ 2203 +            )
+ 2204              .await
+ 2205          }
+ 2206          (SubIndexType::Hnsw, QuantizationType::Rabit) => {
+ 2154 -            IvfIndexBuilder::<HNSW, RabitQuantizer>::new_remapper(
+ 2155 -                dataset, column, index_dir, index,
+ 2156 -            )?
+ 2157 -            .remap(mapping)
+ 2207 +            remap_boxed(
+ 2208 +                IvfIndexBuilder::<HNSW, RabitQuantizer>::new_remapper(
+ 2209 +                    dataset, column, index_dir, index,
+ 2210 +                )?,
+ 2211 +                mapping,
+ 2212 +            )
+ 2213              .await
+ 2214          }
+ 2215      }
+
+@@ -2167,7 +2222,7 @@ pub(crate) async fn remap_index_file(
+ 2222      new_uuid: &Uuid,
+ 2223      old_version: u64,
+ 2224      index: &IVFIndex,
+ 2170 -    mapping: &RowAddrRemap,
+ 2225 +    mapping: &RowAddrTranslator,
+ 2226      name: String,
+ 2227      column: String,
+ 2228      transforms: Vec<pb::Transform>,

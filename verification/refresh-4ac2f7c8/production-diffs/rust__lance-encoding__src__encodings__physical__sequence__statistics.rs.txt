@@ -1,0 +1,365 @@
+@@ -0,0 +1,364 @@
+    1 +// SPDX-License-Identifier: Apache-2.0
+    2 +// SPDX-FileCopyrightText: Copyright The Lance Authors
+    3 +
+    4 +use std::{collections::BTreeSet, ops::Range, sync::Arc};
+    5 +
+    6 +use lance_core::{Error, Result};
+    7 +
+    8 +use crate::{
+    9 +    data::FixedWidthDataBlock,
+   10 +    encodings::physical::{checked_fixed_values, dictionary::MAX_BLOCK_DICTIONARY_ITEMS},
+   11 +};
+   12 +
+   13 +const GENERAL_SAMPLE_BYTES: usize = 64 * 1024;
+   14 +
+   15 +#[derive(Debug, Clone)]
+   16 +pub(super) struct SequenceStats {
+   17 +    pub(super) bits_per_value: u64,
+   18 +    pub(super) len: u64,
+   19 +    pub(super) first: Option<u64>,
+   20 +    pub(super) min: u64,
+   21 +    pub(super) max: u64,
+   22 +    pub(super) arithmetic_step: Option<u64>,
+   23 +    pub(super) run_count: u64,
+   24 +    pub(super) sample: Arc<[u8]>,
+   25 +}
+   26 +
+   27 +impl SequenceStats {
+   28 +    pub(super) fn raw_bytes(&self) -> u64 {
+   29 +        self.len.saturating_mul(self.bits_per_value / 8)
+   30 +    }
+   31 +
+   32 +    #[cfg(feature = "bitpacking")]
+   33 +    pub(super) fn required_bits(&self) -> u64 {
+   34 +        u64::from((u64::BITS - self.max.leading_zeros()).max(1))
+   35 +    }
+   36 +}
+   37 +
+   38 +#[derive(Debug)]
+   39 +pub(super) struct MemberStats {
+   40 +    pub(super) values: SequenceStats,
+   41 +    pub(super) deltas: Option<SequenceStats>,
+   42 +    pub(super) run_values: SequenceStats,
+   43 +    pub(super) run_lengths: SequenceStats,
+   44 +}
+   45 +
+   46 +#[derive(Debug)]
+   47 +pub(super) struct FamilyStats {
+   48 +    pub(super) members: Vec<MemberStats>,
+   49 +    pub(super) dictionary_items: Option<Arc<[u64]>>,
+   50 +}
+   51 +
+   52 +#[derive(Debug)]
+   53 +struct SequenceStatsBuilder {
+   54 +    bits_per_value: u64,
+   55 +    len: u64,
+   56 +    first: Option<u64>,
+   57 +    previous: Option<u64>,
+   58 +    min: u64,
+   59 +    max: u64,
+   60 +    arithmetic_step: Option<u64>,
+   61 +    run_count: u64,
+   62 +    sample: Vec<u8>,
+   63 +    sample_limit: usize,
+   64 +}
+   65 +
+   66 +impl SequenceStatsBuilder {
+   67 +    fn new(bits_per_value: u64, sample_limit: usize) -> Self {
+   68 +        Self {
+   69 +            bits_per_value,
+   70 +            len: 0,
+   71 +            first: None,
+   72 +            previous: None,
+   73 +            min: u64::MAX,
+   74 +            max: 0,
+   75 +            arithmetic_step: None,
+   76 +            run_count: 0,
+   77 +            sample: Vec::new(),
+   78 +            sample_limit,
+   79 +        }
+   80 +    }
+   81 +
+   82 +    fn push(&mut self, value: u64) {
+   83 +        if self.first.is_none() {
+   84 +            self.first = Some(value);
+   85 +            self.run_count = 1;
+   86 +        }
+   87 +        if let Some(previous) = self.previous {
+   88 +            if value != previous {
+   89 +                self.run_count += 1;
+   90 +            }
+   91 +            let step = value.checked_sub(previous);
+   92 +            if self.len == 1 {
+   93 +                self.arithmetic_step = step;
+   94 +            } else if self.arithmetic_step != step {
+   95 +                self.arithmetic_step = None;
+   96 +            }
+   97 +        }
+   98 +        self.previous = Some(value);
+   99 +        self.min = self.min.min(value);
+  100 +        self.max = self.max.max(value);
+  101 +        self.len += 1;
+  102 +
+  103 +        if self.sample.len() < self.sample_limit {
+  104 +            let bytes = value.to_le_bytes();
+  105 +            let value_bytes = (self.bits_per_value / 8) as usize;
+  106 +            let remaining = self.sample_limit - self.sample.len();
+  107 +            self.sample
+  108 +                .extend_from_slice(&bytes[..value_bytes.min(remaining)]);
+  109 +        }
+  110 +    }
+  111 +
+  112 +    fn finish(self) -> SequenceStats {
+  113 +        SequenceStats {
+  114 +            bits_per_value: self.bits_per_value,
+  115 +            len: self.len,
+  116 +            first: self.first,
+  117 +            min: if self.len == 0 { 0 } else { self.min },
+  118 +            max: self.max,
+  119 +            arithmetic_step: self.arithmetic_step,
+  120 +            run_count: self.run_count,
+  121 +            sample: Arc::from(self.sample),
+  122 +        }
+  123 +    }
+  124 +}
+  125 +
+  126 +pub(super) fn analyze_family(
+  127 +    data: &FixedWidthDataBlock,
+  128 +    ranges: &[Range<usize>],
+  129 +    collect_general_sample: bool,
+  130 +    normalize: bool,
+  131 +) -> Result<FamilyStats> {
+  132 +    if ranges.is_empty() {
+  133 +        return Err(Error::invalid_input(
+  134 +            "Offset compression requires at least one chunk",
+  135 +        ));
+  136 +    }
+  137 +    let sample_limit = if collect_general_sample {
+  138 +        GENERAL_SAMPLE_BYTES / ranges.len()
+  139 +    } else {
+  140 +        0
+  141 +    };
+  142 +    match data.bits_per_value {
+  143 +        32 => {
+  144 +            let values = checked_fixed_values::<u32>(data, "Offset family")?;
+  145 +            analyze_typed_family(
+  146 +                &values,
+  147 +                ranges,
+  148 +                32,
+  149 +                sample_limit,
+  150 +                true,
+  151 +                normalize,
+  152 +                u64::from,
+  153 +            )
+  154 +        }
+  155 +        64 => {
+  156 +            let values = checked_fixed_values::<u64>(data, "Offset family")?;
+  157 +            analyze_typed_family(
+  158 +                &values,
+  159 +                ranges,
+  160 +                64,
+  161 +                sample_limit,
+  162 +                true,
+  163 +                normalize,
+  164 +                |value| value,
+  165 +            )
+  166 +        }
+  167 +        bits_per_value => Err(Error::invalid_input(format!(
+  168 +            "Offset compression only supports 32 or 64-bit values, got {bits_per_value}"
+  169 +        ))),
+  170 +    }
+  171 +}
+  172 +
+  173 +fn analyze_typed_family<T: Copy + Eq>(
+  174 +    values: &[T],
+  175 +    ranges: &[Range<usize>],
+  176 +    bits_per_value: u64,
+  177 +    sample_limit: usize,
+  178 +    collect_dictionary: bool,
+  179 +    normalize: bool,
+  180 +    to_u64: impl Fn(T) -> u64 + Copy,
+  181 +) -> Result<FamilyStats> {
+  182 +    let mut dictionary = collect_dictionary.then(BoundedDistinct::default);
+  183 +    let members = ranges
+  184 +        .iter()
+  185 +        .map(|range| {
+  186 +            let member = values.get(range.clone()).ok_or_else(|| {
+  187 +                Error::invalid_input(format!(
+  188 +                    "Sequence range {}..{} exceeds {} values",
+  189 +                    range.start,
+  190 +                    range.end,
+  191 +                    values.len()
+  192 +                ))
+  193 +            })?;
+  194 +            analyze_member(
+  195 +                member.iter().copied().map(to_u64),
+  196 +                bits_per_value,
+  197 +                sample_limit,
+  198 +                normalize,
+  199 +                &mut dictionary,
+  200 +            )
+  201 +        })
+  202 +        .collect::<Result<Vec<_>>>()?;
+  203 +    Ok(FamilyStats {
+  204 +        members,
+  205 +        dictionary_items: dictionary.and_then(BoundedDistinct::finish),
+  206 +    })
+  207 +}
+  208 +
+  209 +/// Analyze a generated sequence without allocating its values.
+  210 +pub(super) fn analyze_sequence(
+  211 +    values: impl Iterator<Item = u64>,
+  212 +    collect_general_sample: bool,
+  213 +) -> Result<FamilyStats> {
+  214 +    let mut dictionary = Some(BoundedDistinct::default());
+  215 +    let member = analyze_member(
+  216 +        values,
+  217 +        64,
+  218 +        if collect_general_sample {
+  219 +            GENERAL_SAMPLE_BYTES
+  220 +        } else {
+  221 +            0
+  222 +        },
+  223 +        false,
+  224 +        &mut dictionary,
+  225 +    )?;
+  226 +    Ok(FamilyStats {
+  227 +        members: vec![member],
+  228 +        dictionary_items: dictionary.and_then(BoundedDistinct::finish),
+  229 +    })
+  230 +}
+  231 +
+  232 +fn analyze_member(
+  233 +    values: impl Iterator<Item = u64>,
+  234 +    bits: u64,
+  235 +    sample_limit: usize,
+  236 +    normalize: bool,
+  237 +    dictionary: &mut Option<BoundedDistinct>,
+  238 +) -> Result<MemberStats> {
+  239 +    let mut values = values.peekable();
+  240 +    let first = values.peek().copied().unwrap_or(0);
+  241 +    let base = if normalize { first } else { 0 };
+  242 +    let mut monotonic = true;
+  243 +    let mut value_stats = SequenceStatsBuilder::new(bits, sample_limit);
+  244 +    let mut delta_stats = SequenceStatsBuilder::new(bits, 0);
+  245 +    let mut run_value_stats = SequenceStatsBuilder::new(bits, 0);
+  246 +    let mut run_length_stats = SequenceStatsBuilder::new(32, 0);
+  247 +    let mut previous = None;
+  248 +    let mut run_value = None;
+  249 +    let mut run_length = 0;
+  250 +    for raw_value in values {
+  251 +        let value = raw_value.checked_sub(base).ok_or_else(|| {
+  252 +            Error::invalid_input("Offset chunk contains a value below its first offset")
+  253 +        })?;
+  254 +        if let Some(previous) = previous {
+  255 +            if let Some(delta) = value.checked_sub(previous) {
+  256 +                delta_stats.push(delta);
+  257 +            } else if normalize {
+  258 +                return Err(Error::invalid_input("Offset chunk must be non-decreasing"));
+  259 +            } else {
+  260 +                monotonic = false;
+  261 +            }
+  262 +        }
+  263 +        previous = Some(value);
+  264 +        value_stats.push(value);
+  265 +        if let Some(dictionary) = dictionary.as_mut() {
+  266 +            dictionary.push(value);
+  267 +        }
+  268 +        match run_value {
+  269 +            Some(current) if current == value => run_length += 1,
+  270 +            Some(current) => {
+  271 +                run_value_stats.push(current);
+  272 +                run_length_stats.push(run_length);
+  273 +                run_value = Some(value);
+  274 +                run_length = 1;
+  275 +            }
+  276 +            None => {
+  277 +                run_value = Some(value);
+  278 +                run_length = 1;
+  279 +            }
+  280 +        }
+  281 +    }
+  282 +    if let Some(run_value) = run_value {
+  283 +        run_value_stats.push(run_value);
+  284 +        run_length_stats.push(run_length);
+  285 +    }
+  286 +    let values = value_stats.finish();
+  287 +    Ok(MemberStats {
+  288 +        deltas: (values.len >= 2 && monotonic).then(|| delta_stats.finish()),
+  289 +        values,
+  290 +        run_values: run_value_stats.finish(),
+  291 +        run_lengths: run_length_stats.finish(),
+  292 +    })
+  293 +}
+  294 +
+  295 +#[derive(Debug)]
+  296 +struct BoundedDistinct {
+  297 +    values: Option<BTreeSet<u64>>,
+  298 +}
+  299 +
+  300 +impl Default for BoundedDistinct {
+  301 +    fn default() -> Self {
+  302 +        Self {
+  303 +            values: Some(BTreeSet::new()),
+  304 +        }
+  305 +    }
+  306 +}
+  307 +
+  308 +impl BoundedDistinct {
+  309 +    fn push(&mut self, value: u64) {
+  310 +        let Some(values) = self.values.as_mut() else {
+  311 +            return;
+  312 +        };
+  313 +        values.insert(value);
+  314 +        if values.len() > MAX_BLOCK_DICTIONARY_ITEMS {
+  315 +            self.values = None;
+  316 +        }
+  317 +    }
+  318 +
+  319 +    fn finish(self) -> Option<Arc<[u64]>> {
+  320 +        self.values
+  321 +            .map(|values| Arc::from(values.into_iter().collect::<Vec<_>>()))
+  322 +    }
+  323 +}
+  324 +
+  325 +pub(super) fn combine(stats: &[&SequenceStats]) -> Result<SequenceStats> {
+  326 +    let bits_per_value = stats
+  327 +        .first()
+  328 +        .ok_or_else(|| Error::invalid_input("Cannot combine an empty stats family"))?
+  329 +        .bits_per_value;
+  330 +    let mut len = 0_u64;
+  331 +    let mut run_count = 0_u64;
+  332 +    let mut min = u64::MAX;
+  333 +    let mut max = 0_u64;
+  334 +    let mut sample = Vec::new();
+  335 +    for member in stats {
+  336 +        if member.bits_per_value != bits_per_value {
+  337 +            return Err(Error::invalid_input(
+  338 +                "Cannot combine sequences with different value widths",
+  339 +            ));
+  340 +        }
+  341 +        len = len
+  342 +            .checked_add(member.len)
+  343 +            .ok_or_else(|| Error::invalid_input("Combined sequence length overflows u64"))?;
+  344 +        run_count = run_count
+  345 +            .checked_add(member.run_count)
+  346 +            .ok_or_else(|| Error::invalid_input("Combined run count overflows u64"))?;
+  347 +        if member.len > 0 {
+  348 +            min = min.min(member.min);
+  349 +            max = max.max(member.max);
+  350 +        }
+  351 +        let remaining = GENERAL_SAMPLE_BYTES.saturating_sub(sample.len());
+  352 +        sample.extend_from_slice(&member.sample[..member.sample.len().min(remaining)]);
+  353 +    }
+  354 +    Ok(SequenceStats {
+  355 +        bits_per_value,
+  356 +        len,
+  357 +        first: stats.first().and_then(|stats| stats.first),
+  358 +        min: if len == 0 { 0 } else { min },
+  359 +        max,
+  360 +        arithmetic_step: None,
+  361 +        run_count,
+  362 +        sample: Arc::from(sample),
+  363 +    })
+  364 +}

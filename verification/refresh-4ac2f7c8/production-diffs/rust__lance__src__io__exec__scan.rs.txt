@@ -1,0 +1,57 @@
+@@ -44,7 +44,9 @@ use crate::dataset::scanner::{
+   44  };
+   45  use crate::datatypes::Schema;
+   46  
+   47 -use super::utils::{IoMetrics, buffered_fragment_opens};
+   47 +use super::utils::{
+   48 +    IoMetrics, buffered_fragment_opens, estimated_bytes_per_row, estimated_total_byte_size,
+   49 +};
+   50  
+   51  async fn open_file(
+   52      file_fragment: FileFragment,
+
+@@ -633,6 +635,8 @@ pub struct LanceScanExec {
+  635      range: Option<Range<u64>>,
+  636      projection: Arc<Schema>,
+  637      output_schema: Arc<ArrowSchema>,
+  638 +    /// Cached from the output schema and dataset blob metadata at construction.
+  639 +    bytes_per_row: Option<f64>,
+  640      properties: Arc<PlanProperties>,
+  641      config: LanceScanConfig,
+  642      metrics: ExecutionPlanMetricsSet,
+
+@@ -708,6 +712,7 @@ impl LanceScanExec {
+  712                  .unwrap();
+  713          }
+  714          let output_schema = Arc::new(output_schema);
+  715 +        let bytes_per_row = estimated_bytes_per_row(output_schema.as_ref(), dataset.schema());
+  716  
+  717          let properties = Arc::new(PlanProperties::new(
+  718              EquivalenceProperties::new(output_schema.clone()),
+
+@@ -721,6 +726,7 @@ impl LanceScanExec {
+  726              range,
+  727              projection,
+  728              output_schema,
+  729 +            bytes_per_row,
+  730              properties,
+  731              config,
+  732              metrics: ExecutionPlanMetricsSet::new(),
+
+@@ -825,6 +831,7 @@ impl ExecutionPlan for LanceScanExec {
+  831                  .map_or(Precision::Absent, Precision::Exact);
+  832              return Ok(Arc::new(Statistics {
+  833                  num_rows,
+  834 +                total_byte_size: estimated_total_byte_size(num_rows, self.bytes_per_row),
+  835                  ..Statistics::new_unknown(self.schema().as_ref())
+  836              }));
+  837          }
+
+@@ -865,6 +872,7 @@ impl ExecutionPlan for LanceScanExec {
+  872  
+  873          Ok(Arc::new(Statistics {
+  874              num_rows,
+  875 +            total_byte_size: estimated_total_byte_size(num_rows, self.bytes_per_row),
+  876              ..Statistics::new_unknown(self.schema().as_ref())
+  877          }))
+  878      }

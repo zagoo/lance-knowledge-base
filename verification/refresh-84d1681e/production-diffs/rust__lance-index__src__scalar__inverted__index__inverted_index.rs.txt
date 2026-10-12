@@ -1,0 +1,70 @@
+@@ -2,6 +2,9 @@
+    2  // SPDX-FileCopyrightText: Copyright The Lance Authors
+    3  
+    4  use super::*;
+    5 +use crate::scalar::RowAddrTranslatorRef;
+    6 +use lance_core::utils::row_addr_remap::RowAddrRemap;
+    7 +use lance_index_core::remapping::RowAddrTranslator;
+    8  
+    9  #[derive(Debug, Default)]
+   10  pub(in super::super) struct InvertedPrewarmState {
+
+@@ -915,6 +918,30 @@ impl InvertedIndex {
+  918      }
+  919  }
+  920  
+  921 +impl InvertedIndex {
+  922 +    /// The one remap implementation: the legacy `remap` (an in-memory
+  923 +    /// mapping, borrowed as a synchronous translator) and `remap_streaming`
+  924 +    /// both come here, so neither copies a map nor delegates to the other.
+  925 +    async fn remap_with(
+  926 +        &self,
+  927 +        mapping: RowAddrTranslatorRef<'_>,
+  928 +        dest_store: &dyn IndexStore,
+  929 +    ) -> Result<CreatedIndex> {
+  930 +        let files = self
+  931 +            .to_builder()
+  932 +            .remap_with(mapping, self.store.clone(), dest_store)
+  933 +            .await?;
+  934 +
+  935 +        let details = pbold::InvertedIndexDetails::try_from(&self.params)?;
+  936 +
+  937 +        Ok(CreatedIndex {
+  938 +            index_details: prost_types::Any::from_msg(&details).unwrap(),
+  939 +            index_version: self.index_version(),
+  940 +            files,
+  941 +        })
+  942 +    }
+  943 +}
+  944 +
+  945  #[async_trait]
+  946  impl ScalarIndex for InvertedIndex {
+  947      // return the row ids of the documents that contain the query
+
+@@ -949,18 +976,15 @@ impl ScalarIndex for InvertedIndex {
+  976          mapping: &RowAddrRemap,
+  977          dest_store: &dyn IndexStore,
+  978      ) -> Result<CreatedIndex> {
+  952 -        let files = self
+  953 -            .to_builder()
+  954 -            .remap(mapping, self.store.clone(), dest_store)
+  955 -            .await?;
+  956 -
+  957 -        let details = pbold::InvertedIndexDetails::try_from(&self.params)?;
+  979 +        self.remap_with(mapping.into(), dest_store).await
+  980 +    }
+  981  
+  959 -        Ok(CreatedIndex {
+  960 -            index_details: prost_types::Any::from_msg(&details).unwrap(),
+  961 -            index_version: self.index_version(),
+  962 -            files,
+  963 -        })
+  982 +    async fn remap_streaming(
+  983 +        &self,
+  984 +        translator: &RowAddrTranslator,
+  985 +        dest_store: &dyn IndexStore,
+  986 +    ) -> Result<CreatedIndex> {
+  987 +        self.remap_with(translator.as_ref(), dest_store).await
+  988      }
+  989  
+  990      async fn update(

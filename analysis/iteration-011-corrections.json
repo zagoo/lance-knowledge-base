@@ -1,0 +1,129 @@
+{
+  "iteration": 11,
+  "previous_evidence": "verification/iteration-010.json",
+  "files": [
+    {
+      "path": "rust/lance-core/src/utils/path.rs",
+      "module": "L1-modules/rust-lance-core-storage.md",
+      "reviewed": true,
+      "role": "Public extension trait for joining object-store Path components, without filesystem IO.",
+      "ranges": [
+        [
+          1,
+          4,
+          "SPDX metadata and object_store::path::Path import; Path here is not std::path::Path."
+        ],
+        [
+          5,
+          8,
+          "LancePathExt is public and requires `child_path(&self,path:&Path)->Path`. It returns an owned path directly rather than Result."
+        ],
+        [
+          9,
+          18,
+          "The Path implementation clones self into a working new_path, then for each supplied path.parts() replaces it with new_path.clone().join(part), returning the final value. With zero parts this is the base clone. It delegates parsing/component and join semantics to object_store and performs no IO. Repeated whole-path clones are explicit; absolute-path, escaping and normalization semantics are not reimplemented here. No local tests are defined."
+        ]
+      ],
+      "limits": "Dependency Path internals and repository consumers remain pending; do not substitute OS path joining based on the helper name. (rust/lance-core/src/utils/path.rs:4-18)"
+    },
+    {
+      "path": "rust/lance-core/src/utils/tokio.rs",
+      "module": "L1-modules/rust-lance-core.md",
+      "reviewed": true,
+      "role": "Process-global CPU blocking pool, environment-driven sizing, child-after-fork reset, and spawn_cpu future/error/panic propagation. Public configuration is lazy and process-wide, not a per-dataset setting.",
+      "ranges": [
+        [
+          1,
+          11,
+          "SPDX and imports for AtomicBool/AtomicPtr/SeqCst, LazyLock, Duration, FutureExt, Tokio runtime builder and tracing Span. The atomics implement runtime publication rather than dataset synchronization."
+        ],
+        [
+          12,
+          22,
+          "Private NUM_COMPUTE_INTENSIVE_CPUS is a LazyLock<usize> initialized by calculate_num_compute_intensive_cpus; public get_num_compute_intensive_cpus()->usize dereferences it. Its first observation fixes the value for later calls. Environment changes after initialization are not reread."
+        ],
+        [
+          23,
+          43,
+          "A successful LANCE_CPU_THREADS env read is trimmed/parsed with minimum 1 and panics on invalid input, bypassing automatic IO reservation. Otherwise compute CPU count from num_cpus: if count <= cached IO_CORE_RESERVATION return 1, warning only when CPU count >2; else call num_cpus::get again and subtract reservation. The two num_cpus calls are distinct. The warning comment describes a custom-reservation situation, but the branch checks only count>2, not whether reservation was explicitly configured. Env read errors, including non-Unicode, take the automatic path."
+        ],
+        [
+          44,
+          62,
+          "Private parse_env_usize(name:&str,raw:&str,min:usize)->Result<usize,String> trims then parses usize, returning an error naming the variable, raw value and parse error if malformed, or variable/minimum/value if below min. It does not silently clamp. Accepted values return Ok. Its callers choose whether to panic, so the parser itself is independently testable without process-environment mutation."
+        ],
+        [
+          63,
+          77,
+          "Public IO_CORE_RESERVATION:LazyLock<usize> reads LANCE_IO_CORE_RESERVATION once, accepts zero (minimum 0), panics on malformed numeric input, and defaults to 2 on any env read error. Reserving more than available CPUs still leaves one compute thread through the automatic branch; an explicit CPU-thread override is independent of this reservation. Automatic minimum and explicit override control flow: rust/lance-core/src/utils/tokio.rs:23-46."
+        ],
+        [
+          78,
+          88,
+          "Private create_runtime()->Runtime uses a multi-thread Tokio builder named lance-cpu, max_blocking_threads equal to the computed count, one async worker thread, and Duration::from_secs(u64::MAX) keepalive, then build().unwrap(). No enable_all, timer or IO driver call appears here. Runtime build failure panics. One worker is separate from the bounded blocking-worker limit."
+        ],
+        [
+          89,
+          94,
+          "CPU_RUNTIME starts as a null AtomicPtr<Runtime>; RUNTIME_INSTALLED and ATFORK_INSTALLED start false. They are private process-global state. Published runtimes are boxed and intentionally leaked; no shutdown/drop path is provided here."
+        ],
+        [
+          95,
+          109,
+          "global_cpu_runtime()->&'static Runtime loops: SeqCst load pointer, return unsafe shared reference when non-null, otherwise fetch_or(true) on installation flag to elect one initializer; other callers yield their OS thread and retry. The comments justify pointer lifetime by heap allocation/leak and resetting in fork children. No lock or async suspension is used; waiting callers spin/yield."
+        ],
+        [
+          110,
+          119,
+          "The elected initializer installs the fork hook once, creates/boxes runtime, publishes pointer with SeqCst, and returns an unsafe shared reference. A panic during hook/runtime initialization occurs after RUNTIME_INSTALLED=true but before pointer publication; there is no reset guard in this file. If such a panic is caught and execution continues, a later call can loop indefinitely on a null pointer with flag set. This is a source-derived failure path, not a reproduced test result. The election flag and waiting loop are at rust/lance-core/src/utils/tokio.rs:89-109."
+        ],
+        [
+          120,
+          126,
+          "extern C child-after-fork callback resets CPU_RUNTIME to null and RUNTIME_INSTALLED to false with SeqCst. It leaves ATFORK_INSTALLED true and does not drop the inherited runtime, avoiding arbitrary destructor execution in that callback. Next pool access in the child initializes a fresh runtime. The implementation does not install a parent/before-fork callback or prove safety of arbitrary forking application code. Publication and hook registration are at rust/lance-core/src/utils/tokio.rs:95-134."
+        ],
+        [
+          127,
+          134,
+          "On non-Windows, install_atfork invokes unsafe libc::pthread_atfork(None,None,Some(callback)); its return status is ignored. On Windows the same private name is a no-op. Registration failure is therefore not surfaced, and this implementation is platform-dependent."
+        ],
+        [
+          135,
+          160,
+          "spawn_cpu documentation describes isolating CPU-heavy work, suggests roughly 100 microseconds as a cost threshold, and describes thread-count defaults. These are guidance, not measured guarantees. Prose mentions spawn_blocking plus a oneshot round trip, but executable code below returns a mapped JoinHandle and has no result oneshot. The simple CPU-count formula must be read with LANCE_CPU_THREADS override and configurable IO reservation above. Executable join handling is at rust/lance-core/src/utils/tokio.rs:180-208; sizing override/reservation are at rust/lance-core/src/utils/tokio.rs:23-43 and rust/lance-core/src/utils/tokio.rs:63-76."
+        ],
+        [
+          161,
+          179,
+          "The warning explains that blocking IO, synchronous channels, contended locks or block_on inside closures can deadlock, especially when only one compute worker exists. The function does not enforce CPU purity through its type system. The docs prohibit these operations transitively in callees, so callers must inspect closure behavior, not merely its immediate body."
+        ],
+        [
+          180,
+          193,
+          "pub fn spawn_cpu<E:std::error::Error+Send+'static,F:FnOnce()->Result<R,E>+Send+'static,R:Send+'static>(func:F)->impl Future<Output=Result<R,E>> captures Span::current, immediately submits to global_cpu_runtime().spawn_blocking, enters that span in the closure, then calls func. This is a regular function returning a future, not async fn: submission happens at call time, before awaiting. The closure result type and error E are preserved, not converted to Lance Error."
+        ],
+        [
+          194,
+          208,
+          "The returned mapped JoinHandle produces the original closure Result on a successful join. For JoinError, try_into_panic recovers and resume_unwind rethrows the original panic payload; non-panic join errors trigger a new explanatory panic. The closure may outlive the returned handle; this wrapper contains no explicit cancellation/abort API or cancellation token. Exact Tokio detach/shutdown semantics belong to the dependency and are not reconstructed here. Span entry is scoped to closure execution."
+        ],
+        [
+          209,
+          241,
+          "Private cfg(test) module imports super::*. FutureExt is imported by the parent module at rust/lance-core/src/utils/tokio.rs:8-8; Tokio calls here use qualified paths, and no PanicHookInfo import exists. spawn_cpu_reraises_the_closure_panic temporarily replaces the global panic hook, triggers an &str panic inside spawn_cpu, awaits through tokio::spawn, restores the hook, and checks the original payload. This confirms the intended contract in test source; there is no serial guard around the process-wide hook manipulation in this file. Test runtime execution was not performed."
+        ],
+        [
+          242,
+          259,
+          "A comment explains why tests exercise parse_env_usize rather than mutate env after process-wide LazyLock initialization. One test accepts whitespace-surrounded 8; another rejects a noninteger and asserts the error names LANCE_CPU_THREADS and explains integer parsing."
+        ],
+        [
+          260,
+          272,
+          "Remaining parser tests reject zero for min 1 and accept zero for min 0. The file has no full child-fork lifecycle test, environment-cache reset test or initializer-panic recovery test. Tests preserve validation semantics rather than silently adjusting input."
+        ]
+      ],
+      "limits": "Local call chain is spawn_cpu -> global_cpu_runtime -> install_atfork/create_runtime -> get_num_compute_intensive_cpus -> calculation/parser; explicit pool configuration and fork callback state are captured above (rust/lance-core/src/utils/tokio.rs:12-208). Full repository closure callers and dependency runtime implementation remain pending. No CPU benchmark, fork experiment or task runtime test was run."
+    }
+  ]
+}

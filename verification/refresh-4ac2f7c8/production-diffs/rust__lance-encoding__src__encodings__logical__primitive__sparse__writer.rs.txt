@@ -1,0 +1,755 @@
+@@ -2,7 +2,22 @@
+    2  // SPDX-FileCopyrightText: Copyright The Lance Authors
+    3  
+    4  //! Sparse structural planning and serialization.
+    5 -
+    5 +//!
+    6 +//! The 2.3 writer selects Sparse when dense rep/def would split a page, or when
+    7 +//! explicitly requested. Dictionary blocks and variable-width packed structs
+    8 +//! retain dense paths; structural-only and all-null pages use ConstantLayout.
+    9 +//! Explicit Sparse retains this layout for any non-null leaf values, even equal ones.
+   10 +//! Normalization is shared with dense planning; sparse plans are built only after selection.
+   11 +//! Validity polarity minimizes estimated descriptor and payload cost, including
+   12 +//! buffer metadata and alignment; ties use null positions. Only the chosen side
+   13 +//! is materialized. These policies are not restrictions on compatible writers.
+   14 +
+   15 +use crate::encodings::physical::{
+   16 +    constant::ConstantEncoder,
+   17 +    range::RangeEncoder,
+   18 +    sequence::{BlockCost, select_block_codec},
+   19 +};
+   20 +use prost::Message;
+   21  use std::iter;
+   22  
+   23  use arrow_buffer::BooleanBuffer;
+
+@@ -10,19 +25,16 @@ use lance_core::{Error, Result, datatypes::Field, utils::bit::pad_bytes};
+   25  
+   26  use crate::{
+   27      buffer::LanceBuffer,
+   13 -    compression::{CompressionStrategy, compress_required_block},
+   28 +    compression::CompressionStrategy,
+   29      data::{BlockInfo, DataBlock, FixedWidthDataBlock},
+   30      decoder::PageEncoding,
+   31      encoder::EncodedPage,
+   32      format::pb21::{self, CompressiveEncoding},
+   33      repdef::{NormalizedStructuralLayer, NormalizedStructuralPlan},
+   19 -    statistics::ComputeStat,
+   34  };
+   35  
+   22 -use super::super::MiniblockChunkSize;
+   23 -
+   36  use super::{
+   25 -    SparseCountSet, SparsePositionSet, SparseStructuralLayerPlan, SparseStructuralPlan,
+   37 +    SparseCountPlan, SparsePositionPlan, SparseStructuralLayerPlan, SparseStructuralPlan,
+   38      SparseValidityMeaning, SparseValiditySet,
+   39  };
+   40  use crate::encodings::logical::primitive::{
+
+@@ -35,44 +47,71 @@ struct PositionSetStats {
+   47      count: u64,
+   48      first: u64,
+   49      last: u64,
+   38 -    is_contiguous: bool,
+   50 +    step: Option<u64>,
+   51  }
+   52  
+   53  impl PositionSetStats {
+   54      fn observe(&mut self, position: u64) {
+   43 -        if self.count == 0 {
+   44 -            self.first = position;
+   45 -            self.is_contiguous = true;
+   46 -        } else if self.last.checked_add(1) != Some(position) {
+   47 -            self.is_contiguous = false;
+   55 +        match self.count {
+   56 +            0 => self.first = position,
+   57 +            1 => self.step = Some(position - self.last),
+   58 +            _ if self.step != Some(position - self.last) => self.step = None,
+   59 +            _ => {}
+   60          }
+   61          self.last = position;
+   62          self.count += 1;
+   63      }
+   64  
+   53 -    fn encoded_cost(&self, domain_len: u64) -> u64 {
+   54 -        if self.count == 0 || self.count == domain_len || self.is_contiguous {
+   55 -            0
+   65 +    fn inline_plan(self, domain_len: u64) -> Option<SparsePositionPlan> {
+   66 +        if self.count == 0 {
+   67 +            Some(SparsePositionPlan::empty())
+   68 +        } else if self.count == domain_len {
+   69 +            Some(SparsePositionPlan::all(domain_len))
+   70 +        } else if self.count == 1 || self.step == Some(1) {
+   71 +            Some(SparsePositionPlan::range(self.first, self.count))
+   72          } else {
+   57 -            self.count
+   73 +            self.step.map(|step| SparsePositionPlan::Arithmetic {
+   74 +                start: self.first,
+   75 +                step,
+   76 +                len: self.count,
+   77 +            })
+   78          }
+   79      }
+   80  
+   61 -    fn to_set(
+   81 +    fn wire_cost(self, validity: &BooleanBuffer, want_valid: bool, domain_len: u64) -> Result<u64> {
+   82 +        let (encoding, payload_cost) = if let Some(plan) = self.inline_plan(domain_len) {
+   83 +            (encode_position_set(&plan)?.1, 0)
+   84 +        } else {
+   85 +            let values = validity
+   86 +                .iter()
+   87 +                .enumerate()
+   88 +                .filter_map(|(i, value)| (value == want_valid).then_some(i as u64));
+   89 +            let codec = crate::encodings::physical::sequence::select_u64_sequence_codec(
+   90 +                values,
+   91 +                &Default::default(),
+   92 +                STRUCTURAL_BLOCK_COST,
+   93 +            )?;
+   94 +            let encoding = codec.expected_encoding().clone();
+   95 +            let payload_cost = codec.estimated_wire_bytes() - encoding.encoded_len() as u64;
+   96 +            (encoding, payload_cost)
+   97 +        };
+   98 +        let descriptor = pb21::SparseValiditySet {
+   99 +            meaning: pb21::sparse_validity_set::Meaning::SparseValidityNullPositions as i32,
+  100 +            positions: Some(encoding),
+  101 +            num_positions: self.count,
+  102 +        };
+  103 +        Ok((descriptor.encoded_len() as u64).saturating_add(payload_cost))
+  104 +    }
+  105 +
+  106 +    fn to_plan(
+  107          self,
+  108          validity: &BooleanBuffer,
+  109          want_valid: bool,
+  110          domain_len: u64,
+  111          label: &str,
+   67 -    ) -> Result<SparsePositionSet> {
+   68 -        if self.count == 0 {
+   69 -            return Ok(SparsePositionSet::empty());
+   70 -        }
+   71 -        if self.count == domain_len {
+   72 -            return Ok(SparsePositionSet::all(domain_len));
+   73 -        }
+   74 -        if self.is_contiguous {
+   75 -            return Ok(SparsePositionSet::range(self.first, self.count));
+  112 +    ) -> Result<SparsePositionPlan> {
+  113 +        if let Some(plan) = self.inline_plan(domain_len) {
+  114 +            return Ok(plan);
+  115          }
+  116  
+  117          let capacity = usize::try_from(self.count).map_err(|_| {
+
+@@ -90,7 +129,7 @@ impl PositionSetStats {
+  129                  })?);
+  130              }
+  131          }
+   93 -        SparsePositionSet::from_positions(positions, domain_len, label)
+  132 +        SparsePositionPlan::from_positions(positions, domain_len, label)
+  133      }
+  134  }
+  135  
+
+@@ -110,7 +149,7 @@ fn validity_set(
+  149      let Some(validity) = validity else {
+  150          return Ok(SparseValiditySet {
+  151              meaning: SparseValidityMeaning::NullPositions,
+  113 -            positions: SparsePositionSet::empty(),
+  152 +            positions: SparsePositionPlan::empty(),
+  153          });
+  154      };
+  155      if validity.len() != num_slots {
+
+@@ -139,27 +178,27 @@ fn validity_set(
+  178      if null_stats.count == 0 {
+  179          return Ok(SparseValiditySet {
+  180              meaning: SparseValidityMeaning::NullPositions,
+  142 -            positions: SparsePositionSet::empty(),
+  181 +            positions: SparsePositionPlan::empty(),
+  182          });
+  183      }
+  184      if valid_stats.count == 0 {
+  185          return Ok(SparseValiditySet {
+  186              meaning: SparseValidityMeaning::ValidPositions,
+  148 -            positions: SparsePositionSet::empty(),
+  187 +            positions: SparsePositionPlan::empty(),
+  188          });
+  189      }
+  190  
+  152 -    let valid_cost = valid_stats.encoded_cost(domain_len);
+  153 -    let null_cost = null_stats.encoded_cost(domain_len);
+  154 -    if valid_cost < null_cost {
+  191 +    if valid_stats.wire_cost(validity, true, domain_len)?
+  192 +        < null_stats.wire_cost(validity, false, domain_len)?
+  193 +    {
+  194          Ok(SparseValiditySet {
+  195              meaning: SparseValidityMeaning::ValidPositions,
+  157 -            positions: valid_stats.to_set(validity, true, domain_len, label)?,
+  196 +            positions: valid_stats.to_plan(validity, true, domain_len, label)?,
+  197          })
+  198      } else {
+  199          Ok(SparseValiditySet {
+  200              meaning: SparseValidityMeaning::NullPositions,
+  162 -            positions: null_stats.to_set(validity, false, domain_len, label)?,
+  201 +            positions: null_stats.to_plan(validity, false, domain_len, label)?,
+  202          })
+  203      }
+  204  }
+
+@@ -170,7 +209,6 @@ pub(in crate::encodings::logical::primitive) fn plan(
+  209      num_visible_items: u64,
+  210  ) -> Result<SparseStructuralPlan> {
+  211      let mut layers = Vec::with_capacity(normalized.layers().len());
+  173 -    let mut num_items = num_visible_items;
+  212  
+  213      for layer in normalized.layers() {
+  214          match layer {
+
+@@ -259,14 +297,6 @@ pub(in crate::encodings::logical::primitive) fn plan(
+  297                  }
+  298  
+  299                  let num_slots_u64 = usize_to_u64(num_slots, "list slot count")?;
+  262 -                let num_non_empty = usize_to_u64(non_empty_positions.len(), "list position count")?;
+  263 -                num_items = num_items
+  264 -                    .checked_add(num_slots_u64 - num_non_empty)
+  265 -                    .ok_or_else(|| {
+  266 -                        Error::invalid_input_source(
+  267 -                            "Sparse structural item count overflows u64".into(),
+  268 -                        )
+  269 -                    })?;
+  300                  let num_child_slots = offsets.last().copied().ok_or_else(|| {
+  301                      Error::invalid_input_source("Sparse structural list has no offsets".into())
+  302                  })?;
+
+@@ -281,12 +311,12 @@ pub(in crate::encodings::logical::primitive) fn plan(
+  311                  layers.push(SparseStructuralLayerPlan::List {
+  312                      num_slots: num_slots_u64,
+  313                      num_child_slots,
+  284 -                    non_empty_positions: SparsePositionSet::from_positions(
+  314 +                    non_empty_positions: SparsePositionPlan::from_positions(
+  315                          non_empty_positions,
+  316                          num_slots_u64,
+  317                          "list non-empty",
+  318                      )?,
+  289 -                    counts: SparseCountSet::from_counts(counts)?,
+  319 +                    counts: SparseCountPlan::from_counts(counts)?,
+  320                      validity: validity_set(validity, num_slots, "list validity")?,
+  321                  });
+  322              }
+
+@@ -305,7 +335,6 @@ pub(in crate::encodings::logical::primitive) fn plan(
+  335      };
+  336      let plan = SparseStructuralPlan {
+  337          layers,
+  308 -        num_items,
+  338          num_visible_items,
+  339      };
+  340      plan.validate(row_domain)?;
+
+@@ -373,18 +402,7 @@ pub fn supports_value_block(data: &DataBlock) -> bool {
+  402      }
+  403  }
+  404  
+  376 -struct SparseMiniBlockChunk {
+  377 -    buffer_sizes: Vec<u32>,
+  378 -    num_values: u32,
+  379 -}
+  380 -
+  381 -struct SparseMiniBlockCompressed {
+  382 -    data: Vec<LanceBuffer>,
+  383 -    chunks: Vec<SparseMiniBlockChunk>,
+  384 -}
+  385 -
+  405  struct SerializedValuePage {
+  387 -    num_buffers: u64,
+  406      data: LanceBuffer,
+  407      metadata: LanceBuffer,
+  408  }
+
+@@ -405,51 +423,19 @@ struct EncodedStructuralPlan {
+  423      buffers: Vec<LanceBuffer>,
+  424  }
+  425  
+  408 -fn with_explicit_value_counts(
+  409 -    compressed: MiniBlockCompressed,
+  410 -) -> Result<SparseMiniBlockCompressed> {
+  411 -    let mut values_in_previous_chunks = 0_u64;
+  412 -    let mut chunks = Vec::with_capacity(compressed.chunks.len());
+  413 -    for chunk in compressed.chunks {
+  414 -        let num_values = chunk.num_values(values_in_previous_chunks, compressed.num_values);
+  415 -        values_in_previous_chunks = values_in_previous_chunks
+  416 -            .checked_add(num_values)
+  417 -            .ok_or_else(|| Error::internal("Sparse value count overflows u64".to_string()))?;
+  418 -        chunks.push(SparseMiniBlockChunk {
+  419 -            buffer_sizes: chunk.buffer_sizes,
+  420 -            num_values: u32::try_from(num_values).map_err(|_| {
+  421 -                Error::invalid_input_source(
+  422 -                    format!(
+  423 -                        "Sparse value chunk has {num_values} visible values, which exceeds the u32 metadata limit"
+  424 -                    )
+  425 -                    .into(),
+  426 -                )
+  427 -            })?,
+  428 -        });
+  429 -    }
+  430 -    if values_in_previous_chunks != compressed.num_values {
+  431 -        return Err(Error::internal(format!(
+  432 -            "Sparse value chunks describe {values_in_previous_chunks} values, expected {}",
+  433 -            compressed.num_values
+  434 -        )));
+  435 -    }
+  436 -    Ok(SparseMiniBlockCompressed {
+  437 -        data: compressed.data,
+  438 -        chunks,
+  439 -    })
+  440 -}
+  441 -
+  442 -fn serialize_value_chunks(
+  443 -    compressed: SparseMiniBlockCompressed,
+  444 -    miniblock_chunk_size: MiniblockChunkSize,
+  445 -) -> Result<SerializedValuePage> {
+  426 +fn serialize_value_chunks(compressed: MiniBlockCompressed) -> Result<SerializedValuePage> {
+  427      let bytes_data = compressed.data.iter().map(LanceBuffer::len).sum::<usize>();
+  428      let num_buffers = compressed.data.len();
+  429      let mut data_buffer = Vec::with_capacity(bytes_data + 9 * num_buffers);
+  430      let mut metadata = Vec::with_capacity(compressed.chunks.len() * 8);
+  431      let mut buffer_offsets = vec![0_usize; num_buffers];
+  432 +    let mut values_in_previous_chunks = 0_u64;
+  433  
+  434      for chunk in compressed.chunks {
+  435 +        let num_values = chunk.num_values(values_in_previous_chunks, compressed.num_values);
+  436 +        values_in_previous_chunks = values_in_previous_chunks
+  437 +            .checked_add(num_values)
+  438 +            .ok_or_else(|| Error::internal("Sparse value count overflows u64".to_string()))?;
+  439          if chunk.buffer_sizes.len() != num_buffers {
+  440              return Err(Error::internal(format!(
+  441                  "Sparse chunk has {} value buffer sizes, expected {num_buffers}",
+
+@@ -460,19 +446,8 @@ fn serialize_value_chunks(
+  446          let chunk_start = data_buffer.len();
+  447          debug_assert_eq!(chunk_start % MINIBLOCK_ALIGNMENT, 0);
+  448          data_buffer.extend_from_slice(&0_u16.to_le_bytes());
+  463 -        if miniblock_chunk_size == MiniblockChunkSize::U32 {
+  464 -            for buffer_size in &chunk.buffer_sizes {
+  465 -                data_buffer.extend_from_slice(&buffer_size.to_le_bytes());
+  466 -            }
+  467 -        } else {
+  468 -            for buffer_size in &chunk.buffer_sizes {
+  469 -                let buffer_size = u16::try_from(*buffer_size).map_err(|_| {
+  470 -                    Error::internal(format!(
+  471 -                        "Sparse value buffer size ({buffer_size} bytes) exceeds 16-bit metadata"
+  472 -                    ))
+  473 -                })?;
+  474 -                data_buffer.extend_from_slice(&buffer_size.to_le_bytes());
+  475 -            }
+  449 +        for buffer_size in &chunk.buffer_sizes {
+  450 +            data_buffer.extend_from_slice(&buffer_size.to_le_bytes());
+  451          }
+  452          let add_padding = |buffer: &mut Vec<u8>| {
+  453              let padding = pad_bytes::<MINIBLOCK_ALIGNMENT>(buffer.len());
+
+@@ -501,11 +476,6 @@ fn serialize_value_chunks(
+  476          }
+  477  
+  478          let chunk_bytes = data_buffer.len() - chunk_start;
+  504 -        if chunk_bytes == 0 || !chunk_bytes.is_multiple_of(MINIBLOCK_ALIGNMENT) {
+  505 -            return Err(Error::internal(format!(
+  506 -                "Sparse value chunk size {chunk_bytes} is not a positive multiple of {MINIBLOCK_ALIGNMENT}"
+  507 -            )));
+  508 -        }
+  479          let words_minus_one = chunk_bytes / MINIBLOCK_ALIGNMENT - 1;
+  480          metadata.extend_from_slice(
+  481              &u32::try_from(words_minus_one)
+
+@@ -516,7 +486,22 @@ fn serialize_value_chunks(
+  486                  })?
+  487                  .to_le_bytes(),
+  488          );
+  519 -        metadata.extend_from_slice(&chunk.num_values.to_le_bytes());
+  489 +        metadata.extend_from_slice(
+  490 +            &u32::try_from(num_values)
+  491 +                .map_err(|_| {
+  492 +                    Error::internal(format!(
+  493 +                        "Sparse chunk has {num_values} values, exceeding u32"
+  494 +                    ))
+  495 +                })?
+  496 +                .to_le_bytes(),
+  497 +        );
+  498 +    }
+  499 +
+  500 +    if values_in_previous_chunks != compressed.num_values {
+  501 +        return Err(Error::internal(format!(
+  502 +            "Sparse value chunks describe {values_in_previous_chunks} values, expected {}",
+  503 +            compressed.num_values
+  504 +        )));
+  505      }
+  506  
+  507      for (index, (consumed, buffer)) in buffer_offsets
+
+@@ -533,7 +518,6 @@ fn serialize_value_chunks(
+  518      }
+  519  
+  520      Ok(SerializedValuePage {
+  536 -        num_buffers: usize_to_u64(num_buffers, "value buffer count")?,
+  521          data: LanceBuffer::from(data_buffer),
+  522          metadata: LanceBuffer::from(metadata),
+  523      })
+
+@@ -543,7 +527,6 @@ pub fn prepare_values(
+  527      field: &Field,
+  528      compression_strategy: &dyn CompressionStrategy,
+  529      data: DataBlock,
+  546 -    miniblock_chunk_size: MiniblockChunkSize,
+  530  ) -> Result<PreparedSparseValues> {
+  531      match &data {
+  532          DataBlock::AllNull(_) => {
+
+@@ -566,13 +549,9 @@ pub fn prepare_values(
+  549  
+  550      let num_values = data.num_values();
+  551      let compressor = compression_strategy.create_miniblock_compressor(field, &data)?;
+  569 -    let support_large_chunk = miniblock_chunk_size == MiniblockChunkSize::U32;
+  570 -    let compression_context = MiniBlockCompressionContext::new(0, support_large_chunk, false);
+  552 +    let compression_context = MiniBlockCompressionContext::new(0, true, true);
+  553      let (compressed, value_compression) = compressor.compress(compression_context, data)?;
+  572 -    let values = serialize_value_chunks(
+  573 -        with_explicit_value_counts(compressed)?,
+  574 -        miniblock_chunk_size,
+  575 -    )?;
+  554 +    let values = serialize_value_chunks(compressed)?;
+  555      Ok(PreparedSparseValues {
+  556          num_values,
+  557          value_compression,
+
+@@ -580,131 +559,61 @@ pub fn prepare_values(
+  559      })
+  560  }
+  561  
+  583 -fn encode_u64_values(
+  584 -    values: Vec<u64>,
+  585 -    compression_strategy: &dyn CompressionStrategy,
+  586 -) -> Result<(LanceBuffer, CompressiveEncoding)> {
+  587 -    let num_values = usize_to_u64(values.len(), "u64 value count")?;
+  588 -    let mut block = DataBlock::FixedWidth(FixedWidthDataBlock {
+  562 +// Estimate the offset/size metadata per payload using the minimum page alignment.
+  563 +// The final file writer may apply a larger alignment.
+  564 +const STRUCTURAL_BLOCK_COST: BlockCost =
+  565 +    BlockCost::new(16, crate::encoder::MIN_PAGE_BUFFER_ALIGNMENT);
+  566 +
+  567 +fn encode_u64_values(values: Vec<u64>) -> Result<(Option<LanceBuffer>, CompressiveEncoding)> {
+  568 +    let len = values.len();
+  569 +    let block = FixedWidthDataBlock {
+  570          data: LanceBuffer::reinterpret_vec(values),
+  571          bits_per_value: 64,
+  591 -        num_values,
+  572 +        num_values: usize_to_u64(len, "u64 value count")?,
+  573          block_info: BlockInfo::new(),
+  593 -    });
+  594 -    block.compute_stat();
+  595 -    let field = Field::new_arrow("", arrow_schema::DataType::UInt64, false)?;
+  596 -    compress_required_block(compression_strategy, &field, block)
+  597 -}
+  598 -
+  599 -fn positions_to_deltas(positions: &[u64], label: &str) -> Result<Vec<u64>> {
+  600 -    let mut previous = 0_u64;
+  601 -    positions
+  602 -        .iter()
+  603 -        .copied()
+  604 -        .enumerate()
+  605 -        .map(|(index, position)| {
+  606 -            if index > 0 && position <= previous {
+  607 -                return Err(Error::invalid_input_source(
+  608 -                    format!("Sparse structural {label} positions must be strictly increasing")
+  609 -                        .into(),
+  610 -                ));
+  611 -            }
+  612 -            let delta = if index == 0 {
+  613 -                position
+  614 -            } else {
+  615 -                position - previous
+  616 -            };
+  617 -            previous = position;
+  618 -            Ok(delta)
+  619 -        })
+  620 -        .collect()
+  574 +    };
+  575 +    let codec = select_block_codec(
+  576 +        &block,
+  577 +        &[0..len],
+  578 +        &Default::default(),
+  579 +        STRUCTURAL_BLOCK_COST,
+  580 +        false,
+  581 +    )?;
+  582 +    codec.compress(block)
+  583  }
+  584  
+  585  fn encode_position_set(
+  624 -    positions: &SparsePositionSet,
+  625 -    compression_strategy: &dyn CompressionStrategy,
+  626 -    label: &str,
+  627 -) -> Result<(Option<LanceBuffer>, pb21::SparsePositionSet)> {
+  628 -    let (buffer, positions_pb) = match positions {
+  629 -        SparsePositionSet::Empty => (
+  630 -            None,
+  631 -            pb21::sparse_position_set::Positions::Empty(pb21::SparsePositionEmpty {}),
+  632 -        ),
+  633 -        SparsePositionSet::All { .. } => (
+  634 -            None,
+  635 -            pb21::sparse_position_set::Positions::All(pb21::SparsePositionAll {}),
+  636 -        ),
+  637 -        SparsePositionSet::Range { start, len } => (
+  638 -            None,
+  639 -            pb21::sparse_position_set::Positions::Range(pb21::SparsePositionRange {
+  640 -                start: *start,
+  641 -                length: *len,
+  642 -            }),
+  643 -        ),
+  644 -        SparsePositionSet::Explicit(positions) => {
+  645 -            if positions.is_empty() {
+  646 -                return Err(Error::internal(format!(
+  647 -                    "Sparse structural {label} explicit set is empty"
+  648 -                )));
+  649 -            }
+  650 -            let (buffer, encoding) =
+  651 -                encode_u64_values(positions_to_deltas(positions, label)?, compression_strategy)?;
+  652 -            (
+  653 -                Some(buffer),
+  654 -                pb21::sparse_position_set::Positions::Explicit(encoding),
+  655 -            )
+  586 +    positions: &SparsePositionPlan,
+  587 +) -> Result<(Option<LanceBuffer>, CompressiveEncoding)> {
+  588 +    Ok(match positions {
+  589 +        SparsePositionPlan::Empty => (None, ConstantEncoder::new(64, 0).encoding(0)?),
+  590 +        SparsePositionPlan::All { len } => (None, RangeEncoder::new(64, 0, 1).encoding(*len)?),
+  591 +        SparsePositionPlan::Range { start, len } => {
+  592 +            (None, RangeEncoder::new(64, *start, 1).encoding(*len)?)
+  593          }
+  657 -    };
+  658 -    Ok((
+  659 -        buffer,
+  660 -        pb21::SparsePositionSet {
+  661 -            positions: Some(positions_pb),
+  662 -            num_positions: positions.len(),
+  663 -        },
+  664 -    ))
+  594 +        SparsePositionPlan::Arithmetic { start, step, len } => {
+  595 +            (None, RangeEncoder::new(64, *start, *step).encoding(*len)?)
+  596 +        }
+  597 +        SparsePositionPlan::Explicit(values) => return encode_u64_values(values.clone()),
+  598 +    })
+  599  }
+  600  
+  601  fn encode_count_set(
+  668 -    counts: &SparseCountSet,
+  669 -    compression_strategy: &dyn CompressionStrategy,
+  670 -) -> Result<(Option<LanceBuffer>, pb21::SparseCountSet)> {
+  671 -    let (buffer, counts_pb) = match counts {
+  672 -        SparseCountSet::Empty => (
+  673 -            None,
+  674 -            pb21::sparse_count_set::Counts::Empty(pb21::SparseCountEmpty {}),
+  675 -        ),
+  676 -        SparseCountSet::Constant { value, .. } => (
+  677 -            None,
+  678 -            pb21::sparse_count_set::Counts::Constant(pb21::SparseCountConstant { value: *value }),
+  679 -        ),
+  680 -        SparseCountSet::Explicit { counts, .. } => {
+  681 -            if counts.is_empty() {
+  682 -                return Err(Error::internal(
+  683 -                    "Sparse structural explicit count set is empty".to_string(),
+  684 -                ));
+  685 -            }
+  686 -            let (buffer, encoding) = encode_u64_values(counts.to_vec(), compression_strategy)?;
+  687 -            (
+  688 -                Some(buffer),
+  689 -                pb21::sparse_count_set::Counts::Explicit(encoding),
+  690 -            )
+  602 +    counts: &SparseCountPlan,
+  603 +) -> Result<(Option<LanceBuffer>, CompressiveEncoding)> {
+  604 +    Ok(match counts {
+  605 +        SparseCountPlan::Empty => (None, ConstantEncoder::new(64, 0).encoding(0)?),
+  606 +        SparseCountPlan::Constant { value, len } => {
+  607 +            (None, ConstantEncoder::new(64, *value).encoding(*len)?)
+  608          }
+  692 -    };
+  693 -    Ok((
+  694 -        buffer,
+  695 -        pb21::SparseCountSet {
+  696 -            counts: Some(counts_pb),
+  697 -        },
+  698 -    ))
+  609 +        SparseCountPlan::Explicit { counts, .. } => return encode_u64_values(counts.to_vec()),
+  610 +    })
+  611  }
+  612  
+  613  fn encode_validity_set(
+  614      validity: &SparseValiditySet,
+  703 -    compression_strategy: &dyn CompressionStrategy,
+  704 -    label: &str,
+  615  ) -> Result<(Option<LanceBuffer>, pb21::SparseValiditySet)> {
+  706 -    let (buffer, positions) =
+  707 -        encode_position_set(&validity.positions, compression_strategy, label)?;
+  616 +    let (buffer, positions) = encode_position_set(&validity.positions)?;
+  617      let meaning = match validity.meaning {
+  618          SparseValidityMeaning::NullPositions => {
+  619              pb21::sparse_validity_set::Meaning::SparseValidityNullPositions
+
+@@ -718,69 +627,46 @@ fn encode_validity_set(
+  627          pb21::SparseValiditySet {
+  628              meaning: meaning as i32,
+  629              positions: Some(positions),
+  630 +            num_positions: validity.positions.len(),
+  631          },
+  632      ))
+  633  }
+  634  
+  725 -fn encode_structural_plan(
+  726 -    plan: &SparseStructuralPlan,
+  727 -    compression_strategy: &dyn CompressionStrategy,
+  728 -) -> Result<EncodedStructuralPlan> {
+  635 +// Structural plans are validated by plan() before entering the writer.
+  636 +fn encode_structural_plan(plan: &SparseStructuralPlan) -> Result<EncodedStructuralPlan> {
+  637      let mut layers = Vec::with_capacity(plan.layers.len());
+  638      let mut buffers = Vec::new();
+  639  
+  640      for layer in &plan.layers {
+  641          match layer {
+  734 -            SparseStructuralLayerPlan::Validity {
+  735 -                num_slots,
+  736 -                validity,
+  737 -            } => {
+  738 -                let (validity_buffer, validity) =
+  739 -                    encode_validity_set(validity, compression_strategy, "validity")?;
+  642 +            SparseStructuralLayerPlan::Validity { validity, .. } => {
+  643 +                let (validity_buffer, validity) = encode_validity_set(validity)?;
+  644                  buffers.extend(validity_buffer);
+  645                  layers.push(pb21::SparseStructuralLayer {
+  742 -                    layer: Some(pb21::sparse_structural_layer::Layer::Validity(
+  743 -                        pb21::SparseValidityLayer {
+  744 -                            num_slots: *num_slots,
+  745 -                            validity: Some(validity),
+  746 -                        },
+  747 -                    )),
+  646 +                    layer: Some(pb21::sparse_structural_layer::Layer::Validity(validity)),
+  647                  });
+  648              }
+  649              SparseStructuralLayerPlan::List {
+  751 -                num_slots,
+  650                  num_child_slots,
+  651                  non_empty_positions,
+  652                  counts,
+  653                  validity,
+  654 +                ..
+  655              } => {
+  757 -                if non_empty_positions.len() != counts.len() {
+  758 -                    return Err(Error::invalid_input_source(
+  759 -                        format!(
+  760 -                            "Sparse structural list has {} non-empty positions but {} counts",
+  761 -                            non_empty_positions.len(),
+  762 -                            counts.len()
+  763 -                        )
+  764 -                        .into(),
+  765 -                    ));
+  766 -                }
+  767 -                let (position_buffer, non_empty_positions) = encode_position_set(
+  768 -                    non_empty_positions,
+  769 -                    compression_strategy,
+  770 -                    "list non-empty",
+  771 -                )?;
+  656 +                let num_non_empty_positions = non_empty_positions.len();
+  657 +                let (position_buffer, non_empty_positions) =
+  658 +                    encode_position_set(non_empty_positions)?;
+  659                  buffers.extend(position_buffer);
+  773 -                let (count_buffer, counts) = encode_count_set(counts, compression_strategy)?;
+  660 +                let (count_buffer, counts) = encode_count_set(counts)?;
+  661                  buffers.extend(count_buffer);
+  775 -                let (validity_buffer, validity) =
+  776 -                    encode_validity_set(validity, compression_strategy, "list validity")?;
+  662 +                let (validity_buffer, validity) = encode_validity_set(validity)?;
+  663                  buffers.extend(validity_buffer);
+  664                  layers.push(pb21::SparseStructuralLayer {
+  665                      layer: Some(pb21::sparse_structural_layer::Layer::List(
+  666                          pb21::SparseListLayer {
+  781 -                            num_slots: *num_slots,
+  667                              num_child_slots: *num_child_slots,
+  668                              non_empty_positions: Some(non_empty_positions),
+  669 +                            num_non_empty_positions,
+  670                              counts: Some(counts),
+  671                              validity: Some(validity),
+  672                          },
+
+@@ -788,28 +674,15 @@ fn encode_structural_plan(
+  674                  });
+  675              }
+  676              SparseStructuralLayerPlan::FixedSizeList {
+  791 -                num_slots,
+  677                  dimension,
+  678                  validity,
+  679 +                ..
+  680              } => {
+  795 -                let (validity_buffer, validity) = encode_validity_set(
+  796 -                    validity,
+  797 -                    compression_strategy,
+  798 -                    "fixed-size-list validity",
+  799 -                )?;
+  681 +                let (validity_buffer, validity) = encode_validity_set(validity)?;
+  682                  buffers.extend(validity_buffer);
+  801 -                num_slots.checked_mul(*dimension).ok_or_else(|| {
+  802 -                    Error::invalid_input_source(
+  803 -                        format!(
+  804 -                            "Sparse structural fixed-size-list child slot count overflows: slots={num_slots}, dimension={dimension}"
+  805 -                        )
+  806 -                        .into(),
+  807 -                    )
+  808 -                })?;
+  683                  layers.push(pb21::SparseStructuralLayer {
+  684                      layer: Some(pb21::sparse_structural_layer::Layer::FixedSizeList(
+  685                          pb21::SparseFixedSizeListLayer {
+  812 -                            num_slots: *num_slots,
+  686                              dimension: *dimension,
+  687                              validity: Some(validity),
+  688                          },
+
+@@ -822,7 +695,6 @@ fn encode_structural_plan(
+  695      Ok(EncodedStructuralPlan { layers, buffers })
+  696  }
+  697  
+  825 -#[allow(clippy::too_many_arguments)]
+  698  pub(in crate::encodings::logical::primitive) fn encode_page(
+  699      column_idx: u32,
+  700      field: &Field,
+
+@@ -831,16 +703,13 @@ pub(in crate::encodings::logical::primitive) fn encode_page(
+  703      plan: SparseStructuralPlan,
+  704      row_number: u64,
+  705      num_rows: u64,
+  834 -    miniblock_chunk_size: MiniblockChunkSize,
+  706  ) -> Result<EncodedPage> {
+  707      let PreparedSparseValues {
+  708          num_values,
+  709          value_compression,
+  710          values,
+  711      } = match values {
+  841 -        SparseValueInput::Unprepared(data) => {
+  842 -            prepare_values(field, compression_strategy, data, miniblock_chunk_size)?
+  843 -        }
+  712 +        SparseValueInput::Unprepared(data) => prepare_values(field, compression_strategy, data)?,
+  713          SparseValueInput::Prepared(prepared) => prepared,
+  714      };
+  715      if plan.num_visible_items != num_values {
+
+@@ -849,15 +718,11 @@ pub(in crate::encodings::logical::primitive) fn encode_page(
+  718              plan.num_visible_items, num_values
+  719          )));
+  720      }
+  852 -    let structural = encode_structural_plan(&plan, compression_strategy)?;
+  721 +    let structural = encode_structural_plan(&plan)?;
+  722      let description = pb21::PageLayout {
+  723          layout: Some(pb21::page_layout::Layout::SparseLayout(
+  724              pb21::SparseLayout {
+  725                  value_compression: Some(value_compression),
+  857 -                num_buffers: values.num_buffers,
+  858 -                num_items: plan.num_items,
+  859 -                num_visible_items: plan.num_visible_items,
+  860 -                has_large_chunk: miniblock_chunk_size == MiniblockChunkSize::U32,
+  726                  structural_layers: structural.layers,
+  727              },
+  728          )),

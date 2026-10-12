@@ -1,0 +1,215 @@
+@@ -902,7 +902,7 @@ impl Dataset {
+  902      }
+  903  
+  904      #[allow(clippy::too_many_arguments)]
+  905 -    fn checkout_manifest(
+  905 +    pub(crate) fn checkout_manifest(
+  906          object_store: Arc<ObjectStore>,
+  907          base_path: Path,
+  908          uri: String,
+
+@@ -2466,10 +2466,35 @@ impl Dataset {
+ 2466          }
+ 2467      }
+ 2468  
+ 2469 +    pub(crate) fn blob_base_path(&self, base_id: Option<u32>) -> Result<Path> {
+ 2470 +        match base_id {
+ 2471 +            Some(id) => self
+ 2472 +                .manifest
+ 2473 +                .base_paths
+ 2474 +                .get(&id)
+ 2475 +                .ok_or_else(|| {
+ 2476 +                    Error::invalid_input(format!("Managed blob references unknown base_id {id}"))
+ 2477 +                })?
+ 2478 +                .extract_path(self.session.store_registry()),
+ 2479 +            None => Ok(self.base.clone()),
+ 2480 +        }
+ 2481 +    }
+ 2482 +
+ 2483      async fn base_object_store(&self, base_id: u32) -> Result<Arc<ObjectStore>> {
+ 2484          let base_path = self.manifest.base_paths.get(&base_id).ok_or_else(|| {
+ 2485              Error::invalid_input(format!("Dataset base path with ID {} not found", base_id))
+ 2486          })?;
+ 2487 +        if base_path.path == self.uri
+ 2488 +            && !self
+ 2489 +                .base_store_params
+ 2490 +                .as_ref()
+ 2491 +                .is_some_and(|params| params.contains_key(&base_path.path))
+ 2492 +            && self.store_params.as_ref().is_none_or(|params| {
+ 2493 +                matches!(params.scoped_to_base(Some(base_id)), Cow::Borrowed(_))
+ 2494 +            })
+ 2495 +        {
+ 2496 +            return Ok(self.object_store.clone());
+ 2497 +        }
+ 2498          let store_params = self.store_params_for_base(Some(base_path));
+ 2499  
+ 2500          let cell = {
+
+@@ -2896,7 +2921,7 @@ impl Dataset {
+ 2921      /// (Lance 0.16 and earlier). Neither is rejected on read, so the search
+ 2922      /// result is checked and a scan takes over when it does not match --
+ 2923      /// returning some other fragment's data would be silent corruption.
+ 2899 -    fn find_fragment(&self, id: u64) -> Option<&Fragment> {
+ 2924 +    pub(crate) fn find_fragment(&self, id: u64) -> Option<&Fragment> {
+ 2925          if !u32::try_from(id).is_ok_and(|id| self.fragment_bitmap.contains(id)) {
+ 2926              return None;
+ 2927          }
+
+@@ -3271,6 +3296,31 @@ impl Dataset {
+ 3296          Ok(())
+ 3297      }
+ 3298  
+ 3299 +    /// Shared clone-target preflight for `shallow_clone` and `deep_clone`:
+ 3300 +    /// permit the clone only when the target definitively holds no dataset.
+ 3301 +    /// Only the codebase-wide "dataset absent" pair passes: the built-in
+ 3302 +    /// resolver reports an empty `_versions/` listing as `NotFound`, while
+ 3303 +    /// handlers with an external source of truth use `DatasetNotFound` (the
+ 3304 +    /// same discrimination the write path's destination probe applies). Any
+ 3305 +    /// other resolver failure (storage, auth, corrupt manifest listing)
+ 3306 +    /// propagates instead of letting the clone write into a target it failed
+ 3307 +    /// to inspect.
+ 3308 +    async fn ensure_clone_target_absent(
+ 3309 +        commit_handler: &dyn CommitHandler,
+ 3310 +        target_base: &Path,
+ 3311 +        target_store: &ObjectStore,
+ 3312 +        target_path: &str,
+ 3313 +    ) -> Result<()> {
+ 3314 +        match commit_handler
+ 3315 +            .resolve_latest_location(target_base, target_store)
+ 3316 +            .await
+ 3317 +        {
+ 3318 +            Ok(_) => Err(Error::dataset_already_exists(target_path.to_string())),
+ 3319 +            Err(Error::NotFound { .. } | Error::DatasetNotFound { .. }) => Ok(()),
+ 3320 +            Err(error) => Err(error),
+ 3321 +        }
+ 3322 +    }
+ 3323 +
+ 3324      /// Shallow clone the target version into a new dataset at target_path.
+ 3325      /// 'target_path': the uri string to clone the dataset into.
+ 3326      /// 'version': the version cloned from, could be a version number or tag.
+
+@@ -3281,6 +3331,23 @@ impl Dataset {
+ 3331          version: impl Into<refs::Ref>,
+ 3332          store_params: Option<ObjectStoreParams>,
+ 3333      ) -> Result<Self> {
+ 3334 +        // Prevent cloning into an existing target dataset (parity with
+ 3335 +        // `deep_clone`) before anything is written there: a tagged clone
+ 3336 +        // stages its relocated FRI details in the target's `_indices/`
+ 3337 +        // ahead of the manifest commit, which must not pollute a live
+ 3338 +        // dataset. The check goes through the same store and commit handler
+ 3339 +        // the commit below writes through. Only a definitive "no dataset
+ 3340 +        // here" permits the clone; see `ensure_clone_target_absent`.
+ 3341 +        let target_base =
+ 3342 +            ObjectStore::extract_path_from_uri(self.session.store_registry(), target_path)?;
+ 3343 +        Self::ensure_clone_target_absent(
+ 3344 +            self.commit_handler.as_ref(),
+ 3345 +            &target_base,
+ 3346 +            &self.object_store,
+ 3347 +            target_path,
+ 3348 +        )
+ 3349 +        .await?;
+ 3350 +
+ 3351          let (ref_name, version_number) = self.resolve_reference(version.into()).await?;
+ 3352          let source_location = self.branch_location().find_branch(ref_name.as_deref())?;
+ 3353          let clone_op = Operation::Clone {
+
+@@ -3336,12 +3403,8 @@ impl Dataset {
+ 3403          // Resolve source dataset and its manifest using checkout_version
+ 3404          let src_ds = self.checkout_version(version).await?;
+ 3405          ensure_can_write_manifest(&src_ds.manifest)?;
+ 3339 -        lance_table::system_index::frag_reuse::metadata::ensure_clone_supported(
+ 3340 -            &src_ds.object_store,
+ 3341 -            &src_ds.manifest_location,
+ 3342 -            &src_ds.manifest,
+ 3343 -        )
+ 3344 -        .await?;
+ 3406 +        // Rejects a tagged FRI history this writer cannot fully interpret
+ 3407 +        // before anything is copied or written to the target.
+ 3408          let src_paths = src_ds.collect_paths().await?;
+ 3409  
+ 3410          // Prepare target object store and base path
+
+@@ -3352,15 +3415,16 @@ impl Dataset {
+ 3415          )
+ 3416          .await?;
+ 3417  
+ 3355 -        // Prevent cloning into an existing target dataset
+ 3356 -        if self
+ 3357 -            .commit_handler
+ 3358 -            .resolve_latest_location(&target_base, &target_store)
+ 3359 -            .await
+ 3360 -            .is_ok()
+ 3361 -        {
+ 3362 -            return Err(Error::dataset_already_exists(target_path.to_string()));
+ 3363 -        }
+ 3418 +        // Prevent cloning into an existing target dataset. Only a definitive
+ 3419 +        // "no dataset here" permits the clone; see
+ 3420 +        // `ensure_clone_target_absent`.
+ 3421 +        Self::ensure_clone_target_absent(
+ 3422 +            self.commit_handler.as_ref(),
+ 3423 +            &target_base,
+ 3424 +            &target_store,
+ 3425 +            target_path,
+ 3426 +        )
+ 3427 +        .await?;
+ 3428  
+ 3429          let build_absolute_path = |relative_path: &str, base: &Path| -> Path {
+ 3430              let mut path = base.clone();
+
+@@ -3537,6 +3601,16 @@ impl Dataset {
+ 3601          .await?;
+ 3602  
+ 3603          for index in &indices {
+ 3604 +            if lance_table::system_index::frag_reuse::metadata::is_tagged(index) {
+ 3605 +                // The clone commit rewrites a tagged FRI entry under a fresh
+ 3606 +                // uuid with local references (its details spill included), so
+ 3607 +                // the entry's own `_indices/<uuid>/` directory is not copied;
+ 3608 +                // the row maps it references are, into the clone's `_fri/`.
+ 3609 +                file_paths.extend(
+ 3610 +                    crate::index::frag_reuse::collect_tagged_row_map_paths(self, index).await?,
+ 3611 +                );
+ 3612 +                continue;
+ 3613 +            }
+ 3614              let base_root = if let Some(base_id) = index.base_id {
+ 3615                  let base_path = self
+ 3616                      .manifest
+
+@@ -4127,6 +4201,10 @@ pub(crate) struct ManifestWriteConfig {
+ 4201      /// It bypasses the "cannot enable stable row ids on existing dataset" guard and
+ 4202      /// sets `manifest.next_row_id` to the provided value before activating the flag.
+ 4203      migration_next_row_id: Option<u64>, // default None
+ 4204 +    /// This commit is a tagged fragment-reuse-index trim derived by
+ 4205 +    /// `cleanup_frag_reuse_index` against the current manifest entry; see
+ 4206 +    /// `ManifestBuildConfig::tagged_frag_reuse_trim`.
+ 4207 +    tagged_frag_reuse_trim: bool, // default false
+ 4208  }
+ 4209  
+ 4210  impl Default for ManifestWriteConfig {
+
+@@ -4139,6 +4217,7 @@ impl Default for ManifestWriteConfig {
+ 4217              use_legacy_format: None,
+ 4218              storage_format: None,
+ 4219              migration_next_row_id: None,
+ 4220 +            tagged_frag_reuse_trim: false,
+ 4221          }
+ 4222      }
+ 4223  }
+
+@@ -4154,6 +4233,19 @@ impl ManifestWriteConfig {
+ 4235  
+ 4236 +    /// Mark this commit as a tagged fragment-reuse-index trim derived by the
+ 4237 +    /// maintenance path; required for `build_manifest` to accept the shape.
+ 4238 +    pub(crate) fn with_tagged_frag_reuse_trim(mut self) -> Self {
+ 4239 +        self.tagged_frag_reuse_trim = true;
+ 4240 +        self
+ 4241 +    }
+ 4242 +
+ 4243 +    /// Whether this commit is the tagged fragment reuse trim the maintenance
+ 4244 +    /// path derived against the current entry (`FragReuseUpdate::Trim`).
+ 4245 +    pub(crate) fn tagged_frag_reuse_trim(&self) -> bool {
+ 4246 +        self.tagged_frag_reuse_trim
+ 4247 +    }
+ 4248 +
+ 4249      /// Resolve into the config `Transaction::build_manifest` consumes.
+ 4250      ///
+ 4251      /// The timestamp is resolved here rather than during the build so it goes

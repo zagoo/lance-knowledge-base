@@ -1,0 +1,61 @@
+@@ -87,8 +87,12 @@ pub enum Operation {
+   87          /// Indices that have been updated with the new row addresses
+   88          rewritten_indices: Vec<RewrittenIndex>,
+   89          /// The fragment reuse index entry to be created or updated to: the
+   90 -        /// complete entry the caller wants installed, that is the entry at
+   91 -        /// the transaction's read version plus this rewrite's own records.
+   90 +        /// complete entry the caller wants installed, that is a base entry
+   91 +        /// plus this rewrite's own records.
+   92 +        ///
+   93 +        /// On a v0 history (`index_version` 0) it must be the entry of the dataset
+   94 +        /// the rewrite is committed through plus one version; a latest entry that
+   95 +        /// is neither that entry nor a trim of it is a retryable conflict.
+   96          ///
+   97          /// On a tagged history (`index_version` 1) the commit path does not
+   98          /// splice this entry as it is. It works out which records the entry
+
+@@ -135,7 +139,11 @@ pub enum Operation {
+  139      /// specification for resolution, coverage, and versioning rules.
+  140      DataOverlay { groups: Vec<DataOverlayGroup> },
+  141      /// Merge a new column in
+  138 -    /// 'fragments' is the final fragments include all data files, the new fragments must align with old ones at rows.
+  142 +    /// 'fragments' is the final fragment list: the merged version of every existing
+  143 +    /// fragment (aligned with the old one at rows) and, optionally, brand-new fragments
+  144 +    /// listed after them. New fragments use id 0 (assigned a fresh id at commit time) or
+  145 +    /// a pre-reserved id; either way, on stable row id datasets they are also assigned
+  146 +    /// row ids at commit time, like Append. New fragments must not carry row id metadata.
+  147      /// 'schema' is not forced to include existed columns, which means we could use Merge to drop column data
+  148      Merge {
+  149          fragments: Vec<Fragment>,
+
+@@ -245,6 +253,12 @@ pub enum Operation {
+  253          /// The new base paths to add to the manifest.
+  254          new_bases: Vec<BasePath>,
+  255      },
+  256 +
+  257 +    /// An operation written by a newer version of Lance that this version does
+  258 +    /// not recognize. It can be read but never re-encoded or committed, and it
+  259 +    /// is assumed to conflict with everything.
+  260 +    #[non_exhaustive]
+  261 +    Unknown {},
+  262  }
+  263  
+  264  #[derive(Debug, Clone, PartialEq, DeepSizeOf)]
+
+@@ -292,6 +306,7 @@ impl std::fmt::Display for Operation {
+  306              Self::UpdateConfig { .. } => write!(f, "UpdateConfig"),
+  307              Self::DataReplacement { .. } => write!(f, "DataReplacement"),
+  308              Self::DataOverlay { .. } => write!(f, "DataOverlay"),
+  309 +            Self::Unknown { .. } => write!(f, "Unknown"),
+  310              Self::Clone { .. } => write!(f, "Clone"),
+  311              Self::UpdateMemWalState { .. } => write!(f, "UpdateMemWalState"),
+  312              Self::UpdateBases { .. } => write!(f, "UpdateBases"),
+
+@@ -412,6 +427,7 @@ impl Operation {
+  427              Self::UpdateConfig { .. } => "UpdateConfig",
+  428              Self::DataReplacement { .. } => "DataReplacement",
+  429              Self::DataOverlay { .. } => "DataOverlay",
+  430 +            Self::Unknown { .. } => "Unknown",
+  431              Self::UpdateMemWalState { .. } => "UpdateMemWalState",
+  432              Self::Clone { .. } => "Clone",
+  433              Self::UpdateBases { .. } => "UpdateBases",

@@ -1,0 +1,537 @@
+@@ -0,0 +1,536 @@
+    1 +// SPDX-License-Identifier: Apache-2.0
+    2 +// SPDX-FileCopyrightText: Copyright The Lance Authors
+    3 +// SPDX-FileCopyrightText: Copyright 2023 Datafuse Labs
+    4 +// Adapted from databendlabs/jsonb at commit fba895c5ebe77ce2539e187f9c652f51cbf195c3.
+    5 +
+    6 +use crate::RawJsonb;
+    7 +use std::borrow::Cow;
+    8 +use std::cmp::Ordering;
+    9 +use std::collections::HashSet;
+   10 +use std::fmt::Display;
+   11 +use std::fmt::Formatter;
+   12 +
+   13 +use crate::number::Number;
+   14 +
+   15 +/// Represents a set of JSON Path chains.
+   16 +#[derive(Debug, Clone, PartialEq)]
+   17 +pub struct JsonPath<'a> {
+   18 +    pub paths: Vec<Path<'a>>,
+   19 +}
+   20 +
+   21 +impl JsonPath<'_> {}
+   22 +
+   23 +/// Represents a valid JSON Path.
+   24 +#[derive(Debug, Clone, PartialEq)]
+   25 +pub enum Path<'a> {
+   26 +    /// `$` represents the root node or element.
+   27 +    Root,
+   28 +    /// `@` represents the current node or element being processed in the filter expression.
+   29 +    Current,
+   30 +    /// `.*` represents selecting all elements in an Object.
+   31 +    DotWildcard,
+   32 +    /// `.**` represents recursive selecting all elements in Array and Object.
+   33 +    /// The optional `RecursiveLevel` indicates the selected levels.
+   34 +    RecursiveDotWildcard(Option<RecursiveLevel>),
+   35 +    /// `[*]` represents selecting all elements in an Array.
+   36 +    BracketWildcard,
+   37 +    /// `.<name>` represents selecting element that matched the name in an Object, like `$.event`.
+   38 +    /// The name can also be written as a string literal, allowing the name to contain special characters, like `$." $price"`.
+   39 +    DotField(Cow<'a, str>),
+   40 +    /// `:<name>` represents selecting element that matched the name in an Object, like `$:event`.
+   41 +    ColonField(Cow<'a, str>),
+   42 +    /// `["<name>"]` represents selecting element that matched the name in an Object, like `$["event"]`.
+   43 +    ObjectField(Cow<'a, str>),
+   44 +    /// `[<index1>,<index2>,..]` represents selecting elements specified by the indices in an Array.
+   45 +    /// There are several forms of index.
+   46 +    /// 1. A single number representing the 0-based `n-th` element in the Array.
+   47 +    ///    e.g. `$[0]` represents the first element in an Array.
+   48 +    /// 2. The keyword `last` represents the last element in the Array,
+   49 +    ///    and last minus a number represents the n-th element before the last element,
+   50 +    ///    e.g. `$[last-1]` represents the penultimate element.
+   51 +    /// 3. The keyword `to` between two numbers represent all elements of a range in an Array,
+   52 +    ///    e.g. `$[1 to last]` represents all the elements in the Array from the second to the last.
+   53 +    ///
+   54 +    /// There can be more than one index, e.g. `$[0, last-1 to last, 5]` represents the first,
+   55 +    /// the last two, and the sixth element in an Array.
+   56 +    ArrayIndices(Vec<ArrayIndex>),
+   57 +    /// `?(<expression>)` represents selecting all elements in an object or array that match the filter expression, like `$.book[?(@.price < 10)]`.
+   58 +    FilterExpr(Box<Expr<'a>>),
+   59 +    /// `<expression>` standalone filter expression, like `$.book[*].price > 10`,
+   60 +    /// and arithmetic expression, like `-$.a[*]` or `$.a + 3`
+   61 +    Expr(Box<Expr<'a>>),
+   62 +}
+   63 +
+   64 +/// Represents the single index in an Array.
+   65 +#[derive(Debug, Clone, PartialEq)]
+   66 +pub enum Index {
+   67 +    /// The 0-based index in an Array.
+   68 +    Index(i32),
+   69 +    /// The last n-th index in an Array.
+   70 +    LastIndex(i32),
+   71 +}
+   72 +
+   73 +/// Represents the index in an Array.
+   74 +#[derive(Debug, Clone, PartialEq)]
+   75 +pub enum ArrayIndex {
+   76 +    /// The single number index.
+   77 +    Index(Index),
+   78 +    /// The range index between two number.
+   79 +    Slice((Index, Index)),
+   80 +}
+   81 +
+   82 +impl ArrayIndex {
+   83 +    /// Converts an `ArrayIndex` to a `HashSet` of indices that should be selected from an Array.
+   84 +    ///
+   85 +    /// # Arguments
+   86 +    ///
+   87 +    /// * `length` - The length of the array.
+   88 +    ///
+   89 +    /// # Returns
+   90 +    ///
+   91 +    /// A `HashSet<usize>` containing the indices to select.
+   92 +    pub(crate) fn to_indices(&self, length: usize) -> HashSet<usize> {
+   93 +        let length = length as i32;
+   94 +
+   95 +        let mut indices = HashSet::new();
+   96 +        match self {
+   97 +            Self::Index(idx) => {
+   98 +                let idx = Self::convert_index(idx, length);
+   99 +                if idx >= 0 && idx < length {
+  100 +                    indices.insert(idx as usize);
+  101 +                }
+  102 +            }
+  103 +            Self::Slice((start, end)) => {
+  104 +                let start_idx = Self::convert_index(start, length);
+  105 +                let end_idx = Self::convert_index(end, length);
+  106 +
+  107 +                let start_idx = if start_idx < 0 { 0 } else { start_idx as usize };
+  108 +                let end_idx = if end_idx >= length {
+  109 +                    (length - 1) as usize
+  110 +                } else {
+  111 +                    end_idx as usize
+  112 +                };
+  113 +                for idx in start_idx..=end_idx {
+  114 +                    indices.insert(idx);
+  115 +                }
+  116 +            }
+  117 +        }
+  118 +        indices
+  119 +    }
+  120 +
+  121 +    fn convert_index(index: &Index, length: i32) -> i32 {
+  122 +        match index {
+  123 +            Index::Index(idx) => *idx,
+  124 +            Index::LastIndex(idx) => length + *idx - 1,
+  125 +        }
+  126 +    }
+  127 +}
+  128 +
+  129 +/// Represents the end level in hierarchical structure.
+  130 +#[derive(Debug, Clone, PartialEq)]
+  131 +pub enum RecursiveLevelEnd {
+  132 +    /// Specifies the end of the recursive level.
+  133 +    Index(u8),
+  134 +    /// Specifies that the recursion should continue to the last level.
+  135 +    Last,
+  136 +}
+  137 +
+  138 +/// Represents the selected levels in hierarchical structure.
+  139 +#[derive(Debug, Clone, PartialEq)]
+  140 +pub struct RecursiveLevel {
+  141 +    /// The starting level of the recursive level.
+  142 +    pub start: u8,
+  143 +    /// The optional end of the recursive level. If None, the level applies only to the start level.
+  144 +    pub end: Option<RecursiveLevelEnd>,
+  145 +}
+  146 +
+  147 +impl RecursiveLevel {
+  148 +    /// Checks if the current level matches the recursive level.
+  149 +    ///
+  150 +    /// # Arguments
+  151 +    ///
+  152 +    /// * `level` - The current level in hierarchical structure.
+  153 +    ///
+  154 +    /// # Returns
+  155 +    ///
+  156 +    /// A tuple (is_match, should_continue):
+  157 +    /// - is_match: Indicates whether the current level matches the level criteria.
+  158 +    /// - should_continue: Indicates whether to continue processing data at the next level.
+  159 +    pub(crate) fn check_recursive_level(&self, level: u8) -> (bool, bool) {
+  160 +        if let Some(end) = &self.end {
+  161 +            match end {
+  162 +                RecursiveLevelEnd::Index(end) => {
+  163 +                    if level < self.start && self.start <= *end {
+  164 +                        (false, true)
+  165 +                    } else if level >= self.start && level <= *end {
+  166 +                        (true, true)
+  167 +                    } else {
+  168 +                        (false, false)
+  169 +                    }
+  170 +                }
+  171 +                RecursiveLevelEnd::Last => {
+  172 +                    if level < self.start {
+  173 +                        (false, true)
+  174 +                    } else {
+  175 +                        (true, true)
+  176 +                    }
+  177 +                }
+  178 +            }
+  179 +        } else if level < self.start {
+  180 +            (false, true)
+  181 +        } else if level == self.start {
+  182 +            (true, false)
+  183 +        } else {
+  184 +            (false, false)
+  185 +        }
+  186 +    }
+  187 +}
+  188 +
+  189 +/// Represents a literal value used in filter expression.
+  190 +#[derive(Debug, Clone)]
+  191 +pub enum PathValue<'a> {
+  192 +    /// Null value.
+  193 +    Null,
+  194 +    /// Boolean value.
+  195 +    Boolean(bool),
+  196 +    /// Number value.
+  197 +    Number(Number),
+  198 +    /// UTF-8 string.
+  199 +    String(Cow<'a, str>),
+  200 +    /// RawJsonb (Array or Object) value, can't be used for calculation.
+  201 +    Raw(RawJsonb<'a>),
+  202 +}
+  203 +
+  204 +impl PartialOrd for PathValue<'_> {
+  205 +    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+  206 +        match (self, other) {
+  207 +            (PathValue::Null, PathValue::Null) => Some(Ordering::Equal),
+  208 +            (PathValue::Boolean(l), PathValue::Boolean(r)) => l.partial_cmp(r),
+  209 +            (PathValue::Number(l), PathValue::Number(r)) => l.partial_cmp(r),
+  210 +            (PathValue::String(l), PathValue::String(r)) => l.partial_cmp(r),
+  211 +            (_, _) => None,
+  212 +        }
+  213 +    }
+  214 +}
+  215 +
+  216 +impl PartialEq for PathValue<'_> {
+  217 +    fn eq(&self, other: &Self) -> bool {
+  218 +        self.partial_cmp(other) == Some(Ordering::Equal)
+  219 +    }
+  220 +}
+  221 +
+  222 +/// Represents the operators used in filter expression.
+  223 +#[derive(Debug, Clone, PartialEq, Eq)]
+  224 +pub enum BinaryOperator {
+  225 +    /// `&&` represents logical And operation.
+  226 +    And,
+  227 +    /// `||` represents logical Or operation.
+  228 +    Or,
+  229 +    /// `==` represents left is equal to right.
+  230 +    Eq,
+  231 +    /// `!=` and `<>` represents left is not equal to right.
+  232 +    NotEq,
+  233 +    /// `<` represents left is less than right.
+  234 +    Lt,
+  235 +    /// `<=` represents left is less or equal to right.
+  236 +    Lte,
+  237 +    /// `>` represents left is greater than right.
+  238 +    Gt,
+  239 +    /// `>=` represents left is greater than or equal to right.
+  240 +    Gte,
+  241 +    /// `starts with` represents right is an initial substring of left.
+  242 +    StartsWith,
+  243 +    /// `Add` represents binary arithmetic + operation.
+  244 +    Add,
+  245 +    /// `Subtract` represents binary arithmetic - operation.
+  246 +    Subtract,
+  247 +    /// `Multiply` represents binary arithmetic * operation.
+  248 +    Multiply,
+  249 +    /// `Divide` represents binary arithmetic / operation.
+  250 +    Divide,
+  251 +    /// `Modulo` represents binary arithmetic % operation.
+  252 +    Modulo,
+  253 +}
+  254 +
+  255 +#[derive(Debug, Clone, PartialEq)]
+  256 +pub enum UnaryOperator {
+  257 +    /// `Add` represents unary arithmetic + operation.
+  258 +    Add,
+  259 +    /// `Subtract` represents unary arithmetic - operation.
+  260 +    Subtract,
+  261 +}
+  262 +
+  263 +/// Represents a filter expression used to filter Array or Object.
+  264 +#[derive(Debug, Clone, PartialEq)]
+  265 +pub enum Expr<'a> {
+  266 +    /// JSON Path chains.
+  267 +    Paths(Vec<Path<'a>>),
+  268 +    /// Literal value.
+  269 +    Value(Box<PathValue<'a>>),
+  270 +    /// Filter expression that performs a binary operation, returns a boolean value,
+  271 +    /// Or arithmetic expression that performs an arithmetic operation, returns a number value.
+  272 +    BinaryOp {
+  273 +        op: BinaryOperator,
+  274 +        left: Box<Self>,
+  275 +        right: Box<Self>,
+  276 +    },
+  277 +    /// Unary expression that performs an arithmetic operation.
+  278 +    UnaryOp {
+  279 +        op: UnaryOperator,
+  280 +        operand: Box<Self>,
+  281 +    },
+  282 +    /// Filter function, returns a boolean value.
+  283 +    ExistsFunc(Vec<Path<'a>>),
+  284 +}
+  285 +
+  286 +impl Display for JsonPath<'_> {
+  287 +    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+  288 +        for path in &self.paths {
+  289 +            write!(f, "{path}")?;
+  290 +        }
+  291 +        Ok(())
+  292 +    }
+  293 +}
+  294 +
+  295 +impl Display for Index {
+  296 +    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+  297 +        match self {
+  298 +            Self::Index(idx) => {
+  299 +                write!(f, "{idx}")?;
+  300 +            }
+  301 +            Self::LastIndex(idx) => {
+  302 +                write!(f, "last")?;
+  303 +                match idx.cmp(&0) {
+  304 +                    Ordering::Greater => {
+  305 +                        write!(f, "+{idx}")?;
+  306 +                    }
+  307 +                    Ordering::Less => {
+  308 +                        write!(f, "{idx}")?;
+  309 +                    }
+  310 +                    Ordering::Equal => {}
+  311 +                }
+  312 +            }
+  313 +        }
+  314 +        Ok(())
+  315 +    }
+  316 +}
+  317 +
+  318 +impl Display for ArrayIndex {
+  319 +    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+  320 +        match self {
+  321 +            Self::Index(idx) => {
+  322 +                write!(f, "{idx}")?;
+  323 +            }
+  324 +            Self::Slice((start, end)) => {
+  325 +                write!(f, "{start} to {end}")?;
+  326 +            }
+  327 +        }
+  328 +        Ok(())
+  329 +    }
+  330 +}
+  331 +
+  332 +impl Display for RecursiveLevel {
+  333 +    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+  334 +        if let Some(end_index) = &self.end {
+  335 +            match end_index {
+  336 +                RecursiveLevelEnd::Index(end) => {
+  337 +                    write!(f, "{} to {}", self.start, end)?;
+  338 +                }
+  339 +                RecursiveLevelEnd::Last => {
+  340 +                    write!(f, "{} to last", self.start)?;
+  341 +                }
+  342 +            }
+  343 +        } else {
+  344 +            write!(f, "{}", self.start)?;
+  345 +        }
+  346 +        Ok(())
+  347 +    }
+  348 +}
+  349 +
+  350 +impl Display for Path<'_> {
+  351 +    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+  352 +        match self {
+  353 +            Path::Root => {
+  354 +                write!(f, "$")?;
+  355 +            }
+  356 +            Path::Current => {
+  357 +                write!(f, "@")?;
+  358 +            }
+  359 +            Path::DotWildcard => {
+  360 +                write!(f, ".*")?;
+  361 +            }
+  362 +            Path::RecursiveDotWildcard(level_opt) => {
+  363 +                write!(f, ".**")?;
+  364 +                if let Some(level) = level_opt {
+  365 +                    write!(f, "{{")?;
+  366 +                    write!(f, "{level}")?;
+  367 +                    write!(f, "}}")?;
+  368 +                }
+  369 +            }
+  370 +            Path::BracketWildcard => {
+  371 +                write!(f, "[*]")?;
+  372 +            }
+  373 +            Path::ColonField(field) => {
+  374 +                write!(f, ":{field}")?;
+  375 +            }
+  376 +            Path::DotField(field) => {
+  377 +                write!(f, ".{field}")?;
+  378 +            }
+  379 +            Path::ObjectField(field) => {
+  380 +                write!(f, "[\"{field}\"]")?;
+  381 +            }
+  382 +            Path::ArrayIndices(indices) => {
+  383 +                write!(f, "[")?;
+  384 +                for (i, index) in indices.iter().enumerate() {
+  385 +                    if i > 0 {
+  386 +                        write!(f, ", ")?;
+  387 +                    }
+  388 +                    write!(f, "{index}")?;
+  389 +                }
+  390 +                write!(f, "]")?;
+  391 +            }
+  392 +            Path::FilterExpr(expr) => {
+  393 +                write!(f, "?({expr})")?;
+  394 +            }
+  395 +            Path::Expr(expr) => {
+  396 +                write!(f, "{expr}")?;
+  397 +            }
+  398 +        }
+  399 +        Ok(())
+  400 +    }
+  401 +}
+  402 +
+  403 +impl Display for PathValue<'_> {
+  404 +    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+  405 +        match self {
+  406 +            PathValue::Null => {
+  407 +                write!(f, "null")
+  408 +            }
+  409 +            PathValue::Boolean(v) => {
+  410 +                if *v {
+  411 +                    write!(f, "true")
+  412 +                } else {
+  413 +                    write!(f, "false")
+  414 +                }
+  415 +            }
+  416 +            PathValue::Number(v) => {
+  417 +                write!(f, "{v}")
+  418 +            }
+  419 +            PathValue::String(v) => {
+  420 +                write!(f, "\"{v}\"")
+  421 +            }
+  422 +            PathValue::Raw(v) => {
+  423 +                write!(f, "{}", v.to_string())
+  424 +            }
+  425 +        }
+  426 +    }
+  427 +}
+  428 +
+  429 +impl Display for BinaryOperator {
+  430 +    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+  431 +        match self {
+  432 +            Self::And => {
+  433 +                write!(f, "&&")
+  434 +            }
+  435 +            Self::Or => {
+  436 +                write!(f, "||")
+  437 +            }
+  438 +            Self::Eq => {
+  439 +                write!(f, "==")
+  440 +            }
+  441 +            Self::NotEq => {
+  442 +                write!(f, "!=")
+  443 +            }
+  444 +            Self::Lt => {
+  445 +                write!(f, "<")
+  446 +            }
+  447 +            Self::Lte => {
+  448 +                write!(f, "<=")
+  449 +            }
+  450 +            Self::Gt => {
+  451 +                write!(f, ">")
+  452 +            }
+  453 +            Self::Gte => {
+  454 +                write!(f, ">=")
+  455 +            }
+  456 +            Self::StartsWith => {
+  457 +                write!(f, "starts with")
+  458 +            }
+  459 +            Self::Add => {
+  460 +                write!(f, "+")
+  461 +            }
+  462 +            Self::Subtract => {
+  463 +                write!(f, "-")
+  464 +            }
+  465 +            Self::Multiply => {
+  466 +                write!(f, "*")
+  467 +            }
+  468 +            Self::Divide => {
+  469 +                write!(f, "/")
+  470 +            }
+  471 +            Self::Modulo => {
+  472 +                write!(f, "%")
+  473 +            }
+  474 +        }
+  475 +    }
+  476 +}
+  477 +
+  478 +impl Display for UnaryOperator {
+  479 +    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+  480 +        match self {
+  481 +            Self::Add => {
+  482 +                write!(f, "+")
+  483 +            }
+  484 +            Self::Subtract => {
+  485 +                write!(f, "-")
+  486 +            }
+  487 +        }
+  488 +    }
+  489 +}
+  490 +
+  491 +impl Display for Expr<'_> {
+  492 +    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+  493 +        match self {
+  494 +            Expr::Paths(paths) => {
+  495 +                for path in paths {
+  496 +                    write!(f, "{path}")?;
+  497 +                }
+  498 +            }
+  499 +            Expr::Value(v) => {
+  500 +                write!(f, "{v}")?;
+  501 +            }
+  502 +            Expr::BinaryOp { op, left, right } => {
+  503 +                if let Expr::BinaryOp { op: left_op, .. } = &**left {
+  504 +                    if left_op == &BinaryOperator::And || left_op == &BinaryOperator::Or {
+  505 +                        write!(f, "({left})")?;
+  506 +                    } else {
+  507 +                        write!(f, "{left}")?;
+  508 +                    }
+  509 +                } else {
+  510 +                    write!(f, "{left}")?;
+  511 +                }
+  512 +                write!(f, " {op} ")?;
+  513 +                if let Expr::BinaryOp { op: right_op, .. } = &**right {
+  514 +                    if right_op == &BinaryOperator::And || right_op == &BinaryOperator::Or {
+  515 +                        write!(f, "({right})")?;
+  516 +                    } else {
+  517 +                        write!(f, "{right}")?;
+  518 +                    }
+  519 +                } else {
+  520 +                    write!(f, "{right}")?;
+  521 +                }
+  522 +            }
+  523 +            Expr::UnaryOp { op, operand } => {
+  524 +                write!(f, "{}{}", op, operand)?;
+  525 +            }
+  526 +            Expr::ExistsFunc(paths) => {
+  527 +                f.write_str("exists(")?;
+  528 +                for path in paths {
+  529 +                    write!(f, "{path}")?;
+  530 +                }
+  531 +                f.write_str(")")?;
+  532 +            }
+  533 +        }
+  534 +        Ok(())
+  535 +    }
+  536 +}

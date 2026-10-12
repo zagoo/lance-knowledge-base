@@ -1,0 +1,122 @@
+@@ -118,19 +118,19 @@ impl Dataset {
+  118      /// Encode one managed part and return its serializable description.
+  119      ///
+  120      /// Lance generates a unique staging name in the target's base. Managed Blob
+  121 -    /// payloads are written directly beneath the sidecar directory selected by the final
+  122 -    /// target using IDs from `blob_ids`; every non-empty logical Inline value is
+  123 -    /// spilled to Packed or Dedicated storage so final concatenation never copies
+  124 -    /// Blob payload bytes.
+  121 +    /// payloads use independent `_blobs/<uuid>.blob` objects in that base. Every
+  122 +    /// non-empty logical Inline value is spilled so final concatenation never
+  123 +    /// copies Blob payload bytes. Parts still require disjoint `blob_ids`
+  124 +    /// reservations; Managed descriptors encode base IDs rather than these IDs.
+  125      /// Every use of `target` must refer to the same dataset and resolved base;
+  126      /// associating a target with that storage context is the caller's
+  127      /// responsibility.
+  128      /// Persist the target before writing. A failed write may leave files; after
+  129 -    /// stopping all users of the target, [`DataFileTarget::cleanup`] can
+  130 -    /// remove them without a completed part description. Retries must use fresh,
+  131 -    /// disjoint Blob ID ranges, including ranges from failed writes. Staging
+  132 -    /// `.part` files are only explicitly cleaned; ordinary dataset GC rules still
+  133 -    /// apply to uncommitted Blob sidecars and must be coordinated with checkpoints.
+  129 +    /// stopping all users of the target, [`DataFileTarget::cleanup`] removes
+  130 +    /// staging files and file-relative sidecars without a completed part description.
+  131 +    /// Retries must use fresh, disjoint Blob ID ranges, including ranges from
+  132 +    /// failed writes. Independent Managed objects follow ordinary dataset GC
+  133 +    /// rules, which must be coordinated with uncommitted writes and checkpoints.
+  134      ///
+  135      /// # Example
+  136      ///
+
+@@ -171,7 +171,7 @@ impl Dataset {
+  171              ));
+  172          }
+  173  
+  174 -        let preprocessor = if let Some(blob_ids) = blob_ids {
+  174 +        let mut preprocessor = if let Some(blob_ids) = blob_ids {
+  175              let data_dir = self.data_file_dir_for_base(target.base_id)?;
+  176              let object_store = self.object_store(target.base_id).await?;
+  177              let external_base_resolver = blob_v2_external_base_resolver(
+
+@@ -198,6 +198,10 @@ impl Dataset {
+  198          } else {
+  199              None
+  200          };
+  201 +        if let Some(writer) = preprocessor.take() {
+  202 +            let root = self.blob_base_path(target.base_id)?;
+  203 +            preprocessor = Some(writer.with_managed_base(target.base_id, root));
+  204 +        }
+  205  
+  206          let file_name = format!("{}.part", generate_random_filename());
+  207          let path = target
+
+@@ -940,9 +944,8 @@ where
+  944          .unwrap_or_else(|| params.store_registry());
+  945      let source_store_params = params.store_params.clone().unwrap_or_default();
+  946  
+  943 -    // Keep a copy so failure paths can clean up files written to target bases.
+  944 -    let cleanup_bases = target_bases_info.clone();
+  947      let file_writer_options = params.file_writer_options.clone().unwrap_or_default();
+  948 +    let cleanup_bases = target_bases_info.clone();
+  949      let writer_generator = WriterGenerator::new(
+  950          object_store.clone(),
+  951          base_dir,
+
+@@ -1690,7 +1693,13 @@ async fn build_external_base_resolver(
+ 1693      )
+ 1694      .await?;
+ 1695  
+ 1693 -    Ok(ExternalBaseResolver::new(candidates, store_registry))
+ 1696 +    let mut resolver = ExternalBaseResolver::new(candidates, store_registry);
+ 1697 +    resolver.registered_base_ids = dataset
+ 1698 +        .into_iter()
+ 1699 +        .flat_map(|dataset| dataset.manifest.base_paths.keys().copied())
+ 1700 +        .chain(params.initial_bases.iter().flatten().map(|base| base.id))
+ 1701 +        .collect();
+ 1702 +    Ok(resolver)
+ 1703  }
+ 1704  
+ 1705  pub(super) async fn blob_v2_external_base_resolver(
+
+@@ -2269,7 +2278,7 @@ impl GenericWriter for V2WriterAdapter {
+ 2278  #[derive(Default)]
+ 2279  pub(crate) struct WriterOptions {
+ 2280      add_data_dir: bool,
+ 2272 -    base_id: Option<u32>,
+ 2281 +    pub(super) base_id: Option<u32>,
+ 2282      preassigned_data_file_name: Option<Arc<String>>,
+ 2283      external_base_resolver: Option<Arc<ExternalBaseResolver>>,
+ 2284      allow_external_blob_outside_bases: bool,
+
+@@ -2378,6 +2387,7 @@ where
+ 2387  }
+ 2388  
+ 2389  pub(in crate::dataset) async fn open_current_blob_v2_writer<F>(
+ 2390 +    version: ConcreteFileVersion,
+ 2391      create_file_writer: F,
+ 2392      object_store: &ObjectStore,
+ 2393      schema: &Schema,
+
+@@ -2428,7 +2438,7 @@ where
+ 2438          base_id,
+ 2439          file_writer_options,
+ 2440      )?;
+ 2431 -    let preprocessor = BlobPreprocessor::new(
+ 2441 +    let mut preprocessor = BlobPreprocessor::new(
+ 2442          object_store.clone(),
+ 2443          data_dir,
+ 2444          data_file_key,
+
+@@ -2440,6 +2450,12 @@ where
+ 2450          source_store_params,
+ 2451          blob_pack_file_size_threshold,
+ 2452      )?;
+ 2453 +    if matches!(
+ 2454 +        version,
+ 2455 +        ConcreteFileVersion::V2_2 | ConcreteFileVersion::V2_3
+ 2456 +    ) {
+ 2457 +        preprocessor = preprocessor.with_managed_base(base_id, base_dir.clone());
+ 2458 +    }
+ 2459      Ok(Box::new(V2WriterAdapter::new(
+ 2460          file_writer,
+ 2461          Some(data_file),

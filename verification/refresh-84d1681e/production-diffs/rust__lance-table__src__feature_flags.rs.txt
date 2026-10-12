@@ -1,0 +1,58 @@
+@@ -95,8 +95,13 @@ pub const FLAG_FRAGMENT_TREE: u64 = 1 << 12;
+   95  /// `supported_flags_when`, so it cannot open a table and apply the legacy
+   96  /// suffix contract to independent declarations.
+   97  pub const FLAG_INDEPENDENT_COVERING_FIELDS: u64 = 1 << 13;
+   98 +/// Blob v2 descriptors may independently address Lance-owned objects. Readers
+   99 +/// must resolve their explicit bases and writers/GC must preserve those references.
+  100 +/// This capability is sticky, including across restore, and requires both words.
+  101 +pub const FLAG_MANAGED_BLOBS: u64 = 1 << 14;
+  102 +
+  103  /// The first bit that is unknown as a feature flag
+   99 -pub const FLAG_UNKNOWN: u64 = 1 << 14;
+  104 +pub const FLAG_UNKNOWN: u64 = 1 << 15;
+  105  
+  106  const _: () = assert!(FLAG_COVERED_INDEX_METADATA < FLAG_UNKNOWN);
+  107  // The fence needs a bit the current released build already refuses, which means
+
+@@ -111,8 +116,10 @@ const _: () = assert!(FLAG_UNSTABLE_SPILLED_ROW_LINEAGE < FLAG_UNKNOWN);
+  116  const _: () = assert!(FLAG_FRAGMENT_TREE < FLAG_UNKNOWN);
+  117  const _: () = assert!(FLAG_INDEPENDENT_COVERING_FIELDS < FLAG_UNKNOWN);
+  118  
+  119 +const _: () = assert!(FLAG_MANAGED_BLOBS < FLAG_UNKNOWN);
+  120 +
+  121  pub(crate) const STICKY_PAIRED_FLAGS: u64 =
+  115 -    FLAG_MIXED_DATA_FILE_VERSIONS | FLAG_FRAGMENT_REUSE_INDEX;
+  122 +    FLAG_MIXED_DATA_FILE_VERSIONS | FLAG_FRAGMENT_REUSE_INDEX | FLAG_MANAGED_BLOBS;
+  123  
+  124  /// Environment variable that opts a release build into reading and writing data
+  125  /// overlay files before the feature is generally released.
+
+@@ -360,14 +367,20 @@ pub fn validate_paired_feature_flags(manifest: &Manifest) -> Result<()> {
+  367          ));
+  368      }
+  369  
+  363 -    let reader = manifest.reader_feature_flags & FLAG_MIXED_DATA_FILE_VERSIONS != 0;
+  364 -    let writer = manifest.writer_feature_flags & FLAG_MIXED_DATA_FILE_VERSIONS != 0;
+  365 -    if reader != writer {
+  366 -        return Err(Error::corrupt_file_named(
+  367 -            "manifest",
+  368 -            "Manifest has only one of the mixed data-file-version reader and writer feature bits set, \
+  369 -             so its semantics are undefined",
+  370 -        ));
+  370 +    for (flag, name) in [
+  371 +        (FLAG_MIXED_DATA_FILE_VERSIONS, "mixed data-file-version"),
+  372 +        (FLAG_MANAGED_BLOBS, "Managed Blob"),
+  373 +    ] {
+  374 +        let reader = manifest.reader_feature_flags & flag != 0;
+  375 +        let writer = manifest.writer_feature_flags & flag != 0;
+  376 +        if reader != writer {
+  377 +            return Err(Error::corrupt_file_named(
+  378 +                "manifest",
+  379 +                format!(
+  380 +                    "Manifest has only one of the {name} reader and writer feature bits set, so its semantics are undefined"
+  381 +                ),
+  382 +            ));
+  383 +        }
+  384      }
+  385      Ok(())
+  386  }

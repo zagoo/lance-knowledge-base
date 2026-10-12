@@ -1,0 +1,986 @@
+@@ -1,7 +1,9 @@
+    1  // SPDX-License-Identifier: Apache-2.0
+    2  // SPDX-FileCopyrightText: Copyright The Lance Authors
+    3  
+    4 +use crate::scalar::RowAddrTranslatorRef;
+    5  use lance_core::utils::row_addr_remap::RowAddrRemap;
+    6 +use lance_index_core::remapping::RowAddrTranslator;
+    7  use lance_index_core::remapping::{BatchRowIdRemapper, remap_row_addrs_tree_map_async};
+    8  use std::{
+    9      any::Any,
+
+@@ -19,6 +21,7 @@ use arrow_schema::{DataType, Field, Schema};
+   21  use async_trait::async_trait;
+   22  use bytes::Bytes;
+   23  use datafusion::physical_plan::SendableRecordBatchStream;
+   24 +use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+   25  use datafusion_common::ScalarValue;
+   26  use futures::{StreamExt, TryStreamExt, stream};
+   27  use lance_core::deepsize::DeepSizeOf;
+
+@@ -40,7 +43,8 @@ use tracing::{instrument, warn};
+   43  
+   44  use super::{AnyQuery, IndexFile, IndexStore, ScalarIndex, SearchOptions};
+   45  use super::{
+   43 -    BuiltinIndexType, SargableQuery, ScalarIndexParams, SearchResult, btree::OrderableScalarValue,
+   46 +    BuiltinIndexType, SargableQuery, ScalarIndexParams, SearchResult,
+   47 +    btree::{OrderableScalarValue, filter_keeps_nothing},
+   48  };
+   49  use crate::pbold;
+   50  use crate::{Index, IndexType, metrics::MetricsCollector};
+
+@@ -589,6 +593,19 @@ impl BitmapIndex {
+  593              metrics.record_part_load();
+  594          }
+  595  
+  596 +        let bitmap = self.read_bitmap_at(row_offset).await?;
+  597 +
+  598 +        self.index_cache
+  599 +            .insert_with_key(&cache_key, Arc::new(bitmap.clone()))
+  600 +            .await;
+  601 +
+  602 +        Ok(Arc::new(bitmap))
+  603 +    }
+  604 +
+  605 +    /// Read one row set straight from the lookup file, remapped through the
+  606 +    /// fragment-reuse index but neither served from nor written to the index
+  607 +    /// cache.
+  608 +    async fn read_bitmap_at(&self, row_offset: usize) -> Result<RowAddrTreeMap> {
+  609          let page_lookup_file = self.lazy_reader.get().await?;
+  610          let batch = page_lookup_file
+  611              .read_range(row_offset..row_offset + 1, Some(&["bitmaps"]))
+
+@@ -610,16 +627,104 @@ impl BitmapIndex {
+  627              bitmap = remap_row_addrs_tree_map_async(remapper.as_ref(), &bitmap).await?;
+  628          }
+  629  
+  613 -        self.index_cache
+  614 -            .insert_with_key(&cache_key, Arc::new(bitmap.clone()))
+  615 -            .await;
+  630 +        Ok(bitmap)
+  631 +    }
+  632  
+  617 -        Ok(Arc::new(bitmap))
+  633 +    /// Owned row set for `key`, bypassing the index cache.
+  634 +    ///
+  635 +    /// A merge reads every key of every source segment exactly once, and the
+  636 +    /// commit that follows retires those segments, so routing the reads through
+  637 +    /// the cache would only evict entries for indices that still exist. Returning
+  638 +    /// an owned value also lets the caller filter in place, where
+  639 +    /// [`Self::load_bitmap`] hands back an `Arc` to clone.
+  640 +    ///
+  641 +    /// Nulls are not in `index_map` -- [`OldSegments::take_null_bitmap`] reads
+  642 +    /// `null_map` for those -- so unlike `load_bitmap` this does not special-case
+  643 +    /// them and would return an empty set for a null key.
+  644 +    async fn read_bitmap_uncached(&self, key: &OrderableScalarValue) -> Result<RowAddrTreeMap> {
+  645 +        match self.index_map.get(key) {
+  646 +            Some(row_offset) => self.read_bitmap_at(*row_offset).await,
+  647 +            None => Ok(RowAddrTreeMap::default()),
+  648 +        }
+  649      }
+  650  
+  651      pub(crate) fn value_type(&self) -> &DataType {
+  652          &self.value_type
+  653      }
+  654 +
+  655 +    /// Merge N source bitmap segments plus an additional `new_data` stream into a
+  656 +    /// single bitmap index under `dest_store`, without re-reading the dataset.
+  657 +    ///
+  658 +    /// `old_data_filters` carries one filter per source segment, in the same
+  659 +    /// order. A segment whose filter keeps nothing contributes no postings, so
+  660 +    /// none of its bitmaps are read.
+  661 +    pub async fn merge_segments(
+  662 +        segments: &[Arc<Self>],
+  663 +        new_data: SendableRecordBatchStream,
+  664 +        dest_store: &dyn IndexStore,
+  665 +        old_data_filters: &[Option<super::OldIndexDataFilter>],
+  666 +    ) -> Result<CreatedIndex> {
+  667 +        let Some(first) = segments.first() else {
+  668 +            return Err(Error::invalid_input(
+  669 +                "cannot merge bitmap index without at least one source segment".to_string(),
+  670 +            ));
+  671 +        };
+  672 +
+  673 +        if old_data_filters.len() != segments.len() {
+  674 +            return Err(Error::invalid_input(format!(
+  675 +                "Bitmap merge: expected one old-data filter per source segment \
+  676 +                 (segments={}, filters={})",
+  677 +                segments.len(),
+  678 +                old_data_filters.len()
+  679 +            )));
+  680 +        }
+  681 +
+  682 +        for segment in segments.iter().skip(1) {
+  683 +            if segment.value_type != first.value_type {
+  684 +                return Err(Error::invalid_input(format!(
+  685 +                    "cannot merge bitmap segments with different value types ({:?} vs {:?})",
+  686 +                    first.value_type, segment.value_type
+  687 +                )));
+  688 +            }
+  689 +        }
+  690 +
+  691 +        let new_schema = new_data.schema();
+  692 +        let new_value_type = new_schema
+  693 +            .field(new_schema.index_of(VALUE_COLUMN_NAME)?)
+  694 +            .data_type();
+  695 +        if new_value_type != &first.value_type {
+  696 +            return Err(Error::invalid_input(format!(
+  697 +                "Bitmap merge: new_data value column type {:?} does not match \
+  698 +                 segment value type {:?}",
+  699 +                new_value_type, first.value_type
+  700 +            )));
+  701 +        }
+  702 +
+  703 +        let old_segments = segments
+  704 +            .iter()
+  705 +            .zip(old_data_filters)
+  706 +            .filter(|(_, filter)| !filter_keeps_nothing(filter))
+  707 +            .map(|(segment, filter)| OldSegment {
+  708 +                index: segment.as_ref(),
+  709 +                filter: filter.as_ref(),
+  710 +            })
+  711 +            .collect();
+  712 +
+  713 +        let file = BitmapIndexPlugin::streaming_build_and_write(
+  714 +            new_data,
+  715 +            old_segments,
+  716 +            dest_store,
+  717 +            BITMAP_LOOKUP_NAME,
+  718 +        )
+  719 +        .await?;
+  720 +
+  721 +        Ok(CreatedIndex {
+  722 +            index_details: prost_types::Any::from_msg(&pbold::BitmapIndexDetails::default())
+  723 +                .unwrap(),
+  724 +            index_version: BITMAP_INDEX_VERSION,
+  725 +            files: vec![file],
+  726 +        })
+  727 +    }
+  728  }
+  729  
+  730  impl DeepSizeOf for BitmapIndex {
+
+@@ -753,6 +858,29 @@ impl Index for BitmapIndex {
+  858      }
+  859  }
+  860  
+  861 +impl BitmapIndex {
+  862 +    /// The one remap implementation: the legacy `remap` (an in-memory
+  863 +    /// mapping, borrowed as a synchronous translator) and `remap_streaming`
+  864 +    /// both come here, so neither copies a map nor delegates to the other.
+  865 +    async fn remap_with(
+  866 +        &self,
+  867 +        mapping: RowAddrTranslatorRef<'_>,
+  868 +        dest_store: &dyn IndexStore,
+  869 +    ) -> Result<CreatedIndex> {
+  870 +        let mut writer =
+  871 +            new_bitmap_batch_writer(dest_store, BITMAP_LOOKUP_NAME, &self.value_type).await?;
+  872 +        remap_index_map(self, mapping, &mut writer).await?;
+  873 +        let file = writer.finish().await?;
+  874 +
+  875 +        Ok(CreatedIndex {
+  876 +            index_details: prost_types::Any::from_msg(&pbold::BitmapIndexDetails::default())
+  877 +                .unwrap(),
+  878 +            index_version: BITMAP_INDEX_VERSION,
+  879 +            files: vec![file],
+  880 +        })
+  881 +    }
+  882 +}
+  883 +
+  884  #[async_trait]
+  885  impl ScalarIndex for BitmapIndex {
+  886      #[instrument(name = "bitmap_search", level = "debug", skip_all)]
+
+@@ -923,17 +1051,15 @@ impl ScalarIndex for BitmapIndex {
+ 1051          mapping: &RowAddrRemap,
+ 1052          dest_store: &dyn IndexStore,
+ 1053      ) -> Result<CreatedIndex> {
+  926 -        let mut writer =
+  927 -            new_bitmap_batch_writer(dest_store, BITMAP_LOOKUP_NAME, &self.value_type).await?;
+  928 -        remap_index_map(self, mapping, &mut writer).await?;
+  929 -        let file = writer.finish().await?;
+ 1054 +        self.remap_with(mapping.into(), dest_store).await
+ 1055 +    }
+ 1056  
+  931 -        Ok(CreatedIndex {
+  932 -            index_details: prost_types::Any::from_msg(&pbold::BitmapIndexDetails::default())
+  933 -                .unwrap(),
+  934 -            index_version: BITMAP_INDEX_VERSION,
+  935 -            files: vec![file],
+  936 -        })
+ 1057 +    async fn remap_streaming(
+ 1058 +        &self,
+ 1059 +        translator: &RowAddrTranslator,
+ 1060 +        dest_store: &dyn IndexStore,
+ 1061 +    ) -> Result<CreatedIndex> {
+ 1062 +        self.remap_with(translator.as_ref(), dest_store).await
+ 1063      }
+ 1064  
+ 1065      /// Add the new data into the index, creating an updated version of the index in `dest_store`
+
+@@ -945,10 +1071,12 @@ impl ScalarIndex for BitmapIndex {
+ 1071      ) -> Result<CreatedIndex> {
+ 1072          let file = BitmapIndexPlugin::streaming_build_and_write(
+ 1073              new_data,
+  948 -            Some(self),
+ 1074 +            vec![OldSegment {
+ 1075 +                index: self,
+ 1076 +                filter: old_data_filter.as_ref(),
+ 1077 +            }],
+ 1078              dest_store,
+ 1079              BITMAP_LOOKUP_NAME,
+  951 -            old_data_filter.as_ref(),
+ 1080          )
+ 1081          .await?;
+ 1082  
+
+@@ -1402,6 +1544,142 @@ fn retain_valid<'a>(
+ 1544      }
+ 1545  }
+ 1546  
+ 1547 +/// One source segment on the old side of a bitmap build, with the filter that
+ 1548 +/// decides which of its rows survive. `None` keeps every row.
+ 1549 +pub(crate) struct OldSegment<'a> {
+ 1550 +    pub(crate) index: &'a BitmapIndex,
+ 1551 +    pub(crate) filter: Option<&'a super::OldIndexDataFilter>,
+ 1552 +}
+ 1553 +
+ 1554 +/// The already-indexed side of a bitmap build: K source segments presented as a
+ 1555 +/// single ascending-key stream of filtered postings.
+ 1556 +///
+ 1557 +/// Drives each source through its `index_map` -- a sorted `BTreeMap` rebuilt at
+ 1558 +/// load time -- rather than through the rows of its file. Bitmap lookup files are
+ 1559 +/// not reliably key-sorted on disk: LabelList files written before spill-based
+ 1560 +/// builds landed are unsorted, and an update appends an old-only null row last.
+ 1561 +/// `index_map` order can be trusted for old and new files alike, which is what
+ 1562 +/// makes this work without an index version bump.
+ 1563 +///
+ 1564 +/// Bitmaps are read one key at a time through
+ 1565 +/// [`BitmapIndex::read_bitmap_uncached`], which applies fragment-reuse remapping
+ 1566 +/// like the query path's `load_bitmap` but skips the index cache: every source
+ 1567 +/// entry is read exactly once and the sources are retired right after, so caching
+ 1568 +/// them would only evict live entries. Reading the lookup file's raw bytes instead
+ 1569 +/// would skip the remap too and emit row addresses pointing at fragments
+ 1570 +/// compaction has already retired, which under deferred index remapping is silent
+ 1571 +/// data loss.
+ 1572 +///
+ 1573 +/// Every source is sorted, so the smallest key any of them is currently
+ 1574 +/// positioned on is the next key overall. A min-heap holding one entry per live
+ 1575 +/// source finds it in `log(sources)`. Entries borrow their key from the source's
+ 1576 +/// `index_map` rather than cloning it: seeding the heap touches every source key,
+ 1577 +/// so cloning would cost an allocation per key per source for string keys.
+ 1578 +///
+ 1579 +/// The transient state is the merged bitmap for the current key plus one loaded
+ 1580 +/// bitmap per participating source. Each source's `index_map` and the output
+ 1581 +/// writer stay outside it.
+ 1582 +struct OldSegments<'a> {
+ 1583 +    segments: Vec<OldSegment<'a>>,
+ 1584 +    key_iters: Vec<std::collections::btree_map::Keys<'a, OrderableScalarValue, usize>>,
+ 1585 +    heap: BinaryHeap<Reverse<(&'a OrderableScalarValue, usize)>>,
+ 1586 +    /// Source entries drained so far: one per (source, key) pair, the unit
+ 1587 +    /// [`merge_source_entry_count`] declares up front.
+ 1588 +    consumed: u64,
+ 1589 +    null_taken: bool,
+ 1590 +}
+ 1591 +
+ 1592 +impl<'a> OldSegments<'a> {
+ 1593 +    fn new(segments: Vec<OldSegment<'a>>) -> Self {
+ 1594 +        let mut key_iters: Vec<_> = segments
+ 1595 +            .iter()
+ 1596 +            .map(|segment| segment.index.index_map.keys())
+ 1597 +            .collect();
+ 1598 +        let mut heap = BinaryHeap::with_capacity(segments.len());
+ 1599 +        for (source_idx, keys) in key_iters.iter_mut().enumerate() {
+ 1600 +            if let Some(key) = keys.next() {
+ 1601 +                heap.push(Reverse((key, source_idx)));
+ 1602 +            }
+ 1603 +        }
+ 1604 +        Self {
+ 1605 +            segments,
+ 1606 +            key_iters,
+ 1607 +            heap,
+ 1608 +            consumed: 0,
+ 1609 +            null_taken: false,
+ 1610 +        }
+ 1611 +    }
+ 1612 +
+ 1613 +    fn consumed(&self) -> u64 {
+ 1614 +        self.consumed
+ 1615 +    }
+ 1616 +
+ 1617 +    /// Union every source's filtered posting for the smallest pending key, if
+ 1618 +    /// that key satisfies `predicate`. `None` when no source has a pending key or
+ 1619 +    /// the smallest one fails the predicate; the postings stay pending then.
+ 1620 +    ///
+ 1621 +    /// Drains only the sources positioned on that key. A source's next key is
+ 1622 +    /// strictly greater, so re-pushing it cannot re-enter the same key.
+ 1623 +    async fn take_smallest_if(
+ 1624 +        &mut self,
+ 1625 +        predicate: impl FnOnce(&OrderableScalarValue) -> bool,
+ 1626 +    ) -> Result<Option<(ScalarValue, RowAddrTreeMap)>> {
+ 1627 +        let Some(Reverse((key, _))) = self.heap.peek().copied() else {
+ 1628 +            return Ok(None);
+ 1629 +        };
+ 1630 +        if !predicate(key) {
+ 1631 +            return Ok(None);
+ 1632 +        }
+ 1633 +
+ 1634 +        let mut merged = RowAddrTreeMap::default();
+ 1635 +        while let Some(Reverse((next, source_idx))) = self.heap.peek().copied() {
+ 1636 +            if next != key {
+ 1637 +                break;
+ 1638 +            }
+ 1639 +            self.heap.pop();
+ 1640 +            self.consumed += 1;
+ 1641 +            let segment = &self.segments[source_idx];
+ 1642 +            let mut bitmap = segment.index.read_bitmap_uncached(key).await?;
+ 1643 +            if let Some(filter) = segment.filter {
+ 1644 +                filter.retain_old_rows(&mut bitmap);
+ 1645 +            }
+ 1646 +            merged |= &bitmap;
+ 1647 +            if let Some(next) = self.key_iters[source_idx].next() {
+ 1648 +                self.heap.push(Reverse((next, source_idx)));
+ 1649 +            }
+ 1650 +        }
+ 1651 +
+ 1652 +        // The one clone per emitted key, because the writer takes an owned key.
+ 1653 +        Ok(Some((key.0.clone(), merged)))
+ 1654 +    }
+ 1655 +
+ 1656 +    /// Union of every source's filtered null posting, or `None` once taken or if
+ 1657 +    /// no source stores any. Nulls live in `null_map`, outside `index_map`, so
+ 1658 +    /// they are not part of the key merge and are unioned in one step.
+ 1659 +    fn take_null_bitmap(&mut self) -> Option<RowAddrTreeMap> {
+ 1660 +        if self.null_taken {
+ 1661 +            return None;
+ 1662 +        }
+ 1663 +        self.null_taken = true;
+ 1664 +
+ 1665 +        let mut merged: Option<RowAddrTreeMap> = None;
+ 1666 +        for segment in &self.segments {
+ 1667 +            if segment.index.null_map.is_empty() {
+ 1668 +                continue;
+ 1669 +            }
+ 1670 +            let nulls = retain_valid(
+ 1671 +                Cow::Borrowed(segment.index.null_map.as_ref()),
+ 1672 +                segment.filter,
+ 1673 +            );
+ 1674 +            match &mut merged {
+ 1675 +                Some(acc) => *acc |= &*nulls,
+ 1676 +                None => merged = Some(nulls.into_owned()),
+ 1677 +            }
+ 1678 +        }
+ 1679 +        merged
+ 1680 +    }
+ 1681 +}
+ 1682 +
+ 1683  impl BitmapIndexPlugin {
+ 1684      fn get_batch_from_arrays(
+ 1685          keys: Arc<dyn Array>,
+
+@@ -1421,7 +1699,7 @@ impl BitmapIndexPlugin {
+ 1699          data: SendableRecordBatchStream,
+ 1700          index_store: &dyn IndexStore,
+ 1701      ) -> Result<IndexFile> {
+ 1424 -        Self::streaming_build_and_write(data, None, index_store, BITMAP_LOOKUP_NAME, None).await
+ 1702 +        Self::streaming_build_and_write(data, Vec::new(), index_store, BITMAP_LOOKUP_NAME).await
+ 1703      }
+ 1704  
+ 1705      async fn train_bitmap_shard(
+
+@@ -1437,77 +1715,68 @@ impl BitmapIndexPlugin {
+ 1715              .stage_start("build_bitmap_shard", None, "rows")
+ 1716              .await?;
+ 1717          let file =
+ 1440 -            Self::streaming_build_and_write(data, None, index_store, &file_name, None).await?;
+ 1718 +            Self::streaming_build_and_write(data, Vec::new(), index_store, &file_name).await?;
+ 1719          progress.stage_complete("build_bitmap_shard").await?;
+ 1720          Ok(file)
+ 1721      }
+ 1722  
+ 1723      /// Builds and writes a bitmap index in a streaming fashion from value-sorted
+ 1724      /// input. Only one new value's aggregate bitmap is held at a time instead of
+ 1447 -    /// an aggregate map containing every value. The input pipeline, an existing
+ 1448 -    /// index and its cache, and the output writer retain separate memory.
+ 1725 +    /// an aggregate map containing every value. The input pipeline, the existing
+ 1726 +    /// segments and their cache, and the output writer retain separate memory.
+ 1727      ///
+ 1450 -    /// If `old_index` is provided, its existing bitmaps are merged with the new
+ 1451 -    /// data via a sorted merge-join (the old index_map is a BTreeMap, already
+ 1452 -    /// sorted by value).
+ 1728 +    /// `old_segments` are merged with the new data via a k-way sorted merge-join
+ 1729 +    /// (each segment's `index_map` is a `BTreeMap`, already sorted by value), so
+ 1730 +    /// the old side holds one posting per segment for the key being unioned, plus
+ 1731 +    /// that union, rather than all of them at once.
+ 1732      async fn streaming_build_and_write(
+ 1733          data_source: SendableRecordBatchStream,
+ 1455 -        old_index: Option<&BitmapIndex>,
+ 1734 +        old_segments: Vec<OldSegment<'_>>,
+ 1735          index_store: &dyn IndexStore,
+ 1736          output_file_name: &str,
+ 1458 -        old_data_filter: Option<&super::OldIndexDataFilter>,
+ 1737      ) -> Result<IndexFile> {
+ 1738          let value_type = data_source.schema().field(0).data_type().clone();
+ 1739          let mut writer =
+ 1740              new_bitmap_batch_writer(index_store, output_file_name, &value_type).await?;
+ 1463 -        build_index_map(data_source, old_index, old_data_filter, &mut writer).await?;
+ 1741 +        build_index_map(data_source, old_segments, &mut writer).await?;
+ 1742          writer.finish().await
+ 1743      }
+ 1744  
+ 1745      /// Flush a completed value-run from the new data stream, emitting any
+ 1468 -    /// old-only entries that sort before it and merging the old bitmap if the
+ 1469 -    /// key exists in both old and new.
+ 1746 +    /// old-only entries that sort before it and merging the old postings if the
+ 1747 +    /// key exists on both sides.
+ 1748      async fn finish_run(
+ 1749          key: ScalarValue,
+ 1750          bitmap: &mut RowAddrTreeMap,
+ 1473 -        old_index: Option<&BitmapIndex>,
+ 1474 -        old_keys: &mut std::iter::Peekable<
+ 1475 -            std::collections::btree_map::Keys<'_, OrderableScalarValue, usize>,
+ 1476 -        >,
+ 1751 +        old: &mut OldSegments<'_>,
+ 1752          emitted_null: &mut bool,
+ 1753          writer: &mut BitmapBatchWriter,
+ 1479 -        old_data_filter: Option<&super::OldIndexDataFilter>,
+ 1754      ) -> Result<()> {
+ 1755          if key.is_null() {
+ 1482 -            // Null values are stored separately in the old index's null_map.
+ 1483 -            if let Some(idx) = old_index
+ 1484 -                && !idx.null_map.is_empty()
+ 1485 -            {
+ 1486 -                *bitmap |= &*retain_valid(Cow::Borrowed(idx.null_map.as_ref()), old_data_filter);
+ 1756 +            // Null values are stored separately in each old segment's null_map.
+ 1757 +            if let Some(null_bitmap) = old.take_null_bitmap() {
+ 1758 +                *bitmap |= &null_bitmap;
+ 1759              }
+ 1760              *emitted_null = true;
+ 1489 -            writer.emit(key, bitmap).await?;
+ 1490 -        } else if let Some(idx) = old_index {
+ 1761 +        } else {
+ 1762              let orderable = OrderableScalarValue(key.clone());
+ 1763  
+ 1764              // Emit old-only entries that sort before this key.
+ 1494 -            while let Some(old_key) = old_keys.next_if(|old| **old < orderable) {
+ 1495 -                let loaded = idx.load_bitmap(old_key, None).await?;
+ 1496 -                let old_bitmap = retain_valid(Cow::Borrowed(loaded.as_ref()), old_data_filter);
+ 1497 -                writer.emit(old_key.0.clone(), &old_bitmap).await?;
+ 1765 +            while let Some((old_key, old_bitmap)) =
+ 1766 +                old.take_smallest_if(|old_key| *old_key < orderable).await?
+ 1767 +            {
+ 1768 +                writer.emit(old_key, &old_bitmap).await?;
+ 1769              }
+ 1770  
+ 1500 -            // If the old index also has this key, merge its bitmap.
+ 1501 -            if let Some(old_key) = old_keys.next_if(|old| **old == orderable) {
+ 1502 -                let loaded = idx.load_bitmap(old_key, None).await?;
+ 1503 -                *bitmap |= &*retain_valid(Cow::Borrowed(loaded.as_ref()), old_data_filter);
+ 1771 +            // If the old side also has this key, merge its postings.
+ 1772 +            if let Some((_, old_bitmap)) = old
+ 1773 +                .take_smallest_if(|old_key| *old_key == orderable)
+ 1774 +                .await?
+ 1775 +            {
+ 1776 +                *bitmap |= &old_bitmap;
+ 1777              }
+ 1505 -
+ 1506 -            writer.emit(key, bitmap).await?;
+ 1507 -        } else {
+ 1508 -            writer.emit(key, bitmap).await?;
+ 1778          }
+ 1510 -        Ok(())
+ 1779 +        writer.emit(key, bitmap).await
+ 1780      }
+ 1781  
+ 1782      /// Merge per-shard bitmap lookup files into a single bitmap index file.
+
+@@ -1604,6 +1873,49 @@ pub async fn merge_index_files(
+ 1873      Ok(())
+ 1874  }
+ 1875  
+ 1876 +/// Enforce the ordering a bitmap build requires, once per value change.
+ 1877 +///
+ 1878 +/// A run is a maximal group of equal keys, so reopening a run for a key already
+ 1879 +/// written loses rows silently: the old-key cursor has advanced past it on an
+ 1880 +/// earlier, larger run, so it leaves as an old-only row and returns later
+ 1881 +/// carrying only new rows, and `BitmapIndex::load` keys `index_map` by value
+ 1882 +/// and keeps only the last of the two file offsets. The same holds for nulls,
+ 1883 +/// which `load` funnels into `null_map` from the last null entry it sees.
+ 1884 +///
+ 1885 +/// Only the non-null keys have to ascend. Nulls are collected separately rather
+ 1886 +/// than merge-joined by value, so a single null run is correct wherever it
+ 1887 +/// falls, which lets a caller sort nulls first or last. `null_run_closed` says
+ 1888 +/// whether one has already been flushed, making a second run detectable.
+ 1889 +/// `last_non_null` is the most recent non-null key, carried across a null run,
+ 1890 +/// so that a value reappearing on the far side of the nulls is still caught.
+ 1891 +///
+ 1892 +/// Both keys come from the same column, so they share a `ScalarValue` variant
+ 1893 +/// and `OrderableScalarValue`'s `Ord` cannot panic comparing them.
+ 1894 +fn check_run_order(
+ 1895 +    last_non_null: Option<&ScalarValue>,
+ 1896 +    next: &ScalarValue,
+ 1897 +    null_run_closed: bool,
+ 1898 +) -> Result<()> {
+ 1899 +    if next.is_null() {
+ 1900 +        if null_run_closed {
+ 1901 +            return Err(Error::invalid_input(
+ 1902 +                "bitmap index: input is not sorted by value, it has more than one run of nulls"
+ 1903 +                    .to_string(),
+ 1904 +            ));
+ 1905 +        }
+ 1906 +        return Ok(());
+ 1907 +    }
+ 1908 +    let Some(previous) = last_non_null else {
+ 1909 +        return Ok(());
+ 1910 +    };
+ 1911 +    if OrderableScalarValue(next.clone()) <= OrderableScalarValue(previous.clone()) {
+ 1912 +        return Err(Error::invalid_input(format!(
+ 1913 +            "bitmap index: input must be sorted by value, but {next} follows {previous}"
+ 1914 +        )));
+ 1915 +    }
+ 1916 +    Ok(())
+ 1917 +}
+ 1918 +
+ 1919  /// Build a bitmap index map from value-sorted `(value, row_id)` input, emitting
+ 1920  /// one key at a time into `writer`.
+ 1921  ///
+
+@@ -1611,28 +1923,20 @@ pub async fn merge_index_files(
+ 1923  /// own global buffers in the same file can reuse this. `LabelListIndex` does
+ 1924  /// exactly that for its `list_nulls` set.
+ 1925  ///
+ 1614 -/// Input must be sorted by value with nulls first. This function's transient
+ 1615 -/// aggregation state is one key's bitmap at a time. When `old_index` is given,
+ 1616 -/// its entries are merge-joined in, loading each old bitmap on demand; its
+ 1617 -/// already-loaded `index_map` remains resident separately, outside that state.
+ 1926 +/// Input must be sorted ascending by value, with nulls in a single run that may
+ 1927 +/// lead or trail; see [`check_run_order`] for what is rejected. This function's
+ 1928 +/// transient aggregation state is one key's bitmap at a time. `old_segments`
+ 1929 +/// are merge-joined in through [`OldSegments`], loading each old bitmap on
+ 1930 +/// demand; their already-loaded `index_map`s remain resident separately,
+ 1931 +/// outside that state.
+ 1932  pub(crate) async fn build_index_map(
+ 1933      mut data_source: SendableRecordBatchStream,
+ 1620 -    old_index: Option<&BitmapIndex>,
+ 1621 -    old_data_filter: Option<&super::OldIndexDataFilter>,
+ 1934 +    old_segments: Vec<OldSegment<'_>>,
+ 1935      writer: &mut BitmapBatchWriter,
+ 1936  ) -> Result<()> {
+ 1937      let value_type = data_source.schema().field(0).data_type().clone();
+ 1938  
+ 1626 -    // Borrowed from the source's `index_map` rather than collected into a Vec.
+ 1627 -    // That map already holds every key, so collecting made a second full copy:
+ 1628 -    // a 64-byte `ScalarValue` per key plus its label text, which at 10M labels
+ 1629 -    // is most of a gigabyte for nothing.
+ 1630 -    let empty = BTreeMap::new();
+ 1631 -    let mut old_keys = old_index
+ 1632 -        .map(|idx| idx.index_map.as_ref())
+ 1633 -        .unwrap_or(&empty)
+ 1634 -        .keys()
+ 1635 -        .peekable();
+ 1939 +    let mut old = OldSegments::new(old_segments);
+ 1940  
+ 1941      // Current value being accumulated from the new data stream.
+ 1942      let mut current_key: Option<ScalarValue> = None;
+
+@@ -1640,6 +1944,9 @@ pub(crate) async fn build_index_map(
+ 1944      // Track whether we emitted a null bitmap (old index stores nulls
+ 1945      // separately in null_map, not in index_map).
+ 1946      let mut emitted_null = false;
+ 1947 +    // The most recent non-null key, kept across a null run so the ordering check
+ 1948 +    // still sees the whole non-null sequence.
+ 1949 +    let mut last_non_null_key: Option<ScalarValue> = None;
+ 1950  
+ 1951      while let Some(batch) = data_source.try_next().await? {
+ 1952          let values = batch.column_by_name(VALUE_COLUMN_NAME).expect_ok()?;
+
+@@ -1658,35 +1965,20 @@ pub(crate) async fn build_index_map(
+ 1965                  _ => {
+ 1966                      // Value changed — flush the previous run.
+ 1967                      if let Some(prev_key) = current_key.take() {
+ 1661 -                        // This function assumes value-sorted, nulls-first input
+ 1662 -                        // and does not check it in release builds. Violated
+ 1663 -                        // input emits one key twice -- the old-key cursor
+ 1664 -                        // advances past it on an earlier, larger run, so it
+ 1665 -                        // leaves as an old-only row and returns later carrying
+ 1666 -                        // only new rows. Neither row is complete, and
+ 1667 -                        // `BitmapIndex::load` inserts both into `index_map`,
+ 1668 -                        // so the later one shadows the earlier and its rows
+ 1669 -                        // are lost.
+ 1670 -                        debug_assert!(
+ 1671 -                            OrderableScalarValue(key.clone())
+ 1672 -                                > OrderableScalarValue(prev_key.clone()),
+ 1673 -                            "build_index_map input must be sorted ascending by value \
+ 1674 -                             with nulls first; got key {:?} after {:?}",
+ 1675 -                            key,
+ 1676 -                            prev_key
+ 1677 -                        );
+ 1968 +                        check_run_order(last_non_null_key.as_ref(), &key, emitted_null)?;
+ 1969                          let mut prev_bitmap = std::mem::take(&mut current_bitmap);
+ 1970                          BitmapIndexPlugin::finish_run(
+ 1971                              prev_key,
+ 1972                              &mut prev_bitmap,
+ 1682 -                            old_index,
+ 1683 -                            &mut old_keys,
+ 1973 +                            &mut old,
+ 1974                              &mut emitted_null,
+ 1975                              writer,
+ 1686 -                            old_data_filter,
+ 1976                          )
+ 1977                          .await?;
+ 1978                      }
+ 1979 +                    if !key.is_null() {
+ 1980 +                        last_non_null_key = Some(key.clone());
+ 1981 +                    }
+ 1982                      current_key = Some(key);
+ 1983                      current_bitmap = RowAddrTreeMap::default();
+ 1984                      current_bitmap.insert(row_id);
+
+@@ -1701,32 +1993,22 @@ pub(crate) async fn build_index_map(
+ 1993          BitmapIndexPlugin::finish_run(
+ 1994              last_key,
+ 1995              &mut last_bitmap,
+ 1704 -            old_index,
+ 1705 -            &mut old_keys,
+ 1996 +            &mut old,
+ 1997              &mut emitted_null,
+ 1998              writer,
+ 1708 -            old_data_filter,
+ 1999          )
+ 2000          .await?;
+ 2001      }
+ 2002  
+ 2003      // Emit any remaining old-only entries.
+ 1714 -    if let Some(idx) = old_index {
+ 1715 -        for old_key in old_keys {
+ 1716 -            let loaded = idx.load_bitmap(old_key, None).await?;
+ 1717 -            let old_bitmap = retain_valid(Cow::Borrowed(loaded.as_ref()), old_data_filter);
+ 1718 -            writer.emit(old_key.0.clone(), &old_bitmap).await?;
+ 1719 -        }
+ 2004 +    while let Some((key, bitmap)) = old.take_smallest_if(|_| true).await? {
+ 2005 +        writer.emit(key, &bitmap).await?;
+ 2006      }
+ 2007  
+ 2008      // Emit old null bitmap if we didn't already merge it with new nulls.
+ 1723 -    if !emitted_null
+ 1724 -        && let Some(idx) = old_index
+ 1725 -        && !idx.null_map.is_empty()
+ 1726 -    {
+ 2009 +    if !emitted_null && let Some(null_bitmap) = old.take_null_bitmap() {
+ 2010          let null_key = new_null_array(&value_type, 1);
+ 2011          let null_key = ScalarValue::try_from_array(null_key.as_ref(), 0)?;
+ 1729 -        let null_bitmap = retain_valid(Cow::Borrowed(idx.null_map.as_ref()), old_data_filter);
+ 2012          writer.emit(null_key, &null_bitmap).await?;
+ 2013      }
+ 2014  
+
+@@ -1741,35 +2023,57 @@ pub(crate) async fn build_index_map(
+ 2023  /// separately. Nulls live outside `index_map`, in `null_map`, so they are
+ 2024  /// remapped separately and emitted first -- a null sorts below every value.
+ 2025  ///
+ 1744 -/// Emits every key unconditionally, even one whose remapped bitmap comes out
+ 1745 -/// empty -- deliberately unlike [`merge_index_maps`], which drops a key its
+ 1746 -/// filter empties. Both are query-equivalent, since an absent key and a
+ 1747 -/// present-but-empty one both match no rows; this function preserves the key
+ 1748 -/// to match the old materialized-map remap path, which always produced one
+ 1749 -/// row per source key.
+ 2026 +/// A key whose remapped bitmap comes out empty (every one of its rows deleted)
+ 2027 +/// is not written, the rule [`BitmapBatchWriter::emit`] applies to every path.
+ 2028  pub(crate) async fn remap_index_map(
+ 2029      index: &BitmapIndex,
+ 1752 -    mapping: &RowAddrRemap,
+ 2030 +    mapping: RowAddrTranslatorRef<'_>,
+ 2031      writer: &mut BitmapBatchWriter,
+ 2032  ) -> Result<()> {
+ 2033      if !index.null_map.is_empty() {
+ 2034          let null_key = new_null_array(index.value_type(), 1);
+ 2035          let null_key = ScalarValue::try_from_array(null_key.as_ref(), 0)?;
+ 2036          writer
+ 1759 -            .emit(null_key, &remap_row_addrs(&index.null_map, mapping)?)
+ 2037 +            .emit(
+ 2038 +                null_key,
+ 2039 +                &remap_row_addrs_with(&index.null_map, mapping).await?,
+ 2040 +            )
+ 2041              .await?;
+ 2042      }
+ 2043  
+ 2044      for key in index.index_map.keys() {
+ 2045          let bitmap = index.load_bitmap(key, None).await?;
+ 2046          writer
+ 1766 -            .emit(key.0.clone(), &remap_row_addrs(&bitmap, mapping)?)
+ 2047 +            .emit(
+ 2048 +                key.0.clone(),
+ 2049 +                &remap_row_addrs_with(&bitmap, mapping).await?,
+ 2050 +            )
+ 2051              .await?;
+ 2052      }
+ 2053  
+ 2054      Ok(())
+ 2055  }
+ 2056  
+ 2057 +/// [`remap_row_addrs`] through a [`RowAddrTranslator`]: a synchronous map
+ 2058 +/// remaps directly; a batch translator translates the posting in bounded
+ 2059 +/// batches (`remap_row_addrs_tree_map_async`) and never resolves it into a
+ 2060 +/// map, so one posting list is the unit of work here.
+ 2061 +pub(crate) async fn remap_row_addrs_with(
+ 2062 +    bitmap: &RowAddrTreeMap,
+ 2063 +    translator: RowAddrTranslatorRef<'_>,
+ 2064 +) -> Result<RowAddrTreeMap> {
+ 2065 +    match translator {
+ 2066 +        RowAddrTranslatorRef::Sync(mapping) => remap_row_addrs(bitmap, mapping),
+ 2067 +        RowAddrTranslatorRef::Batch(remapper) => {
+ 2068 +            remap_row_addrs_tree_map_async(remapper, bitmap).await
+ 2069 +        }
+ 2070 +        #[allow(unreachable_patterns)]
+ 2071 +        _ => Err(Error::not_supported(
+ 2072 +            "this build does not know how to translate through this row address translator",
+ 2073 +        )),
+ 2074 +    }
+ 2075 +}
+ 2076 +
+ 2077  pub(crate) fn remap_row_addrs(
+ 2078      bitmap: &RowAddrTreeMap,
+ 2079      mapping: &RowAddrRemap,
+
+@@ -1809,22 +2113,12 @@ pub(crate) fn merge_source_entry_count(sources: &[Arc<BitmapIndex>]) -> u64 {
+ 2113  }
+ 2114  
+ 2115  /// Merge loaded bitmap indexes into `writer` without materializing all source
+ 1812 -/// bitmap payloads at once.
+ 1813 -///
+ 1814 -/// Drives each source through its `index_map` -- a sorted `BTreeMap` rebuilt at
+ 1815 -/// load time -- rather than through the rows of its file. LabelList index files
+ 1816 -/// written before spill-based builds landed are unsorted on disk, so file order
+ 1817 -/// cannot be trusted for them; `index_map` order can, for old and new files
+ 1818 -/// alike, which is what makes this work without an index version bump.
+ 2116 +/// bitmap payloads at once, applying the same `old_data_filter` to every source.
+ 2117 +/// See [`OldSegments`] for the merge itself.
+ 2118  ///
+ 2119  /// Null keys live outside `index_map`, in each source's `null_map`, so they are
+ 2120  /// unioned separately and emitted first -- a null sorts below every value.
+ 2121  ///
+ 1823 -/// The merge's transient aggregation state is the merged bitmap for the current
+ 1824 -/// key plus one loaded bitmap per participating source. Each source `index_map`,
+ 1825 -/// any bitmaps retained by the index cache, and the output writer remain outside
+ 1826 -/// that state.
+ 1827 -///
+ 2122  /// `progress` reports source entries consumed, against the total from
+ 2123  /// [`merge_source_entry_count`]. Not segments: the merge is key-driven and
+ 2124  /// touches every source on every key, so no source is ever "done" to report.
+
+@@ -1833,9 +2127,8 @@ pub(crate) fn merge_source_entry_count(sources: &[Arc<BitmapIndex>]) -> u64 {
+ 2127  /// actually in, since it loads one bitmap per entry.
+ 2128  ///
+ 2129  /// A key whose merged bitmap comes out empty (every one of its rows retired by
+ 1836 -/// `old_data_filter`) is dropped rather than emitted -- deliberately unlike
+ 1837 -/// [`remap_index_map`], which preserves such a key. Both are query-equivalent,
+ 1838 -/// since an absent key and a present-but-empty one both match no rows.
+ 2130 +/// `old_data_filter`) is not written, the rule [`BitmapBatchWriter::emit`]
+ 2131 +/// applies to every path.
+ 2132  pub(crate) async fn merge_index_maps(
+ 2133      sources: &[Arc<BitmapIndex>],
+ 2134      old_data_filter: Option<&super::OldIndexDataFilter>,
+
+@@ -1849,18 +2142,22 @@ pub(crate) async fn merge_index_maps(
+ 2142      };
+ 2143      let value_type = first.value_type().clone();
+ 2144  
+ 1852 -    let mut merged_nulls = RowAddrTreeMap::default();
+ 1853 -    for source in sources {
+ 1854 -        merged_nulls |= source.null_map.as_ref();
+ 1855 -    }
+ 1856 -    let merged_nulls = retain_valid(Cow::Owned(merged_nulls), old_data_filter);
+ 1857 -    if !merged_nulls.is_empty() {
+ 2145 +    let mut old = OldSegments::new(
+ 2146 +        sources
+ 2147 +            .iter()
+ 2148 +            .map(|source| OldSegment {
+ 2149 +                index: source.as_ref(),
+ 2150 +                filter: old_data_filter,
+ 2151 +            })
+ 2152 +            .collect(),
+ 2153 +    );
+ 2154 +
+ 2155 +    if let Some(merged_nulls) = old.take_null_bitmap() {
+ 2156          let null_key = new_null_array(&value_type, 1);
+ 2157          let null_key = ScalarValue::try_from_array(null_key.as_ref(), 0)?;
+ 2158          writer.emit(null_key, &merged_nulls).await?;
+ 2159      }
+ 2160  
+ 1863 -    let mut consumed = 0u64;
+ 2161      // Cap reporting at roughly a hundred times across the merge. `stage_progress`
+ 2162      // is `#[async_trait]`, so every call boxes a future, and a real reporter does
+ 2163      // more: the Python one allocates and sends, the Java one makes a JNI upcall.
+
+@@ -1870,56 +2167,13 @@ pub(crate) async fn merge_index_maps(
+ 2167      let report_every = (merge_source_entry_count(sources) / 100).max(1);
+ 2168      let mut last_reported = 0u64;
+ 2169  
+ 1873 -    let mut key_iters: Vec<_> = sources
+ 1874 -        .iter()
+ 1875 -        .map(|source| source.index_map.keys())
+ 1876 -        .collect();
+ 1877 -
+ 1878 -    // Every source is sorted, so the smallest key any of them is currently
+ 1879 -    // positioned on is the next key overall. A min-heap holding one entry per
+ 1880 -    // live source finds it in `log(sources)`. What this replaced was not a
+ 1881 -    // cheaper comparison strategy but full materialization: the previous
+ 1882 -    // `merge_bitmap_indices` built a `HashMap<ScalarValue, RowAddrTreeMap>`
+ 1883 -    // holding every key of every source at once. The win here is bounded
+ 1884 -    // memory, not fewer comparisons. It is the same merge `merge_shards` runs
+ 1885 -    // over file-backed cursors.
+ 1886 -    //
+ 1887 -    // Entries borrow their key from the source's `index_map` rather than cloning
+ 1888 -    // it. Seeding the heap touches every source key, so cloning here would cost
+ 1889 -    // more than the scan it replaces whenever there are only a few sources.
+ 1890 -    let mut heap: BinaryHeap<Reverse<(&OrderableScalarValue, usize)>> =
+ 1891 -        BinaryHeap::with_capacity(key_iters.len());
+ 1892 -    for (source_idx, keys) in key_iters.iter_mut().enumerate() {
+ 1893 -        if let Some(key) = keys.next() {
+ 1894 -            heap.push(Reverse((key, source_idx)));
+ 1895 -        }
+ 1896 -    }
+ 1897 -
+ 1898 -    while let Some(Reverse((next_key, _))) = heap.peek().copied() {
+ 1899 -        let mut merged = RowAddrTreeMap::default();
+ 1900 -
+ 1901 -        // Drain the sources positioned on this key -- only those, where the
+ 1902 -        // previous scan visited every source on every key. A source's next key is
+ 1903 -        // strictly greater, so re-pushing it cannot re-enter this loop.
+ 1904 -        while let Some(Reverse((key, source_idx))) = heap.peek().copied() {
+ 1905 -            if key != next_key {
+ 1906 -                break;
+ 1907 -            }
+ 1908 -            heap.pop();
+ 1909 -            consumed += 1;
+ 1910 -            merged |= sources[source_idx].load_bitmap(key, None).await?.as_ref();
+ 1911 -            if let Some(next) = key_iters[source_idx].next() {
+ 1912 -                heap.push(Reverse((next, source_idx)));
+ 1913 -            }
+ 1914 -        }
+ 1915 -
+ 1916 -        let merged = retain_valid(Cow::Owned(merged), old_data_filter);
+ 1917 -        if !merged.is_empty() {
+ 1918 -            writer.emit(next_key.0.clone(), &merged).await?;
+ 1919 -        }
+ 2170 +    while let Some((key, merged)) = old.take_smallest_if(|_| true).await? {
+ 2171 +        writer.emit(key, &merged).await?;
+ 2172  
+ 1921 -        // Reported outside the guard above: a key the filter emptied still
+ 1922 -        // consumed its source entries, and skipping it would stall the count.
+ 2173 +        // Counted whether or not `emit` wrote the key: one the filter emptied
+ 2174 +        // still consumed its source entries, and skipping it would stall the
+ 2175 +        // count.
+ 2176 +        let consumed = old.consumed();
+ 2177          if consumed - last_reported >= report_every
+ 2178              && let Some((progress, stage)) = progress
+ 2179          {
+
+@@ -1932,64 +2186,55 @@ pub(crate) async fn merge_index_maps(
+ 2186      // throttle above skipped -- including when there were no keys at all (every
+ 2187      // list null or empty), where the loop never runs.
+ 2188      if let Some((progress, stage)) = progress {
+ 1935 -        progress.stage_progress(stage, consumed).await?;
+ 2189 +        progress.stage_progress(stage, old.consumed()).await?;
+ 2190      }
+ 2191  
+ 2192      Ok(())
+ 2193  }
+ 2194  
+ 2195 +/// Merge bitmap segments with no new data and no old-data filters.
+ 2196 +///
+ 2197 +/// Forwards to [`BitmapIndex::merge_segments`], which is the replacement: it
+ 2198 +/// also takes a new-data stream and one filter per source segment. Kept with
+ 2199 +/// its original signature and progress stages; progress for the merge stage is
+ 2200 +/// reported once, at completion, rather than as entries are consumed.
+ 2201 +#[deprecated(note = "use BitmapIndex::merge_segments")]
+ 2202  pub async fn merge_bitmap_indices(
+ 2203      source_indices: &[Arc<BitmapIndex>],
+ 2204      dest_store: &dyn IndexStore,
+ 2205      progress: Arc<dyn IndexBuildProgress>,
+ 2206  ) -> Result<CreatedIndex> {
+ 1946 -    if source_indices.is_empty() {
+ 2207 +    let Some(first) = source_indices.first() else {
+ 2208          return Err(Error::invalid_input(
+ 2209              "Bitmap segment merge requires at least one source segment".to_string(),
+ 2210          ));
+ 1950 -    }
+ 2211 +    };
+ 2212 +    let entry_count = merge_source_entry_count(source_indices);
+ 2213 +    progress
+ 2214 +        .stage_start("merge_bitmap_segments", Some(entry_count), "entries")
+ 2215 +        .await?;
+ 2216  
+ 1952 -    let value_type = source_indices[0].value_type().clone();
+ 2217 +    let schema = Arc::new(Schema::new(vec![
+ 2218 +        Field::new(VALUE_COLUMN_NAME, first.value_type().clone(), true),
+ 2219 +        Field::new(ROW_ID, DataType::UInt64, false),
+ 2220 +    ]));
+ 2221 +    let no_new_data: SendableRecordBatchStream =
+ 2222 +        Box::pin(RecordBatchStreamAdapter::new(schema, stream::empty()));
+ 2223 +    let no_filters = vec![None; source_indices.len()];
+ 2224 +    let created_index =
+ 2225 +        BitmapIndex::merge_segments(source_indices, no_new_data, dest_store, &no_filters).await?;
+ 2226  
+ 2227      progress
+ 1955 -        .stage_start(
+ 1956 -            "merge_bitmap_segments",
+ 1957 -            Some(merge_source_entry_count(source_indices)),
+ 1958 -            "entries",
+ 1959 -        )
+ 2228 +        .stage_progress("merge_bitmap_segments", entry_count)
+ 2229          .await?;
+ 1961 -    for source_index in source_indices.iter() {
+ 1962 -        if source_index.value_type() != &value_type {
+ 1963 -            return Err(Error::invalid_input(format!(
+ 1964 -                "Bitmap segment has value type {:?}, expected {:?}",
+ 1965 -                source_index.value_type(),
+ 1966 -                value_type
+ 1967 -            )));
+ 1968 -        }
+ 1969 -    }
+ 1970 -
+ 1971 -    let mut writer = new_bitmap_batch_writer(dest_store, BITMAP_LOOKUP_NAME, &value_type).await?;
+ 1972 -    merge_index_maps(
+ 1973 -        source_indices,
+ 1974 -        None,
+ 1975 -        &mut writer,
+ 1976 -        Some((progress.as_ref(), "merge_bitmap_segments")),
+ 1977 -    )
+ 1978 -    .await?;
+ 2230      progress.stage_complete("merge_bitmap_segments").await?;
+ 1980 -
+ 2231      progress
+ 2232          .stage_start("write_bitmap_index", Some(1), "files")
+ 2233          .await?;
+ 1984 -    let file = writer.finish().await?;
+ 2234      progress.stage_progress("write_bitmap_index", 1).await?;
+ 2235      progress.stage_complete("write_bitmap_index").await?;
+ 2236  
+ 1988 -    Ok(CreatedIndex {
+ 1989 -        index_details: prost_types::Any::from_msg(&pbold::BitmapIndexDetails::default()).unwrap(),
+ 1990 -        index_version: BITMAP_INDEX_VERSION,
+ 1991 -        files: vec![file],
+ 1992 -    })
+ 2237 +    Ok(created_index)
+ 2238  }
+ 2239  
+ 2240  #[async_trait]
+
+@@ -2091,6 +2336,7 @@ impl ScalarIndexPlugin for BitmapIndexPlugin {
+ 2336          &self,
+ 2337          index_store: Arc<dyn IndexStore>,
+ 2338          _index_details: &prost_types::Any,
+ 2339 +        _index_version: u32,
+ 2340          frag_reuse_index: Option<Arc<dyn RowIdRemapper>>,
+ 2341          cache: &LanceCache,
+ 2342      ) -> Result<Arc<dyn ScalarIndex>> {
+
+@@ -2105,6 +2351,7 @@ impl ScalarIndexPlugin for BitmapIndexPlugin {
+ 2351          &self,
+ 2352          index_store: Arc<dyn IndexStore>,
+ 2353          _index_details: &prost_types::Any,
+ 2354 +        _index_version: u32,
+ 2355          remapping: Option<Arc<dyn BatchRowIdRemapper>>,
+ 2356          cache: &LanceCache,
+ 2357      ) -> Result<Arc<dyn ScalarIndex>> {

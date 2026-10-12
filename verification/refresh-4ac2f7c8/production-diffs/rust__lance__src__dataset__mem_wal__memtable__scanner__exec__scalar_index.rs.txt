@@ -1,0 +1,522 @@
+@@ -0,0 +1,791 @@
+    1 +// SPDX-License-Identifier: Apache-2.0
+    2 +// SPDX-FileCopyrightText: Copyright The Lance Authors
+    3 +
+    4 +//! `ScalarMemIndexExec`: a filter answered from a memtable's indexes, with MVCC
+    5 +//! visibility.
+    6 +
+    7 +use std::fmt::{Debug, Formatter};
+    8 +use std::sync::Arc;
+    9 +
+   10 +use arrow::compute::{filter_record_batch, prep_null_mask_filter, take_record_batch};
+   11 +use arrow_array::cast::AsArray;
+   12 +use arrow_array::{Array, BooleanArray, RecordBatch, UInt32Array, UInt64Array};
+   13 +use arrow_buffer::BooleanBufferBuilder;
+   14 +use arrow_schema::SchemaRef;
+   15 +use datafusion::common::ScalarValue;
+   16 +use datafusion::common::stats::Precision;
+   17 +use datafusion::error::{DataFusionError, Result as DataFusionResult};
+   18 +use datafusion::execution::TaskContext;
+   19 +use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
+   20 +use datafusion::physical_plan::metrics::{
+   21 +    Count, ExecutionPlanMetricsSet, MetricBuilder, MetricsSet,
+   22 +};
+   23 +use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+   24 +use datafusion::physical_plan::{
+   25 +    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
+   26 +    SendableRecordBatchStream, Statistics,
+   27 +};
+   28 +use datafusion_physical_expr::{EquivalenceProperties, PhysicalExprRef};
+   29 +use futures::stream::{self, StreamExt};
+   30 +use lance_core::Result;
+   31 +use lance_index::scalar::expression::ScalarIndexExpr;
+   32 +
+   33 +use crate::dataset::mem_wal::index::{SearchContext, evaluate_index_filter};
+   34 +use crate::dataset::mem_wal::memtable::scanner::exec::{scan_record_batch, take_projected_columns};
+   35 +use crate::dataset::mem_wal::write::{BatchStore, IndexStore};
+   36 +
+   37 +/// An index may decline a search matching more than the visible rows divided
+   38 +/// by this; reading them all is then expected to be cheaper.
+   39 +const MATCH_BUDGET_DIVISOR: u64 = 16;
+   40 +
+   41 +/// Matches always worth listing, however few rows are visible.
+   42 +const MIN_MATCH_BUDGET: u64 = 4096;
+   43 +
+   44 +/// The divisor for a read that keeps only each key's newest version, where
+   45 +/// each match also costs a seek in the primary-key index.
+   46 +const NEWEST_CHECK_MATCH_BUDGET_DIVISOR: u64 = 8;
+   47 +
+   48 +/// Metric counting the matches checked for being their key's newest version.
+   49 +pub const NEWEST_CHECKS_METRIC: &str = "newest_checks";
+   50 +
+   51 +/// Metric counting reads that matched too many rows and read every row instead.
+   52 +pub const FALLBACK_READS_METRIC: &str = "fallback_reads";
+   53 +
+   54 +/// Execution-plan node answering a filter from the memtable's indexes,
+   55 +/// filtered by visibility.
+   56 +pub struct ScalarMemIndexExec {
+   57 +    batch_store: Arc<BatchStore>,
+   58 +    indexes: Arc<IndexStore>,
+   59 +    /// The index searches the filter was split into.
+   60 +    index_expr: ScalarIndexExpr,
+   61 +    /// The whole filter, compiled. Applied to the candidates unless the
+   62 +    /// indexes decided the filter alone.
+   63 +    recheck: Option<PhysicalExprRef>,
+   64 +    /// Whether the index searches are the whole filter.
+   65 +    is_whole_filter: bool,
+   66 +    readable_count: usize,
+   67 +    projection: Option<Vec<usize>>,
+   68 +    output_schema: SchemaRef,
+   69 +    properties: Arc<PlanProperties>,
+   70 +    metrics: ExecutionPlanMetricsSet,
+   71 +    /// Whether to include _rowid column (row position) in output.
+   72 +    with_row_id: bool,
+   73 +    /// Whether to include _rowaddr column (same as row position) in output.
+   74 +    with_row_address: bool,
+   75 +    /// Keep only the newest visible version of each primary key, given the key
+   76 +    /// columns' positions in the stored batches. An older version can match a
+   77 +    /// filter its key's newest version fails, and must not be returned.
+   78 +    newest_of: Option<Vec<usize>>,
+   79 +    /// Run instead when the indexes match too many rows to be worth listing.
+   80 +    /// Required with `newest_of`.
+   81 +    broad_fallback: Option<Arc<dyn ExecutionPlan>>,
+   82 +}
+   83 +
+   84 +impl Debug for ScalarMemIndexExec {
+   85 +    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+   86 +        f.debug_struct("ScalarMemIndexExec")
+   87 +            .field("index_expr", &self.index_expr)
+   88 +            .field("rechecked", &self.recheck.is_some())
+   89 +            .field("readable_count", &self.readable_count)
+   90 +            .field("with_row_id", &self.with_row_id)
+   91 +            .field("with_row_address", &self.with_row_address)
+   92 +            .finish()
+   93 +    }
+   94 +}
+   95 +
+   96 +impl ScalarMemIndexExec {
+   97 +    /// Read the rows `index_expr` selects from the first `readable_count`
+   98 +    /// batches. `output_schema` is the projected schema, including `_rowid` and
+   99 +    /// `_rowaddr` when requested.
+  100 +    #[allow(clippy::too_many_arguments)]
+  101 +    pub fn new(
+  102 +        batch_store: Arc<BatchStore>,
+  103 +        indexes: Arc<IndexStore>,
+  104 +        index_expr: ScalarIndexExpr,
+  105 +        recheck: Option<PhysicalExprRef>,
+  106 +        is_whole_filter: bool,
+  107 +        readable_count: usize,
+  108 +        projection: Option<Vec<usize>>,
+  109 +        output_schema: SchemaRef,
+  110 +        with_row_id: bool,
+  111 +        with_row_address: bool,
+  112 +    ) -> Self {
+  113 +        let properties = Arc::new(PlanProperties::new(
+  114 +            EquivalenceProperties::new(output_schema.clone()),
+  115 +            Partitioning::UnknownPartitioning(1),
+  116 +            EmissionType::Incremental,
+  117 +            Boundedness::Bounded,
+  118 +        ));
+  119 +
+  120 +        Self {
+  121 +            batch_store,
+  122 +            indexes,
+  123 +            index_expr,
+  124 +            recheck,
+  125 +            is_whole_filter,
+  126 +            readable_count,
+  127 +            projection,
+  128 +            output_schema,
+  129 +            properties,
+  130 +            metrics: ExecutionPlanMetricsSet::new(),
+  131 +            with_row_id,
+  132 +            with_row_address,
+  133 +            newest_of: None,
+  134 +            broad_fallback: None,
+  135 +        }
+  136 +    }
+  137 +
+  138 +    /// Return only the newest visible version of each primary key, reading
+  139 +    /// with `broad_fallback` when the indexes match too many rows to list.
+  140 +    pub fn with_newest_check(
+  141 +        mut self,
+  142 +        pk_indices: Vec<usize>,
+  143 +        broad_fallback: Arc<dyn ExecutionPlan>,
+  144 +    ) -> Self {
+  145 +        self.newest_of = Some(pk_indices);
+  146 +        self.broad_fallback = Some(broad_fallback);
+  147 +        self
+  148 +    }
+  149 +
+  150 +    /// How many matches are worth listing out of `visible_rows`.
+  151 +    fn match_budget(&self, visible_rows: u64) -> u64 {
+  152 +        if self.newest_of.is_some() {
+  153 +            visible_rows / NEWEST_CHECK_MATCH_BUDGET_DIVISOR
+  154 +        } else {
+  155 +            (visible_rows / MATCH_BUDGET_DIVISOR).max(MIN_MATCH_BUDGET)
+  156 +        }
+  157 +    }
+  158 +
+  159 +    /// Evaluate the index searches: the candidate positions, or `None` when
+  160 +    /// every visible row is one, and whether they are the exact answer.
+  161 +    fn query_index(&self) -> Result<(Option<Vec<u64>>, bool)> {
+  162 +        let Some(max_readable_row) = self.batch_store.max_visible_row(self.readable_count) else {
+  163 +            return Ok((Some(Vec::new()), true));
+  164 +        };
+  165 +        let visible_rows = max_readable_row + 1;
+  166 +        let budget = self.match_budget(visible_rows);
+  167 +        let mut ctx = SearchContext::new(max_readable_row);
+  168 +        // A declined search needs `recheck` or the fallback to read the rows,
+  169 +        // so set a budget only when there is one.
+  170 +        if self.recheck.is_some() || self.broad_fallback.is_some() {
+  171 +            ctx = ctx.with_match_budget(budget);
+  172 +        }
+  173 +        let result = evaluate_index_filter(&self.index_expr, &self.indexes, &ctx)?;
+  174 +        let exact = result.is_exact();
+  175 +        // An index may list past its budget; reading every row is then expected
+  176 +        // to be cheaper.
+  177 +        let past_budget = self.broad_fallback.is_some() && result.at_most.len() > budget;
+  178 +        Ok(if past_budget || result.at_most.len() == visible_rows {
+  179 +            (None, exact)
+  180 +        } else {
+  181 +            (Some(result.at_most.into()), exact)
+  182 +        })
+  183 +    }
+  184 +
+  185 +    /// Read the candidate rows, one stored batch at a time: those at
+  186 +    /// `candidates` (ascending), or every visible row when it is `None`. A
+  187 +    /// batch without a candidate is not read, and `recheck` sees only the
+  188 +    /// candidates.
+  189 +    fn read_rows(
+  190 +        &self,
+  191 +        candidates: Option<&[u64]>,
+  192 +        recheck: Option<&PhysicalExprRef>,
+  193 +        newest_checks: &Count,
+  194 +    ) -> DataFusionResult<Vec<RecordBatch>> {
+  195 +        let max_readable_row = self.batch_store.max_visible_row(self.readable_count);
+  196 +        let mut results = Vec::new();
+  197 +        let mut next = 0;
+  198 +        for stored in self.batch_store.iter().take(self.readable_count) {
+  199 +            let start = stored.row_offset;
+  200 +            let mut newest_checked = false;
+  201 +            let end = start + stored.num_rows as u64;
+  202 +            // The rows read, and their positions; `None` when they are the
+  203 +            // whole batch.
+  204 +            let (mut data, mut positions) = match candidates {
+  205 +                Some(candidates) => {
+  206 +                    if next == candidates.len() {
+  207 +                        break;
+  208 +                    }
+  209 +                    let first = next;
+  210 +                    while next < candidates.len() && candidates[next] < end {
+  211 +                        next += 1;
+  212 +                    }
+  213 +                    let in_batch = &candidates[first..next];
+  214 +                    if in_batch.is_empty() {
+  215 +                        continue;
+  216 +                    }
+  217 +                    if in_batch.len() == stored.num_rows {
+  218 +                        (scan_record_batch(&stored.data)?, None)
+  219 +                    } else {
+  220 +                        // Drop stale versions before gathering, so their
+  221 +                        // columns are never copied.
+  222 +                        let in_batch = match (&self.newest_of, max_readable_row) {
+  223 +                            (Some(pk_indices), Some(max_readable_row)) => {
+  224 +                                newest_checks.add(in_batch.len());
+  225 +                                let survivors = self.newest_of_rows(
+  226 +                                    &stored.data,
+  227 +                                    in_batch,
+  228 +                                    start,
+  229 +                                    pk_indices,
+  230 +                                    max_readable_row,
+  231 +                                )?;
+  232 +                                newest_checked = true;
+  233 +                                if survivors.is_empty() {
+  234 +                                    continue;
+  235 +                                }
+  236 +                                survivors
+  237 +                            }
+  238 +                            _ => in_batch.to_vec(),
+  239 +                        };
+  240 +                        let rows = UInt32Array::from_iter_values(
+  241 +                            in_batch.iter().map(|position| (position - start) as u32),
+  242 +                        );
+  243 +                        let taken = take_record_batch(&stored.data, &rows)?;
+  244 +                        (scan_record_batch(&taken)?, Some(in_batch))
+  245 +                    }
+  246 +                }
+  247 +                None => (scan_record_batch(&stored.data)?, None),
+  248 +            };
+  249 +            if let Some(recheck) = recheck {
+  250 +                let keep = recheck.evaluate(&data)?.into_array(data.num_rows())?;
+  251 +                let keep = keep.as_boolean_opt().ok_or_else(|| {
+  252 +                    DataFusionError::Internal("a filter must evaluate to a boolean".to_string())
+  253 +                })?;
+  254 +                // A null result is not a match, as it is not in a full scan.
+  255 +                let keep = if keep.null_count() > 0 {
+  256 +                    prep_null_mask_filter(keep)
+  257 +                } else {
+  258 +                    keep.clone()
+  259 +                };
+  260 +                (data, positions) = retain(data, positions, start, &keep)?;
+  261 +            }
+  262 +            if let (false, Some(pk_indices), Some(max_readable_row)) =
+  263 +                (newest_checked, &self.newest_of, max_readable_row)
+  264 +            {
+  265 +                newest_checks.add(data.num_rows());
+  266 +                let keep = self.keep_newest(
+  267 +                    &data,
+  268 +                    positions.as_deref(),
+  269 +                    start,
+  270 +                    pk_indices,
+  271 +                    max_readable_row,
+  272 +                )?;
+  273 +                (data, positions) = retain(data, positions, start, &keep)?;
+  274 +            }
+  275 +            if data.num_rows() == 0 {
+  276 +                continue;
+  277 +            }
+  278 +
+  279 +            let mut columns: Vec<Arc<dyn Array>> = match &self.projection {
+  280 +                Some(projection) => take_projected_columns(
+  281 +                    data.columns(),
+  282 +                    data.schema().fields(),
+  283 +                    projection,
+  284 +                    self.output_schema.as_ref(),
+  285 +                    data.num_rows(),
+  286 +                )?,
+  287 +                None => data.columns().to_vec(),
+  288 +            };
+  289 +            if self.with_row_id || self.with_row_address {
+  290 +                let row_positions: Arc<dyn Array> = Arc::new(match positions {
+  291 +                    Some(positions) => UInt64Array::from(positions),
+  292 +                    None => UInt64Array::from_iter_values(start..end),
+  293 +                });
+  294 +                if self.with_row_id {
+  295 +                    columns.push(row_positions.clone());
+  296 +                }
+  297 +                // A memtable row's address is its position.
+  298 +                if self.with_row_address {
+  299 +                    columns.push(row_positions);
+  300 +                }
+  301 +            }
+  302 +            results.push(RecordBatch::try_new(self.output_schema.clone(), columns)?);
+  303 +        }
+  304 +        Ok(results)
+  305 +    }
+  306 +
+  307 +    /// The `positions` in `stored`, a batch starting at `start`, that are their
+  308 +    /// key's newest visible version.
+  309 +    fn newest_of_rows(
+  310 +        &self,
+  311 +        stored: &RecordBatch,
+  312 +        positions: &[u64],
+  313 +        start: u64,
+  314 +        pk_indices: &[usize],
+  315 +        max_readable_row: u64,
+  316 +    ) -> DataFusionResult<Vec<u64>> {
+  317 +        let mut values = Vec::with_capacity(pk_indices.len());
+  318 +        let mut survivors = Vec::new();
+  319 +        for &position in positions {
+  320 +            let row = (position - start) as usize;
+  321 +            if self.is_newest(
+  322 +                stored,
+  323 +                row,
+  324 +                position,
+  325 +                pk_indices,
+  326 +                max_readable_row,
+  327 +                &mut values,
+  328 +            )? {
+  329 +                survivors.push(position);
+  330 +            }
+  331 +        }
+  332 +        Ok(survivors)
+  333 +    }
+  334 +
+  335 +    /// Which of `data`'s rows are their key's newest visible version: one seek
+  336 +    /// in the primary-key index per row. `positions` are the rows' positions,
+  337 +    /// or `None` when `data` is the whole batch starting at `start`.
+  338 +    fn keep_newest(
+  339 +        &self,
+  340 +        data: &RecordBatch,
+  341 +        positions: Option<&[u64]>,
+  342 +        start: u64,
+  343 +        pk_indices: &[usize],
+  344 +        max_readable_row: u64,
+  345 +    ) -> DataFusionResult<BooleanArray> {
+  346 +        let rows = data.num_rows();
+  347 +        let mut keep = BooleanBufferBuilder::new(rows);
+  348 +        let mut values = Vec::with_capacity(pk_indices.len());
+  349 +        for row in 0..rows {
+  350 +            let position = positions.map_or(start + row as u64, |positions| positions[row]);
+  351 +            keep.append(self.is_newest(
+  352 +                data,
+  353 +                row,
+  354 +                position,
+  355 +                pk_indices,
+  356 +                max_readable_row,
+  357 +                &mut values,
+  358 +            )?);
+  359 +        }
+  360 +        Ok(BooleanArray::new(keep.finish(), None))
+  361 +    }
+  362 +
+  363 +    /// Whether `data`'s row `row`, at `position`, is its key's newest visible
+  364 +    /// version: one seek in the primary-key index. `values` is scratch space.
+  365 +    fn is_newest(
+  366 +        &self,
+  367 +        data: &RecordBatch,
+  368 +        row: usize,
+  369 +        position: u64,
+  370 +        pk_indices: &[usize],
+  371 +        max_readable_row: u64,
+  372 +        values: &mut Vec<ScalarValue>,
+  373 +    ) -> DataFusionResult<bool> {
+  374 +        values.clear();
+  375 +        for &column in pk_indices {
+  376 +            values.push(ScalarValue::try_from_array(data.column(column), row)?);
+  377 +        }
+  378 +        Ok(self
+  379 +            .indexes
+  380 +            .pk_is_newest(values, position, max_readable_row))
+  381 +    }
+  382 +}
+  383 +
+  384 +/// `data` and its row `positions` narrowed to the rows `keep` selects;
+  385 +/// `positions` is `None` while `data` is the whole batch starting at `start`.
+  386 +/// `keep` has no nulls: its bits pick the positions.
+  387 +fn retain(
+  388 +    data: RecordBatch,
+  389 +    positions: Option<Vec<u64>>,
+  390 +    start: u64,
+  391 +    keep: &BooleanArray,
+  392 +) -> DataFusionResult<(RecordBatch, Option<Vec<u64>>)> {
+  393 +    if keep.true_count() == data.num_rows() {
+  394 +        return Ok((data, positions));
+  395 +    }
+  396 +    let kept = keep.values().set_indices();
+  397 +    let positions = match positions {
+  398 +        Some(positions) => kept.map(|row| positions[row]).collect(),
+  399 +        None => kept.map(|row| start + row as u64).collect(),
+  400 +    };
+  401 +    Ok((filter_record_batch(&data, keep)?, Some(positions)))
+  402 +}
+  403 +
+  404 +impl DisplayAs for ScalarMemIndexExec {
+  405 +    fn fmt_as(&self, t: DisplayFormatType, f: &mut Formatter<'_>) -> std::fmt::Result {
+  406 +        match t {
+  407 +            DisplayFormatType::Default | DisplayFormatType::Verbose => {
+  408 +                write!(
+  409 +                    f,
+  410 +                    "ScalarMemIndexExec: query={}, whole_filter={}{}, with_row_id={}, with_row_address={}",
+  411 +                    self.index_expr.to_expr(),
+  412 +                    self.is_whole_filter,
+  413 +                    if self.newest_of.is_some() {
+  414 +                        ", newest_only=true"
+  415 +                    } else {
+  416 +                        ""
+  417 +                    },
+  418 +                    self.with_row_id,
+  419 +                    self.with_row_address
+  420 +                )
+  421 +            }
+  422 +            DisplayFormatType::TreeRender => {
+  423 +                write!(
+  424 +                    f,
+  425 +                    "ScalarMemIndexExec\nquery={}\nwhole_filter={}\nnewest_only={}\nwith_row_id={}\nwith_row_address={}",
+  426 +                    self.index_expr.to_expr(),
+  427 +                    self.is_whole_filter,
+  428 +                    self.newest_of.is_some(),
+  429 +                    self.with_row_id,
+  430 +                    self.with_row_address
+  431 +                )
+  432 +            }
+  433 +        }
+  434 +    }
+  435 +}
+  436 +
+  437 +impl ExecutionPlan for ScalarMemIndexExec {
+  438 +    fn name(&self) -> &str {
+  439 +        "ScalarMemIndexExec"
+  440 +    }
+  441 +
+  442 +    fn schema(&self) -> SchemaRef {
+  443 +        self.output_schema.clone()
+  444 +    }
+  445 +
+  446 +    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+  447 +        vec![]
+  448 +    }
+  449 +
+  450 +    fn with_new_children(
+  451 +        self: Arc<Self>,
+  452 +        children: Vec<Arc<dyn ExecutionPlan>>,
+  453 +    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+  454 +        if !children.is_empty() {
+  455 +            return Err(DataFusionError::Internal(
+  456 +                "ScalarMemIndexExec does not have children".to_string(),
+  457 +            ));
+  458 +        }
+  459 +        Ok(self)
+  460 +    }
+  461 +
+  462 +    fn execute(
+  463 +        &self,
+  464 +        partition: usize,
+  465 +        context: Arc<TaskContext>,
+  466 +    ) -> DataFusionResult<SendableRecordBatchStream> {
+  467 +        let newest_checks =
+  468 +            MetricBuilder::new(&self.metrics).counter(NEWEST_CHECKS_METRIC, partition);
+  469 +        let (positions, exact) = self.query_index()?;
+  470 +        if positions.is_none()
+  471 +            && let Some(fallback) = &self.broad_fallback
+  472 +        {
+  473 +            MetricBuilder::new(&self.metrics)
+  474 +                .counter(FALLBACK_READS_METRIC, partition)
+  475 +                .add(1);
+  476 +            return fallback.execute(partition, context);
+  477 +        }
+  478 +
+  479 +        // Candidates from a narrowing or partial answer still need the filter.
+  480 +        let recheck = if !exact || !self.is_whole_filter {
+  481 +            let Some(recheck) = &self.recheck else {
+  482 +                return Err(DataFusionError::Internal(
+  483 +                    "the indexes did not decide the filter, but no filter was given to re-check with"
+  484 +                        .to_string(),
+  485 +                ));
+  486 +            };
+  487 +            Some(recheck)
+  488 +        } else {
+  489 +            None
+  490 +        };
+  491 +        let batches = self.read_rows(positions.as_deref(), recheck, &newest_checks)?;
+  492 +
+  493 +        let stream = stream::iter(batches.into_iter().map(Ok)).boxed();
+  494 +
+  495 +        Ok(Box::pin(RecordBatchStreamAdapter::new(
+  496 +            self.output_schema.clone(),
+  497 +            stream,
+  498 +        )))
+  499 +    }
+  500 +
+  501 +    fn partition_statistics(&self, _partition: Option<usize>) -> DataFusionResult<Arc<Statistics>> {
+  502 +        Ok(Arc::new(Statistics {
+  503 +            num_rows: Precision::Absent,
+  504 +            total_byte_size: Precision::Absent,
+  505 +            column_statistics: Statistics::unknown_column(&self.schema()),
+  506 +        }))
+  507 +    }
+  508 +
+  509 +    fn metrics(&self) -> Option<MetricsSet> {
+  510 +        Some(self.metrics.clone_inner())
+  511 +    }
+  512 +
+  513 +    fn properties(&self) -> &Arc<PlanProperties> {
+  514 +        &self.properties
+  515 +    }
+  516 +
+  517 +    fn supports_limit_pushdown(&self) -> bool {
+  518 +        false
+  519 +    }
+  520 +}
+  521 +

@@ -1,0 +1,82 @@
+@@ -401,11 +401,9 @@ impl TryFrom<pb::Transaction> for Transaction {
+  401                      .map(DataOverlayGroup::try_from)
+  402                      .collect::<Result<Vec<_>>>()?,
+  403              },
+  404 -            None => {
+  405 -                return Err(Error::internal(
+  406 -                    "Transaction message did not contain an operation".to_string(),
+  407 -                ));
+  408 -            }
+  404 +            // prost drops unrecognized oneof fields, so an operation from a
+  405 +            // newer writer is indistinguishable from a missing one.
+  406 +            None => Operation::Unknown {},
+  407          };
+  408          Ok(Self {
+  409              read_version: message.read_version,
+
+@@ -489,8 +487,10 @@ impl TryFrom<pb::transaction::rewrite::RewriteGroup> for RewriteGroup {
+  487      }
+  488  }
+  489  
+  492 -impl From<&Transaction> for pb::Transaction {
+  493 -    fn from(value: &Transaction) -> Self {
+  490 +impl TryFrom<&Transaction> for pb::Transaction {
+  491 +    type Error = Error;
+  492 +
+  493 +    fn try_from(value: &Transaction) -> Result<Self> {
+  494          let operation = match &value.operation {
+  495              Operation::Append { fragments } => {
+  496                  pb::transaction::Operation::Append(pb::transaction::Append {
+
+@@ -706,6 +706,13 @@ impl From<&Transaction> for pb::Transaction {
+  706                          .collect::<Vec<pb::BasePath>>(),
+  707                  })
+  708              }
+  709 +            Operation::Unknown { .. } => {
+  710 +                return Err(Error::not_supported(format!(
+  711 +                    "Transaction {} has an operation written by a newer version of Lance \
+  712 +                     and cannot be re-encoded by this version",
+  713 +                    value.uuid
+  714 +                )));
+  715 +            }
+  716          };
+  717  
+  718          let transaction_properties = value
+
+@@ -713,13 +720,13 @@ impl From<&Transaction> for pb::Transaction {
+  720              .as_ref()
+  721              .map(|arc| arc.as_ref().clone())
+  722              .unwrap_or_default();
+  716 -        Self {
+  723 +        Ok(Self {
+  724              read_version: value.read_version,
+  725              uuid: value.uuid.clone(),
+  726              operation: Some(operation),
+  727              tag: value.tag.clone().unwrap_or("".to_string()),
+  728              transaction_properties,
+  722 -        }
+  729 +        })
+  730      }
+  731  }
+  732  
+
+@@ -796,12 +803,13 @@ impl From<&pb::transaction::UpdateMap> for UpdateMap {
+  803      }
+  804  }
+  805  
+  799 -impl From<&Transaction> for crate::format::Transaction {
+  800 -    fn from(value: &Transaction) -> Self {
+  801 -        let pb_transaction: pb::Transaction = value.into();
+  802 -        Self {
+  803 -            inner: pb_transaction,
+  804 -        }
+  806 +impl TryFrom<&Transaction> for crate::format::Transaction {
+  807 +    type Error = Error;
+  808 +
+  809 +    fn try_from(value: &Transaction) -> Result<Self> {
+  810 +        Ok(Self {
+  811 +            inner: pb::Transaction::try_from(value)?,
+  812 +        })
+  813      }
+  814  }
+  815  

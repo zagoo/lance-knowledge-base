@@ -1,0 +1,158 @@
+{
+  "iteration": 52,
+  "files": [
+    {
+      "path": "rust/lance-table/src/io/manifest.rs",
+      "module": "L1-modules/rust-lance-table-io.md",
+      "reviewed": true,
+      "role": "Manifest body and separate index-section readers, mutable manifest serialization to an already-open Writer, and legacy schema-only ManifestProvider. Owns low-level metadata IO/framing interpretation, not dataset capability validation, commit arbitration or footer/shutdown publication.",
+      "ranges": [
+        [
+          1,
+          31,
+          "SPDX and imports bind async_trait, LittleEndian, Bytes/Buf, fallible streams, exact storage version and legacy V1 dictionary/provider helpers, object-store paths/extensions, Prost, collections/Arc, tracing, core Schema/Error, lance-io Writer extensions/chunk utilities, table metadata/protobuf/MAGIC and ManifestLocation. Public io module exposes this child; no environment variables or global mutable state here."
+        ],
+        [
+          32,
+          53,
+          "Public async read_manifest(store,path,known_size) reads manifest files only. Debug instrumentation skips store. Supplied u64 size bypasses explicit HEAD; absent size awaits inner.head. PREFETCH_SIZE is64*1024 bytes; saturating_sub chooses tail start and one inner.get_range fetches through supplied/observed end. GET errors propagate immediately; it does not verify supplied size first or read data files."
+        ],
+        [
+          54,
+          71,
+          "Only a successfully returned tail shorter than16 or lacking trailing table MAGIC triggers one recursive boxed retry without cached size. Retry has None so cannot recurse again. If still short or wrong magic, CorruptFile includes path and reason. Arbitrary range/HEAD errors, bad offset, bad length or protobuf decode do not trigger this retry. Footer major/minor bytes are not inspected by these checks."
+        ],
+        [
+          72,
+          85,
+          "Read footer offset as signed little-endian i64 then unchecked as usize; file_size is also unchecked cast to usize before ordinary subtraction. No explicit negative/out-of-file offset validation. If computed manifest_len fits tail, slice from its computed start; else open a sized reader. Corrupt offsets can cause arithmetic/slicing failures rather than contextual Result errors; this is source-level observation, not an executed repro."
+        ],
+        [
+          86,
+          108,
+          "Large-body path fetches manifest_pos through file_size-64KiB in METADATA_READ_CHUNK_SIZE chunks, accumulating every Bytes in ChunkedBuf, then appends prefetched tail. Requires combined remaining>=20, reads u32 LE prefix, truncates trailing16, and returns decode_manifest. Errors drop local buffer/futures; no write. Contextual helper uses16MiB chunks with ordered buffered concurrency max(reader.io_parallelism,1); chunk handles avoid whole-body concatenation but all bytes remain resident for decode (rust/lance-io/src/utils.rs:27-95). Comment throughput/memory motivations are not measurements performed here."
+        ],
+        [
+          109,
+          128,
+          "Fast path reads prefix buf[0..4], slices4..len-16 and delegates; unlike chunk branch no explicit20-byte minimum after trimming. Private decode_manifest requires exact remaining==recorded_length or InvalidInput with expected/actual sizes, then Prost decode, Manifest::try_from and sparse-inline-row-ID detach heuristic using message-body length. No capability/feature/footer-version validation occurs here. Length mismatch lacks path argument; conversion/decode errors propagate. Byte detachment may copy small inline payloads after otherwise shared decoding."
+        ],
+        [
+          129,
+          159,
+          "Public async read_manifest_indexes(store,location,manifest) reads only when index_section Some; absent returns empty Vec without opening storage. On read_index_section error, retry once without cached size only if location.size Some and error.to_string contains exact file size is too small substring. Other errors propagate. Convert all returned protobuf entries in order, failing whole Result on first metadata conversion error. No independent count/UUID/type/capability validation here; None and encoded empty section both return empty Vec."
+        ],
+        [
+          160,
+          176,
+          "Private read_index_section opens with unchecked u64->usize sized hint when Some, otherwise normal open, then awaits generic read_message at pos. Underlying helper validates length-prefix/body against reader.size and emits the retry substring for a too-small sized view (rust/lance-io/src/utils.rs:161-199). This wrapper does not read footer or verify offset belongs to an IndexSection."
+        ],
+        [
+          177,
+          195,
+          "Private do_write_manifest borrows mutable Writer/Manifest, owns optional index Vec and optional inline transaction. Some indices (even empty) converts entire vector into pb::IndexSection, awaits write_protobuf and then updates manifest.index_section to returned position. None explicitly clears inherited index_section so stale offsets cannot refer to unrelated bytes. A failed write may leave bytes partly emitted; local code supplies no rollback."
+        ],
+        [
+          196,
+          211,
+          "If transaction Some, take/move wrapper into pb::Transaction, await write_protobuf then set transaction_section; None clears inherited offset. Finally write_struct serializes current manifest and returns its starting offset. Earlier index/transaction writes and in-memory offset mutations survive later failure/cancellation; no footer, flush, shutdown, feature checks, CAS or cleanup in this helper. Transaction wrapper conversion itself is a move, while protobuf writer allocates encoding buffer (rust/lance-io/src/traits.rs:53-63; rust/lance-io/src/traits.rs:84-92)."
+        ],
+        [
+          212,
+          231,
+          "Public write_manifest on an open dyn Writer branches only on exact manifest default storage version: V1 awaits write_schema_dictionaries mutating schema, every V2_0/1/2/3 skips that step. Then delegate do_write_manifest. Legacy dictionary route is compatibility behavior, not a general new-format implementation hook. Return usize is metadata starting position, not byte count; caller must append footer and close writer."
+        ],
+        [
+          232,
+          252,
+          "Public empty ManifestDescribing implements legacy V1ManifestProvider::store_schema asynchronously. Clone schema into new Manifest with no fragments/bases and explicit V1; directly call do_write_manifest with no index/transaction and return Some(position). It bypasses write_manifest dictionary step because provider delegates only schema-envelope writing at this boundary. No inherent constructor/Default or public fields beyond empty struct."
+        ],
+        [
+          253,
+          268,
+          "Private cfg(test) module imports Arrow arrays/batches/schema, SelfDescribingFileReader, legacy FileReader/FileWriter and lance-file footer constants, random alphanumerics and tokio AsyncWriteExt. Tests below use in-memory stores and were read, not run. Imported footer major/minor are lance-file's0/2, not table facade's0/1; reader only checks magic/position here."
+        ],
+        [
+          269,
+          297,
+          "Roundtrip helper creates memory store/path, writes random alphanumeric prefix of requested length, makes deterministic repeated-a field name at least requested payload size and constructs default-format empty-fragment manifest. Builds config key/value map but never attaches it to manifest, so this fixture does not test persisted config values. Size inflation is schema-name content, not many fragments or dictionaries."
+        ],
+        [
+          298,
+          313,
+          "Roundtrip helper writes body, explicitly appends footer, explicitly shuts down, reads with unknown size and asserts Manifest equality, then deletes object. Manifest derives PartialEq, whose schema comparison ignores top-level schema metadata (rust/lance-table/src/format/manifest.rs:38-41; rust/lance-core/src/datatypes/schema.rs:874-878); this assertion is not a complete metadata-field oracle. The test pins body/footer/close sequence but not production commit arbitration or known-size retry behavior."
+        ],
+        [
+          314,
+          327,
+          "test_read_large_manifest invokes helper with prefix/body sizes(0,100000),(1000,100000),(1000,1000). Separate larger-than-chunk case uses1000-byte prefix and METADATA_READ_CHUNK_SIZE+4MiB filler, i.e.20MiB with contextual16MiB constant. They cover whole-tail, extra-range and multi-chunk shapes; no timing/peak-memory assertions or injected concurrency failures."
+        ],
+        [
+          328,
+          354,
+          "Clears-unwritten-index test sets index_section Some42, writes with indices/transaction None, adds footer/shuts down, then asserts in-memory and reread index_section None. It does not test inherited transaction_section clearing, Some(empty) indices, failed writes or retry on stale known size."
+        ],
+        [
+          355,
+          392,
+          "Legacy schema metadata test writes one Int32 i batch0..10 through V1FileWriter<ManifestDescribing>, finish_with_metadata adds lance:extra=for_test, opens self-described V1 reader and checks Arrow schema metadata value. Exercises legacy provider integration with fresh current writer, not released historical fixtures or v2 metadata. Closing brace ends module/file."
+        ]
+      ],
+      "limits": "All392 physical lines read and authored. Source tests not run. Chunk utilities, WriteExt, canonical caller and dataset adapters are contextual excerpts only and remain pending as complete files. This IO layer is not complete storage commit, feature-gate validation or released-format compatibility qualification; unchecked malformed-footer boundaries are static observations only."
+    },
+    {
+      "path": "rust/lance-file/src/lib.rs",
+      "module": "L1-modules/rust-lance-file.md",
+      "reviewed": true,
+      "role": "Crate module facade and asynchronous footer-only exact file-version recognition.",
+      "ranges": [
+        [
+          1,
+          18,
+          "SPDX; public concat,datatypes,format,reader,testing,version,versions,writer modules; io is pub(crate), compatibility_tests private cfg(test). Public LanceEncodingsIo reexport exposes selected IO type despite module visibility. Schema conversion, IO adapter, exact dispatch, writer facade and type checker are now covered; full reader and concrete version writers remain pending."
+        ],
+        [
+          19,
+          35,
+          "Imports shared MAGIC, core errors, ObjectStore/Path and exact version. determine_file_version(store,path,known_size)->Result<ConcreteFileVersion> obtains size via await store.size only if unknown, checked-converts it to usize or InvalidInput with path. Supplied usize size is trusted without checking actual length; no explicit size lookup then. Underlying open behavior is delegated, so this does not prove all HEAD requests avoided."
+        ],
+        [
+          36,
+          55,
+          "Reject size<8 with InvalidInput source text and path, then await open_with_size and exactly requested range size-8..size. Compare footer[4..] to MAGIC; mismatch returns contextual InvalidInput. No explicit received-length check: fewer than4 returned bytes can panic on slice; other non8 lengths fail magic comparison. Store/range IO errors propagate. No full file parse or schema/page integrity check."
+        ],
+        [
+          56,
+          60,
+          "Decode first two little-endian u16 values from four bytes, then delegate ConcreteFileVersion::from_footer_numbers. Magic match implies exactly8 returned bytes for this equality check. Unknown version error lacks path because decoder formats just the pair. The helper recognizes accepted footer aliases only and cannot establish complete file validity."
+        ]
+      ],
+      "limits": "Complete bounded read and authored physical-line coverage. No build, test, benchmark or network execution; delegated implementations remain pending unless separately analyzed."
+    }
+  ],
+  "changes": [
+    {
+      "path": "rust/lance-table/src/io/manifest.rs",
+      "range": [
+        298,
+        313
+      ],
+      "before": "Roundtrip helper writes body, explicitly appends footer, explicitly shuts down, reads with unknown size and asserts full Manifest equality, then deletes object. This pins sequence of body/footer/close in test but not production commit arbitration or known-size retry behavior.",
+      "after": "Roundtrip helper writes body, explicitly appends footer, explicitly shuts down, reads with unknown size and asserts Manifest equality, then deletes object. Manifest derives PartialEq, whose schema comparison ignores top-level schema metadata (rust/lance-table/src/format/manifest.rs:38-41; rust/lance-core/src/datatypes/schema.rs:874-878); this assertion is not a complete metadata-field oracle. The test pins body/footer/close sequence but not production commit arbitration or known-size retry behavior."
+    },
+    {
+      "path": "rust/lance-file/src/lib.rs",
+      "range": [
+        1,
+        18
+      ],
+      "before": "SPDX; public concat,datatypes,format,reader,testing,version,versions,writer modules; io is pub(crate), compatibility_tests private cfg(test). Public LanceEncodingsIo reexport exposes selected IO type despite module visibility. Reader/writer implementations are separate pending files.",
+      "after": "SPDX; public concat,datatypes,format,reader,testing,version,versions,writer modules; io is pub(crate), compatibility_tests private cfg(test). Public LanceEncodingsIo reexport exposes selected IO type despite module visibility. Schema conversion, IO adapter, exact dispatch, writer facade and type checker are now covered; full reader and concrete version writers remain pending."
+    },
+    {
+      "path": "L4-crosscutting/build-and-test.md",
+      "before": "They assert full metadata equality after body/footer/shutdown.",
+      "after": "They assert Manifest equality after body/footer/shutdown; derived Manifest equality delegates schema comparison to Schema::PartialEq, which ignores top-level schema metadata, so this is not a complete metadata oracle (rust/lance-table/src/format/manifest.rs:38-41; rust/lance-core/src/datatypes/schema.rs:874-878)."
+    }
+  ]
+}

@@ -1,0 +1,110 @@
+[
+  {
+    "id": 1,
+    "path": "rust/lance-table/src/format/overlay.rs",
+    "start": 242,
+    "end": 276,
+    "unit": "lines",
+    "read_at": "2026-10-04T07:03:03.099Z",
+    "evidence": "242 | /// Tombstone `fields` across a fragment's `overlays`, dropping any overlay left\n243 | /// with no live fields.\n244 | ///\n245 | /// Called when new base values are written for those fields (a DataReplacement,\n246 | /// or an in-place column rewrite): the stale overlay values must stop shadowing\n247 | /// the fresh base. Each matching field id is replaced with [`TOMBSTONE_FIELD_ID`]\n248 | /// in place, preserving the overlay's remaining fields and its coverage positions\n249 | /// (a per-field coverage bitmap stays aligned with `data_file.fields`). An overlay\n250 | /// whose fields are now all tombstoned is removed entirely. See the [module\n251 | /// documentation](self) for the tombstone invariant.\n252 | pub fn tombstone_overlay_fields(overlays: &mut Vec<DataOverlayFile>, fields: &[u32]) {\n253 |     for overlay in overlays.iter_mut() {\n254 |         let tombstoned: Vec<i32> = overlay\n255 |             .data_file\n256 |             .fields\n257 |             .iter()\n258 |             .map(|&field| {\n259 |                 if field >= 0 && fields.contains(&(field as u32)) {\n260 |                     TOMBSTONE_FIELD_ID\n261 |                 } else {\n262 |                     field\n263 |                 }\n264 |             })\n265 |             .collect();\n266 |         overlay.data_file.fields = tombstoned.into();\n267 |     }\n268 |     overlays.retain(|overlay| {\n269 |         overlay\n270 |             .data_file\n271 |             .fields\n272 |             .iter()\n273 |             .any(|&field| field != TOMBSTONE_FIELD_ID)\n274 |     });\n275 | }\n276 | "
+  },
+  {
+    "id": 3,
+    "path": "rust/lance-table/src/rowids/bitmap.rs",
+    "start": 67,
+    "end": 78,
+    "unit": "lines",
+    "read_at": "2026-10-04T07:03:03.100Z",
+    "evidence": "67 |     pub fn set(&mut self, i: usize) {\n68 |         self.data[i / 8] |= 1 << (i % 8);\n69 |     }\n70 | \n71 |     pub fn clear(&mut self, i: usize) {\n72 |         self.data[i / 8] &= !(1 << (i % 8));\n73 |     }\n74 | \n75 |     pub fn get(&self, i: usize) -> bool {\n76 |         self.data[i / 8] & (1 << (i % 8)) != 0\n77 |     }\n78 | "
+  },
+  {
+    "id": 4,
+    "path": "rust/lance-encoding/src/encodings/logical/primitive/miniblock.rs",
+    "start": 80,
+    "end": 111,
+    "unit": "lines",
+    "read_at": "2026-10-04T07:03:03.100Z",
+    "evidence": "80 | /// Describes the size of a mini-block chunk of data\n81 | ///\n82 | /// Mini-block chunks are designed to be small (just a few disk sectors)\n83 | /// and contain a power-of-two number of values (except for the last chunk)\n84 | ///\n85 | /// By default we limit a chunk to 4Ki values and slightly less than\n86 | /// 8KiB of compressed value data.  The byte budget remains the primary\n87 | /// constraint, so only encodings that compress many values into that\n88 | /// budget can use larger value counts when explicitly configured.\n89 | ///\n90 | /// The maximum number of values per chunk can be configured via the\n91 | /// `LANCE_MINIBLOCK_MAX_VALUES` environment variable.  This is only\n92 | /// useful in extremely bandwidth-limited environments; the default is\n93 | /// appropriate for local disks and same-region cloud object storage.\n94 | #[derive(Debug)]\n95 | pub struct MiniBlockChunk {\n96 |     // The size in bytes of each buffer in the chunk.\n97 |     //\n98 |     // In Lance 2.1, the chunk size is limited to 32KiB, so only 16-bits are used.\n99 |     // Since Lance 2.2, the chunk size uses u32 to support larger chunk size\n100 |     pub buffer_sizes: Vec<u32>,\n101 |     // The log (base 2) of the number of values in the chunk.  If this is the final chunk\n102 |     // then this should be 0 (the number of values will be calculated by subtracting the\n103 |     // size of all other chunks from the total size of the page)\n104 |     //\n105 |     // For example, 1 would mean there are 2 values in the chunk and 15 would mean there\n106 |     // are 32Ki values in the chunk.\n107 |     //\n108 |     // This must be <= log2(MAX_MINIBLOCK_VALUES) (i.e. <= 12 at the default of 4096)\n109 |     pub log_num_values: u8,\n110 | }\n111 | "
+  },
+  {
+    "id": 5,
+    "path": "protos/encodings_v2_1.proto",
+    "start": 447,
+    "end": 479,
+    "unit": "lines",
+    "read_at": "2026-10-04T07:03:03.100Z",
+    "evidence": "447 | /* Compression algorithm where all values have a constant value (encoded in the description)\n448 |  *\n449 |  * This is a leaf encoding, there is no compression applied to the data.\n450 |  *\n451 |  * The input can be any kind of data block.\n452 |  * There is no output.\n453 |  */\n454 | message Constant {\n455 |   // The value (TODO: define encoding for literals?)\n456 |   optional bytes value = 1;\n457 | }\n458 | \n459 | /* A compression scheme in which a single fixed-width block is \"packed\" into\n460 |  * a smaller fixed-width block values where each value has fewer bits.\n461 |  *\n462 |  * This is typically done by throwing away the most significant bits of each value when\n463 |  * those bits are all the same.\n464 |  *\n465 |  * In this scheme the number of bits per value is fixed across the entire buffer and stored\n466 |  * in this message.\n467 |  *\n468 |  * This is a transparent encoding.\n469 |  *\n470 |  * The input is a fixed-width data block.\n471 |  * The output is a single fixed-width data block.\n472 |  */\n473 | message OutOfLineBitpacking {\n474 |   // the number of bits of the uncompressed value. e.g. for a u32, this will be 32\n475 |   uint64 uncompressed_bits_per_value = 1;\n476 |   // The compression used to store the bitpacked values data block\n477 |   CompressiveEncoding values = 3;\n478 | }\n479 | "
+  },
+  {
+    "id": 10,
+    "path": "rust/lance-file/src/versions/v2_3/reader.rs",
+    "start": 91,
+    "end": 108,
+    "unit": "lines",
+    "read_at": "2026-10-04T07:03:03.100Z",
+    "evidence": "91 | fn validate_sparse_positions(positions: Option<&pb21::SparsePositionSet>) -> Result<()> {\n92 |     use pb21::sparse_position_set::Positions;\n93 | \n94 |     if let Some(Positions::Explicit(encoding)) =\n95 |         positions.and_then(|positions| positions.positions.as_ref())\n96 |     {\n97 |         validate_compressive_encoding(encoding)?;\n98 |     }\n99 |     Ok(())\n100 | }\n101 | \n102 | fn validate_sparse_validity(validity: Option<&pb21::SparseValiditySet>) -> Result<()> {\n103 |     if let Some(validity) = validity {\n104 |         validate_sparse_positions(validity.positions.as_ref())?;\n105 |     }\n106 |     Ok(())\n107 | }\n108 | "
+  },
+  {
+    "id": 11,
+    "path": "rust/lance-table/src/transaction/index_maintenance.rs",
+    "start": 1499,
+    "end": 1542,
+    "unit": "lines",
+    "read_at": "2026-10-04T07:03:03.100Z",
+    "evidence": "1499 |     #[test]\n1500 |     fn withdraws_the_whole_transition_reaching_the_rewritten_fragment() {\n1501 |         let entry = history();\n1502 |         let live: RoaringBitmap = [4u32, 8, 9].into_iter().collect();\n1503 |         // Provenance {1, 2} reaches F4 through F3; F6 (retired, on the\n1504 |         // unrelated F6 -> F8 lineage) is untouched and keeps the segment on\n1505 |         // the translating path, so it survives with {6}.\n1506 |         let mut indices = vec![segment(Some(&[1, 2, 6]), vec![0]), entry.clone()];\n1507 |         Transaction::withdraw_rewritten_coverage(\n1508 |             &mut indices,\n1509 |             Some(&lineage(&entry)),\n1510 |             &live,\n1511 |             &[(4, vec![0])],\n1512 |         );\n1513 |         assert_eq!(\n1514 |             indices[0].fragment_bitmap.as_ref().unwrap(),\n1515 |             &RoaringBitmap::from_iter([6u32])\n1516 |         );\n1517 |         // The entry itself is never touched.\n1518 |         assert_eq!(indices[1].fragment_bitmap, entry.fragment_bitmap);\n1519 |     }\n1520 | \n1521 |     /// The file of a segment whose retired sources were withdrawn still\n1522 |     /// holds their rows. A remainder that is live-only and unknown to the\n1523 |     /// history would be loaded as it is and serve those rows raw, so it is\n1524 |     /// withdrawn whole (the segment empties and is rebuilt).\n1525 |     #[test]\n1526 |     fn live_only_remainder_after_withdrawing_retired_sources_goes_whole() {\n1527 |         let entry = history();\n1528 |         let live: RoaringBitmap = [4u32, 8, 9].into_iter().collect();\n1529 |         let mut indices = vec![segment(Some(&[1, 2, 9]), vec![0]), entry.clone()];\n1530 |         Transaction::withdraw_rewritten_coverage(\n1531 |             &mut indices,\n1532 |             Some(&lineage(&entry)),\n1533 |             &live,\n1534 |             &[(4, vec![0])],\n1535 |         );\n1536 |         assert!(\n1537 |             indices[0].fragment_bitmap.as_ref().unwrap().is_empty(),\n1538 |             \"{:?}\",\n1539 |             indices[0].fragment_bitmap\n1540 |         );\n1541 |     }\n1542 | "
+  },
+  {
+    "id": 12,
+    "path": "rust/lance-core/src/cache/codec.rs",
+    "start": 104,
+    "end": 119,
+    "unit": "lines",
+    "read_at": "2026-10-04T07:03:03.101Z",
+    "evidence": "104 |     let type_id_len = u16::from_le_bytes(bytes.get(off..off + 2)?.try_into().ok()?) as usize;\n105 |     off += 2;\n106 | \n107 |     let type_id = std::str::from_utf8(bytes.get(off..off + type_id_len)?).ok()?;\n108 |     off += type_id_len;\n109 | \n110 |     let type_version = u32::from_le_bytes(bytes.get(off..off + 4)?.try_into().ok()?);\n111 |     off += 4;\n112 | \n113 |     Some(ParsedEnvelope {\n114 |         type_id,\n115 |         type_version,\n116 |         body_offset: off,\n117 |     })\n118 | }\n119 | "
+  },
+  {
+    "id": 13,
+    "path": "rust/lance-table/src/io/commit/external_manifest.rs",
+    "start": 1518,
+    "end": 1531,
+    "unit": "lines",
+    "read_at": "2026-10-04T07:03:03.101Z",
+    "evidence": "1518 |         let finalized = handler\n1519 |             .resolve_version_location(&base_path, version, object_store.inner.as_ref())\n1520 |             .await\n1521 |             .expect(\"a reader should finalize the selected staging manifest\");\n1522 |         let final_meta = object_store.inner.head(&final_path).await.unwrap();\n1523 |         assert_eq!(finalized.e_tag, final_meta.e_tag);\n1524 | \n1525 |         let indexed = external_store\n1526 |             .get_manifest_location(base_path.as_ref(), version)\n1527 |             .await\n1528 |             .unwrap();\n1529 |         assert_eq!(indexed.e_tag, None);\n1530 |     }\n1531 | "
+  },
+  {
+    "id": 14,
+    "path": "rust/lance-table/src/format/key_existence.rs",
+    "start": 150,
+    "end": 169,
+    "unit": "lines",
+    "read_at": "2026-10-04T07:03:03.101Z",
+    "evidence": "150 | /// Filter type for key existence data.\n151 | #[derive(Debug, Clone, DeepSizeOf, PartialEq)]\n152 | pub enum FilterType {\n153 |     ExactSet(HashSet<u64>),\n154 |     Bloom {\n155 |         bitmap: Vec<u8>,\n156 |         num_bits: u32,\n157 |         number_of_items: u64,\n158 |         probability: f64,\n159 |     },\n160 | }\n161 | \n162 | /// Tracks keys of inserted rows for conflict detection.\n163 | /// Only created when ON columns match the schema's unenforced primary key.\n164 | #[derive(Debug, Clone, DeepSizeOf, PartialEq)]\n165 | pub struct KeyExistenceFilter {\n166 |     pub field_ids: Vec<i32>,\n167 |     pub filter: FilterType,\n168 | }\n169 | "
+  },
+  {
+    "id": 16,
+    "path": "rust/lance-core/src/deepsize.rs",
+    "start": 200,
+    "end": 212,
+    "unit": "lines",
+    "read_at": "2026-10-04T07:03:03.101Z",
+    "evidence": "200 | \n201 | impl<K: DeepSizeOf, V: DeepSizeOf, S> DeepSizeOf for HashMap<K, V, S> {\n202 |     fn deep_size_of_children(&self, context: &mut Context) -> usize {\n203 |         // Each bucket holds a key-value pair plus hash metadata (~1 byte control per bucket).\n204 |         // Robin hood / Swiss table capacity is always a power of 2.\n205 |         let capacity_bytes = self.capacity() * (size_of::<K>() + size_of::<V>() + 1);\n206 |         let children: usize = self\n207 |             .iter()\n208 |             .map(|(k, v)| k.deep_size_of_children(context) + v.deep_size_of_children(context))\n209 |             .sum();\n210 |         capacity_bytes + children\n211 |     }\n212 | }"
+  },
+  {
+    "id": 17,
+    "path": "rust/lance-table/src/rowids/index.rs",
+    "start": 1144,
+    "end": 1199,
+    "unit": "lines",
+    "read_at": "2026-10-04T07:03:03.101Z",
+    "evidence": "1144 |     #[test]\n1145 |     fn test_overlapping_chunks_sparse_with_deletions() {\n1146 |         // Interleaved (overlapping) id ranges plus a deletion that leaves a hole,\n1147 |         // so the union doesn't tile the span. Every live id must still resolve.\n1148 |         let fragment_indices = vec![\n1149 |             FragmentRowIdIndex {\n1150 |                 fragment_id: 10,\n1151 |                 row_id_sequence: Arc::new(RowIdSequence(vec![U64Segment::SortedArray(\n1152 |                     vec![1, 3, 5, 7, 9].into(),\n1153 |                 )])),\n1154 |                 deletion_vector: Arc::new(DeletionVector::default()),\n1155 |             },\n1156 |             FragmentRowIdIndex {\n1157 |                 fragment_id: 20,\n1158 |                 row_id_sequence: Arc::new(RowIdSequence(vec![U64Segment::SortedArray(\n1159 |                     vec![0, 2, 4, 6, 8].into(),\n1160 |                 )])),\n1161 |                 // Delete offset 2 (id 4) -> a hole in the span.\n1162 |                 deletion_vector: Arc::new(DeletionVector::from_iter(vec![2])),\n1163 |             },\n1164 |         ];\n1165 | \n1166 |         let index = RowIdIndex::new(&fragment_indices).unwrap();\n1167 | \n1168 |         assert_eq!(\n1169 |             index.get(0).unwrap(),\n1170 |             Some(RowAddress::new_from_parts(20, 0))\n1171 |         );\n1172 |         assert_eq!(\n1173 |             index.get(1).unwrap(),\n1174 |             Some(RowAddress::new_from_parts(10, 0))\n1175 |         );\n1176 |         assert_eq!(\n1177 |             index.get(2).unwrap(),\n1178 |             Some(RowAddress::new_from_parts(20, 1))\n1179 |         );\n1180 |         assert_eq!(\n1181 |             index.get(3).unwrap(),\n1182 |             Some(RowAddress::new_from_parts(10, 1))\n1183 |         );\n1184 |         assert_eq!(index.get(4).unwrap(), None);\n1185 |         // Surviving ids keep their original offsets (the hole is not compacted).\n1186 |         assert_eq!(\n1187 |             index.get(6).unwrap(),\n1188 |             Some(RowAddress::new_from_parts(20, 3))\n1189 |         );\n1190 |         assert_eq!(\n1191 |             index.get(8).unwrap(),\n1192 |             Some(RowAddress::new_from_parts(20, 4))\n1193 |         );\n1194 |         assert_eq!(\n1195 |             index.get(9).unwrap(),\n1196 |             Some(RowAddress::new_from_parts(10, 4))\n1197 |         );\n1198 |     }\n1199 | "
+  },
+  {
+    "id": 20,
+    "path": "rust/lance-file/src/versions/v2_2/mod.rs",
+    "start": 48,
+    "end": 61,
+    "unit": "lines",
+    "read_at": "2026-10-04T07:03:03.101Z",
+    "evidence": "48 | /// Count physical columns represented by a field in a v2.2 footer.\n49 | pub fn physical_column_count(field: &Field) -> usize {\n50 |     structural::physical_column_count(field)\n51 | }\n52 | \n53 | /// Build persisted field-to-column entries for a v2.2 data file.\n54 | pub fn data_file_columns(schema: &Schema) -> (Vec<i32>, Vec<i32>) {\n55 |     structural::data_file_columns(schema)\n56 | }\n57 | \n58 | pub(super) fn field_id_to_column_index(schema: &Schema) -> BTreeMap<u32, u32> {\n59 |     structural::field_id_to_column_index(schema)\n60 | }\n61 | "
+  }
+]

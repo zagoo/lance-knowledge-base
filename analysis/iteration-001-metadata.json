@@ -1,0 +1,277 @@
+{
+  "iteration": 1,
+  "files": [
+    {
+      "path": "protos/AGENTS.md",
+      "reviewed": true,
+      "role": "Maintainer policy for protobuf work, including persisted-format review, execution-wire compatibility, optional-field semantics, and schema documentation. It is policy documentation, not runtime code or a public API.",
+      "ranges": [
+        [
+          1,
+          4,
+          "The title scopes the guide to protobufs and the root AGENTS.md link incorporates cross-language standards."
+        ],
+        [
+          5,
+          10,
+          "Persisted-format protobuf changes require a PMC vote enforced by format-spec-vote. Keep the schema change with its matching docs/src/format change and compilation-only library adjustments, then implement separately. ann.proto, filtered_read.proto, and table_identifier.proto are execution wire contracts whose implementation changes belong together and do not require this format vote or format-doc change."
+        ],
+        [
+          11,
+          16,
+          "Stable persisted contracts preserve existing field numbers and backwards compatibility. Exclusively unstable schemas need not preserve earlier unstable revisions, but shared stable usage must be checked first. Execution-wire field numbers stay compatible unless all producers and consumers upgrade atomically."
+        ],
+        [
+          17,
+          22,
+          "Use optional for absent-versus-zero presence, mapping to Rust Option and has_* accessors. Prefer structured messages, operation-specific field scope, one representation of each fact, and parallel sequences when keys already exist elsewhere."
+        ],
+        [
+          23,
+          27,
+          "Document both presence states and precise terms. Multiline comments use block syntax for folding, single-line comments use //. ci/check_proto_comments.py, pre-commit, and the Protobuf lint workflow enforce this convention; --fix can rewrite offenders."
+        ]
+      ],
+      "limits": "These are contributor rules, not evidence that all current files conform (protos/AGENTS.md:5-27). The linked root policy and CI implementation require their own coverage."
+    },
+    {
+      "path": "protos/fragment_metadata.proto",
+      "reviewed": true,
+      "role": "Public lance.table persisted metadata contracts for fragments, data/overlay/deletion files, row lineage, and fragment-tree routing and mutations. It defines state and ordering rules, with no executable mutation or reader implementation.",
+      "ranges": [
+        [
+          1,
+          7,
+          "SPDX license and ownership, proto3 syntax, and lance.table package establish the schema without imports."
+        ],
+        [
+          8,
+          33,
+          "DataFragment groups column files for the same rows. Missing schema columns within a fragment read as all-null. id=1 is dataset-unique, files=2 is the file list, deletion_file=3 identifies tombstones, and overlays=11 must be empty unless manifest flag 64 is set. The overlay list is ordered: later entries win ties in committed_version for the same cell. The inline-tombstone bitmap question is a TODO, not an implemented arm."
+        ],
+        [
+          34,
+          53,
+          "row_id_sequence holds serialized RowIdSequence bytes inline_row_ids=5, or an empty RowLineageColumn marker column_row_ids=12 referring to a file field -3. Row IDs follow physical row order, including unsorted example [1,42,3]. The comments say current writers keep inline bytes regardless of size. Any column arm requires manifest spilled-lineage flag 2048; otherwise an older reader could see an unset oneof and falsely infer no row IDs. This is a schema contract; current writer behavior still needs source confirmation. Empty marker declaration: protos/fragment_metadata.proto:288-305."
+        ],
+        [
+          54,
+          73,
+          "last_updated_at_version_sequence uses inline bytes=7 or column marker=13 with reserved field ID -5. created_at_version_sequence uses inline bytes=9 or marker=14 with field ID -4. Both comments say current writers store inline regardless of size, and both column variants share the 2048 gate. Shared feature-bit requirement: protos/fragment_metadata.proto:43-51."
+        ],
+        [
+          74,
+          89,
+          "Former external byte-range arms reserve numeric tags 6,8,10 and the three external_* names. The comment says no Lance writer ever emitted them and column arms replaced the design; do not interpret these reservations as readable active fields. physical_rows=4 counts original rows including deleted rows; logical count subtracts deletion_file.num_deleted_rows."
+        ],
+        [
+          90,
+          125,
+          "DataFile.path=1 is dataset-relative. fields=2 lists signed field IDs: in-memory -1 is unassigned and must not persist; -2 is tombstoned; all negatives are reserved system values rather than schema fields and projection skips them, including -3/-4/-5 lineage IDs. The v1 comment assigns IDs by file position plus existing maximum and counts nested struct/list fields but one ID for a fixed-size list; v1 IDs are sorted but need not be contiguous. For v2 the field ID cannot determine the physical column because encoding choices change column count, so use column_indices. The example's wording about second fragments versus files is retained as a comment-level account, not confirmed allocator behavior."
+        ],
+        [
+          126,
+          170,
+          "column_indices=3 is empty for v1, otherwise parallels fields exactly. -1 marks a field without its own top-level column; every other column index must be unique. The packed-struct/list/FSL example maps nine fields to [0,-1,-1,1,3,4,5,6,7], illustrating packed children and optional FSL structural columns. file_major_version=4 and file_minor_version=5 record file version; both zero identify historical 0.1 or 0.2 and do not uniquely choose one."
+        ],
+        [
+          171,
+          184,
+          "file_size_bytes=6 supplies known disk length for fast footer lookup; zero means unknown rather than a known empty file. Optional base_id=7 refers to Manifest.base_paths for imported/referenced files. Presence must survive serialization; this declaration does not fully define absence resolution."
+        ],
+        [
+          185,
+          221,
+          "DataOverlayFile stores replacement cell values without rewriting base files. Consult overlays newest to oldest, falling through to base when absent; deletions take precedence and suppress overlay values. data_file=1 contains one value column per declared field, no row-offset key column. Value position equals the count of coverage bits below the physical offset (zero-based rank), and columns can differ in length. coverage selects shared_offset_bitmap bytes=2 (32-bit Roaring offsets shared by every field) or FieldCoverage=4 (independent field offsets). Dense UPDATE and sparse MERGE are motivating examples, not different file types."
+        ],
+        [
+          222,
+          239,
+          "committed_version=3 is the commit that made the overlay effective, not its read version. It is stamped at commit and restamped on retry. An index built at dataset_version >= committed_version incorporates the overlay; an older index must exclude affected cells for those fields and reevaluate current values. Greater committed_version wins across overlays; equal versions use later DataFragment.overlays position. Incorrect stamping or sorting changes query results."
+        ],
+        [
+          240,
+          250,
+          "FieldCoverage.offset_bitmaps=1 is a repeated bytes list with one 32-bit Roaring bitmap per data_file.fields entry in the same order. A present offset whose value is NULL overrides to NULL; an absent offset falls through to base. A sparse NULL update must not be encoded by simply omitting the offset."
+        ],
+        [
+          251,
+          287,
+          "DeletionFile path is {root}/_deletions/{fragment_id}-{read_version}-{id}.{extension}. Nested DeletionFileType is ARROW_ARRAY=0 or BITMAP=1. Schema comments describe one Arrow IPC batch with an Int32Array column and .arrow, or Roaring bitmap and .bin. The current Rust implementation instead requires row_id:UInt32; this source/comment discrepancy is explicit in rust/lance-table/src/io/deletion.rs:25-34 and rust/lance-table/src/io/deletion.rs:162-195. Comments motivate sparse versus dense selection but provide no threshold. Fields are file_type=1, read_version=2, concurrent-writer differentiating id=3, num_deleted_rows=4, and optional base_id=7 for Manifest.base_paths. Deletions operate on offsets, not stable logical IDs."
+        ],
+        [
+          288,
+          306,
+          "RowLineageColumn is an empty marker. Exactly one DataFragment.files entry carries the relevant reserved field ID (-3 row ID, -4 creation version, -5 update version), and its column_indices identifies the column. It may share a data file or be separate; values are non-null uint64, exactly physical_rows long in physical order. Only v2 data files support this mapping; v1 datasets keep sequences inline. Metadata is stored once in files, not repeated in the marker."
+        ],
+        [
+          307,
+          323,
+          "ExternalFile is a table-relative path=1 plus byte offset=2 and size=3, documented for fragment reuse index details rather than the removed external lineage arms. FragmentTreeMetadata.layout currently has one tree=1 alternative; it selects the fragment storage layout. Removed external lineage arms: protos/fragment_metadata.proto:74-81."
+        ],
+        [
+          324,
+          349,
+          "FragmentTree selects inline_root=1 or root_uuid bytes=2. UUID must be exactly 16 display-order bytes and resolves to _bt/root/{lowercase hyphenated UUID}.root under this dataset. mutations_since_root=3 carries mutations absent from that root; next_action_sequence=4 is the next unused sequence for this version. FragmentTreeRoot stores children=1, buffer=2, and next_action_sequence=3 meaning the first action not represented by the root. Confusing root and version watermarks risks replaying or skipping mutations."
+        ],
+        [
+          350,
+          391,
+          "FragmentTreeChild routing is ordered by min_key and owns [min_key,next min_key), with the final upper bound inherited. path=1 is relative to resolved dataset; optional base_id=2 inherits the containing object's dataset when absent and otherwise matches Manifest.base_paths, including valid ID zero. min_key=3 need not exist in the child. num_keys=4, total_rows=7, and visible_rows=10 include the object's buffered mutations; height=5 counts edges to leaves, num_children=6 direct children, both zero for leaves; object_size=8 is stored byte length. materialized_through_action_sequence=9 records a leaf's fully applied watermark with no qualifying mutations above it, zero meaning none; interiors must use zero."
+        ],
+        [
+          392,
+          406,
+          "FragmentTreeNode holds children=1 and buffered mutations=2. FragmentTreeMutation holds action_sequence=1, FragmentAction action=2, and signed after-minus-before aggregate deltas fragment_count_delta=3, total_rows_delta=4, visible_rows_delta=5. Signed deltas preserve removals and deletions; these are validated changes by contract, not validation code."
+        ],
+        [
+          407,
+          421,
+          "FragmentAction.action oneof selects complete upsert_fragment=1, remove_fragment ID=2, AddDataFile=3, RemoveDataFile=4, AddDeletionFile=5, ClearDeletionFile=6, or ReplaceDataFile=7. Upsert replaces the entire fragment and covers changes lacking narrower actions, including overlays, version sequences, and row IDs. Treating it as a partial patch would retain obsolete state."
+        ],
+        [
+          422,
+          442,
+          "AddDataFile(frag_id=1,file=2) appends to ordered files. RemoveDataFile(frag_id=1,path=2) removes every matching path while preserving order of others. AddDeletionFile(frag_id=1,deletion_file=2) and ClearDeletionFile(frag_id=1) carry deletion changes. Missing-fragment handling and validation errors are not specified here."
+        ],
+        [
+          443,
+          455,
+          "ReplaceDataFile carries frag_id=1, expected_path=2, path=3, file_size_bytes=4, optional base_id=5. Replace only the first expected-path match, changing path/size/base while retaining column mapping and file version. An absent base inherits the dataset resolved for the tree object or version manifest containing the mutation; present base matches Manifest.base_paths. This differs deliberately from RemoveDataFile's all-match rule. Supporting all-match rule: protos/fragment_metadata.proto:428-432."
+        ]
+      ],
+      "limits": "This schema supplies file/tree state and explicit ordering invariants (protos/fragment_metadata.proto:8-455). It does not demonstrate actual reader/writer support, transaction conflict handling, tree balancing, mutation validation, or format stability of each feature. The inline-writer comments and column-arm definitions coexist; support must be traced rather than equating declared fields with emitted files (protos/fragment_metadata.proto:34-81)."
+    },
+    {
+      "path": "protos/index_old.proto",
+      "reviewed": true,
+      "role": "Public persisted index-detail protobuf types intentionally retained in the historical lance.table namespace. The filename does not mean every field is unused; this file still contains evolving details for existing index kinds.",
+      "ranges": [
+        [
+          1,
+          7,
+          "License, proto3 syntax, and lance.table package define the namespace which participates in serialized type identity."
+        ],
+        [
+          8,
+          24,
+          "The instruction prohibits adding new index detail kinds here: use index.proto. Existing messages can be extended here, because older readers expect historical lance.table BTree identities. Empty details mean properties are hard-coded or stored inside index files, with future query-planning metadata anticipated. The comment calls index.proto's namespace lance.index, while its actual declaration is lance.index.pb; exact package declarations take precedence over this abbreviated comment. Supporting package declaration: protos/index.proto:6-6."
+        ],
+        [
+          25,
+          34,
+          "BTreeIndexDetails, BitmapIndexDetails, LabelListIndexDetails, and NGramIndexDetails are empty type markers. ZoneMapIndexDetails.rows_per_zone is optional uint64 tag 1; absent represents old datasets and prevents seed-writer creation, not an implicit numeric zone size."
+        ],
+        [
+          35,
+          45,
+          "ZoneMap use_seeds optional bool tag 2 distinguishes absent historical disabled, explicit false, and true enabling per-fragment seed buffers in data files harvested for incremental updates to avoid full column scans. The creation-time comment says variable-length and fixed-width wider than eight bytes default true, narrow fixed-width false. On-disk absence must not be interpreted using that creation-time default."
+        ],
+        [
+          46,
+          54,
+          "ZoneMap has_null_bitmap optional bool tag 3 enables exact null-row address tracking. Absent/false use legacy approximate zone statistics for IS NULL; true makes IS NULL exact and supports IS NOT NULL without a full scan. The closing brace ends ZoneMap and the next declaration begins InvertedIndexDetails."
+        ],
+        [
+          55,
+          80,
+          "InvertedIndexDetails.DocumentGranularity enum is ROW=0, LIST_ELEMENT=1. CodeTokenizerConfig has bool split_identifiers=1 (camel-case subwords), optional split_on_numerics=2 (letter/number boundaries) and preserve_original=3 (full lexical identifier alongside subwords), and bool index_operators=4. Absent optional options use tokenizer defaults; their concrete default booleans are not provided here. Operators such as ::, ->, != are documented off by default due to frequency noise."
+        ],
+        [
+          81,
+          98,
+          "base_tokenizer optional string=1 identifies concrete lexical tokenizer after document extraction; analyzer profiles expand into it plus concrete options before persistence. Presence detects older blank details. Remaining fields are language string=2, with_position bool=3, max_token_length optional uint32=4, lower_case=5, stem=6, remove_stop_words=7, ascii_folding=8 booleans, min_ngram_length=9 and max_ngram_length=10 uint32, prefix_only bool=11. These names specify configuration choices but not processing order, language validation, or numeric bounds."
+        ],
+        [
+          99,
+          118,
+          "block_size optional uint32=12 counts documents per compressed posting block: absence mandates legacy 128; present 256 is valid with formats 3/4. code_config message=13 records explicit code-tokenizer configuration when present and no code-specific configuration when absent. document_granularity enum=14 defaults to row behavior for absent wire values. posting_format_version optional uint32=15 identifies posting payload separately from overall inverted index_version; do not conflate these version axes."
+        ]
+      ],
+      "limits": "Namespace preservation and new-kind placement are explicit (protos/index_old.proto:8-17); the actual new namespace is lance.index.pb (protos/index.proto:6-6). Runtime implementation and historical fixture compatibility remain separate obligations. Code-level defaults must be compared to the comment-specified creation and decoding rules (protos/index_old.proto:29-52; protos/index_old.proto:99-118)."
+    },
+    {
+      "path": "protos/index.proto",
+      "reviewed": true,
+      "role": "Public lance.index.pb protobuf contracts for vector metadata and current index detail extensions, including JSON, Bloom filter, R-tree, FM, and experimental MinHash LSH detail markers. Declaration here is not proof every index path is current or supported by every reader.",
+      "ranges": [
+        [
+          1,
+          16,
+          "License, proto3 and lance.index.pb precede Any and index_old.proto imports. IndexType declares only VECTOR=0; this enum is not an exhaustive list of all index kinds in the repository."
+        ],
+        [
+          17,
+          35,
+          "Index has unique dataset index name=1, repeated indexed column names=2, build dataset_version=3, IndexType=4, and implementation oneof VectorIndex vector_index=5. Its shape describes this metadata envelope, not the newer generic Any detail registry."
+        ],
+        [
+          36,
+          56,
+          "Tensor.DataType enumerates BFLOAT16=0, FLOAT16=1, FLOAT32=2, FLOAT64=3, UINT8=4, UINT16=5, UINT32=6, UINT64=7. Tensor carries data_type=1, repeated uint32 shape=2, bytes data=3. The comments define shape dimensions but not byte order, strides, validation, or memory alignment."
+        ],
+        [
+          57,
+          77,
+          "IVF metadata stores repeated float centroids=1 (deprecated in prose, with the actual protobuf deprecated option commented out), repeated uint64 partition offsets=2, repeated uint32 record lengths=3, Tensor centroids_tensor=4, and optional double KMeans loss=5. Centroid shape is num_partitions by dimension. Implementations must decide compatibility precedence; this schema does not say what happens if both centroid forms are populated."
+        ],
+        [
+          78,
+          95,
+          "PQ records num_bits=1, num_sub_vectors=2, dimension=3, repeated float codebook=4, and Tensor codebook_tensor=5. Both codebook descriptions require dimension times 2^num_bits scalar values. This is metadata, not the sub-vector layout or distance implementation; no legal-bit-range validation appears."
+        ],
+        [
+          96,
+          116,
+          "TransformType declares OPQ=0. Transform stores matrix file position=1, repeated uint32 shape [rows,cols]=2, and transform type=3. Flat is an empty marker. These encode stage descriptions without executing a transformation."
+        ],
+        [
+          117,
+          152,
+          "DiskAnn carries spec=1, filename=2, r=3, alpha=4, capital-L field L=5, and repeated graph entry IDs=6. The schema supplies parameter names but not the graph algorithm or numeric bounds. VectorIndexStage.stage selects Flat=1, IVF=2, PQ=3, Transform=4, or DiskAnn=5; retaining order in the surrounding repeated stage list is essential to represent a pipeline. Ordered pipeline example: protos/index.proto:176-184."
+        ],
+        [
+          153,
+          189,
+          "VectorMetricType declares L2=0, Cosine=1, Dot=2, Hamming=3. VectorIndex stores spec_version=1, dimension=2, repeated stages=3, metric_type=4; its example composes IVF then PQ with 8 bits and 16 subvectors. The enum names do not specify normalization or squared-versus-unsquared numeric outputs."
+        ],
+        [
+          190,
+          220,
+          "VectorIndexDetails is stored in manifest index_details. metric_type=1 chooses metric; target_partition_size=2 uses zero for unset; optional HnswParameters=3 indicates an HNSW layer. Nested ProductQuantization has num_bits=1 and num_sub_vectors=2; ScalarQuantization has num_bits=1; RabitQuantization has num_bits=1 and RotationType=2 with FAST=0, MATRIX=1; FlatCompression is empty and means stored unquantized vectors."
+        ],
+        [
+          221,
+          234,
+          "The compression oneof uses pq=4, sq=5, rq=6, flat=8; tag 7 is not declared or reserved in this text. runtime_hints string map=9 contains nonstructural build preferences, namespaced by reverse DNS. Unrecognized keys must be silently ignored by runtimes; making them structural would violate the comment's portability contract."
+        ],
+        [
+          235,
+          249,
+          "HnswParameters has max_connections=1 (M, outgoing-edge bound: more improves recall at memory/build cost), construction_ef=2 (dynamic candidate list size during construction), and max_level=3. Defaults, legality checks, and exact complexity are not given."
+        ],
+        [
+          250,
+          259,
+          "JsonIndexDetails stores JSON path string=1 and google.protobuf.Any target_details=2, allowing nested index-kind details. BloomFilterIndexDetails, RTreeIndexDetails, and FMIndexDetails are empty markers. Empty metadata messages do not imply empty index files or lack of implementation options."
+        ],
+        [
+          260,
+          286,
+          "MinHashLshIndexDetails is explicitly experimental: incompatible detail/file changes may require rebuilding the index, not rewriting data, and the feature may be removed if stabilization fails. Every segment must share identical details, query signatures must be comparable, and both index files repeat serialized details in schema metadata to detect mismatches. Readers validate every field before allocation or file read. num_hashes=1 is in [1,4096] and divisible by num_bands; num_bands=2 is in [1,256]; each band covers num_hashes/num_bands consecutive values."
+        ],
+        [
+          287,
+          302,
+          "shingle_size uint32=3 is at least one; text with fewer tokens forms a single shingle of all tokens. Required tokenizer=4 is historical lance.table.InvertedIndexDetails rebuilt from metadata alone. Posting-only fields with_position, block_size, posting_format_version, and document_granularity are retained unchanged but ignored. Unrepresentable custom stop words/document extraction and external jieba/lindera dictionaries are rejected by the contract. Empty text behavior is not resolved by this paragraph alone."
+        ],
+        [
+          303,
+          311,
+          "signature_version=5 versions the entire signature procedure: bundled tokenizer streams, shingling, hashing, permutation coefficients and seed, compression, and band keys. Bump when a change makes signatures incomparable; a reader rejects an unimplemented version. This is independent of index file format version, so file readability alone does not imply signature comparability."
+        ]
+      ],
+      "limits": "The explicit experimental marker applies to MinHash LSH (protos/index.proto:260-275), not automatically to every message. Tag/default contracts, validation requirements, and algorithm descriptions need reconciliation with current readers and writers; none of this file contains executable validation. The imports preserve access to old namespace details (protos/index.proto:8-9)."
+    }
+  ]
+}

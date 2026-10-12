@@ -1,0 +1,441 @@
+@@ -1,6 +1,7 @@
+    1  // SPDX-License-Identifier: Apache-2.0
+    2  // SPDX-FileCopyrightText: Copyright The Lance Authors
+    3  
+    4 +use std::collections::HashMap;
+    5  use std::sync::Arc;
+    6  
+    7  use futures::{FutureExt, TryStreamExt};
+
+@@ -33,7 +34,7 @@ use super::vector::ivf::{
+   34      optimize_vector_indices, select_steady_state_rebalance, vector_segment_compatibility,
+   35  };
+   36  use super::vector::{LogicalVectorIndex, VectorIndexParams, details, fresh_vector_segment_params};
+   36 -use super::{CreateIndexBuilder, DatasetIndexInternalExt};
+   37 +use super::{CreateIndexBuilder, DatasetIndexExt, DatasetIndexInternalExt};
+   38  use crate::dataset::Dataset;
+   39  use crate::dataset::index::LanceIndexStoreExt;
+   40  use crate::dataset::rowids::load_row_id_sequences;
+
+@@ -141,6 +142,78 @@ pub async fn build_old_data_filter(
+  142      }
+  143  }
+  144  
+  145 +/// On a table with a tagged fragment reuse history, the fragments each segment
+  146 +/// ANSWERS FOR right now: its coverage as derived by the tagged reader (live
+  147 +/// destinations reached through the ledger plus directly covered live
+  148 +/// fragments). `None` on every other table.
+  149 +///
+  150 +/// A tagged segment's stored bitmap is provenance, not coverage: it names the
+  151 +/// fragments the segment was built from, which a rewrite may have retired,
+  152 +/// while the segment's addresses are translated to live fragments when it is
+  153 +/// opened. Maintenance that reads a segment through the translating loader
+  154 +/// therefore sees rows in these derived fragments, and must filter and account
+  155 +/// for old data in this domain rather than in `stored ∩ live` (which is empty
+  156 +/// for a fully rewritten segment and would drop every translated row).
+  157 +///
+  158 +/// `staged` supplies the plan of segments the manifest does not list (a staged
+  159 +/// build being merged, see `plan_staged_segments`); their coverage comes from
+  160 +/// that plan. A segment that is neither staged nor registered in the manifest
+  161 +/// is an error: "not registered" is not "covers nothing".
+  162 +pub async fn tagged_segment_coverage(
+  163 +    dataset: &Dataset,
+  164 +    segments: &[&IndexMetadata],
+  165 +    staged: Option<&crate::index::frag_reuse::StagedRemappingPlans>,
+  166 +) -> Result<Option<HashMap<Uuid, RoaringBitmap>>> {
+  167 +    use crate::index::frag_reuse::SegmentRemappingPlan;
+  168 +
+  169 +    let stored = crate::index::load_all_indices(dataset).await?;
+  170 +    if !stored
+  171 +        .iter()
+  172 +        .any(lance_table::system_index::frag_reuse::metadata::is_tagged)
+  173 +    {
+  174 +        return Ok(None);
+  175 +    }
+  176 +    let derived = dataset.load_indices().await?;
+  177 +    let mut coverage = HashMap::with_capacity(segments.len());
+  178 +    for segment in segments {
+  179 +        if let Some(plan) = staged.and_then(|plans| plans.get(&segment.uuid)) {
+  180 +            let bitmap = match plan {
+  181 +                SegmentRemappingPlan::Identity => segment
+  182 +                    .fragment_bitmap
+  183 +                    .as_ref()
+  184 +                    .map(|bitmap| bitmap & dataset.fragment_bitmap.as_ref())
+  185 +                    .unwrap_or_default(),
+  186 +                SegmentRemappingPlan::Translate { coverage, .. } => coverage.clone(),
+  187 +                SegmentRemappingPlan::MissingCoverage(_) => {
+  188 +                    return Err(Error::not_supported(format!(
+  189 +                        "FRI query coverage is unavailable for staged segment {}",
+  190 +                        segment.uuid
+  191 +                    )));
+  192 +                }
+  193 +            };
+  194 +            coverage.insert(segment.uuid, bitmap);
+  195 +            continue;
+  196 +        }
+  197 +        if !stored.iter().any(|entry| entry.uuid == segment.uuid) {
+  198 +            return Err(Error::invalid_input(format!(
+  199 +                "segment {} is not registered in the manifest; a staged segment must be \
+  200 +                 merged with its own translation plan",
+  201 +                segment.uuid
+  202 +            )));
+  203 +        }
+  204 +        // A registered segment the tagged reader excludes (no coverage it can
+  205 +        // honor) has no old data reachable here; leave it empty rather than
+  206 +        // fail, the loader reports the precise reason if it is actually opened.
+  207 +        let bitmap = derived
+  208 +            .iter()
+  209 +            .find(|entry| entry.uuid == segment.uuid)
+  210 +            .and_then(|entry| entry.fragment_bitmap.clone())
+  211 +            .unwrap_or_default();
+  212 +        coverage.insert(segment.uuid, bitmap);
+  213 +    }
+  214 +    Ok(Some(coverage))
+  215 +}
+  216 +
+  217  /// Split the stored fragment coverage of `segments` into fragments still live in
+  218  /// `dataset` (`effective`) and fragments that compaction or deletion has already
+  219  /// retired (`deleted`).
+
+@@ -191,17 +264,39 @@ pub fn fragment_reuse_affects_segment(
+  264                  .new_frags
+  265                  .iter()
+  266                  .any(|fragment| coverage.contains(fragment.id as u32));
+  194 -            (version.dataset_version >= dataset_version && covers_old)
+  195 -                || (version.dataset_version > dataset_version && covers_new)
+  267 +            // A segment built at or before `version.dataset_version` predates the
+  268 +            // rewrite, even if its coverage already moved onto the new fragments.
+  269 +            version.dataset_version >= dataset_version && (covers_old || covers_new)
+  270          })
+  271      })
+  272  }
+  273  
+  274  /// Build one [`OldIndexDataFilter`] per segment and return their effective coverage.
+  275 +///
+  276 +/// `staged` carries the plans of segments the manifest does not list (see
+  277 +/// [`tagged_segment_coverage`]); committed merges pass `None`.
+  278  pub async fn build_per_segment_filters(
+  279      dataset: &Dataset,
+  280      segments: &[&IndexMetadata],
+  281 +    staged: Option<&crate::index::frag_reuse::StagedRemappingPlans>,
+  282  ) -> Result<(RoaringBitmap, Vec<Option<OldIndexDataFilter>>)> {
+  283 +    if let Some(coverage) = tagged_segment_coverage(dataset, segments, staged).await? {
+  284 +        // Translated addresses live in the derived coverage; retired source
+  285 +        // fragments never appear in them, so there is nothing to remove.
+  286 +        let mut effective_union = RoaringBitmap::new();
+  287 +        let mut filters = Vec::with_capacity(segments.len());
+  288 +        for segment in segments {
+  289 +            let effective = coverage.get(&segment.uuid).cloned().ok_or_else(|| {
+  290 +                Error::internal(format!(
+  291 +                    "tagged coverage missing for segment {}",
+  292 +                    segment.uuid
+  293 +                ))
+  294 +            })?;
+  295 +            effective_union |= &effective;
+  296 +            filters.push(build_old_data_filter(dataset, &effective, &RoaringBitmap::new()).await?);
+  297 +        }
+  298 +        return Ok((effective_union, filters));
+  299 +    }
+  300      if dataset.manifest.uses_stable_row_ids() {
+  301          let mut effective_union = RoaringBitmap::new();
+  302          let mut filters = Vec::with_capacity(segments.len());
+
+@@ -470,21 +565,39 @@ async fn merge_scalar_indices<'a>(
+  565          .copied()
+  566          .unwrap_or(old_indices[old_indices.len() - 1]);
+  567      let reference_index = dataset
+  473 -        .open_scalar_index(field_path, &reference_idx.uuid, &NoOpMetricsCollector)
+  568 +        .open_scalar_index_for_maintenance(field_path, &reference_idx.uuid, &NoOpMetricsCollector)
+  569          .await?;
+  570      let update_criteria = reference_index.update_criteria();
+  571  
+  572      // Effective = bitmap ∩ live fragments; deleted = bitmap \ live fragments.
+  478 -    let (effective_old_frags, deleted_old_frags) =
+  479 -        split_segment_coverage(dataset.as_ref(), selected_old_indices.iter().copied());
+  573 +    // On a tagged table the selected segments' old data is instead the coverage
+  574 +    // the tagged reader derives for them (translated, live), and retired source
+  575 +    // fragments are not something to remove from translated addresses.
+  576 +    let tagged_coverage =
+  577 +        tagged_segment_coverage(dataset.as_ref(), &selected_old_indices, None).await?;
+  578 +    let (effective_old_frags, deleted_old_frags) = match &tagged_coverage {
+  579 +        Some(coverage) => (
+  580 +            selected_old_indices
+  581 +                .iter()
+  582 +                .filter_map(|index| coverage.get(&index.uuid))
+  583 +                .fold(RoaringBitmap::new(), |acc, bitmap| acc | bitmap),
+  584 +            RoaringBitmap::new(),
+  585 +        ),
+  586 +        None => split_segment_coverage(dataset.as_ref(), selected_old_indices.iter().copied()),
+  587 +    };
+  588  
+  481 -    let mut frag_bitmap = base_unindexed_bitmap.clone();
+  482 -    frag_bitmap |= &effective_old_frags;
+  589 +    // The fragments a from-scratch rebuild must scan: everything the merged
+  590 +    // segment will answer for, all of it live.
+  591 +    let mut rebuild_frags = base_unindexed_bitmap.clone();
+  592 +    rebuild_frags |= &effective_old_frags;
+  593      let new_uuid = Uuid::new_v4();
+  594  
+  595      // Scalar Index that expos an N:1 segment-merge primitive reachable without
+  596      // rescanning the dataset
+  487 -    let has_segment_merge_primitive = matches!(index_type, IndexType::BTree | IndexType::NGram);
+  597 +    let has_segment_merge_primitive = matches!(
+  598 +        index_type,
+  599 +        IndexType::BTree | IndexType::Bitmap | IndexType::NGram
+  600 +    );
+  601      let frag_reuse_index = dataset.open_frag_reuse_index(&NoOpMetricsCollector).await?;
+  602      let ngram_requires_rebuild = index_type == IndexType::NGram
+  603          && frag_reuse_index.as_ref().is_some_and(|frag_reuse_index| {
+
+@@ -507,6 +620,19 @@ async fn merge_scalar_indices<'a>(
+  620          && !ngram_requires_rebuild
+  621          && (has_segment_merge_primitive || selected_old_indices.len() == 1);
+  622  
+  623 +    // The bitmap the merged segment commits, decided by how its content is
+  624 +    // produced:
+  625 +    //   - rebuilt from a scan: exactly the live fragments scanned (direct
+  626 +    //     coverage of every row it holds);
+  627 +    //   - merged from the old segments' pages: on a tagged table the union of
+  628 +    //     the selected segments' STORED bitmaps, i.e. provenance, retired
+  629 +    //     sources included. The pages were translated to live addresses when
+  630 +    //     the segments were opened, and the tagged reader stops translating
+  631 +    //     at a live fragment, so provenance keeps deriving coverage for this
+  632 +    //     segment and for any unselected sibling that shares a destination,
+  633 +    //     and keeps the mapping they need retained until they are rebuilt;
+  634 +    //     elsewhere the effective (live) coverage, as before.
+  635 +    let mut frag_bitmap = rebuild_frags.clone();
+  636      let (created_index, new_dataset_version) = if !can_merge_segments {
+  637          (
+  638              rebuild_scalar_segment(
+
+@@ -515,12 +641,20 @@ async fn merge_scalar_indices<'a>(
+  641                  field_path,
+  642                  column_name,
+  643                  new_uuid,
+  518 -                frag_bitmap.iter().collect(),
+  644 +                rebuild_frags.iter().collect(),
+  645              )
+  646              .await?,
+  647              dataset.manifest.version,
+  648          )
+  649      } else {
+  650 +        if tagged_coverage.is_some() {
+  651 +            frag_bitmap = base_unindexed_bitmap.clone();
+  652 +            for index in &selected_old_indices {
+  653 +                if let Some(stored) = &index.fragment_bitmap {
+  654 +                    frag_bitmap |= stored;
+  655 +                }
+  656 +            }
+  657 +        }
+  658          let new_store = LanceIndexStore::from_dataset_for_new(&dataset, &new_uuid)?;
+  659  
+  660          // Try a seed-based update before falling back to a full column scan.
+
+@@ -560,7 +694,8 @@ async fn merge_scalar_indices<'a>(
+  694              match index_type {
+  695                  IndexType::BTree => {
+  696                      let (_, old_data_filters) =
+  563 -                        build_per_segment_filters(dataset.as_ref(), &selected_old_indices).await?;
+  697 +                        build_per_segment_filters(dataset.as_ref(), &selected_old_indices, None)
+  698 +                            .await?;
+  699                      crate::index::scalar::btree::open_and_merge_segments(
+  700                          dataset.as_ref(),
+  701                          field_path,
+
+@@ -568,18 +703,36 @@ async fn merge_scalar_indices<'a>(
+  703                          new_data_stream,
+  704                          &new_store,
+  705                          &old_data_filters,
+  706 +                        None,
+  707 +                    )
+  708 +                    .await?
+  709 +                }
+  710 +                IndexType::Bitmap => {
+  711 +                    let (_, old_data_filters) =
+  712 +                        build_per_segment_filters(dataset.as_ref(), &selected_old_indices, None)
+  713 +                            .await?;
+  714 +                    crate::index::scalar::bitmap::open_and_merge_segments(
+  715 +                        dataset.as_ref(),
+  716 +                        field_path,
+  717 +                        &selected_old_indices,
+  718 +                        new_data_stream,
+  719 +                        &new_store,
+  720 +                        &old_data_filters,
+  721 +                        None,
+  722                      )
+  723                      .await?
+  724                  }
+  725                  IndexType::NGram => {
+  726                      let (_, old_data_filters) =
+  576 -                        build_per_segment_filters(dataset.as_ref(), &selected_old_indices).await?;
+  727 +                        build_per_segment_filters(dataset.as_ref(), &selected_old_indices, None)
+  728 +                            .await?;
+  729                      crate::index::scalar::ngram::open_and_merge_segments(
+  730                          dataset.as_ref(),
+  731                          &selected_old_indices,
+  732                          Some(new_data_stream),
+  733                          &new_store,
+  734                          &old_data_filters,
+  735 +                        None,
+  736                      )
+  737                      .await?
+  738                  }
+
+@@ -904,15 +1057,36 @@ pub async fn merge_indices_with_unindexed_frags<'a>(
+ 1057              // live rows, so merging them would resurrect stale vectors; they
+ 1058              // may only be replaced. A born-empty segment (deferred build) has
+ 1059              // no stored rows and stays mergeable.
+ 1060 +            // Under a tagged history an empty bitmap does not mean empty
+ 1061 +            // pages: an in-place rewrite withdraws a segment's whole coverage
+ 1062 +            // and leaves its files. Such a segment is dormant too, rebuilt
+ 1063 +            // from the live fragments; only a definition without files (the
+ 1064 +            // deferred build) stays mergeable there. Elsewhere an index
+ 1065 +            // initialized on an empty table has files and no rows and keeps
+ 1066 +            // merging as before.
+ 1067 +            // On a tagged table a segment's stored bitmap is provenance: its
+ 1068 +            // rows translate to the coverage the tagged reader derives for
+ 1069 +            // it, so THAT is its live coverage. A segment the reader excludes
+ 1070 +            // (derived coverage empty) is the dormant one.
+ 1071 +            let tagged_coverage =
+ 1072 +                tagged_segment_coverage(dataset.as_ref(), old_indices, None).await?;
+ 1073              let (live_segments, dormant_segments): (Vec<&IndexMetadata>, Vec<&IndexMetadata>) =
+ 1074                  old_indices.iter().copied().partition(|idx| {
+  909 -                    let has_stored_rows = idx
+  910 -                        .fragment_bitmap
+  911 -                        .as_ref()
+  912 -                        .is_some_and(|bitmap| !bitmap.is_empty());
+  913 -                    let has_live_coverage = idx
+  914 -                        .effective_fragment_bitmap(&dataset.fragment_bitmap)
+  915 -                        .is_none_or(|bitmap| !bitmap.is_empty());
+ 1075 +                    let has_stored_rows = match &tagged_coverage {
+ 1076 +                        Some(_) => !is_definition_only_segment(idx),
+ 1077 +                        None => idx
+ 1078 +                            .fragment_bitmap
+ 1079 +                            .as_ref()
+ 1080 +                            .is_some_and(|bitmap| !bitmap.is_empty()),
+ 1081 +                    };
+ 1082 +                    let has_live_coverage = match &tagged_coverage {
+ 1083 +                        Some(coverage) => coverage
+ 1084 +                            .get(&idx.uuid)
+ 1085 +                            .is_some_and(|bitmap| !bitmap.is_empty()),
+ 1086 +                        None => idx
+ 1087 +                            .effective_fragment_bitmap(&dataset.fragment_bitmap)
+ 1088 +                            .is_none_or(|bitmap| !bitmap.is_empty()),
+ 1089 +                    };
+ 1090                      !has_stored_rows || has_live_coverage
+ 1091                  });
+ 1092              if !dormant_segments.is_empty() && !live_segments.is_empty() && !options.retrain {
+
+@@ -952,8 +1126,11 @@ pub async fn merge_indices_with_unindexed_frags<'a>(
+ 1126                      .map(Some);
+ 1127              }
+ 1128  
+ 1129 +            // The maintenance opener: a segment the tagged reader excludes
+ 1130 +            // from the listing (its coverage was withdrawn) is still here,
+ 1131 +            // opened as contributing nothing, so it can be replaced.
+ 1132              let full_logical_index = dataset
+  956 -                .open_logical_vector_index(&field_path, &old_indices[0].name)
+ 1133 +                .open_logical_vector_index_for_maintenance(&field_path, &old_indices[0].name)
+ 1134                  .await?;
+ 1135              let mut opened_indices_by_uuid = full_logical_index
+ 1136                  .iter()
+
+@@ -1140,10 +1317,19 @@ pub async fn merge_indices_with_unindexed_frags<'a>(
+ 1317                      return Ok(None);
+ 1318                  }
+ 1319  
+ 1143 -                let new_fragment_bitmap = removed_segment
+ 1144 -                    .effective_fragment_bitmap(&dataset.fragment_bitmap)
+ 1145 -                    .or_else(|| removed_segment.fragment_bitmap.clone())
+ 1146 -                    .unwrap_or_default();
+ 1320 +                // The rebalanced file was read through the translating
+ 1321 +                // loader, so on a tagged table it holds live addresses under
+ 1322 +                // the segment's stored provenance: publish that provenance,
+ 1323 +                // as a merge does, not stored ∩ live, which is empty for
+ 1324 +                // retired sources and would turn indexed rows into scans.
+ 1325 +                let new_fragment_bitmap = if tagged_coverage.is_some() {
+ 1326 +                    removed_segment.fragment_bitmap.clone().unwrap_or_default()
+ 1327 +                } else {
+ 1328 +                    removed_segment
+ 1329 +                        .effective_fragment_bitmap(&dataset.fragment_bitmap)
+ 1330 +                        .or_else(|| removed_segment.fragment_bitmap.clone())
+ 1331 +                        .unwrap_or_default()
+ 1332 +                };
+ 1333  
+ 1334                  Ok((
+ 1335                      new_uuid,
+
+@@ -1266,7 +1452,11 @@ pub async fn merge_indices_with_unindexed_frags<'a>(
+ 1452              let mut indices = Vec::with_capacity(old_indices.len());
+ 1453              for idx in old_indices {
+ 1454                  match dataset
+ 1269 -                    .open_generic_index(&field_path, &idx.uuid, &NoOpMetricsCollector)
+ 1455 +                    .open_generic_index_for_maintenance(
+ 1456 +                        &field_path,
+ 1457 +                        &idx.uuid,
+ 1458 +                        &NoOpMetricsCollector,
+ 1459 +                    )
+ 1460                      .await
+ 1461                  {
+ 1462                      Ok(index) => indices.push(index),
+
+@@ -1305,7 +1495,11 @@ pub async fn merge_indices_with_unindexed_frags<'a>(
+ 1495                          .copied()
+ 1496                          .unwrap_or(old_indices[old_indices.len() - 1]);
+ 1497                      let reference_index = dataset
+ 1308 -                        .open_scalar_index(&field_path, &reference_idx.uuid, &NoOpMetricsCollector)
+ 1498 +                        .open_scalar_index_for_maintenance(
+ 1499 +                            &field_path,
+ 1500 +                            &reference_idx.uuid,
+ 1501 +                            &NoOpMetricsCollector,
+ 1502 +                        )
+ 1503                          .await?;
+ 1504                      let update_criteria = reference_index.update_criteria();
+ 1505                      if update_criteria.requires_old_data {
+
+@@ -1366,15 +1560,39 @@ pub async fn merge_indices_with_unindexed_frags<'a>(
+ 1560                      let mut frag_bitmap = base_unindexed_bitmap;
+ 1561                      let mut effective_old_frags = RoaringBitmap::new();
+ 1562                      let mut selected_indices = Vec::with_capacity(selected_old_indices.len());
+ 1563 +                    // On a tagged table a selected segment's old data is the
+ 1564 +                    // coverage the reader derives for it (translated, live)
+ 1565 +                    // and the merged segment keeps the stored provenance,
+ 1566 +                    // exactly as the scalar merge does; stored ∩ live would
+ 1567 +                    // be empty for retired sources and drop indexed rows.
+ 1568 +                    let tagged_coverage =
+ 1569 +                        tagged_segment_coverage(dataset.as_ref(), &selected_old_indices, None)
+ 1570 +                            .await?;
+ 1571                      for idx in &selected_old_indices {
+ 1370 -                        if let Some(effective) =
+ 1371 -                            idx.effective_fragment_bitmap(&dataset.fragment_bitmap)
+ 1372 -                        {
+ 1373 -                            frag_bitmap |= &effective;
+ 1374 -                            effective_old_frags |= &effective;
+ 1572 +                        match &tagged_coverage {
+ 1573 +                            Some(coverage) => {
+ 1574 +                                if let Some(derived) = coverage.get(&idx.uuid) {
+ 1575 +                                    effective_old_frags |= derived;
+ 1576 +                                }
+ 1577 +                                if let Some(stored) = &idx.fragment_bitmap {
+ 1578 +                                    frag_bitmap |= stored;
+ 1579 +                                }
+ 1580 +                            }
+ 1581 +                            None => {
+ 1582 +                                if let Some(effective) =
+ 1583 +                                    idx.effective_fragment_bitmap(&dataset.fragment_bitmap)
+ 1584 +                                {
+ 1585 +                                    frag_bitmap |= &effective;
+ 1586 +                                    effective_old_frags |= &effective;
+ 1587 +                                }
+ 1588 +                            }
+ 1589                          }
+ 1590                          let scalar_index = dataset
+ 1377 -                            .open_scalar_index(&field_path, &idx.uuid, &NoOpMetricsCollector)
+ 1591 +                            .open_scalar_index_for_maintenance(
+ 1592 +                                &field_path,
+ 1593 +                                &idx.uuid,
+ 1594 +                                &NoOpMetricsCollector,
+ 1595 +                            )
+ 1596                              .await?;
+ 1597                          let inverted_index = scalar_index
+ 1598                              .as_any()

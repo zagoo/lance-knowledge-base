@@ -1,0 +1,162 @@
+[
+  {
+    "id": 1,
+    "path": "rust/lance-file/src/writer.rs",
+    "start": 104,
+    "end": 116,
+    "read_at": "2026-10-04T00:56:59.872Z",
+    "evidence": "104 |     let encoding = Any::from_msg(&column.encoding)?.encode_to_vec();\n105 |     Ok(pbfile::ColumnMetadata {\n106 |         pages,\n107 |         buffer_offsets,\n108 |         buffer_sizes,\n109 |         encoding: Some(pbfile::Encoding {\n110 |             location: Some(pbfile::encoding::Location::Direct(pbfile::DirectEncoding {\n111 |                 encoding,\n112 |             })),\n113 |         }),\n114 |     })\n115 | }\n116 | "
+  },
+  {
+    "id": 2,
+    "path": "rust/lance-file/src/versions/v1/reader.rs",
+    "start": 895,
+    "end": 935,
+    "read_at": "2026-10-04T00:56:59.873Z",
+    "evidence": "895 |         let mut file_writer = V1FileWriter::<NotSelfDescribing>::try_new(\n896 |             &store,\n897 |             &path,\n898 |             schema.clone(),\n899 |             &Default::default(),\n900 |         )\n901 |         .await\n902 |         .unwrap();\n903 |         for batch in batches.iter() {\n904 |             file_writer\n905 |                 .write(std::slice::from_ref(batch))\n906 |                 .await\n907 |                 .unwrap();\n908 |         }\n909 |         file_writer.finish().await.unwrap();\n910 | \n911 |         let reader = FileReader::try_new(&store, &path, schema).await.unwrap();\n912 |         let batch = reader\n913 |             .take(&[1, 15, 20, 25, 30, 48, 90], reader.schema())\n914 |             .await\n915 |             .unwrap();\n916 |         let dict_keys = UInt8Array::from_iter_values([1, 1, 6, 4, 2, 6, 6]);\n917 |         assert_eq!(\n918 |             batch,\n919 |             RecordBatch::try_new(\n920 |                 batch.schema(),\n921 |                 vec![\n922 |                     Arc::new(Int64Array::from_iter_values([1, 15, 20, 25, 30, 48, 90])),\n923 |                     Arc::new(Float32Array::from_iter_values([\n924 |                         1.0, 15.0, 20.0, 25.0, 30.0, 48.0, 90.0\n925 |                     ])),\n926 |                     Arc::new(StringArray::from_iter_values([\n927 |                         \"str-1\", \"str-15\", \"str-20\", \"str-25\", \"str-30\", \"str-48\", \"str-90\"\n928 |                     ])),\n929 |                     Arc::new(DictionaryArray::try_new(dict_keys, values_ref.clone()).unwrap()),\n930 |                 ]\n931 |             )\n932 |             .unwrap()\n933 |         );\n934 |     }\n935 | "
+  },
+  {
+    "id": 3,
+    "path": "rust/lance-table/src/format/overlay.rs",
+    "start": 242,
+    "end": 276,
+    "read_at": "2026-10-04T00:56:59.873Z",
+    "evidence": "242 | /// Tombstone `fields` across a fragment's `overlays`, dropping any overlay left\n243 | /// with no live fields.\n244 | ///\n245 | /// Called when new base values are written for those fields (a DataReplacement,\n246 | /// or an in-place column rewrite): the stale overlay values must stop shadowing\n247 | /// the fresh base. Each matching field id is replaced with [`TOMBSTONE_FIELD_ID`]\n248 | /// in place, preserving the overlay's remaining fields and its coverage positions\n249 | /// (a per-field coverage bitmap stays aligned with `data_file.fields`). An overlay\n250 | /// whose fields are now all tombstoned is removed entirely. See the [module\n251 | /// documentation](self) for the tombstone invariant.\n252 | pub fn tombstone_overlay_fields(overlays: &mut Vec<DataOverlayFile>, fields: &[u32]) {\n253 |     for overlay in overlays.iter_mut() {\n254 |         let tombstoned: Vec<i32> = overlay\n255 |             .data_file\n256 |             .fields\n257 |             .iter()\n258 |             .map(|&field| {\n259 |                 if field >= 0 && fields.contains(&(field as u32)) {\n260 |                     TOMBSTONE_FIELD_ID\n261 |                 } else {\n262 |                     field\n263 |                 }\n264 |             })\n265 |             .collect();\n266 |         overlay.data_file.fields = tombstoned.into();\n267 |     }\n268 |     overlays.retain(|overlay| {\n269 |         overlay\n270 |             .data_file\n271 |             .fields\n272 |             .iter()\n273 |             .any(|&field| field != TOMBSTONE_FIELD_ID)\n274 |     });\n275 | }\n276 | "
+  },
+  {
+    "id": 4,
+    "path": "rust/lance-table/src/transaction/manifest_build.rs",
+    "start": 1617,
+    "end": 1643,
+    "read_at": "2026-10-04T00:56:59.874Z",
+    "evidence": "1617 |         // Blob is one logical column across file versions. Publishing its first\n1618 |         // 2.2+ file also publishes the logical v2 view, without replacing older files.\n1619 |         // Blob children are not independent physical columns; retain the root ID\n1620 |         // and allocate logical child IDs against the current manifest on commit.\n1621 |         let legacy_blob_ids = schema\n1622 |             .fields_pre_order()\n1623 |             .filter(|field| field.is_blob() && !field.is_blob_v2())\n1624 |             .map(|field| field.id)\n1625 |             .collect::<HashSet<_>>();\n1626 |         if !legacy_blob_ids.is_empty() {\n1627 |             let mut blob_v2_fields = std::collections::BTreeSet::new();\n1628 |             for file in final_fragments\n1629 |                 .iter()\n1630 |                 .flat_map(|fragment| fragment.referenced_lance_files())\n1631 |             {\n1632 |                 if matches!(\n1633 |                     file.file_version()?,\n1634 |                     ConcreteFileVersion::V2_2 | ConcreteFileVersion::V2_3\n1635 |                 ) {\n1636 |                     blob_v2_fields.extend(\n1637 |                         file.fields\n1638 |                             .iter()\n1639 |                             .copied()\n1640 |                             .filter(|id| legacy_blob_ids.contains(id)),\n1641 |                     );\n1642 |                 }\n1643 |             }"
+  },
+  {
+    "id": 5,
+    "path": "rust/lance-file/src/reader/structural.rs",
+    "start": 433,
+    "end": 445,
+    "read_at": "2026-10-04T00:56:59.874Z",
+    "evidence": "433 | \n434 | #[cfg(test)]\n435 | pub fn test_projection_length(\n436 |     schema: &Schema,\n437 |     column_indices: &[u32],\n438 |     column_lengths: &[u64],\n439 | ) -> Result<u64> {\n440 |     projection_length(schema, column_indices, &|column| {\n441 |         column_lengths.get(column).copied().ok_or_else(|| {\n442 |             Error::invalid_input(format!(\"missing synthetic length for column {column}\"))\n443 |         })\n444 |     })\n445 | }"
+  },
+  {
+    "id": 6,
+    "path": "rust/lance-table/src/format.rs",
+    "start": 71,
+    "end": 78,
+    "read_at": "2026-10-04T00:57:20.936Z",
+    "evidence": "71 | \n72 | impl From<&Uuid> for pb::Uuid {\n73 |     fn from(value: &Uuid) -> Self {\n74 |         Self {\n75 |             uuid: value.into_bytes().to_vec(),\n76 |         }\n77 |     }\n78 | }"
+  },
+  {
+    "id": 7,
+    "path": "rust/lance-core/src/error.rs",
+    "start": 1193,
+    "end": 1239,
+    "read_at": "2026-10-04T00:57:20.937Z",
+    "evidence": "1193 |     #[test]\n1194 |     fn cloneable_error_preserves_not_found_contract() {\n1195 |         let original = CloneableError(Error::not_found(\"metadata.lance\"));\n1196 |         let cloned = original.clone();\n1197 |         let cloned_again = cloned.clone();\n1198 |         assert!(matches!(original.0, Error::NotFound { .. }));\n1199 |         assert!(cloned.0.is_not_found());\n1200 |         assert!(cloned_again.0.is_not_found());\n1201 |         assert!(cloned.0.to_string().to_lowercase().contains(\"not found\"));\n1202 |         assert!(\n1203 |             cloned_again\n1204 |                 .0\n1205 |                 .to_string()\n1206 |                 .to_lowercase()\n1207 |                 .contains(\"not found\")\n1208 |         );\n1209 |         assert!(\n1210 |             format!(\"{:?}\", cloned.0)\n1211 |                 .to_lowercase()\n1212 |                 .contains(\"not found\")\n1213 |         );\n1214 |         assert!(cloned.0.source().is_some_and(|source| source.is::<Error>()\n1215 |             || source.source().is_some_and(|source| source.is::<Error>())));\n1216 |         let downstream_error = Error::wrapped(Box::new(Error::io_source(Box::new(\n1217 |             object_store::Error::Generic {\n1218 |                 store: \"N/A\",\n1219 |                 source: Box::new(cloned.0),\n1220 |             },\n1221 |         ))));\n1222 |         assert!(downstream_error.is_not_found());\n1223 |         assert!(\n1224 |             format!(\"{downstream_error:?}\")\n1225 |                 .to_lowercase()\n1226 |                 .contains(\"not found\")\n1227 |         );\n1228 | \n1229 |         let original = CloneableError(Error::timeout(\"metadata read timed out\"));\n1230 |         let cloned = original.clone();\n1231 |         assert!(matches!(original.0, Error::Timeout { .. }));\n1232 |         assert!(matches!(cloned.0, Error::Timeout { .. }));\n1233 | \n1234 |         let original = CloneableError(Error::io(\"metadata read was denied\"));\n1235 |         let cloned = original.clone();\n1236 |         assert!(matches!(original.0, Error::IO { .. }));\n1237 |         assert!(matches!(cloned.0, Error::IO { .. }));\n1238 |     }\n1239 | "
+  },
+  {
+    "id": 8,
+    "path": "rust/lance-table/src/format/index.rs",
+    "start": 338,
+    "end": 370,
+    "read_at": "2026-10-04T00:57:20.937Z",
+    "evidence": "338 |         let files = idx\n339 |             .files\n340 |             .as_ref()\n341 |             .map(|files| {\n342 |                 files\n343 |                     .iter()\n344 |                     .map(|f| pb::IndexFile {\n345 |                         path: f.path.clone(),\n346 |                         size_bytes: f.size_bytes,\n347 |                     })\n348 |                     .collect()\n349 |             })\n350 |             .unwrap_or_default();\n351 | \n352 |         Self {\n353 |             uuid: Some((&idx.uuid).into()),\n354 |             name: idx.name.clone(),\n355 |             fields: idx.fields.clone(),\n356 |             covering_fields: idx.covering_fields.clone(),\n357 |             dataset_version: idx.dataset_version,\n358 |             fragment_bitmap,\n359 |             index_details: idx\n360 |                 .index_details\n361 |                 .as_ref()\n362 |                 .map(|details| details.as_ref().clone()),\n363 |             index_version: Some(idx.index_version),\n364 |             created_at: idx.created_at.map(|dt| dt.timestamp_millis() as u64),\n365 |             base_id: idx.base_id,\n366 |             files,\n367 |         }\n368 |     }\n369 | }\n370 | "
+  },
+  {
+    "id": 9,
+    "path": "rust/lance-file/src/versions/v1/writer/mod.rs",
+    "start": 1152,
+    "end": 1172,
+    "read_at": "2026-10-04T00:57:20.937Z",
+    "evidence": "1152 |     fn stats_schema(data_fields: impl IntoIterator<Item = (i32, DataType)>) -> ArrowSchema {\n1153 |         let fields = data_fields\n1154 |             .into_iter()\n1155 |             .map(|(field_id, data_type)| {\n1156 |                 Arc::new(ArrowField::new(\n1157 |                     format!(\"{}\", field_id),\n1158 |                     DataType::Struct(\n1159 |                         vec![\n1160 |                             Arc::new(ArrowField::new(\"null_count\", DataType::Int64, false)),\n1161 |                             Arc::new(ArrowField::new(\"min_value\", data_type.clone(), true)),\n1162 |                             Arc::new(ArrowField::new(\"max_value\", data_type, true)),\n1163 |                         ]\n1164 |                         .into(),\n1165 |                     ),\n1166 |                     false,\n1167 |                 ))\n1168 |             })\n1169 |             .collect::<Vec<_>>();\n1170 |         ArrowSchema::new(fields)\n1171 |     }\n1172 | "
+  },
+  {
+    "id": 10,
+    "path": "rust/lance-table/src/system_index/frag_reuse/gate.rs",
+    "start": 556,
+    "end": 586,
+    "read_at": "2026-10-04T00:57:20.937Z",
+    "evidence": "556 |     #[case(\"restore\", Table::Tagged, Verdict::Admit(Admission::RestoresManifest))]\n557 |     #[case(\n558 |         \"reserve_fragments\",\n559 |         Table::Tagged,\n560 |         Verdict::Admit(Admission::MovesNoRows)\n561 |     )]\n562 |     #[case(\n563 |         \"update_rewrites_rows\",\n564 |         Table::TaggedWithTranslatingIndex,\n565 |         Verdict::Admit(Admission::MovesNoRows)\n566 |     )]\n567 |     #[case(\n568 |         \"update_rewrites_column\",\n569 |         Table::TaggedWithDirectIndex,\n570 |         Verdict::Admit(Admission::MovesNoRows)\n571 |     )]\n572 |     #[case(\n573 |         \"update_rewrites_column\",\n574 |         Table::TaggedWithTranslatingIndex,\n575 |         Verdict::Admit(Admission::MovesNoRows)\n576 |     )]\n577 |     #[case(\n578 |         \"update_rewrites_unindexed_column\",\n579 |         Table::TaggedWithTranslatingIndex,\n580 |         Verdict::Admit(Admission::MovesNoRows)\n581 |     )]\n582 |     #[case(\"project\", Table::Tagged, Verdict::Admit(Admission::MovesNoRows))]\n583 |     #[case(\"update_config\", Table::Tagged, Verdict::Admit(Admission::MovesNoRows))]\n584 |     #[case(\"update_mem_wal_state\", Table::Tagged, Verdict::NotSupported)]\n585 |     #[case(\"clone\", Table::Tagged, Verdict::NotSupported)]\n586 |     #[case(\"update_bases\", Table::Tagged, Verdict::NotSupported)]"
+  },
+  {
+    "id": 11,
+    "path": "rust/lance-file/src/versions/v1/encoding/plain.rs",
+    "start": 306,
+    "end": 324,
+    "read_at": "2026-10-04T00:57:41.513Z",
+    "evidence": "306 |     async fn take_boolean(&self, indices: &UInt32Array) -> Result<ArrayRef> {\n307 |         let block_size = self.reader.block_size() as u32;\n308 |         let boolean_block_size = block_size * 8;\n309 | \n310 |         let mut chunk_ranges = vec![];\n311 |         let mut start: u32 = 0;\n312 |         for j in 0..(indices.len() - 1) as u32 {\n313 |             if (indices.value(j as usize + 1) / boolean_block_size)\n314 |                 > (indices.value(start as usize) / boolean_block_size)\n315 |             {\n316 |                 let next_start = j + 1;\n317 |                 chunk_ranges.push(start..next_start);\n318 |                 start = next_start;\n319 |             }\n320 |         }\n321 |         // Remaining\n322 |         chunk_ranges.push(start..indices.len() as u32);\n323 | \n324 |         let arrays = stream::iter(chunk_ranges)"
+  },
+  {
+    "id": 12,
+    "path": "rust/lance-table/src/io/commit/dynamodb.rs",
+    "start": 369,
+    "end": 395,
+    "read_at": "2026-10-04T00:57:41.514Z",
+    "evidence": "369 |         match query_result.items {\n370 |             Some(mut items) => {\n371 |                 if items.is_empty() {\n372 |                     return Ok(None);\n373 |                 }\n374 |                 if items.len() > 1 {\n375 |                     return Err(Error::invalid_input(format!(\n376 |                         \"dynamodb table: {} returned unexpected number of items\",\n377 |                         self.table_name\n378 |                     )));\n379 |                 }\n380 | \n381 |                 let item = items.pop().expect(\"length checked\");\n382 |                 let version_attribute = item\n383 |                     .get(version!())\n384 |                     .ok_or_else(|| Error::not_found(\n385 |                         format!(\"dynamodb error: found entries for {} but the returned data does not contain {} column\", base_uri, version!())\n386 |                     ))?;\n387 | \n388 |                 let path_attribute = item\n389 |                     .get(path!())\n390 |                     .ok_or_else(|| Error::not_found(\n391 |                         format!(\"dynamodb error: found entries for {} but the returned data does not contain {} column\", base_uri, path!())\n392 |                     ))?;\n393 | \n394 |                 let size = parse_size_attribute(&item)?;\n395 | "
+  },
+  {
+    "id": 13,
+    "path": "rust/lance-file/src/versions/v1/page_table.rs",
+    "start": 28,
+    "end": 35,
+    "read_at": "2026-10-04T00:57:41.514Z",
+    "evidence": "28 | /// Page lookup table.\n29 | ///\n30 | #[derive(Debug, Default, Clone, PartialEq, DeepSizeOf)]\n31 | pub struct PageTable {\n32 |     /// map[field-id,  map[batch-id, PageInfo]]\n33 |     pages: BTreeMap<i32, BTreeMap<i32, PageInfo>>,\n34 | }\n35 | "
+  },
+  {
+    "id": 14,
+    "path": "rust/lance-file/src/versions/v1/encoding/plain.rs",
+    "start": 282,
+    "end": 305,
+    "read_at": "2026-10-04T00:57:41.514Z",
+    "evidence": "282 |     async fn decode_fixed_size_binary(\n283 |         &self,\n284 |         stride: i32,\n285 |         start: usize,\n286 |         end: usize,\n287 |     ) -> Result<ArrayRef> {\n288 |         let bytes_decoder = PlainDecoder::new(\n289 |             self.reader,\n290 |             &DataType::UInt8,\n291 |             self.position,\n292 |             self.length * stride as usize,\n293 |         )?;\n294 |         let bytes_array = bytes_decoder\n295 |             .get(start * stride as usize..end * stride as usize)\n296 |             .await?;\n297 |         let values = bytes_array\n298 |             .as_any()\n299 |             .downcast_ref::<UInt8Array>()\n300 |             .ok_or_else(|| {\n301 |                 Error::schema(\"Could not cast to UInt8Array for FixedSizeBinary\".to_string())\n302 |             })?;\n303 |         Ok(Arc::new(FixedSizeBinaryArray::try_new_from_values(values, stride)?) as ArrayRef)\n304 |     }\n305 | "
+  },
+  {
+    "id": 15,
+    "path": "rust/lance-file/src/reader/structural.rs",
+    "start": 173,
+    "end": 188,
+    "read_at": "2026-10-04T00:57:41.514Z",
+    "evidence": "173 | fn field_column_shape(field: &Field) -> (bool, bool) {\n174 |     if field.is_blob() || field.is_packed_struct() {\n175 |         return (true, false);\n176 |     }\n177 |     (field.children.is_empty(), !field.children.is_empty())\n178 | }\n179 | \n180 | /// Count physical columns in the leaf-column layout used by v2.1+.\n181 | pub fn physical_column_count(field: &Field) -> usize {\n182 |     if field.children.is_empty() || field.is_blob() || field.is_packed_struct() {\n183 |         1\n184 |     } else {\n185 |         field.children.iter().map(physical_column_count).sum()\n186 |     }\n187 | }\n188 | "
+  },
+  {
+    "id": 16,
+    "path": "rust/lance-file/src/datatypes.rs",
+    "start": 80,
+    "end": 94,
+    "read_at": "2026-10-04T00:57:56.094Z",
+    "evidence": "80 |             extension_name: field\n81 |                 .extension_name()\n82 |                 .map(|name| name.to_owned())\n83 |                 .unwrap_or_default(),\n84 |             r#type: 0,\n85 |             unenforced_primary_key: field.unenforced_primary_key_position.is_some(),\n86 |             unenforced_primary_key_position: field.unenforced_primary_key_position.unwrap_or(0),\n87 |             unenforced_clustering_key: false,\n88 |             unenforced_clustering_key_position: field\n89 |                 .unenforced_clustering_key_position\n90 |                 .unwrap_or(0),\n91 |         }\n92 |     }\n93 | }\n94 | "
+  },
+  {
+    "id": 17,
+    "path": "rust/lance-table/src/transaction/manifest_build.rs",
+    "start": 3359,
+    "end": 3418,
+    "read_at": "2026-10-04T00:57:56.095Z",
+    "evidence": "3359 |     #[test]\n3360 |     fn test_remove_tombstoned_data_files() {\n3361 |         // Create a fragment with mixed data files: some normal, some fully tombstoned\n3362 |         let mut fragment = Fragment::new(1);\n3363 | \n3364 |         // Add a normal data file with valid field IDs\n3365 |         fragment.files.push(DataFile {\n3366 |             path: \"normal.lance\".to_string(),\n3367 |             fields: Arc::from([1, 2, 3]),\n3368 |             column_indices: Arc::from([]),\n3369 |             file_major_version: 2,\n3370 |             file_minor_version: 0,\n3371 |             file_size_bytes: CachedFileSize::new(1000),\n3372 |             base_id: None,\n3373 |         });\n3374 | \n3375 |         // Add a data file with all fields tombstoned\n3376 |         fragment.files.push(DataFile {\n3377 |             path: \"all_tombstoned.lance\".to_string(),\n3378 |             fields: Arc::from([-2, -2, -2]),\n3379 |             column_indices: Arc::from([]),\n3380 |             file_major_version: 2,\n3381 |             file_minor_version: 0,\n3382 |             file_size_bytes: CachedFileSize::new(500),\n3383 |             base_id: None,\n3384 |         });\n3385 | \n3386 |         // Add a data file with mixed tombstoned and valid fields\n3387 |         fragment.files.push(DataFile {\n3388 |             path: \"mixed.lance\".to_string(),\n3389 |             fields: Arc::from([4, -2, 5]),\n3390 |             column_indices: Arc::from([]),\n3391 |             file_major_version: 2,\n3392 |             file_minor_version: 0,\n3393 |             file_size_bytes: CachedFileSize::new(750),\n3394 |             base_id: None,\n3395 |         });\n3396 | \n3397 |         // Add another fully tombstoned file\n3398 |         fragment.files.push(DataFile {\n3399 |             path: \"another_tombstoned.lance\".to_string(),\n3400 |             fields: Arc::from([-2_i32]),\n3401 |             column_indices: Arc::from([]),\n3402 |             file_major_version: 2,\n3403 |             file_minor_version: 0,\n3404 |             file_size_bytes: CachedFileSize::new(250),\n3405 |             base_id: None,\n3406 |         });\n3407 | \n3408 |         let mut fragments = vec![fragment];\n3409 | \n3410 |         // Apply the cleanup\n3411 |         Transaction::remove_tombstoned_data_files(&mut fragments);\n3412 | \n3413 |         // Should have removed the two fully tombstoned files\n3414 |         assert_eq!(fragments[0].files.len(), 2);\n3415 |         assert_eq!(fragments[0].files[0].path, \"normal.lance\");\n3416 |         assert_eq!(fragments[0].files[1].path, \"mixed.lance\");\n3417 |     }\n3418 | "
+  },
+  {
+    "id": 18,
+    "path": "rust/lance-table/src/transaction/manifest_build.rs",
+    "start": 3534,
+    "end": 3590,
+    "read_at": "2026-10-04T00:57:56.095Z",
+    "evidence": "3534 |     #[test]\n3535 |     fn test_bitmap_max_offset_exceeds_physical_rows() {\n3536 |         let row_ids = RowIdSequence::from([10u64, 11, 12, 13, 14].as_slice());\n3537 |         let row_id_meta = Some(RowIdMeta::Inline(write_row_ids(&row_ids).into()));\n3538 | \n3539 |         let data_file = DataFile::new(\n3540 |             \"data.lance\",\n3541 |             vec![0],\n3542 |             vec![0],\n3543 |             LanceFileVersion::Stable.resolve(),\n3544 |             None,\n3545 |             None,\n3546 |         );\n3547 | \n3548 |         let version_seq = RowDatasetVersionSequence::from_uniform_row_count(5, 1);\n3549 |         let version_meta = RowDatasetVersionMeta::from_sequence(&version_seq).unwrap();\n3550 | \n3551 |         let fragment = Fragment {\n3552 |             id: 1,\n3553 |             files: vec![data_file],\n3554 |             overlays: vec![],\n3555 |             deletion_file: None,\n3556 |             row_id_meta,\n3557 |             physical_rows: Some(5),\n3558 |             last_updated_at_version_meta: Some(version_meta.clone()),\n3559 |             created_at_version_meta: Some(version_meta),\n3560 |         };\n3561 | \n3562 |         let manifest = make_stable_row_id_manifest(vec![fragment.clone()]);\n3563 | \n3564 |         // Only 2 offsets (within cardinality) but max offset 100 exceeds physical_rows 5.\n3565 |         let off_map = HashMap::from([(1u64, RoaringBitmap::from_iter([0u32, 100]))]);\n3566 |         let tx = Transaction::new(\n3567 |             manifest.version,\n3568 |             Operation::Update {\n3569 |                 removed_fragment_ids: vec![],\n3570 |                 updated_fragments: vec![fragment],\n3571 |                 new_fragments: vec![],\n3572 |                 fields_modified: vec![],\n3573 |                 compacted_sstables: vec![],\n3574 |                 fields_for_preserving_frag_bitmap: vec![],\n3575 |                 update_mode: Some(UpdateMode::RewriteColumns),\n3576 |                 inserted_rows_filter: None,\n3577 |                 updated_fragment_offsets: Some(UpdatedFragmentOffsets(off_map)),\n3578 |             },\n3579 |             None,\n3580 |         );\n3581 | \n3582 |         let result = tx.build_manifest(Some(&manifest), vec![], \"txn\", &default_build_config());\n3583 |         assert!(result.is_err());\n3584 |         let msg = result.unwrap_err().to_string();\n3585 |         assert!(\n3586 |             msg.contains(\"max offset\"),\n3587 |             \"expected max offset error, got: {msg}\"\n3588 |         );\n3589 |     }\n3590 | "
+  },
+  {
+    "id": 19,
+    "path": "rust/lance-file/src/versions/v1/reader.rs",
+    "start": 99,
+    "end": 123,
+    "read_at": "2026-10-04T00:57:56.096Z",
+    "evidence": "99 | impl<T: StableStringCacheValue> CacheKey for StringCacheKey<'_, T> {\n100 |     type ValueType = T;\n101 | \n102 |     fn key(&self) -> Cow<'_, str> {\n103 |         self.key.into()\n104 |     }\n105 | \n106 |     fn type_name() -> &'static str {\n107 |         // Keep the legacy diagnostic name for compatibility. `stable_type_id`\n108 |         // provides the compiler-independent identity used by physical keys.\n109 |         std::any::type_name::<T>()\n110 |     }\n111 | \n112 |     fn stable_type_id() -> &'static str {\n113 |         T::STABLE_TYPE_ID\n114 |     }\n115 | \n116 |     fn schema() -> CacheKeySchema {\n117 |         CacheKeySchema::new(\"lance.file.previous.string-key\", 1)\n118 |     }\n119 | \n120 |     fn write_key(&self, builder: &mut KeyBuilder) {\n121 |         builder.write_str(self.key);\n122 |     }\n123 | }"
+  },
+  {
+    "id": 20,
+    "path": "rust/lance-table/src/system_index/frag_reuse/ledger.rs",
+    "start": 120,
+    "end": 157,
+    "read_at": "2026-10-04T00:57:56.096Z",
+    "evidence": "120 | impl FragReuseLedger {\n121 |     /// Decode FRI details, resolving external history through `read_external`.\n122 |     /// The callback reads the exact byte range described by the external reference;\n123 |     /// it is never used for inline history or stable-partition row maps.\n124 |     /// Index versions 0 and 1 are supported. Unsupported versions require an upgrade.\n125 |     pub async fn decode<F, Fut>(\n126 |         index_version: i32,\n127 |         details: &prost_types::Any,\n128 |         read_external: F,\n129 |     ) -> Result<Self>\n130 |     where\n131 |         F: FnOnce(crate::format::pb::ExternalFile) -> Fut,\n132 |         Fut: Future<Output = Result<Bytes>>,\n133 |     {\n134 |         validate_index_version(index_version)?;\n135 |         let (tag, content) = content_field(details)?;\n136 |         let content = if tag == 1 {\n137 |             content\n138 |         } else {\n139 |             let file = crate::format::pb::ExternalFile::decode(content)\n140 |                 .map_err(|e| corrupt(e.to_string()))?;\n141 |             file.offset\n142 |                 .checked_add(file.size)\n143 |                 .and_then(|end| usize::try_from(end).ok())\n144 |                 .ok_or_else(|| corrupt(\"external FRI range overflow\"))?;\n145 |             let expected = file.size;\n146 |             let bytes = read_external(file).await?;\n147 |             if bytes.len() as u64 != expected {\n148 |                 return Err(corrupt(format!(\n149 |                     \"external FRI size mismatch: expected {expected}, received {}\",\n150 |                     bytes.len()\n151 |                 )));\n152 |             }\n153 |             bytes\n154 |         };\n155 |         Self::decode_content(index_version, content)\n156 |     }\n157 | "
+  }
+]

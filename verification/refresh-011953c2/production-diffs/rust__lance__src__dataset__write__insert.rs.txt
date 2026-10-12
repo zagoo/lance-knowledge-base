@@ -1,0 +1,148 @@
+@@ -25,8 +25,7 @@ use crate::dataset::ReadParams;
+   25  use crate::dataset::builder::DatasetBuilder;
+   26  use crate::dataset::transaction::{Operation, Transaction, TransactionBuilder};
+   27  use crate::dataset::write::{
+   28 -    validate_and_resolve_target_bases_with_primary, write_fragments_internal,
+   29 -    write_fragments_internal_to_file,
+   28 +    validate_and_resolve_target_bases_with_primary, write_fragments_internal_impl,
+   29  };
+   30  use crate::{Error, Result};
+   31  use tracing::info;
+
+@@ -55,6 +54,7 @@ pub struct InsertBuilder<'a> {
+   54      params: Option<&'a WriteParams>,
+   55      write_progress: Option<WriteProgressFn>,
+   56      preassigned_data_file_name: Option<Arc<String>>,
+   57 +    keep_field_ids: bool,
+   58  }
+   59  
+   60  impl<'a> InsertBuilder<'a> {
+
+@@ -64,6 +64,7 @@ impl<'a> InsertBuilder<'a> {
+   64              params: None,
+   65              write_progress: None,
+   66              preassigned_data_file_name: None,
+   67 +            keep_field_ids: false,
+   68          }
+   69      }
+   70  
+
+@@ -80,6 +81,15 @@ impl<'a> InsertBuilder<'a> {
+   81          self
+   82      }
+   83  
+   84 +    /// Keep the field ids the input schema carries when creating a dataset,
+   85 +    /// instead of numbering its fields afresh.
+   86 +    ///
+   87 +    /// For a MemWAL generation, whose columns must keep the base table's ids.
+   88 +    pub(crate) fn with_table_field_ids(mut self) -> Self {
+   89 +        self.keep_field_ids = true;
+   90 +        self
+   91 +    }
+   92 +
+   93      /// Register a callback that is invoked after each batch of rows is written.
+   94      ///
+   95      /// The callback receives cumulative [`WriteStats`] and can be used to drive
+
+@@ -97,7 +107,7 @@ impl<'a> InsertBuilder<'a> {
+  107      /// This writes the data fragments and commits them into the dataset.
+  108      pub async fn execute(&self, data: Vec<RecordBatch>) -> Result<Dataset> {
+  109          let (transaction, context) = self.write_uncommitted_impl(data).await?;
+  100 -        Self::do_commit(&context, transaction).await
+  110 +        self.do_commit(&context, transaction).await
+  111      }
+  112  
+  113      /// Execute the insert operation with the given stream.
+
+@@ -114,7 +124,7 @@ impl<'a> InsertBuilder<'a> {
+  124          schema: Schema,
+  125      ) -> Result<Dataset> {
+  126          let (transaction, context) = self.write_uncommitted_stream_impl(stream, schema).await?;
+  117 -        Self::do_commit(&context, transaction).await
+  127 +        self.do_commit(&context, transaction).await
+  128      }
+  129  
+  130      /// Write data files, but don't commit the transaction yet.
+
+@@ -145,7 +155,11 @@ impl<'a> InsertBuilder<'a> {
+  155          self.write_uncommitted_impl(data).await.map(|(t, _)| t)
+  156      }
+  157  
+  148 -    async fn do_commit(context: &WriteContext<'_>, transaction: Transaction) -> Result<Dataset> {
+  158 +    async fn do_commit(
+  159 +        &self,
+  160 +        context: &WriteContext<'_>,
+  161 +        transaction: Transaction,
+  162 +    ) -> Result<Dataset> {
+  163          let mut commit_builder = CommitBuilder::new(context.dest.clone())
+  164              .use_stable_row_ids(context.params.enable_stable_row_ids)
+  165              .with_exact_storage_format(context.storage_version)
+
+@@ -161,6 +175,9 @@ impl<'a> InsertBuilder<'a> {
+  175          if let Some(session) = context.params.session.as_ref() {
+  176              commit_builder = commit_builder.with_session(session.clone());
+  177          }
+  178 +        if self.keep_field_ids {
+  179 +            commit_builder = commit_builder.with_table_field_ids();
+  180 +        }
+  181  
+  182          commit_builder.execute(transaction).await
+  183      }
+
+@@ -225,37 +242,25 @@ impl<'a> InsertBuilder<'a> {
+  242          )
+  243          .await?;
+  244  
+  228 -        let (written_fragments, written_schema) =
+  229 -            if let Some(preassigned_data_file_name) = &self.preassigned_data_file_name {
+  230 -                if target_base_info.is_some() {
+  231 -                    return Err(Error::invalid_input(
+  232 -                        "a fixed data file name cannot be combined with target bases",
+  233 -                    ));
+  234 -                }
+  235 -                Box::pin(write_fragments_internal_to_file(
+  236 -                    context.storage_version,
+  237 -                    context.dest.dataset(),
+  238 -                    context.object_store.clone(),
+  239 -                    &context.base_path,
+  240 -                    schema.clone(),
+  241 -                    stream,
+  242 -                    context.params.clone(),
+  243 -                    preassigned_data_file_name.clone(),
+  244 -                ))
+  245 -                .await?
+  246 -            } else {
+  247 -                Box::pin(write_fragments_internal(
+  248 -                    context.storage_version,
+  249 -                    context.dest.dataset(),
+  250 -                    context.object_store.clone(),
+  251 -                    &context.base_path,
+  252 -                    schema.clone(),
+  253 -                    stream,
+  254 -                    context.params.clone(),
+  255 -                    target_base_info,
+  256 -                ))
+  257 -                .await?
+  258 -            };
+  245 +        if self.preassigned_data_file_name.is_some() && target_base_info.is_some() {
+  246 +            return Err(Error::invalid_input(
+  247 +                "a fixed data file name cannot be combined with target bases",
+  248 +            ));
+  249 +        }
+  250 +        let (written_fragments, written_schema) = Box::pin(write_fragments_internal_impl(
+  251 +            context.storage_version,
+  252 +            context.dest.dataset(),
+  253 +            context.object_store.clone(),
+  254 +            &context.base_path,
+  255 +            schema.clone(),
+  256 +            stream,
+  257 +            context.params.clone(),
+  258 +            target_base_info,
+  259 +            None,
+  260 +            self.preassigned_data_file_name.clone(),
+  261 +            self.keep_field_ids,
+  262 +        ))
+  263 +        .await?;
+  264  
+  265          let transaction = Self::build_transaction(written_schema, written_fragments, &context)?;
+  266  

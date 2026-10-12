@@ -1,0 +1,299 @@
+{
+  "iteration": 62,
+  "files": [
+    {
+      "path": "rust/lance-file/src/versions/v1/reader.rs",
+      "module": "L1-modules/rust-lance-file-v1-reader.md",
+      "role": "Frozen V1 file reader: public constructors, metadata/page-table cache keys, batch/range/take/statistics/stream APIs and private recursive Arrow reconstruction. Stores caller schema and dictionary values; no automatic schema discovery, row-ID synthesis or current-format grammar negotiation. Includes12 active tests and four helpers.",
+      "reviewed": true,
+      "limits": "Every physical line was read in six bounded source outputs during ANALYZE62. Tests were inspected, not run. No internet, source edits, source builds/tests/benchmarks, fixture generators or installations. Complete V1 writer/statistics, modern encodings/backends, Dataset lifecycle and binary fixture payloads remain pending. Contextual Arrow/IO and Dataset snippets only establish cited local interactions; they do not promote those files to analyzed. Source-derived panic/cancellation/cache-identity risks are not executed reproductions. Preserve frozen legacy compatibility; new features belong in current-format paths (AGENTS.md:13-18).",
+      "ranges": [
+        [
+          1,
+          40,
+          "SPDX and legacy data-file-reader module heading. Imports combine Arrow primitive/struct/list construction and arithmetic, concat, boxed recursive async functions, ordered futures streams, cache key/size traits, field/schema definitions, Reader/ObjectStore, metadata framing helpers, tracing, V1 codecs and page-table metadata. No current-format version dispatch or writer is defined in production here."
+        ],
+        [
+          41,
+          58,
+          "Public FileReader derives Clone and DeepSizeOf. object_reader is a public Arc<dyn Reader>; metadata and ordinary page table are private Arcs, schema is owned, fragment_id is private u64, and statistics is an Arc<Option<PageTable>>. Cloning shares reader/tables/metadata and clones Schema according to its own Clone semantics, including shared dictionary arrays. Public replacement of object_reader does not refresh any stored metadata/schema/table. There is no custom Drop."
+        ],
+        [
+          59,
+          67,
+          "Debug prints only fragment ID and object_reader.path; it does not dump schema, metadata, dictionaries or page tables. fragment_id is otherwise only set and retained in this file: no row-ID column or bitwise address construction occurs here despite later constructor documentation."
+        ],
+        [
+          68,
+          82,
+          "Private generic StringCacheKey borrows a string and carries PhantomData<T>. new only stores both. The key does not own path bytes or include fragment ID, schema, field-ID bounds, supplied metadata, object-store identity, file version or ETag. Any additional namespace isolation belongs to the supplied cache."
+        ],
+        [
+          83,
+          98,
+          "Private StableStringCacheValue requires static lifetime and a stable string ID. Implementations pin Metadata to lance.file.previous.Metadata, PageTable to lance.file.previous.PageTable, and Option<PageTable> to lance.file.previous.OptionalPageTable. These are three separate cache value identities, preserving the historical previous spelling rather than deriving identity from Rust type names."
+        ],
+        [
+          99,
+          123,
+          "StringCacheKey<T> implements CacheKey with associated ValueType=T. key returns borrowed Cow text; type_name retains compiler-derived diagnostic name, stable_type_id uses the trait constant, schema is lance.file.previous.string-key version1, and write_key feeds one string to KeyBuilder. Type scoping distinguishes the three value families even when path text matches; changing stable IDs/schema/write_key changes physical cache identity."
+        ],
+        [
+          124,
+          164,
+          "Public traced try_new_with_fragment_id opens the ObjectStore path, loads metadata, then forwards the supplied Schema, u32 fragment ID, signed min/max field bounds and optional LanceCache to try_new_from_reader with Some(metadata). No schema/dictionary hydration is performed here. Docs mention an optional manifest and row-ID high bits, but the actual signature requires Schema and this file emits no row IDs. IO/cache errors propagate before reader construction."
+        ],
+        [
+          165,
+          180,
+          "Public try_new_from_reader accepts an arbitrary Arc<dyn Reader>, separate Path, optional Arc<Metadata>, supplied Schema and cache/bounds. Some metadata is trusted directly; None calls read_metadata. No equality check relates the separate path to object_reader.path, the metadata to the file, bounds to schema, or the schema dictionary values to file contents."
+        ],
+        [
+          181,
+          209,
+          "Ordinary PageTable loading uses the separately supplied path string as cache key and metadata.page_table_position, signed field bounds and num_batches cast to i32. Statistics loading uses object_reader and its own path. try_join polls both table futures concurrently; first error prevents constructing Self, with no local task spawn/abort or rollback. Statistics loading calls read_metadata independently, so a supplied metadata Arc does not eliminate that read; without cache the ordinary open path can load metadata twice. Successful construction retains all supplied/shared values and widens fragment ID to u64."
+        ],
+        [
+          210,
+          235,
+          "Public read_metadata caches by object_reader.path string. On miss: await size, read min(size,block_size) tail, decode the metadata position, then either read_struct at an earlier location or slice the tail and decode in memory. It does not validate footer magic/version or schema here. read_metadata_offset only checks tail length>=16 and extracts LEu64; read_struct_from_buf trusts the u32 length while slicing. Out-of-file offsets, short/malformed tail bodies and arithmetic are not locally guarded and can panic before structured decoding errors (rust/lance-io/src/utils.rs:221-231; rust/lance-io/src/utils.rs:248-263). Earlier-position read_struct uses its separate framed IO path."
+        ],
+        [
+          236,
+          269,
+          "Private read_stats_page_table caches Option<PageTable> under reader.path joined with stats, including None. Its loader obtains metadata again and, when stats_metadata exists, loads one batch with field bounds0..max(leaf_field_ids). Empty leaf IDs panic at max().unwrap; no schema/presence/table consistency validation is added. Statistics and ordinary tables use distinct value types in addition to different path strings."
+        ],
+        [
+          270,
+          289,
+          "Generic async load_from_cache requires DeepSizeOf+Send+Sync+StableStringCacheValue and a Send+Sync Fn loader returning a Send future. Some cache delegates get_or_insert_with_key using borrowed StringCacheKey; no-cache awaits the loader and wraps the result in Arc. The owned key String remains alive through the await. No local expiration, persistence codec, invalidation, file identity verification or duplicate-load policy is added beyond the chosen cache implementation."
+        ],
+        [
+          290,
+          300,
+          "Public convenience try_new assumes the supplied schema describes the file, derives max_field_id or0, sets fragment/min ID to0 and disables cache. It does not discover a schema from disk. Private io_parallelism returns the Reader policy unchanged, with no zero-value clamp or local override."
+        ],
+        [
+          301,
+          323,
+          "schema returns the stored supplied Schema by reference, not the projection later passed to a read. num_batches, len and is_empty delegate metadata; num_rows_in_batch delegates get_batch_length, substitutes0 for None and casts signed length to usize. These accessors do not validate malformed signed offsets or batch IDs; a missing batch length is not an error here."
+        ],
+        [
+          324,
+          336,
+          "Public instrumented method read_batch converts params to ReadBatchParams then calls the free read_batch with the explicit projection. Its doc says returned schema is FileReader::schema(), but actual output follows the projection argument; there is no subset/type/field-ID validation against self.schema at this boundary."
+        ],
+        [
+          337,
+          365,
+          "Public read_range returns a typed empty RecordBatch for every Range::is_empty before metadata/bounds checks, including reversed or beyond-end empty ranges. Nonempty ranges use metadata.range_to_batches, read batches with ordered buffered(reader parallelism), and collect all into Vec. A single batch returns a cheap clone; multiple batches concatenate in spawn_blocking with JoinError and Arrow error propagated. The code indexes batches[0] without guarding an unexpectedly empty split. No abort-on-drop handle is retained for blocking work."
+        ],
+        [
+          366,
+          397,
+          "Public take documents sorted indices, but metadata.group_indices_to_batches clones and sorts them, retaining duplicates and discarding original unsorted order (rust/lance-file/src/versions/v1/format/metadata.rs:128-163). Grouping happens before validation and assumes valid cumulative metadata. Each group rejects batch_id>=num_batches, then compares last local offset strictly greater than whole-file len cast to u32, not the selected batch length; codec checks supply additional bounds. Nonempty groups are assumed by expect. Ordered buffered reads collect all batches, then spawn_blocking concat even for zero/one group using the requested schema. No output reorder restores caller order; empty take performs no per-column read."
+        ],
+        [
+          398,
+          415,
+          "page_stats_schema returns None only when stats metadata is absent. Otherwise parse each root statistics field name as i32, retain roots whose parsed data-field ID occurs in requested IDs, append that root ID plus immediate child IDs, then project_by_ids(include children=true). Unparseable names and missing requested IDs are silently skipped; results follow statistics schema order, not caller order, with linear contains lookup. An existing stats schema can yield Some(empty schema)."
+        ],
+        [
+          416,
+          447,
+          "read_page_stats returns None when the cached optional statistics table is absent. If present, it unwraps page_stats_schema, returns None for an empty projection, otherwise reads selected root fields at batch0/RangeFull using the stats table with ordered buffered parallelism. It collects every array and constructs one RecordBatch. A supplied-metadata versus independently loaded stats-table disagreement can make the unwrap panic; statistics fields are not cross-validated here."
+        ],
+        [
+          448,
+          484,
+          "Public batches_stream consumes FileReader, Schema and a mutable Send+Sync static batch-ID predicate. It snapshots num_batches as i32, lazily filters IDs in increasing order, retains reader/projection in Arcs and reads whole batches with fixed buffered(2), independent of Reader io_parallelism for this outer layer. The stream adapter advertises the supplied projection schema; each batch may still perform parallel field reads. No Tokio task is spawned here despite thread-sharing comments; dropping the stream drops pending local futures, without a backend cancellation guarantee."
+        ],
+        [
+          485,
+          508,
+          "Public free read_batch rejects an empty schema with InvalidInput no fields requested. Its comment about with_row_id and panic is stale: no such flag or row-ID synthesis exists. Nonempty roots are read concurrently via ordered buffered(reader parallelism), collected, then RecordBatch::try_new checks assembled arrays against converted explicit schema. No upfront batch-ID validation occurs; missing page errors or codec errors emerge during reads."
+        ],
+        [
+          509,
+          545,
+          "Private async-recursive read_array reconstructs field.data_type and first routes is_fixed_stride to plain decoding. Otherwise handles Null, four binary/string families, Struct, Dictionary, List<Int32 offsets> and LargeList<Int64 offsets>. Other types panic via unimplemented rather than returning NotSupported. In the locally read predicate every FSL is fixed-stride, regardless of child; Interval has byte_width support but is absent from is_fixed_stride, so predicate/type-dispatch differences matter (rust/lance-arrow/src/lib.rs:111-181). No field.encoding tag drives this dispatch."
+        ],
+        [
+          546,
+          558,
+          "get_page_info looks up exact signed field.id and batch_id in the provided PageTable. Missing entry becomes InvalidInput with field name, field ID and batch ID. It performs no file-bound or length validation on the returned PageInfo."
+        ],
+        [
+          559,
+          577,
+          "_read_fixed_stride_array fetches page info from its supplied table, reconstructs field DataType and forwards position, length and cloned selector to the V1 facade. It passes neither field.nullable nor a separate validity bitmap; plain codec semantics govern primitive/fixed-array null handling."
+        ],
+        [
+          578,
+          600,
+          "read_null_array obtains page info but performs no payload IO. Empty Indices produces0; nonempty raw indices.values determines maximum, rejecting max>=page length, then uses indices.len. Index validity is ignored, so null selector backing values participate in bounds checks and every selector slot counts as a Null output row."
+        ],
+        [
+          601,
+          624,
+          "For null ranges, derive start/end for Range/full/to/from, reject only end>page length, then subtract start from end unchecked. Reversed ranges or RangeFrom beyond length can underflow rather than following PlainDecoder empty-range behavior. Ranges reaches unreachable!, not InvalidInput. Finally allocate a NullArray of the computed count. The inline wrap comment adds no behavior."
+        ],
+        [
+          625,
+          644,
+          "Binary adapter gets page info and forwards actual field DataType, field.nullable, position/length and borrowed selector to the V1 binary facade. Nullable controls equal-offset-to-null reconstruction; no independent validity is fetched here. Missing-page errors precede binary selector validation."
+        ],
+        [
+          645,
+          670,
+          "Dictionary adapter gets page info, reconstructs DataType and unwraps field.dictionary plus its loaded values before constructing DictionaryDecoder. It clones the values Arc, then forwards cloned selector. Missing/unhydrated dictionaries panic, even for a selector whose key decoder might otherwise return empty; this layer does not hydrate or validate dictionary values."
+        ],
+        [
+          671,
+          688,
+          "Struct adapter walks field.children sequentially, recursively reading each with the same table/batch/selector, then creates StructArray from FieldRef/ArrayRef pairs. It never reads a page or validity bitmap for the struct parent, so original parent nullness is not reconstructed. Child failures short-circuit after any earlier IO; there is no parallel child scheduling or parent-level row-count validation here."
+        ],
+        [
+          689,
+          710,
+          "Generic take_list_array expects a nonempty sorted UInt32 selector. It subtracts the first selector from every raw selector value and indexes the already fetched position span to create per-list child ranges. Null selector validity is ignored, and unsigned subtraction, positions and first-child existence are unchecked. It clones the Field and accumulates arrays rather than streaming child values."
+        ],
+        [
+          711,
+          740,
+          "For each selected list range, await read_array on children[0] sequentially, so repeated indices cause repeated child reads at this layer. Retain all arrays, build offsets from summed range lengths with unchecked addition/conversion, concatenate all values, and build a generic list. No separate list validity is restored; the helper creates an all-valid List/LargeList with child named item and nullable=true from the actual value type (rust/lance-arrow/src/lib.rs:202-229). This does not preserve arbitrary original child metadata or nullability."
+        ],
+        [
+          741,
+          760,
+          "read_list_array expands Range end and RangeTo end by1 for the terminal offset; Indices reads the entire first..last+2 position interval. RangeFull/from pass through unchanged. Empty direct Indices panics at first/last access before page lookup; no sorting or validity checks are local. Arithmetic is unchecked. Multiple Ranges is initially passed through to fixed-stride decoding."
+        ],
+        [
+          761,
+          773,
+          "List position lookup deliberately uses reader.page_table rather than the page_table argument, then reads T::DATA_TYPE (Int32/Int64) with the PageInfo position and length. Children later use the supplied table. This distinction matters if invoked with a statistics or other alternate table; no local assertion ensures equality. The position result is downcast to the generic primitive type."
+        ],
+        [
+          774,
+          794,
+          "Map logical list selectors to child rows: Range uses first and range-length endpoint; To uses0..positions[end]; From uses first position..child end; Full uses first..last position; Indices returns take_list_array. Ranges has an Internal error branch, but ordinary fixed-stride decoding rejects that selector earlier. Position access, range subtraction and child bounds are delegated/unchecked rather than preflighted."
+        ],
+        [
+          795,
+          809,
+          "Subtract first absolute position from all offsets with Arrow arithmetic, recursively read children[0] over derived child selector using the supplied page table, and call try_new_generic_list_array. Parent validity and original child field metadata are not passed. Arrow arithmetic/building errors propagate; no local offset monotonicity, nonnegativity or payload-length check precedes them."
+        ],
+        [
+          810,
+          826,
+          "Single cfg(test) module imports the frozen NotSelfDescribing writer, Arrow builders/types/casts and ObjectStoreParams. All fixtures use in-memory stores. Twelve active tests and four helper functions are present, including one nested helper; tests were read, not executed."
+        ],
+        [
+          827,
+          854,
+          "Cache discriminator test pins the three literal stable IDs and separately expects legacy diagnostic names equal std::any::type_name. It does not assert schema version, write_key bytes, physical key equality/isolation, cache hits, invalidation or concurrency."
+        ],
+        [
+          855,
+          894,
+          "test_take prepares ten10-row batches over Int64, Float32, Utf8 and UInt8-key dictionary with shared seven strings. schema.set_dictionary loads values from the first batch before opening the reader. Int64 is declared nullable but every generated element is valid; other fields are nonnullable."
+        ],
+        [
+          895,
+          935,
+          "Writes each of ten batches separately, finishes, opens with the prepared schema and takes [1,15,20,25,30,48,90]. Exact batch equality checks numeric/string values and dictionary keys [1,1,6,4,2,6,6] with the supplied values. This covers multi-batch file selection, not multiple fragments, nulls, unsorted/duplicate/empty input, out-of-range error timing or IO counts."
+        ],
+        [
+          936,
+          975,
+          "test_write_null_string_in_struct helper constructs one nullable parent struct containing Utf8 with configurable field nullability and values a,empty,b, all originally valid. It writes/finishes and reads one whole batch. There is no parent null bitmap, so it cannot prove preservation of null parents."
+        ],
+        [
+          976,
+          996,
+          "For nullable child, assert a,null,b; for nonnullable child, assert whole batch equality with the original empty string. The active read_nullable_string_in_struct test invokes both variants. This explicitly pins empty-vs-null legacy binary behavior controlled by the field schema, rather than demonstrating arbitrary null validity roundtrip."
+        ],
+        [
+          997,
+          1029,
+          "Struct-of-list roundtrip creates three input batches, each ten rows with ten values/list, passes all three together to one writer.write call, reads stored batch0 and compares to concatenation. It covers combined-input List<Int32>, List<Utf8> and LargeList<Int32> inside a struct, with all values and parent lists valid. It is not a three-stored-batch or three-fragment test."
+        ],
+        [
+          1030,
+          1076,
+          "Struct-of-list slice fixture writes three rows with ten items each, constructs expected row1 by slicing every struct child, then reads batch0 Range(1..2) and asserts equality. Despite scan in its name it calls read_batch directly, with no scanner, filtering, multi-batch range or null case."
+        ],
+        [
+          1077,
+          1100,
+          "make_schema_of_list_array returns one nullable struct s with nullable li List<Int32>, nullable ls List<Utf8> and nonnullable ll LargeList<Int32>. Every nested item field is named item and nullable=true, matching the reconstruction helper defaults; custom child metadata/name/nullability are not covered."
+        ],
+        [
+          1101,
+          1145,
+          "make_struct_of_list_array fills all three list builders with rows*num_items entries, numeric values i*10+j and strings str-(i*10+j), appending true validity for every row. The stride is hardcoded10 rather than num_items. It reconstructs the same three Arrow fields and returns a StructArray without parent validity."
+        ],
+        [
+          1146,
+          1190,
+          "test_read_nullable_arrays writes100 rows with a nonnullable Int64 and a Null column. Its nested async read_array_w_params directly invokes private read_array for field1/batch0 and unwraps. Thus later null cases exercise the null adapter rather than the public concatenating range/take path."
+        ],
+        [
+          1191,
+          1218,
+          "Null fixture asserts datatype Null plus lengths100/full,15/10..25,40/60..,25/..25 and4/indices[1,9,30,72]. It checks length/type, not an encoded null bitmap or IO counter; the null adapter does not read payload bytes."
+        ],
+        [
+          1219,
+          1241,
+          "Null indices ending100 and RangeTo(..107) only assert is_err. They do not pin error variant/message, empty/null indices, reversed/from-beyond-end ranges, Ranges panic, malformed page lengths or error timing."
+        ],
+        [
+          1242,
+          1277,
+          "test_take_lists constructs List and LargeList of nullable Int32 item fields, ten valid lists each containing ten consecutive values0..100. Both outer fields are nonnullable. Shared source values and no null/empty list slots simplify expected offsets."
+        ],
+        [
+          1278,
+          1320,
+          "Writes one batch, finishes, takes sorted[1,3,5,9] and builds the expected four ten-value lists. Independently asserts both output columns equal the expected List and LargeList arrays. No schema equality, repeated/unsorted/empty/null indices, differing list lengths, nested lists or IO batching assertion."
+        ],
+        [
+          1321,
+          1357,
+          "List-offset test constructs List and LargeList with three rows then slices to row1, whose values are [3,4] and [12,13]; the excluded final row has2000 values. The two retained rows form a one-row RecordBatch with default item metadata/validity."
+        ],
+        [
+          1358,
+          1381,
+          "Writes the sliced batch, finishes, asserts total file size<1000, then full-read batch equality. The size guard verifies the huge excluded list payload was not retained in this fixture; it is not a precise byte-layout, memory or IO-count guarantee. Both32/64-bit list offset paths are exercised."
+        ],
+        [
+          1382,
+          1412,
+          "test_read_ranges writes one Int64 column0..100, reads7..25 and asserts exact values. The comment claiming a null column is stale. It covers a single stored batch only, not the read_range concat branch, empty/out-of-bounds/reversed input or metadata corruption."
+        ],
+        [
+          1413,
+          1458,
+          "batches_stream fixture writes ten separate10-row Int32 batches, keeps even batch IDs, collects and asserts five batches with exact increasing ranges0..10,20..30,...,80..90. It pins predicate filtering and output order, not concurrency2, read-ahead, cancellation, cache or memory bounds."
+        ],
+        [
+          1459,
+          1505,
+          "Boolean take fixture configures a memory store block_size256, writes5000 modulo5 Boolean values in one batch and takes[2,4,5,8,4555]. Exact result false,false,true,false,true exercises separated Boolean chunks across the nominal2048-bit block boundary. Unlike disabled codec-local Boolean-take text, this is active reader-level coverage; it still makes no request-count, null/duplicate or cancellation assertion."
+        ],
+        [
+          1506,
+          1542,
+          "Projection fixture builds100 Int32 fields, projects f50 retaining its field ID, writes only that projected field with15 zeros and finishes. The comment names field_offset/num_fields, but the current constructor takes field_id_offset/max_field_id. The file itself is narrow; it is not reading one field from a physically100-column file."
+        ],
+        [
+          1543,
+          1562,
+          "Opens the narrow file with the full100-field Schema but both page-table bounds equal f50 ID, then reads with the partial schema and asserts original batch equality. This establishes that stored reader.schema can exceed available physical columns and explicit per-call projection controls successful reads. It does not validate arbitrary schema/file mismatch or cached page-table reuse across differing field bounds. End of module/file."
+        ]
+      ]
+    }
+  ]
+}

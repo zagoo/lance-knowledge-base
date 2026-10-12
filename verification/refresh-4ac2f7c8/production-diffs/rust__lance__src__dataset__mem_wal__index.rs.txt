@@ -1,0 +1,1636 @@
+@@ -1,246 +1,106 @@
+    1  // SPDX-License-Identifier: Apache-2.0
+    2  // SPDX-FileCopyrightText: Copyright The Lance Authors
+    3  
+    4 -//! Index store for MemTable write path.
+    5 -//!
+    6 -//! Maintains in-memory indexes that are updated synchronously with writes:
+    7 -//! - BTree: Primary key and scalar field lookups
+    8 -//! - HNSW: Vector similarity search (built incrementally, queryable while
+    9 -//!   building, flushed as Lance HNSW + FLAT)
+   10 -//! - FTS: Full-text search
+   11 -//!
+   12 -//! Other index types log a warning and are skipped.
+    4 +//! The indexes one memtable maintains. Each kind is a [`MemIndexPlugin`];
+    5 +//! B-tree, HNSW and full-text search are built in.
+    6  
+   14 -#![allow(clippy::print_stderr)]
+   15 -#![allow(clippy::type_complexity)]
+   16 -
+   17 -mod arena_skiplist;
+    7 +pub mod arena_skiplist;
+    8  mod btree;
+    9 +mod filter;
+   10  mod fts;
+   11  mod hnsw;
+   12 +mod pk;
+   13  mod pk_key;
+   14 +mod plugin;
+   15 +mod query;
+   20  
+   23 -use std::collections::HashMap;
+   21 +use std::collections::{BTreeMap, HashMap};
+   22  use std::sync::Arc;
+   23  use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+   26 -use std::time::Instant;
+   27 -
+   28 -use datafusion::common::ScalarValue;
+   24  
+   30 -use super::memtable::batch_store::StoredBatch;
+   31 -use super::wal::WriterCursors;
+   25  use arrow_array::RecordBatch;
+   33 -use arrow_schema::{DataType, Schema as ArrowSchema};
+   26 +use arrow_schema::Schema as ArrowSchema;
+   27  use lance_core::datatypes::Schema as LanceSchema;
+   28  use lance_core::{Error, Result};
+   36 -use lance_index::pbold;
+   29  use lance_index::scalar::InvertedIndexParams;
+   38 -use lance_index::vector::hnsw::builder::HnswBuildParams;
+   30 +use lance_index::scalar::inverted::DocumentGranularity;
+   31  use lance_linalg::distance::DistanceType;
+   40 -use lance_table::format::IndexMetadata;
+   41 -use prost::Message as _;
+   32  use tracing::instrument;
+   33  
+   44 -/// Row position in MemTable.
+   45 -///
+   46 -/// This is the absolute row position across all batches in the MemTable.
+   47 -/// When flushed to a single Lance file, this becomes the row ID directly.
+   48 -pub type RowPosition = u64;
+   49 -
+   50 -// Re-export public types used externally
+   51 -pub use btree::{BTreeIndexConfig, BTreeMemIndex};
+   52 -pub use fts::{FtsIndexConfig, FtsMemIndex, FtsQueryExpr, SearchOptions, search_cross_column};
+   53 -pub(crate) use fts::{QueryLocalFtsIndex, QueryLocalFtsStats};
+   54 -pub use hnsw::{HnswIndexConfig, HnswMemIndex};
+   34 +use super::memtable::batch_store::StoredBatch;
+   35 +use super::wal::WriterCursors;
+   36 +use pk::{OwnedPk, PkIndex};
+   37 +
+   38 +pub use btree::{BTreeMemIndex, BTreeMemIndexPlugin};
+   39 +pub(crate) use filter::{
+   40 +    IndexedFilter, MemIndexCatalog, evaluate as evaluate_index_filter, plan_filter,
+   41 +};
+   42 +pub use fts::{FtsEntry, FtsMemIndex, FtsMemIndexPlugin, FtsParams, FtsQueryExpr, SearchOptions};
+   43 +pub(crate) use fts::{QueryLocalFtsIndex, QueryLocalFtsStats, search_cross_column};
+   44 +pub use hnsw::{HnswMemIndex, HnswMemIndexPlugin, HnswParams};
+   45  pub use pk_key::encode_pk_tuple;
+   46 +pub use plugin::{
+   47 +    FlushContext, FlushOutcome, GenerationWrite, MemIndex, MemIndexBuildContext, MemIndexParams,
+   48 +    MemIndexPlugin, MemIndexRegistry, MemIndexSpec, PrimaryKeyIndex, ResolveContext, ResolvedIndex,
+   49 +};
+   50 +pub use query::{
+   51 +    FtsMemQuery, MemMatches, MemQuery, MemSearchResult, PositionSet, RankedMatch, ScalarQuery,
+   52 +    SearchContext, VectorMemQuery,
+   53 +};
+   54 +
+   55 +/// Row position in a memtable: the row's position across all its batches,
+   56 +/// which becomes its row id in the flushed file.
+   57 +pub type RowPosition = u64;
+   58  
+   57 -use pk_key::encode_pk_batch;
+   58 -
+   59 -/// Synthetic column the composite PK index is keyed on: the order-preserving
+   60 -/// encoded tuple (see [`encode_pk_tuple`]), stored as `Binary` so a
+   61 -/// [`BTreeMemIndex`]'s byte backend indexes it directly.
+   62 -const PK_KEY_COLUMN: &str = "__pk_key__";
+   63 -
+   64 -/// Row count at or below which [`IndexStore::insert_batches`] indexes inline
+   65 -/// rather than spawning a thread per index.
+   66 -///
+   67 -/// The spawn is one OS thread *per index* — tens of microseconds each, and a table can
+   68 -/// carry several BTrees alongside its HNSW and FTS — so for a small batch it costs more
+   69 -/// than the indexing it parallelizes. Small batches are not the exceptional case: a
+   70 -/// durable put triggers a WAL flush covering only the batch it just inserted, so this
+   71 -/// path is routinely called with a single short batch.
+   72 -///
+   73 -/// The crossover depends on per-row HNSW cost, which varies with dimension and
+   74 -/// `ef_construction`; tune against `benches/mem_wal/vector/mem_wal_index_micro.rs`.
+   59 +/// At or below this many rows, index on the calling thread: a thread per index
+   60 +/// costs more than the work. Tune with `benches/mem_wal/vector/mem_wal_index_micro.rs`.
+   61  const PARALLEL_INDEX_MIN_ROWS: usize = 64;
+   62  
+   77 -/// The memtable's primary-key index, used to answer "newest visible version of
+   78 -/// this key" for dedup. Single-column PKs reuse the column's compact typed
+   79 -/// [`BTreeMemIndex`] (no second copy); composite PKs key a `BTreeMemIndex` on
+   80 -/// the order-preserving encoded tuple ([`encode_pk_tuple`]) instead. Either way
+   81 -/// the lookup is a single seek on one `BTreeMemIndex`.
+   82 -enum PkIndex {
+   83 -    /// Arity 1: aliases a `btree_indexes` entry, so the insert loop maintains it.
+   84 -    Single(Arc<BTreeMemIndex>),
+   85 -    /// Arity >= 2: a `BTreeMemIndex` over the encoded-tuple `Binary` key,
+   86 -    /// maintained explicitly in the insert paths (the original batch lacks the
+   87 -    /// synthetic key column). `columns` are the PK columns in order, resolved
+   88 -    /// against each batch's schema at insert time.
+   89 -    Composite {
+   90 -        index: Arc<BTreeMemIndex>,
+   91 -        columns: Vec<String>,
+   92 -    },
+   63 +impl Default for MemIndexRegistry {
+   64 +    /// The kinds Lance builds in.
+   65 +    fn default() -> Self {
+   66 +        let mut registry = Self::empty();
+   67 +        for plugin in [
+   68 +            Arc::new(BTreeMemIndexPlugin) as Arc<dyn MemIndexPlugin>,
+   69 +            Arc::new(HnswMemIndexPlugin),
+   70 +            Arc::new(FtsMemIndexPlugin),
+   71 +        ] {
+   72 +            registry
+   73 +                .add_plugin(plugin)
+   74 +                .expect("the built-in kinds claim distinct details messages");
+   75 +        }
+   76 +        registry
+   77 +    }
+   78  }
+   79  
+   95 -// ============================================================================
+   96 -// Index Store
+   97 -// ============================================================================
+   98 -
+   99 -/// Validate every configured in-memory index, and the composite primary key,
+  100 -/// against the shard schema. Call once at shard open, before any write can land.
+  101 -///
+  102 -/// This is what makes poison-and-replay *terminating*. An index insert that
+  103 -/// fails deterministically on a row that is already WAL-durable cannot be
+  104 -/// recovered from: the writer poisons, the operator reopens, replay re-reads the
+  105 -/// same WAL rows, the same insert fails again, and `open()` propagates it — a
+  106 -/// shard that never comes back. Every such failure is an index *config*
+  107 -/// disagreeing with the schema, never a property of the data, so one pass here
+  108 -/// closes the whole class before a single row is accepted.
+  109 -///
+  110 -/// The data-dependent errors inside the index layer are already unreachable
+  111 -/// through `put`: `MemTable::insert_batches_only` does a full `Arc<Schema>`
+  112 -/// equality check, so a batch that would trip one is rejected before it reaches
+  113 -/// the batch store, let alone the WAL.
+  114 -///
+  115 -/// It also rejects a config whose `field_id` names a different column than its
+  116 -/// `column`. Index *selection* keys off `field_id` — a single-column PK reuses
+  117 -/// the BTree whose `field_id` matches its key — so a config resolved only by name
+  118 -/// could be bound under the wrong identity, serving stale reads and flushing the
+  119 -/// wrong column into the durable PK sidecar. `lance_schema` supplies the
+  120 -/// authoritative name→id mapping.
+  121 -pub fn validate_index_configs(
+  122 -    configs: &[MemIndexConfig],
+   80 +/// Reject index specs and primary-key columns that would fail every insert,
+   81 +/// so a writer never accepts a row that replay could not index. Call once,
+   82 +/// when a shard opens.
+   83 +pub fn validate_index_specs(
+   84 +    specs: &[MemIndexSpec],
+   85      schema: &ArrowSchema,
+   86      lance_schema: &LanceSchema,
+   87      pk_columns: &[String],
+   88  ) -> Result<()> {
+  127 -    for config in configs {
+  128 -        let column = config.column();
+  129 -        if let MemIndexConfig::Fts(config) = config {
+  130 -            let resolved = crate::index::scalar::inverted::resolve_fts_field(
+  131 -                lance_schema,
+  132 -                column,
+  133 -                config.params.get_document_granularity(),
+  134 -            )
+  135 -            .map_err(|error| {
+  136 -                Error::invalid_input(format!(
+  137 -                    "FTS index '{}' is invalid for field path '{}': {error}",
+  138 -                    config.name, column
+  139 -                ))
+  140 -            })?;
+  141 -            if resolved.final_field_id != config.field_id {
+  142 -                return Err(Error::invalid_input(format!(
+  143 -                    "index '{}' is configured with field_id {} but its field path '{}' has \
+  144 -                     final field_id {} in the shard schema",
+  145 -                    config.name, config.field_id, column, resolved.final_field_id,
+  146 -                )));
+  147 -            }
+   89 +    let mut seen = HashMap::new();
+   90 +    for spec in specs {
+   91 +        if !first_under_its_name(&mut seen, spec)? {
+   92              continue;
+   93          }
+  150 -
+  151 -        let field = schema.field_with_name(column).map_err(|_| {
+  152 -            Error::invalid_input(format!(
+  153 -                "index '{}' is configured on column '{}', which is not in the shard schema; \
+  154 -                 available columns: [{}]",
+  155 -                config.name(),
+  156 -                column,
+  157 -                schema
+  158 -                    .fields()
+  159 -                    .iter()
+  160 -                    .map(|f| f.name().as_str())
+  161 -                    .collect::<Vec<_>>()
+  162 -                    .join(", ")
+  163 -            ))
+  164 -        })?;
+  165 -
+  166 -        match config {
+  167 -            // BTree falls back to per-row `ScalarValue` extraction, so it
+  168 -            // accepts any column type the schema can hold. Existence is the
+  169 -            // only precondition.
+  170 -            MemIndexConfig::BTree(_) => {}
+  171 -            MemIndexConfig::Fts(_) => unreachable!("FTS configs are validated by schema path"),
+  172 -            MemIndexConfig::Hnsw(_) => match field.data_type() {
+  173 -                DataType::FixedSizeList(item, dim) => {
+  174 -                    if item.data_type() != &DataType::Float32 {
+  175 -                        return Err(Error::invalid_input(format!(
+  176 -                            "HNSW index '{}' requires a FixedSizeList<Float32> column; \
+  177 -                             column '{}' has item type {:?}",
+  178 -                            config.name(),
+  179 -                            column,
+  180 -                            item.data_type()
+  181 -                        )));
+  182 -                    }
+  183 -                    // `HnswMemIndex.dim` is a placeholder until the first batch
+  184 -                    // pins it (`hnsw.rs`), so a zero-width vector would only
+  185 -                    // surface at insert time — i.e. on already-durable data.
+  186 -                    if *dim <= 0 {
+  187 -                        return Err(Error::invalid_input(format!(
+  188 -                            "HNSW index '{}' requires a vector dimension > 0; column '{}' has \
+  189 -                             dimension {dim}",
+  190 -                            config.name(),
+  191 -                            column,
+  192 -                        )));
+  193 -                    }
+  194 -                }
+  195 -                other => {
+  196 -                    return Err(Error::invalid_input(format!(
+  197 -                        "HNSW index '{}' requires a FixedSizeList<Float32> column; \
+  198 -                         column '{}' is {:?}",
+  199 -                        config.name(),
+  200 -                        column,
+  201 -                        other
+  202 -                    )));
+  203 -                }
+  204 -            },
+  205 -        }
+  206 -
+  207 -        // The column resolves, but index selection keys off `field_id`, not name.
+  208 -        // A config whose `field_id` identifies a *different* column would be bound
+  209 -        // under the wrong identity (e.g. reused as the single-column PK index), so
+  210 -        // reject any `field_id` that does not name the resolved column.
+  211 -        let resolved_field_id = lance_schema
+  212 -            .field(column)
+  213 -            .ok_or_else(|| {
+  214 -                Error::invalid_input(format!(
+  215 -                    "index '{}' is configured on column '{}', which is present in the Arrow \
+  216 -                     schema but absent from the Lance schema",
+  217 -                    config.name(),
+  218 -                    column,
+  219 -                ))
+  220 -            })?
+  221 -            .id;
+  222 -        if resolved_field_id != config.field_id() {
+  223 -            return Err(Error::invalid_input(format!(
+  224 -                "index '{}' is configured with field_id {} but its column '{}' has field_id {} \
+  225 -                 in the shard schema",
+  226 -                config.name(),
+  227 -                config.field_id(),
+  228 -                column,
+  229 -                resolved_field_id,
+  230 -            )));
+  231 -        }
+   94 +        spec.validate(lance_schema)?;
+   95      }
+  233 -
+  234 -    // Every PK column must exist in the schema. A single-column PK aliases a
+  235 -    // BTree entry (any type); only a *composite* PK builds an order-preserving
+  236 -    // encoded key, and only some types encode.
+   96      for column in pk_columns {
+   97          let field = schema.field_with_name(column).map_err(|_| {
+   98              Error::invalid_input(format!(
+   99                  "primary-key column '{column}' is not in the shard schema"
+  100              ))
+  101          })?;
+  243 -        if pk_columns.len() > 1 && !is_encodable_pk_type(field.data_type()) {
+  102 +        // Only a composite key is encoded, so only it restricts types.
+  103 +        if pk_columns.len() > 1 && !pk_key::is_encodable(field.data_type()) {
+  104              return Err(Error::invalid_input(format!(
+  105                  "composite primary-key column '{column}' has type {:?}, which has no \
+  106                   order-preserving key encoding",
+
+@@ -248,225 +108,40 @@ pub fn validate_index_configs(
+  108              )));
+  109          }
+  110      }
+  251 -
+  111      Ok(())
+  112  }
+  113  
+  255 -/// Types `pk_key::encode_value` can encode into an order-preserving composite key.
+  256 -fn is_encodable_pk_type(data_type: &DataType) -> bool {
+  257 -    matches!(
+  258 -        data_type,
+  259 -        DataType::Int8
+  260 -            | DataType::Int16
+  261 -            | DataType::Int32
+  262 -            | DataType::Int64
+  263 -            | DataType::UInt8
+  264 -            | DataType::UInt16
+  265 -            | DataType::UInt32
+  266 -            | DataType::UInt64
+  267 -            | DataType::Date32
+  268 -            | DataType::Date64
+  269 -            | DataType::Boolean
+  270 -            | DataType::Utf8
+  271 -            | DataType::LargeUtf8
+  272 -            | DataType::Binary
+  273 -            | DataType::LargeBinary
+  274 -            | DataType::FixedSizeBinary(_)
+  275 -    )
+  276 -}
+  277 -
+  278 -/// The index kinds a MemTable can maintain — the registry of MemWAL index
+  279 -/// support. Data-free because indexes are identified by type url before any
+  280 -/// [`MemIndexConfig`] exists.
+  281 -///
+  282 -/// Adding a variant is a compile error in [`details_suffix`](Self::details_suffix),
+  283 -/// `MemIndexConfig::kind`, and `Dataset::mem_wal_writer` until each handles it.
+  284 -#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+  285 -pub enum MemIndexKind {
+  286 -    /// BTree index for scalar fields (point lookups, range queries).
+  287 -    BTree,
+  288 -    /// HNSW vector index built incrementally, queryable while building.
+  289 -    Hnsw,
+  290 -    /// Full-text search index.
+  291 -    Fts,
+  292 -}
+  293 -
+  294 -impl MemIndexKind {
+  295 -    /// Every maintainable kind. A kind missing here is never detected, so it
+  296 -    /// goes unmaintained rather than reaching a memtable that cannot build it.
+  297 -    pub const ALL: &'static [Self] = &[Self::BTree, Self::Hnsw, Self::Fts];
+  298 -
+  299 -    /// Suffix of the protobuf details message identifying this kind.
+  300 -    ///
+  301 -    /// Only the suffix: the prefix varies by dataset version
+  302 -    /// (`/lance.table.`, `/lance.index.pb.`, and the `type.googleapis.com/`
+  303 -    /// form MemWAL flush once wrote), and all must resolve.
+  304 -    pub const fn details_suffix(self) -> &'static str {
+  305 -        match self {
+  306 -            Self::BTree => "BTreeIndexDetails",
+  307 -            Self::Hnsw => "VectorIndexDetails",
+  308 -            Self::Fts => "InvertedIndexDetails",
+  309 -        }
+  310 -    }
+  311 -
+  312 -    /// The kind a base-table index of this protobuf type maps to, or `None`
+  313 -    /// when a memtable cannot maintain it.
+  314 -    pub fn from_type_url(type_url: &str) -> Option<Self> {
+  315 -        Self::ALL
+  316 -            .iter()
+  317 -            .copied()
+  318 -            .find(|kind| type_url.ends_with(kind.details_suffix()))
+  319 -    }
+  320 -}
+  321 -
+  322 -/// Configuration for an index in MemWAL. Pairs 1:1 with [`MemIndexKind`] via
+  323 -/// [`kind`](Self::kind).
+  324 -///
+  325 -/// `Hnsw` is boxed because `HnswBuildParams` is small but the variant may
+  326 -/// grow with future config (e.g. shard-specific tuning).
+  327 -#[derive(Debug, Clone, PartialEq)]
+  328 -pub enum MemIndexConfig {
+  329 -    /// BTree index for scalar fields (point lookups, range queries).
+  330 -    BTree(BTreeIndexConfig),
+  331 -    /// HNSW vector index built incrementally, queryable while building.
+  332 -    Hnsw(Box<HnswIndexConfig>),
+  333 -    /// Full-text search index.
+  334 -    Fts(FtsIndexConfig),
+  335 -}
+  336 -
+  337 -impl MemIndexConfig {
+  338 -    /// The kind this config builds. Links the config enum to the registry, so
+  339 -    /// a new variant must declare its kind.
+  340 -    pub const fn kind(&self) -> MemIndexKind {
+  341 -        match self {
+  342 -            Self::BTree(_) => MemIndexKind::BTree,
+  343 -            Self::Hnsw(_) => MemIndexKind::Hnsw,
+  344 -            Self::Fts(_) => MemIndexKind::Fts,
+  345 -        }
+  346 -    }
+  347 -
+  348 -    /// Get the index name.
+  349 -    pub fn name(&self) -> &str {
+  350 -        match self {
+  351 -            Self::BTree(c) => &c.name,
+  352 -            Self::Hnsw(c) => &c.name,
+  353 -            Self::Fts(c) => &c.name,
+  354 -        }
+  355 -    }
+  356 -
+  357 -    /// Get the field ID.
+  358 -    pub fn field_id(&self) -> i32 {
+  359 -        match self {
+  360 -            Self::BTree(c) => c.field_id,
+  361 -            Self::Hnsw(c) => c.field_id,
+  362 -            Self::Fts(c) => c.field_id,
+  363 -        }
+  364 -    }
+  365 -
+  366 -    /// Get the column name.
+  367 -    pub fn column(&self) -> &str {
+  368 -        match self {
+  369 -            Self::BTree(c) => &c.column,
+  370 -            Self::Hnsw(c) => &c.column,
+  371 -            Self::Fts(c) => &c.column,
+  372 -        }
+  373 -    }
+  374 -
+  375 -    /// Create a BTree index config from base table IndexMetadata.
+  376 -    pub fn btree_from_metadata(index_meta: &IndexMetadata, schema: &LanceSchema) -> Result<Self> {
+  377 -        let (field_id, column) = Self::extract_field_info(index_meta, schema)?;
+  378 -        Ok(Self::BTree(BTreeIndexConfig {
+  379 -            name: index_meta.name.clone(),
+  380 -            field_id,
+  381 -            column,
+  382 -        }))
+  383 -    }
+  384 -
+  385 -    /// Create an FTS index config from base table IndexMetadata.
+  386 -    pub fn fts_from_metadata(index_meta: &IndexMetadata, schema: &LanceSchema) -> Result<Self> {
+  387 -        let (field_id, _) = Self::extract_field_info(index_meta, schema)?;
+  388 -
+  389 -        // Extract InvertedIndexParams from index_details if available
+  390 -        let details = if let Some(details_any) = &index_meta.index_details {
+  391 -            pbold::InvertedIndexDetails::decode(details_any.value.as_slice()).map_err(|err| {
+  392 -                Error::io(format!(
+  393 -                    "failed to decode InvertedIndexDetails for MemWAL FTS index '{}': {}",
+  394 -                    index_meta.name, err
+  395 -                ))
+  396 -            })?
+  397 -        } else {
+  398 -            pbold::InvertedIndexDetails::default()
+  399 -        };
+  400 -        let details =
+  401 -            crate::index::scalar::inverted::normalize_inverted_details(index_meta, details)?;
+  402 -        let params = InvertedIndexParams::try_from(&details)?;
+  403 -        let resolved = crate::index::scalar::inverted::resolve_fts_field_by_id(
+  404 -            schema,
+  405 -            field_id,
+  406 -            params.get_document_granularity(),
+  407 -        )?;
+  408 -
+  409 -        Ok(Self::Fts(
+  410 -            FtsIndexConfig::try_with_params(
+  411 -                index_meta.name.clone(),
+  412 -                field_id,
+  413 -                resolved.canonical_path.clone(),
+  414 -                params,
+  415 -            )?
+  416 -            .with_resolved_field(resolved),
+  417 -        ))
+  418 -    }
+  419 -
+  420 -    /// Create an HNSW vector index config.
+  421 -    pub fn hnsw(name: String, field_id: i32, column: String, distance_type: DistanceType) -> Self {
+  422 -        Self::Hnsw(Box::new(HnswIndexConfig::new(
+  423 -            name,
+  424 -            field_id,
+  425 -            column,
+  426 -            distance_type,
+  427 -        )))
+  428 -    }
+  429 -
+  430 -    /// Create an HNSW vector index config with explicit build parameters.
+  431 -    pub fn hnsw_with_params(
+  432 -        name: String,
+  433 -        field_id: i32,
+  434 -        column: String,
+  435 -        distance_type: DistanceType,
+  436 -        build_params: HnswBuildParams,
+  437 -    ) -> Self {
+  438 -        Self::Hnsw(Box::new(
+  439 -            HnswIndexConfig::new(name, field_id, column, distance_type)
+  440 -                .with_build_params(build_params),
+  441 -        ))
+  442 -    }
+  443 -
+  444 -    /// Extract field ID and column name from index metadata.
+  445 -    fn extract_field_info(
+  446 -        index_meta: &IndexMetadata,
+  447 -        schema: &LanceSchema,
+  448 -    ) -> Result<(i32, String)> {
+  449 -        let field_id = index_meta.fields.first().ok_or_else(|| {
+  450 -            Error::invalid_input(format!("Index '{}' has no fields", index_meta.name))
+  451 -        })?;
+  452 -
+  453 -        let column = schema
+  454 -            .field_by_id(*field_id)
+  455 -            .map(|f| f.name.clone())
+  456 -            .ok_or_else(|| {
+  457 -                Error::invalid_input(format!("Field with id {} not found in schema", field_id))
+  458 -            })?;
+  459 -
+  460 -        Ok((*field_id, column))
+  114 +/// Whether `spec` is the first under its name. A name listed again for the same
+  115 +/// index is that one index; for a different one it is refused.
+  116 +fn first_under_its_name<'a>(
+  117 +    seen: &mut HashMap<&'a str, &'a MemIndexSpec>,
+  118 +    spec: &'a MemIndexSpec,
+  119 +) -> Result<bool> {
+  120 +    match seen.insert(spec.name.as_str(), spec) {
+  121 +        None => Ok(true),
+  122 +        Some(first) if first.same_index(spec) => Ok(false),
+  123 +        Some(_) => Err(Error::invalid_input(format!(
+  124 +            "index '{}' is configured twice, as two different indexes",
+  125 +            spec.name
+  126 +        ))),
+  127      }
+  128  }
+  129  
+  464 -/// Names the index, not just its type: a caller validating a maintained set
+  465 -/// needs to know which one to drop.
+  466 -pub(crate) fn unsupported_index_type(index_name: &str, type_url: &str) -> Error {
+  130 +/// The error for an index no registered plugin maintains, naming the index.
+  131 +pub(crate) fn unsupported_index_type(
+  132 +    index_name: &str,
+  133 +    type_url: &str,
+  134 +    registry: &MemIndexRegistry,
+  135 +) -> Error {
+  136 +    let supported = registry
+  137 +        .plugins()
+  138 +        .iter()
+  139 +        .map(|plugin| plugin.details_message())
+  140 +        .collect::<Vec<_>>()
+  141 +        .join(", ");
+  142      Error::invalid_input(format!(
+  468 -        "index '{}' has type {}, which the MemWAL cannot maintain. Supported: BTree, Inverted, Vector",
+  469 -        index_name, type_url
+  143 +        "index '{index_name}' has type {type_url}, which no registered plugin maintains. \
+  144 +         Supported: [{supported}]"
+  145      ))
+  146  }
+  147  
+
+@@ -487,170 +162,124 @@ pub enum MemTableVisibility {
+  162      Indexed,
+  163  }
+  164  
+  490 -/// Registry managing all in-memory indexes for a MemTable.
+  491 -///
+  492 -/// Indexes are keyed by index name. Each index stores its field_id for
+  493 -/// stable column-to-index resolution (column name → field_id → index).
+  494 -///
+  495 -/// The store also carries the MemTable's two cursors: `indexed_count` (what the
+  496 -/// index layer has ingested) and `visible_count` (what is indexed *and* durable,
+  497 -/// and therefore safe for scanners to read). Scanners snapshot the latter at plan
+  498 -/// construction time so every plan keys on a stable MVCC cursor.
+  165 +/// The indexes one memtable maintains, keyed by name, and its two cursors:
+  166 +/// what every index holds, and what readers may see.
+  167 +#[derive(Default)]
+  168  pub struct IndexStore {
+  500 -    /// BTree indexes keyed by index name. `Arc` so the primary-key BTrees can be
+  501 -    /// shared into [`Self::pk_btrees`] without a second copy or a second insert.
+  502 -    btree_indexes: HashMap<String, Arc<BTreeMemIndex>>,
+  503 -    /// HNSW vector indexes keyed by index name.
+  504 -    hnsw_indexes: HashMap<String, HnswMemIndex>,
+  505 -    /// FTS indexes keyed by index name.
+  506 -    fts_indexes: HashMap<String, FtsMemIndex>,
+  507 -    /// The primary-key index (single-column or composite), or `None` without a
+  508 -    /// primary key. Queried via [`Self::pk_newest_visible`] (see
+  509 -    /// [`Self::enable_pk_index`]).
+  169 +    /// Sorted by name, so the same query always reaches the same index.
+  170 +    indexes: BTreeMap<String, Arc<dyn MemIndex>>,
+  171 +    /// How a filter expression reaches these indexes.
+  172 +    filter_catalog: MemIndexCatalog,
+  173      pk_index: Option<PkIndex>,
+  511 -    /// How many batches of this memtable have been fully indexed. An exclusive
+  512 -    /// count: 0 means none.
+  513 -    ///
+  514 -    /// This has only ever been an *indexed* cursor — it is advanced at the end of
+  515 -    /// `insert_batches`, once every index insert for the batch has completed, and
+  516 -    /// never before. It was named `max_visible_batch_position` and treated as a
+  517 -    /// visibility cursor by five read sites, which is how rows became readable
+  518 -    /// before they were durable. Publishing is a separate step, and it is the
+  519 -    /// writer's to make — see `visible_count`.
+  174 +    /// Batches every index holds, as an exclusive count. Not a visibility
+  175 +    /// bound: readers use [`Self::visible_count`].
+  176      indexed_count: AtomicUsize,
+  521 -
+  522 -    /// The writer's cursors, and this memtable's coordinate within them. `None`
+  523 -    /// for a bare `IndexStore` (tests, benches), where visibility is just the
+  524 -    /// indexed prefix.
+  525 -    ///
+  526 -    /// Visibility is **derived, never stored**: see `visible_count`.
+  177 +    /// The writer's cursors and this memtable's offset in them; `None` in tests
+  178 +    /// and benches.
+  179      durability: Option<(Arc<WriterCursors>, usize)>,
+  528 -    /// Conservative flag set once this memtable has observed any primary-key
+  529 -    /// rewrite while maintaining a search index. Search planners can push top-k
+  530 -    /// into HNSW/FTS for append-only PK data, but must switch to
+  531 -    /// newest-before-top-k search after an overwrite.
+  180      pk_has_overrides: AtomicBool,
+  533 -}
+  534 -
+  535 -impl Default for IndexStore {
+  536 -    fn default() -> Self {
+  537 -        Self {
+  538 -            btree_indexes: HashMap::new(),
+  539 -            hnsw_indexes: HashMap::new(),
+  540 -            fts_indexes: HashMap::new(),
+  541 -            pk_index: None,
+  542 -            indexed_count: AtomicUsize::new(0),
+  543 -            durability: None,
+  544 -            pk_has_overrides: AtomicBool::new(false),
+  545 -        }
+  546 -    }
+  181 +    /// Whether any row has reached the indexes; an index added after would
+  182 +    /// miss it.
+  183 +    has_rows: AtomicBool,
+  184  }
+  185  
+  186  impl std::fmt::Debug for IndexStore {
+  187      fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+  188          f.debug_struct("IndexStore")
+  552 -            .field(
+  553 -                "btree_indexes",
+  554 -                &self.btree_indexes.keys().collect::<Vec<_>>(),
+  555 -            )
+  556 -            .field(
+  557 -                "hnsw_indexes",
+  558 -                &self.hnsw_indexes.keys().collect::<Vec<_>>(),
+  559 -            )
+  560 -            .field("fts_indexes", &self.fts_indexes.keys().collect::<Vec<_>>())
+  561 -            .field(
+  562 -                "pk_index",
+  563 -                &match &self.pk_index {
+  564 -                    None => "none".to_string(),
+  565 -                    Some(PkIndex::Single(b)) => format!("single({})", b.column_name()),
+  566 -                    Some(PkIndex::Composite { columns, .. }) => {
+  567 -                        format!("composite({})", columns.join(", "))
+  568 -                    }
+  569 -                },
+  570 -            )
+  571 -            .field("indexed_count", &self.indexed_count.load(Ordering::Acquire))
+  572 -            .field(
+  573 -                "pk_has_overrides",
+  574 -                &self.pk_has_overrides.load(Ordering::Acquire),
+  575 -            )
+  189 +            .field("indexes", &self.indexes.keys().collect::<Vec<_>>())
+  190 +            .field("pk_index", &self.pk_index.as_ref().map(PkIndex::describe))
+  191 +            .field("indexed_count", &self.indexed_count())
+  192 +            .field("pk_has_overrides", &self.pk_has_overrides())
+  193              .finish()
+  194      }
+  195  }
+  196  
+  197 +/// The rows one insert hands every index.
+  198 +#[derive(Clone, Copy)]
+  199 +enum Rows<'a> {
+  200 +    One(&'a RecordBatch, RowPosition),
+  201 +    Batches(&'a [StoredBatch]),
+  202 +}
+  203 +
+  204 +impl Rows<'_> {
+  205 +    fn num_rows(&self) -> usize {
+  206 +        match self {
+  207 +            Self::One(batch, _) => batch.num_rows(),
+  208 +            Self::Batches(batches) => batches.iter().map(|stored| stored.num_rows).sum(),
+  209 +        }
+  210 +    }
+  211 +
+  212 +    /// Feed every batch to `insert`, reporting whether any call did.
+  213 +    fn each(
+  214 +        &self,
+  215 +        mut insert: impl FnMut(&RecordBatch, RowPosition) -> Result<bool>,
+  216 +    ) -> Result<bool> {
+  217 +        match self {
+  218 +            Self::One(batch, row_offset) => insert(batch, *row_offset),
+  219 +            Self::Batches(batches) => batches.iter().try_fold(false, |seen, stored| {
+  220 +                Ok(insert(&stored.data, stored.row_offset)? || seen)
+  221 +            }),
+  222 +        }
+  223 +    }
+  224 +
+  225 +    fn insert_into(&self, index: &dyn MemIndex) -> Result<()> {
+  226 +        match self {
+  227 +            Self::One(batch, row_offset) => index.insert(batch, *row_offset),
+  228 +            Self::Batches(batches) => index.insert_batches(batches),
+  229 +        }
+  230 +    }
+  231 +}
+  232 +
+  233 +/// One index's share of an insert, reporting whether it saw a rewritten key.
+  234 +type IndexTask<'a> = Box<dyn Fn() -> Result<bool> + Send + Sync + 'a>;
+  235 +
+  236  impl IndexStore {
+  581 -    /// Create a new empty index registry.
+  237 +    /// An empty store.
+  238      pub fn new() -> Self {
+  239          Self::default()
+  240      }
+  241  
+  586 -    /// Create an index registry from index configurations.
+  587 -    ///
+  588 -    /// # Arguments
+  589 -    ///
+  590 -    /// * `configs` - Index configurations
+  591 -    /// * `max_rows` - Maximum vectors / rows in memtable. Used to size the
+  592 -    ///   pre-allocated HNSW graph and storage capacity.
+  593 -    /// * `max_batches` - Maximum number of write batches the HNSW storage
+  594 -    ///   can hold by reference (matches the writer's
+  595 -    ///   `ShardWriterConfig::max_memtable_batches`).
+  596 -    pub fn from_configs(
+  597 -        configs: &[MemIndexConfig],
+  242 +    /// Build every index a memtable is to maintain. `max_rows` and
+  243 +    /// `max_batches` are the memtable's capacity, which sizes structures an
+  244 +    /// index allocates up front.
+  245 +    pub fn from_specs(
+  246 +        specs: &[MemIndexSpec],
+  247 +        schema: &LanceSchema,
+  248          max_rows: usize,
+  249          max_batches: usize,
+  250      ) -> Result<Self> {
+  601 -        let mut registry = Self::new();
+  602 -
+  603 -        for config in configs {
+  604 -            match config {
+  605 -                MemIndexConfig::BTree(c) => {
+  606 -                    let index = Arc::new(BTreeMemIndex::new(c.field_id, c.column.clone()));
+  607 -                    registry.btree_indexes.insert(c.name.clone(), index);
+  608 -                }
+  609 -                MemIndexConfig::Hnsw(c) => {
+  610 -                    let index = HnswMemIndex::with_capacity(
+  611 -                        c.field_id,
+  612 -                        c.column.clone(),
+  613 -                        c.distance_type,
+  614 -                        c.build_params.clone(),
+  615 -                        max_rows,
+  616 -                        max_batches,
+  617 -                    );
+  618 -                    registry.hnsw_indexes.insert(c.name.clone(), index);
+  619 -                }
+  620 -                MemIndexConfig::Fts(c) => {
+  621 -                    let index = match c.resolved_field.as_deref() {
+  622 -                        Some(resolved) => FtsMemIndex::try_with_resolved_field(
+  623 -                            c.field_id,
+  624 -                            c.column.clone(),
+  625 -                            c.params.clone(),
+  626 -                            resolved.clone(),
+  627 -                        )?,
+  628 -                        None => FtsMemIndex::try_with_params(
+  629 -                            c.field_id,
+  630 -                            c.column.clone(),
+  631 -                            c.params.clone(),
+  632 -                        )?,
+  633 -                    };
+  634 -                    registry.fts_indexes.insert(c.name.clone(), index);
+  635 -                }
+  251 +        let mut store = Self::new();
+  252 +        let mut seen = HashMap::new();
+  253 +        for spec in specs {
+  254 +            if !first_under_its_name(&mut seen, spec)? {
+  255 +                continue;
+  256              }
+  257 +            store.add_index(
+  258 +                spec.name.clone(),
+  259 +                spec.build(schema, max_rows, max_batches)?,
+  260 +            );
+  261          }
+  262 +        store.filter_catalog = MemIndexCatalog::new(specs, schema);
+  263 +        Ok(store)
+  264 +    }
+  265  
+  639 -        Ok(registry)
+  266 +    /// Add a built index. Indexes are added before any row is inserted.
+  267 +    /// Filters reach only indexes built by [`Self::from_specs`].
+  268 +    pub fn add_index(&mut self, name: String, index: Arc<dyn MemIndex>) {
+  269 +        assert!(
+  270 +            !self.has_rows.load(Ordering::Acquire),
+  271 +            "indexes must be added before any row is inserted"
+  272 +        );
+  273 +        self.indexes.insert(name, index);
+  274      }
+  275  
+  642 -    /// Add a BTree/scalar index (skip-list backed). Low-level / test helper;
+  643 -    /// the production memtable path goes through [`Self::from_configs`].
+  276 +    /// Add a B-tree over one column. Filters do not reach it; build with
+  277 +    /// [`Self::from_specs`] for that.
+  278      pub fn add_btree(&mut self, name: String, field_id: i32, column: String) {
+  645 -        self.btree_indexes
+  646 -            .insert(name, Arc::new(BTreeMemIndex::new(field_id, column)));
+  279 +        self.add_index(name, Arc::new(BTreeMemIndex::new(field_id, column)));
+  280      }
+  281  
+  649 -    /// Add an HNSW vector index with default build parameters.
+  650 -    ///
+  651 -    /// HNSW indexes must be configured before rows are inserted into a
+  652 -    /// PK-indexed memtable. The vector planner's append-only fast path relies
+  653 -    /// on `pk_has_overrides` being maintained for every row visible to HNSW.
+  282 +    /// Add an HNSW graph over one vector column, with default graph parameters.
+  283      pub fn add_hnsw(
+  284          &mut self,
+  285          name: String,
+
+@@ -660,69 +289,25 @@ impl IndexStore {
+  289          capacity: usize,
+  290          max_batches: usize,
+  291      ) {
+  663 -        assert!(
+  664 -            self.pk_index.is_none() || self.pk_is_empty(),
+  665 -            "HNSW indexes must be configured before inserting rows into a PK memtable"
+  666 -        );
+  667 -        self.hnsw_indexes.insert(
+  292 +        self.add_index(
+  293              name,
+  669 -            HnswMemIndex::with_capacity(
+  294 +            Arc::new(HnswMemIndex::with_capacity(
+  295                  field_id,
+  296                  column,
+  297                  distance_type,
+  673 -                HnswBuildParams::default(),
+  298 +                Default::default(),
+  299                  capacity,
+  300                  max_batches,
+  676 -            ),
+  677 -        );
+  678 -    }
+  679 -
+  680 -    /// Add an HNSW vector index with explicit build parameters.
+  681 -    ///
+  682 -    /// See [`Self::add_hnsw`] for the PK-indexed memtable lifecycle invariant.
+  683 -    #[allow(clippy::too_many_arguments)]
+  684 -    pub fn add_hnsw_with_params(
+  685 -        &mut self,
+  686 -        name: String,
+  687 -        field_id: i32,
+  688 -        column: String,
+  689 -        distance_type: DistanceType,
+  690 -        build_params: HnswBuildParams,
+  691 -        capacity: usize,
+  692 -        max_batches: usize,
+  693 -    ) {
+  694 -        assert!(
+  695 -            self.pk_index.is_none() || self.pk_is_empty(),
+  696 -            "HNSW indexes must be configured before inserting rows into a PK memtable"
+  697 -        );
+  698 -        self.hnsw_indexes.insert(
+  699 -            name,
+  700 -            HnswMemIndex::with_capacity(
+  701 -                field_id,
+  702 -                column,
+  703 -                distance_type,
+  704 -                build_params,
+  705 -                capacity,
+  706 -                max_batches,
+  707 -            ),
+  301 +            )),
+  302          );
+  303      }
+  304  
+  711 -    /// Add an FTS index with default tokenizer parameters.
+  712 -    ///
+  713 -    /// FTS indexes must be configured before rows are inserted into a
+  714 -    /// PK-indexed memtable. FTS top-k pushdown relies on `pk_has_overrides`
+  715 -    /// being maintained for every row visible to the index.
+  305 +    /// Add a full-text index over one column, with default parameters.
+  306      pub fn add_fts(&mut self, name: String, field_id: i32, column: String) {
+  717 -        assert!(
+  718 -            self.pk_index.is_none() || self.pk_is_empty(),
+  719 -            "FTS indexes must be configured before inserting rows into a PK memtable"
+  720 -        );
+  721 -        self.fts_indexes
+  722 -            .insert(name, FtsMemIndex::new(field_id, column));
+  307 +        self.add_index(name, Arc::new(FtsMemIndex::new(field_id, column)));
+  308      }
+  309  
+  725 -    /// Add an FTS index with custom tokenizer parameters.
+  310 +    /// Add a full-text index over one column.
+  311      pub fn add_fts_with_params(
+  312          &mut self,
+  313          name: String,
+
+@@ -730,593 +315,201 @@ impl IndexStore {
+  315          column: String,
+  316          params: InvertedIndexParams,
+  317      ) -> Result<()> {
+  733 -        assert!(
+  734 -            self.pk_index.is_none() || self.pk_is_empty(),
+  735 -            "FTS indexes must be configured before inserting rows into a PK memtable"
+  736 -        );
+  737 -        self.fts_indexes.insert(
+  318 +        self.add_index(
+  319              name,
+  739 -            FtsMemIndex::try_with_params(field_id, column, params)?,
+  320 +            Arc::new(FtsMemIndex::try_with_params(field_id, column, params)?),
+  321          );
+  322          Ok(())
+  323      }
+  324  
+  744 -    /// Maintain a primary-key index so the memtable can answer "newest visible
+  745 -    /// version of this key" (see [`Self::pk_newest_visible`]).
+  746 -    ///
+  747 -    /// Single-column PKs reuse an existing BTree on the field, else auto-create
+  748 -    /// one under a `__pk__*` name so the normal insert loop maintains it (no
+  749 -    /// second copy). Composite (arity >= 2) PKs key a `BTreeMemIndex` on the
+  750 -    /// order-preserving encoded tuple (synthetic `PK_KEY_COLUMN`), maintained
+  751 -    /// explicitly in the insert paths. Call once at construction, after
+  752 -    /// [`Self::from_configs`] and before any inserts; a no-op when `pk_columns`
+  753 -    /// is empty. Search indexes (HNSW/FTS) must also still be empty so every
+  754 -    /// search-visible row participates in PK override tracking.
+  755 -    pub fn enable_pk_index(&mut self, pk_columns: &[(String, i32)]) {
+  756 -        if !pk_columns.is_empty() {
+  757 -            assert!(
+  758 -                self.hnsw_indexes.values().all(|idx| idx.is_empty())
+  759 -                    && self.fts_indexes.values().all(|idx| idx.is_empty()),
+  760 -                "Primary-key indexes must be configured before inserting rows into a search-indexed memtable"
+  761 -            );
+  762 -        }
+  763 -        self.pk_index = match pk_columns {
+  764 -            [] => None,
+  765 -            [(column, field_id)] => {
+  766 -                let btree = match self
+  767 -                    .btree_indexes
+  768 -                    .values()
+  769 -                    .find(|b| b.field_id() == *field_id)
+  770 -                {
+  771 -                    Some(existing) => existing.clone(),
+  772 -                    None => {
+  773 -                        let btree = Arc::new(BTreeMemIndex::new(*field_id, column.clone()));
+  774 -                        self.btree_indexes
+  775 -                            .insert(format!("__pk__{column}"), btree.clone());
+  776 -                        btree
+  777 -                    }
+  778 -                };
+  779 -                Some(PkIndex::Single(btree))
+  780 -            }
+  781 -            multi => Some(PkIndex::Composite {
+  782 -                // Synthetic field id (-1): the composite index is held directly,
+  783 -                // never resolved by field id.
+  784 -                index: Arc::new(BTreeMemIndex::new(-1, PK_KEY_COLUMN.to_string())),
+  785 -                columns: multi.iter().map(|(c, _)| c.clone()).collect(),
+  786 -            }),
+  787 -        };
+  788 -    }
+  789 -
+  790 -    /// Whether the memtable has a primary-key index.
+  791 -    pub fn has_pk_index(&self) -> bool {
+  792 -        self.pk_index.is_some()
+  793 -    }
+  794 -
+  795 -    /// Sorted `(value, row_id)` training batches for the flushed on-disk PK
+  796 -    /// BTree (the sidecar dedup index). Single-column emits the typed PK value;
+  797 -    /// composite emits the order-preserving `Binary` encoded tuple. Empty when
+  798 -    /// there is no primary key. Row positions line up 1:1 with the forward-
+  799 -    /// written data file, so they are the SSTable row ids directly.
+  800 -    pub fn pk_training_batches(&self, batch_size: usize) -> Result<Vec<RecordBatch>> {
+  801 -        match &self.pk_index {
+  802 -            None => Ok(Vec::new()),
+  803 -            Some(PkIndex::Single(btree)) => btree.to_training_batches(batch_size),
+  804 -            Some(PkIndex::Composite { index, .. }) => index.to_training_batches(batch_size),
+  805 -        }
+  806 -    }
+  807 -
+  808 -    /// Resolve the PK columns' positions in `batch` (composite insert helper).
+  809 -    fn pk_batch_indices(batch: &RecordBatch, columns: &[String]) -> Result<Vec<usize>> {
+  810 -        columns
+  811 -            .iter()
+  812 -            .map(|c| {
+  813 -                batch
+  814 -                    .schema()
+  815 -                    .column_with_name(c)
+  816 -                    .map(|(i, _)| i)
+  817 -                    .ok_or_else(|| {
+  818 -                        Error::invalid_input(format!("PK column '{c}' not found in batch"))
+  819 -                    })
+  820 -            })
+  821 -            .collect()
+  822 -    }
+  823 -
+  824 -    /// Maintain the composite PK index for `batch` (no-op for single/no PK):
+  825 -    /// encode the PK columns into the synthetic `PK_KEY_COLUMN` `Binary` column
+  826 -    /// and feed that to the keyed `BTreeMemIndex`.
+  827 -    fn insert_composite_pk(
+  828 -        &self,
+  829 -        batch: &RecordBatch,
+  830 -        row_offset: u64,
+  831 -        report_existing: bool,
+  832 -    ) -> Result<bool> {
+  833 -        if let Some(PkIndex::Composite { index, columns }) = &self.pk_index {
+  834 -            let pk_indices = Self::pk_batch_indices(batch, columns)?;
+  835 -            let encoded = encode_pk_batch(batch, &pk_indices)?;
+  836 -            let schema = Arc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+  837 -                PK_KEY_COLUMN,
+  838 -                arrow_schema::DataType::Binary,
+  839 -                false,
+  840 -            )]));
+  841 -            let key_batch = RecordBatch::try_new(schema, vec![Arc::new(encoded)])
+  842 -                .map_err(|e| Error::invalid_input(e.to_string()))?;
+  843 -            if report_existing {
+  844 -                return index.insert_and_report_existing(&key_batch, row_offset);
+  845 -            }
+  846 -            index.insert(&key_batch, row_offset)?;
+  847 -        }
+  848 -        Ok(false)
+  849 -    }
+  850 -
+  851 -    /// The newest row position of the primary-key tuple `values` (in PK order)
+  852 -    /// visible at `max_visible_row`, or `None`. A single seek either way:
+  853 -    /// single-column probes the typed BTree; composite probes the encoded-tuple
+  854 -    /// index. Collision-free, since `position` is the row identity.
+  855 -    pub fn pk_newest_visible(
+  856 -        &self,
+  857 -        values: &[ScalarValue],
+  858 -        max_visible_row: RowPosition,
+  859 -    ) -> Option<RowPosition> {
+  860 -        match &self.pk_index {
+  861 -            None => None,
+  862 -            Some(PkIndex::Single(btree)) => btree.get_newest_visible(&values[0], max_visible_row),
+  863 -            Some(PkIndex::Composite { index, .. }) => {
+  864 -                // An unsupported PK type would have failed at insert, so the
+  865 -                // index can't hold a tuple this fails to encode. The probe key is
+  866 -                // the same `Binary`-encoded tuple the insert path indexed.
+  867 -                let key = encode_pk_tuple(values).ok()?;
+  868 -                index.get_newest_visible(&ScalarValue::Binary(Some(key)), max_visible_row)
+  869 -            }
+  870 -        }
+  871 -    }
+  872 -
+  873 -    /// Whether `position` is the newest visible row of `values` — the recency
+  874 -    /// check the active index-search arms apply to drop predicate-crossing
+  875 -    /// stale hits. Callers gate on [`Self::has_pk_index`] first, since this is
+  876 -    /// `false` (drop) when the memtable has no primary-key index.
+  877 -    pub fn pk_is_newest(
+  878 -        &self,
+  879 -        values: &[ScalarValue],
+  880 -        position: RowPosition,
+  881 -        max_visible_row: RowPosition,
+  882 -    ) -> bool {
+  883 -        self.pk_newest_visible(values, max_visible_row) == Some(position)
+  884 -    }
+  885 -
+  886 -    /// Whether `key` has any version visible at `max_visible_row` — the
+  887 -    /// cross-source block-list's existence query, snapshot-bounded so a
+  888 -    /// not-yet-visible write can't shadow an older visible copy.
+  889 -    ///
+  890 -    /// `key` is already in the index's key space: the typed PK value for a
+  891 -    /// single-column key, the `Binary`-encoded tuple for a composite one (built
+  892 -    /// by `block_list::on_disk_pk_key`, the same key the flushed on-disk index is
+  893 -    /// probed with). Both arities forward it straight to the keyed BTree.
+  894 -    pub fn pk_contains_key(&self, key: &ScalarValue, max_visible_row: RowPosition) -> bool {
+  895 -        match &self.pk_index {
+  896 -            None => false,
+  897 -            Some(PkIndex::Single(btree)) | Some(PkIndex::Composite { index: btree, .. }) => {
+  898 -                btree.get_newest_visible(key, max_visible_row).is_some()
+  899 -            }
+  900 -        }
+  901 -    }
+  902 -
+  903 -    /// Whether the primary-key index holds no rows (or doesn't exist).
+  904 -    pub fn pk_is_empty(&self) -> bool {
+  905 -        match &self.pk_index {
+  906 -            None => true,
+  907 -            Some(PkIndex::Single(btree)) => btree.is_empty(),
+  908 -            Some(PkIndex::Composite { index, .. }) => index.is_empty(),
+  909 -        }
+  910 -    }
+  911 -
+  912 -    /// Whether this memtable has observed at least one PK rewrite.
+  913 -    ///
+  914 -    /// This is intentionally conservative: once true, it never resets for the
+  915 -    /// lifetime of the memtable. That is enough for query planning because a
+  916 -    /// memtable is flushed as a unit, and any rewrite means search-index top-k
+  917 -    /// pushdown can be polluted by stale entries that must be removed before
+  918 -    /// top-k. Scalar-only PK tables skip tracking because no search index uses
+  919 -    /// the flag.
+  920 -    pub fn pk_has_overrides(&self) -> bool {
+  921 -        self.pk_has_overrides.load(Ordering::Acquire)
+  922 -    }
+  923 -
+  924 -    fn should_track_pk_overrides(&self) -> bool {
+  925 -        (!self.hnsw_indexes.is_empty() || !self.fts_indexes.is_empty()) && !self.pk_has_overrides()
+  926 -    }
+  927 -
+  928 -    fn is_single_pk_btree(&self, index: &Arc<BTreeMemIndex>) -> bool {
+  929 -        matches!(&self.pk_index, Some(PkIndex::Single(pk)) if Arc::ptr_eq(pk, index))
+  930 -    }
+  931 -
+  932 -    fn mark_pk_overrides_if_needed(&self, had_existing_pk: bool) {
+  933 -        if had_existing_pk {
+  934 -            self.pk_has_overrides.store(true, Ordering::Release);
+  935 -        }
+  936 -    }
+  937 -
+  938 -    /// Insert a batch into all indexes.
+  939 -    pub fn insert(&self, batch: &RecordBatch, row_offset: u64) -> Result<()> {
+  325 +    /// Insert a batch into every index.
+  326 +    pub fn insert(&self, batch: &RecordBatch, row_offset: RowPosition) -> Result<()> {
+  327          self.insert_with_batch_position(batch, row_offset, None)
+  328      }
+  329  
+  943 -    /// Insert a batch into all indexes with batch position tracking.
+  944 -    #[instrument(name = "idx_insert_batch", level = "debug", skip_all, fields(num_rows = batch.num_rows(), row_offset, batch_position))]
+  330 +    /// Insert a batch into every index, then count it indexed if it is the
+  331 +    /// batch at `batch_position`.
+  332 +    #[instrument(
+  333 +        name = "idx_insert_batch",
+  334 +        level = "debug",
+  335 +        skip_all,
+  336 +        fields(num_rows = batch.num_rows(), row_offset, batch_position = ?batch_position)
+  337 +    )]
+  338      pub fn insert_with_batch_position(
+  339          &self,
+  340          batch: &RecordBatch,
+  948 -        row_offset: u64,
+  341 +        row_offset: RowPosition,
+  342          batch_position: Option<usize>,
+  343      ) -> Result<()> {
+  951 -        let track_pk_overrides = self.should_track_pk_overrides();
+  952 -        for index in self.btree_indexes.values() {
+  953 -            if track_pk_overrides && self.is_single_pk_btree(index) {
+  954 -                let had_existing = index.insert_and_report_existing(batch, row_offset)?;
+  955 -                self.mark_pk_overrides_if_needed(had_existing);
+  956 -            } else {
+  957 -                index.insert(batch, row_offset)?;
+  958 -            }
+  959 -        }
+  960 -        for index in self.hnsw_indexes.values() {
+  961 -            index.insert(batch, row_offset)?;
+  344 +        self.index_rows(Rows::One(batch, row_offset))?;
+  345 +        if let Some(position) = batch_position {
+  346 +            self.advance_indexed_count(position + 1);
+  347          }
+  963 -        for index in self.fts_indexes.values() {
+  964 -            index.insert(batch, row_offset)?;
+  965 -        }
+  966 -        // Single-column PK aliases a `btree_indexes` entry (maintained above);
+  967 -        // a composite PK has its own index, maintained here.
+  968 -        let had_existing = self.insert_composite_pk(batch, row_offset, track_pk_overrides)?;
+  969 -        self.mark_pk_overrides_if_needed(had_existing);
+  970 -
+  971 -        // Update the indexed prefix after every index has been updated.
+  972 -        if let Some(bp) = batch_position {
+  973 -            self.advance_indexed_count(bp + 1);
+  974 -        }
+  975 -
+  348          Ok(())
+  349      }
+  350  
+  979 -    /// Advance the indexed prefix to at least `count` batches.
+  980 -    ///
+  981 -    /// Only ever moves forward (idempotent max). The vector planner relies on the
+  982 -    /// insert paths setting `pk_has_overrides` before this is called, so any
+  983 -    /// snapshot that can see a PK rewrite also observes `pk_has_overrides == true`.
+  984 -    pub(crate) fn advance_indexed_count(&self, count: usize) {
+  985 -        let mut current = self.indexed_count.load(Ordering::Acquire);
+  986 -        while count > current {
+  987 -            match self.indexed_count.compare_exchange_weak(
+  988 -                current,
+  989 -                count,
+  990 -                Ordering::Release,
+  991 -                Ordering::Acquire,
+  992 -            ) {
+  993 -                Ok(_) => break,
+  994 -                Err(actual) => current = actual,
+  995 -            }
+  996 -        }
+  997 -    }
+  998 -
+  999 -    /// Insert multiple batches into every index.
+ 1000 -    ///
+ 1001 -    /// Above `PARALLEL_INDEX_MIN_ROWS` rows each index runs on its own thread, which
+ 1002 -    /// maximizes parallelism when several indexes are maintained. At or below it they run
+ 1003 -    /// inline on the calling thread: the spawn is one OS thread *per index*, and for a
+ 1004 -    /// handful of rows that costs more than the indexing itself.
+ 1005 -    ///
+ 1006 -    /// Returns a map of index names to their update durations for performance tracking.
+  351 +    /// Insert the batches of one write into every index, each index on its own
+  352 +    /// thread above a few dozen rows, then count them indexed.
+  353      #[instrument(name = "idx_insert_batches", level = "debug", skip_all, fields(batch_count = batches.len()))]
+ 1008 -    pub fn insert_batches(
+ 1009 -        &self,
+ 1010 -        batches: &[StoredBatch],
+ 1011 -    ) -> Result<std::collections::HashMap<String, std::time::Duration>> {
+ 1012 -        if batches.is_empty() {
+ 1013 -            return Ok(std::collections::HashMap::new());
+ 1014 -        }
+ 1015 -
+ 1016 -        let track_pk_overrides = self.should_track_pk_overrides();
+  354 +    pub fn insert_batches(&self, batches: &[StoredBatch]) -> Result<()> {
+  355 +        let Some(last) = batches.iter().map(|stored| stored.batch_position).max() else {
+  356 +            return Ok(());
+  357 +        };
+  358 +        self.index_rows(Rows::Batches(batches))?;
+  359 +        self.advance_indexed_count(last + 1);
+  360 +        Ok(())
+  361 +    }
+  362  
+ 1018 -        // One task per index, boxed so the inline and the threaded path drive the very
+ 1019 -        // same closures. Each reports whether it saw an already-present PK.
+ 1020 -        type IndexTask<'a> = Box<dyn Fn() -> Result<bool> + Send + Sync + 'a>;
+ 1021 -        let mut tasks: Vec<(&str, IndexTask<'_>)> = Vec::new();
+  363 +    /// Feed `rows` to every index. A failure stops the writer, so every index
+  364 +    /// still finishes and the first error is returned.
+  365 +    fn index_rows(&self, rows: Rows<'_>) -> Result<()> {
+  366 +        self.has_rows.store(true, Ordering::Release);
+  367 +        let track_overrides = self.should_track_pk_overrides();
+  368  
+ 1023 -        for (name, index) in &self.btree_indexes {
+ 1024 -            let track_this_index = track_pk_overrides && self.is_single_pk_btree(index);
+ 1025 -            tasks.push((
+ 1026 -                name.as_str(),
+ 1027 -                Box::new(move || {
+ 1028 -                    let mut had_existing = false;
+ 1029 -                    for stored in batches {
+ 1030 -                        if track_this_index {
+ 1031 -                            had_existing |= index
+ 1032 -                                .insert_and_report_existing(&stored.data, stored.row_offset)?;
+ 1033 -                        } else {
+ 1034 -                            index.insert(&stored.data, stored.row_offset)?;
+ 1035 -                        }
+ 1036 -                    }
+ 1037 -                    Ok(had_existing)
+  369 +        let mut tasks: Vec<(&str, IndexTask<'_>)> = Vec::with_capacity(self.indexes.len() + 1);
+  370 +        for (name, index) in &self.indexes {
+  371 +            let task: IndexTask<'_> = match self.shared_pk_named(name).filter(|_| track_overrides) {
+  372 +                Some(pk) => Box::new(move || {
+  373 +                    rows.each(|batch, row_offset| pk.insert_and_report_existing(batch, row_offset))
+  374                  }),
+ 1039 -            ));
+ 1040 -        }
+ 1041 -
+ 1042 -        for (name, index) in &self.hnsw_indexes {
+ 1043 -            tasks.push((
+ 1044 -                name.as_str(),
+ 1045 -                Box::new(move || index.insert_batches(batches).map(|_| false)),
+ 1046 -            ));
+  375 +                None => Box::new(move || rows.insert_into(index.as_ref()).map(|()| false)),
+  376 +            };
+  377 +            tasks.push((name, task));
+  378          }
+ 1048 -
+ 1049 -        for (name, index) in &self.fts_indexes {
+  379 +        if let Some(pk) = self.pk_index.as_ref().and_then(PkIndex::owned) {
+  380              tasks.push((
+ 1051 -                name.as_str(),
+  381 +                "primary key",
+  382                  Box::new(move || {
+ 1053 -                    for stored in batches {
+ 1054 -                        index.insert(&stored.data, stored.row_offset)?;
+ 1055 -                    }
+ 1056 -                    Ok(false)
+  383 +                    rows.each(|batch, row_offset| pk.insert(batch, row_offset, track_overrides))
+  384                  }),
+  385              ));
+  386          }
+  387  
+ 1061 -        // Keep the raw `Duration` so sub-millisecond timings (the steady state for BTree
+ 1062 -        // updates) survive instead of truncating to 0.
+ 1063 -        let total_rows: usize = batches.iter().map(|b| b.num_rows).sum();
+ 1064 -        let results: Vec<(&str, std::time::Duration, Result<bool>)> =
+ 1065 -            if tasks.len() < 2 || total_rows <= PARALLEL_INDEX_MIN_ROWS {
+ 1066 -                tasks
+  388 +        let inline = matches!(rows, Rows::One(..))
+  389 +            || tasks.len() < 2
+  390 +            || rows.num_rows() <= PARALLEL_INDEX_MIN_ROWS;
+  391 +        let results: Vec<Result<bool>> = if inline {
+  392 +            tasks.iter().map(|(_, task)| task()).collect()
+  393 +        } else {
+  394 +            std::thread::scope(|scope| {
+  395 +                let handles: Vec<_> = tasks
+  396                      .iter()
+ 1068 -                    .map(|(name, task)| {
+ 1069 -                        let start = Instant::now();
+ 1070 -                        let result = task();
+ 1071 -                        (*name, start.elapsed(), result)
+  397 +                    .map(|(name, task)| (*name, scope.spawn(task)))
+  398 +                    .collect();
+  399 +                handles
+  400 +                    .into_iter()
+  401 +                    .map(|(name, handle)| {
+  402 +                        handle.join().unwrap_or_else(|panic| {
+  403 +                            Err(Error::internal(format!(
+  404 +                                "index '{name}' panicked: {}",
+  405 +                                panic_message(panic.as_ref())
+  406 +                            )))
+  407 +                        })
+  408                      })
+  409                      .collect()
+ 1074 -            } else {
+ 1075 -                std::thread::scope(|scope| {
+ 1076 -                    let handles: Vec<_> = tasks
+ 1077 -                        .iter()
+ 1078 -                        .map(|(name, task)| {
+ 1079 -                            let handle = scope.spawn(move || {
+ 1080 -                                let start = Instant::now();
+ 1081 -                                let result = task();
+ 1082 -                                (start.elapsed(), result)
+ 1083 -                            });
+ 1084 -                            (*name, handle)
+ 1085 -                        })
+ 1086 -                        .collect();
+ 1087 -
+ 1088 -                    handles
+ 1089 -                        .into_iter()
+ 1090 -                        .map(|(name, handle)| match handle.join() {
+ 1091 -                            Ok((duration, result)) => (name, duration, result),
+ 1092 -                            Err(_) => (
+ 1093 -                                name,
+ 1094 -                                std::time::Duration::ZERO,
+ 1095 -                                Err(Error::internal(format!("Index '{}' thread panicked", name))),
+ 1096 -                            ),
+ 1097 -                        })
+ 1098 -                        .collect()
+ 1099 -                })
+ 1100 -            };
+ 1101 -
+ 1102 -        // Every task ran to completion whether or not a peer failed (the threaded path
+ 1103 -        // joins all handles unconditionally). Keep the first error; there is no rollback,
+ 1104 -        // so a failure here is terminal for the writer.
+ 1105 -        let mut first_error: Option<Error> = None;
+ 1106 -        let mut had_existing_pk = false;
+ 1107 -        let mut duration_map =
+ 1108 -            std::collections::HashMap::<String, std::time::Duration>::with_capacity(results.len());
+ 1109 -
+ 1110 -        for (name, duration, result) in results {
+ 1111 -            duration_map.insert(name.to_string(), duration);
+ 1112 -            match result {
+ 1113 -                Ok(had_existing) => had_existing_pk |= had_existing,
+ 1114 -                Err(e) if first_error.is_none() => first_error = Some(e),
+ 1115 -                Err(_) => {}
+ 1116 -            }
+ 1117 -        }
+ 1118 -
+ 1119 -        if let Some(e) = first_error {
+ 1120 -            return Err(e);
+ 1121 -        }
+ 1122 -        self.mark_pk_overrides_if_needed(had_existing_pk);
+  410 +            })
+  411 +        };
+  412  
+ 1124 -        // Single-column PK aliases a `btree_indexes` entry — its task above already
+ 1125 -        // maintained it. A composite PK has its own index; maintain it here before the
+ 1126 -        // watermark advances so the visible prefix is fully indexed.
+  413          let mut had_existing = false;
+ 1128 -        for stored in batches {
+ 1129 -            had_existing |=
+ 1130 -                self.insert_composite_pk(&stored.data, stored.row_offset, track_pk_overrides)?;
+  414 +        for result in results {
+  415 +            had_existing |= result?;
+  416          }
+ 1132 -        self.mark_pk_overrides_if_needed(had_existing);
+ 1133 -
+ 1134 -        // The indexed prefix now covers every batch up to and including the
+ 1135 -        // highest position in this call, so the count is that position plus one.
+ 1136 -        let max_bp = batches.iter().map(|b| b.batch_position).max().unwrap();
+ 1137 -        self.advance_indexed_count(max_bp + 1);
+ 1138 -
+ 1139 -        Ok(duration_map)
+ 1140 -    }
+ 1141 -
+ 1142 -    /// Get a BTree index by name.
+ 1143 -    pub fn get_btree(&self, name: &str) -> Option<&BTreeMemIndex> {
+ 1144 -        self.btree_indexes.get(name).map(Arc::as_ref)
+ 1145 -    }
+ 1146 -
+ 1147 -    /// Get an HNSW vector index by name.
+ 1148 -    pub fn get_hnsw(&self, name: &str) -> Option<&HnswMemIndex> {
+ 1149 -        self.hnsw_indexes.get(name)
+ 1150 -    }
+ 1151 -
+ 1152 -    /// Get an FTS index by name.
+ 1153 -    pub fn get_fts(&self, name: &str) -> Option<&FtsMemIndex> {
+ 1154 -        self.fts_indexes.get(name)
+ 1155 -    }
+ 1156 -
+ 1157 -    /// Get a BTree index by field ID.
+ 1158 -    ///
+ 1159 -    /// Searches through all BTree indexes to find one matching the field_id.
+ 1160 -    /// Use this for column-to-index resolution (column → field_id → index).
+ 1161 -    pub fn get_btree_by_field_id(&self, field_id: i32) -> Option<&BTreeMemIndex> {
+ 1162 -        self.btree_indexes
+ 1163 -            .values()
+ 1164 -            .find(|idx| idx.field_id() == field_id)
+ 1165 -            .map(Arc::as_ref)
+  417 +        // Set before the indexed count advances, so a reader that can see a
+  418 +        // rewrite also sees the flag.
+  419 +        self.mark_pk_overrides(had_existing);
+  420 +        Ok(())
+  421      }
+  422  
+ 1168 -    /// Get an HNSW vector index by field ID.
+ 1169 -    pub fn get_hnsw_by_field_id(&self, field_id: i32) -> Option<&HnswMemIndex> {
+ 1170 -        self.hnsw_indexes
+ 1171 -            .values()
+ 1172 -            .find(|idx| idx.field_id() == field_id)
+  423 +    /// Advance the indexed prefix to at least `count` batches; it never moves
+  424 +    /// back.
+  425 +    pub(crate) fn advance_indexed_count(&self, count: usize) {
+  426 +        self.indexed_count.fetch_max(count, Ordering::AcqRel);
+  427      }
+  428  
+ 1175 -    /// Get an FTS index by field ID.
+ 1176 -    ///
+ 1177 -    /// Searches through all FTS indexes to find one matching the field_id.
+ 1178 -    /// Use this for column-to-index resolution (column → field_id → index).
+ 1179 -    pub fn get_fts_by_field_id(&self, field_id: i32) -> Option<&FtsMemIndex> {
+ 1180 -        self.get_fts_by_field_id_and_granularity(
+ 1181 -            field_id,
+ 1182 -            lance_index::scalar::inverted::DocumentGranularity::Row,
+ 1183 -        )
+  429 +    /// How a filter expression reaches these indexes.
+  430 +    pub(crate) fn filter_catalog(&self) -> &MemIndexCatalog {
+  431 +        &self.filter_catalog
+  432      }
+  433  
+ 1186 -    pub fn get_fts_by_field_id_and_granularity(
+ 1187 -        &self,
+ 1188 -        field_id: i32,
+ 1189 -        document_granularity: lance_index::scalar::inverted::DocumentGranularity,
+ 1190 -    ) -> Option<&FtsMemIndex> {
+ 1191 -        self.fts_indexes.values().find(|idx| {
+ 1192 -            idx.field_id() == field_id && idx.document_granularity() == document_granularity
+ 1193 -        })
+  434 +    /// The index named `name`.
+  435 +    pub fn get_index(&self, name: &str) -> Option<&Arc<dyn MemIndex>> {
+  436 +        self.indexes.get(name)
+  437      }
+  438  
+ 1196 -    /// Get a BTree index by column name.
+ 1197 -    pub fn get_btree_by_column(&self, column: &str) -> Option<&BTreeMemIndex> {
+ 1198 -        self.btree_indexes
+ 1199 -            .values()
+ 1200 -            .find(|idx| idx.column_name() == column)
+ 1201 -            .map(Arc::as_ref)
+  439 +    /// The B-tree the memtable keeps over a single key column, when no
+  440 +    /// maintained index serves as the key index.
+  441 +    pub(crate) fn own_key_index(&self) -> Option<Arc<dyn MemIndex>> {
+  442 +        match &self.pk_index {
+  443 +            Some(PkIndex::Owned(OwnedPk::Single(index))) => {
+  444 +                Some(index.clone() as Arc<dyn MemIndex>)
+  445 +            }
+  446 +            _ => None,
+  447 +        }
+  448      }
+  449  
+ 1204 -    /// Get an HNSW vector index by column name.
+ 1205 -    pub fn get_hnsw_by_column(&self, column: &str) -> Option<&HnswMemIndex> {
+ 1206 -        self.hnsw_indexes
+  450 +    /// The first index, by name, covering `column` that can answer `query`;
+  451 +    /// the memtable's own key index last.
+  452 +    pub fn index_answering(&self, column: &str, query: &dyn MemQuery) -> Option<Arc<dyn MemIndex>> {
+  453 +        self.indexes
+  454              .values()
+ 1208 -            .find(|idx| idx.column_name() == column)
+ 1209 -    }
+ 1210 -
+ 1211 -    /// Get an FTS index by column name.
+ 1212 -    pub fn get_fts_by_column(&self, column: &str) -> Option<&FtsMemIndex> {
+ 1213 -        self.get_fts_by_column_and_granularity(
+ 1214 -            column,
+ 1215 -            lance_index::scalar::inverted::DocumentGranularity::Row,
+ 1216 -        )
+ 1217 -    }
+ 1218 -
+ 1219 -    pub fn get_fts_by_column_and_granularity(
+ 1220 -        &self,
+ 1221 -        column: &str,
+ 1222 -        document_granularity: lance_index::scalar::inverted::DocumentGranularity,
+ 1223 -    ) -> Option<&FtsMemIndex> {
+ 1224 -        self.fts_indexes.values().find(|idx| {
+ 1225 -            idx.column_name() == column && idx.document_granularity() == document_granularity
+ 1226 -        })
+  455 +            .cloned()
+  456 +            .chain(self.own_key_index())
+  457 +            .find(|index| {
+  458 +                index.columns().iter().any(|covered| covered == column) && index.can_answer(query)
+  459 +            })
+  460      }
+  461  
+ 1229 -    /// Return the distinct persisted document granularities for FTS indexes on
+ 1230 -    /// `column`, ordered from row to list-element.
+ 1231 -    pub fn fts_document_granularities_by_column(
+ 1232 -        &self,
+ 1233 -        column: &str,
+ 1234 -    ) -> Vec<lance_index::scalar::inverted::DocumentGranularity> {
+ 1235 -        let mut granularities = self
+ 1236 -            .fts_indexes
+ 1237 -            .values()
+ 1238 -            .filter(|index| index.column_name() == column)
+ 1239 -            .map(|index| index.document_granularity())
+ 1240 -            .collect::<Vec<_>>();
+ 1241 -        granularities.sort_by_key(|document_granularity| match document_granularity {
+ 1242 -            lance_index::scalar::inverted::DocumentGranularity::Row => 0,
+ 1243 -            lance_index::scalar::inverted::DocumentGranularity::ListElement => 1,
+ 1244 -        });
+ 1245 -        granularities.dedup();
+ 1246 -        granularities
+  462 +    /// The granularities a full-text index on `column` answers, row before list
+  463 +    /// element.
+  464 +    pub fn fts_granularities_on(&self, column: &str) -> Vec<DocumentGranularity> {
+  465 +        [DocumentGranularity::Row, DocumentGranularity::ListElement]
+  466 +            .into_iter()
+  467 +            .filter(|granularity| {
+  468 +                self.index_answering(column, &FtsMemQuery::probe(*granularity))
+  469 +                    .is_some()
+  470 +            })
+  471 +            .collect()
+  472      }
+  473  
+ 1249 -    /// Check if the registry has any indexes.
+  474 +    /// Whether the store holds no named index.
+  475      pub fn is_empty(&self) -> bool {
+ 1251 -        self.btree_indexes.is_empty() && self.hnsw_indexes.is_empty() && self.fts_indexes.is_empty()
+  476 +        self.indexes.is_empty()
+  477      }
+  478  
+ 1254 -    /// Name every index this memtable carries, for diagnostics.
+ 1255 -    ///
+ 1256 -    /// Answers "is my fresh-tier vector search brute-force" — an absent
+ 1257 -    /// name is the whole explanation, and there is no other way to see it
+ 1258 -    /// from outside. Sorted so repeated calls compare cleanly; `HashMap`
+ 1259 -    /// iteration order alone would not.
+  479 +    /// Every named index, sorted.
+  480      pub fn index_names(&self) -> Vec<String> {
+ 1261 -        let mut out: Vec<String> = self
+ 1262 -            .btree_indexes
+ 1263 -            .keys()
+ 1264 -            .chain(self.hnsw_indexes.keys())
+ 1265 -            .chain(self.fts_indexes.keys())
+ 1266 -            .cloned()
+ 1267 -            .collect();
+ 1268 -        out.sort();
+ 1269 -        out
+  481 +        self.indexes.keys().cloned().collect()
+  482      }
+  483  
+ 1272 -    /// Get the total number of indexes.
+  484 +    /// How many named indexes the store holds.
+  485      pub fn len(&self) -> usize {
+ 1274 -        self.btree_indexes.len() + self.hnsw_indexes.len() + self.fts_indexes.len()
+  486 +        self.indexes.len()
+  487      }
+  488  
+ 1277 -    /// Heap bytes held by every index in the registry.
+ 1278 -    ///
+ 1279 -    /// `MemTable::row_bytes` deliberately omits this — it sizes the flush
+ 1280 -    /// unit, which is row data. Callers budgeting *resident* memory must add it:
+ 1281 -    /// a configured HNSW index pre-allocates its whole graph on the first insert
+ 1282 -    /// and is charged for it from the moment it is configured (see
+ 1283 -    /// `HnswMemIndex::resident_bytes`), so it can dwarf a memtable's row bytes
+ 1284 -    /// while `row_bytes` still reads zero.
+  489 +    /// Heap bytes held by every index. Not part of `MemTable::row_bytes`; add
+  490 +    /// it when budgeting memory.
+  491      pub fn resident_bytes(&self) -> usize {
+ 1286 -        let btrees: usize = self
+ 1287 -            .btree_indexes
+  492 +        let named: usize = self
+  493 +            .indexes
+  494              .values()
+ 1289 -            .map(|b| b.resident_bytes())
+  495 +            .map(|index| index.resident_bytes())
+  496              .sum();
+ 1291 -        let hnsw: usize = self.hnsw_indexes.values().map(|h| h.resident_bytes()).sum();
+ 1292 -        let fts: usize = self.fts_indexes.values().map(|f| f.resident_bytes()).sum();
+ 1293 -        // A `Single` PK aliases a `btree_indexes` entry, already counted above.
+ 1294 -        // A composite PK's index is held only here.
+ 1295 -        let pk = match &self.pk_index {
+ 1296 -            Some(PkIndex::Composite { index, .. }) => index.resident_bytes(),
+ 1297 -            Some(PkIndex::Single(_)) | None => 0,
+ 1298 -        };
+ 1299 -        btrees + hnsw + fts + pk
+  497 +        let owned_pk = self
+  498 +            .pk_index
+  499 +            .as_ref()
+  500 +            .and_then(PkIndex::owned)
+  501 +            .map_or(0, |pk| pk.btree().resident_bytes());
+  502 +        named + owned_pk
+  503      }
+  504  
+ 1302 -    /// How many batches of this memtable have been fully indexed (exclusive
+ 1303 -    /// count; 0 before any batch is indexed).
+ 1304 -    ///
+ 1305 -    /// This is the *indexed* cursor, not the visibility watermark: it advances
+ 1306 -    /// once every index insert for a batch completes, regardless of WAL
+ 1307 -    /// durability. Readers must snapshot [`Self::visible_count`], which derives
+ 1308 -    /// what is safe to read from this cursor and the writer's durability cursor.
+  505 +    /// Batches every index holds, as an exclusive count. Readers snapshot
+  506 +    /// [`Self::visible_count`] instead.
+  507      pub fn indexed_count(&self) -> usize {
+  508          self.indexed_count.load(Ordering::Acquire)
+  509      }
+  510  
+ 1313 -    /// The prefix of this memtable that readers may see. Snapshot this, never
+ 1314 -    /// `indexed_count`.
+ 1315 -    ///
+ 1316 -    /// Derived on every call from the two cursors rather than cached, so there is
+ 1317 -    /// no published value that can be left stale by a race between the two tasks
+ 1318 -    /// that advance them. A bare `IndexStore` has no writer, so its visible
+ 1319 -    /// prefix is simply what has been indexed.
+  511 +    /// The prefix readers may see: indexed and, under a writer, durable.
+  512 +    /// Derived on every call, so no cached value can go stale.
+  513      pub fn visible_count(&self) -> usize {
+  514          let indexed = self.indexed_count();
+  515          match &self.durability {
+
+@@ -1340,934 +533,11 @@ impl IndexStore {
+  533      }
+  534  }
+  535  
+  536 +/// The message a panicking index task left, if it left text.
+  537 +fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
+  538 +    panic
+  539 +        .downcast_ref::<&str>()
+  540 +        .copied()
+  541 +        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+  542 +        .unwrap_or("no message")
+  543  }

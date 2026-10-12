@@ -1,0 +1,104 @@
+@@ -0,0 +1,103 @@
+    1 +// SPDX-License-Identifier: Apache-2.0
+    2 +// SPDX-FileCopyrightText: Copyright The Lance Authors
+    3 +// SPDX-FileCopyrightText: Copyright 2023 Datafuse Labs
+    4 +// Adapted from databendlabs/jsonb at commit fba895c5ebe77ce2539e187f9c652f51cbf195c3.
+    5 +
+    6 +//! JSONB encoding for Lance JSON columns.
+    7 +//!
+    8 +//! Lance stores `lance.json` columns as JSONB values in `LargeBinary` arrays.
+    9 +//! This crate owns that encoding: it parses JSON text into JSONB
+   10 +//! ([`parse_value`], [`OwnedJsonb`]), reads JSONB values ([`RawJsonb`],
+   11 +//! [`from_raw_jsonb`]), and evaluates SQL/JSONPath expressions over them
+   12 +//! ([`jsonpath`]).
+   13 +//!
+   14 +//! ```
+   15 +//! use lance_jsonb::OwnedJsonb;
+   16 +//! use lance_jsonb::jsonpath::{Selector, parse_json_path};
+   17 +//!
+   18 +//! let jsonb: OwnedJsonb = r#"{"user":{"name":"Ada","tags":["a","b"]}}"#.parse().unwrap();
+   19 +//! let path = parse_json_path(b"$.user.tags[1]").unwrap();
+   20 +//! let value = Selector::new(jsonb.as_raw()).select_value(&path).unwrap().unwrap();
+   21 +//! assert_eq!(value.to_string(), r#""b""#);
+   22 +//! ```
+   23 +//!
+   24 +//! The implementation is adapted from
+   25 +//! [databendlabs/jsonb](https://github.com/databendlabs/jsonb) and keeps only
+   26 +//! what Lance uses. See the crate README for the upstream revision and the
+   27 +//! differences from it.
+   28 +//!
+   29 +//! ## Compatibility
+   30 +//!
+   31 +//! The byte layout below is persisted in Lance data files. Every change must
+   32 +//! keep reading values written by released Lance versions, and writers must keep
+   33 +//! producing bytes that those versions can read. `tests/it/compat.rs` pins the
+   34 +//! bytes produced for representative inputs.
+   35 +//!
+   36 +//! ## Encoding format
+   37 +//!
+   38 +//! The JSONB encoding format is a tree-like structure. Each node contains a container header, a number of JEntry headers, and nested encoding values.
+   39 +//!
+   40 +//! - 32-bit container header. 3 bits identify the type of value, including `scalar`, `object` and `array`, and 29 bits identify the number of JEntries in the `array` or `object`. The root node of the `jsonb` value is always a container header.
+   41 +//!   - `scalar` container header: `0x20000000`
+   42 +//!   - `object` container header: `0x40000000`
+   43 +//!   - `array` container header: `0x80000000`
+   44 +//! - 32-bit JEntry header. 1 bit identifies whether the JEntry stores a length or an offset, 3 bits identify the type of value, including `null`, `string`, `number`, `false`, `true` and `container`, and the remaining 28 bits identify the length or offset of the encoding value.
+   45 +//!   - `null` JEntry header: `0x00000000`
+   46 +//!   - `string` JEntry header: `0x10000000`
+   47 +//!   - `number` JEntry header: `0x20000000`
+   48 +//!   - `false` JEntry header: `0x30000000`
+   49 +//!   - `true` JEntry header: `0x40000000`
+   50 +//!   - `container` JEntry header `0x50000000`
+   51 +//! - Encoding value. Different types of JEntry header have different encoding values.
+   52 +//!   - `null`, `true`, `false`: no encoding value, identified by the JEntry header.
+   53 +//!   - `string`: a normal UTF-8 string.
+   54 +//!   - `number`: an encoded number to represent uint64s, int64s and float64s.
+   55 +//!   - `container`: a nested `json` value with a recursive structure.
+   56 +//!
+   57 +//! #### An encoding example
+   58 +//!
+   59 +//! ```text
+   60 +//! // JSON value
+   61 +//! [false, 10, {"k":"v"}]
+   62 +//!
+   63 +//! // JSONB encoding
+   64 +//! 0x80000003    array container header (3 JEntries)
+   65 +//! 0x30000000    false JEntry header (no encoding value)
+   66 +//! 0x20000002    number JEntry header (encoding value length 2)
+   67 +//! 0x5000000e    container JEntry header (encoding value length 14)
+   68 +//! 0x500a        number encoding value (10)
+   69 +//! 0x40000001    object container header (1 JEntry)
+   70 +//! 0x10000001    string key JEntry header (encoding value length 1)
+   71 +//! 0x10000001    string value JEntry header (encoding value length 1)
+   72 +//! 0x6b          string encoding value ("k")
+   73 +//! 0x76          string encoding value ("v")
+   74 +//! ```
+   75 +
+   76 +mod constants;
+   77 +mod core;
+   78 +mod error;
+   79 +mod extension;
+   80 +mod functions;
+   81 +pub mod jsonpath;
+   82 +mod number;
+   83 +mod owned;
+   84 +mod parser;
+   85 +mod raw;
+   86 +mod util;
+   87 +mod value;
+   88 +
+   89 +pub use error::Error;
+   90 +pub use extension::Date;
+   91 +pub use extension::Interval;
+   92 +pub use extension::Timestamp;
+   93 +pub use extension::TimestampTz;
+   94 +pub use number::Decimal64;
+   95 +pub use number::Decimal128;
+   96 +pub use number::Decimal256;
+   97 +pub use number::Number;
+   98 +pub use owned::OwnedJsonb;
+   99 +pub use parser::parse_value;
+  100 +pub use raw::RawJsonb;
+  101 +pub use raw::from_raw_jsonb;
+  102 +pub use value::Object;
+  103 +pub use value::Value;

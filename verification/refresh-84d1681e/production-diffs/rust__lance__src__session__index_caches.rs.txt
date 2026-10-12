@@ -1,0 +1,58 @@
+@@ -14,7 +14,7 @@ use std::{borrow::Cow, ops::Deref, sync::Arc};
+   14  
+   15  use lance_core::cache::{CacheKey, CacheKeySchema, KeyBuilder, LanceCache};
+   16  use lance_core::deepsize::{Context, DeepSizeOf};
+   17 -use lance_index::frag_reuse::CompactFragReuseIndex;
+   17 +use lance_index::frag_reuse::{CompactFragReuseIndex, FragReuseIndexDetails};
+   18  use lance_table::format::IndexMetadata;
+   19  use uuid::Uuid;
+   20  
+
+@@ -116,6 +116,47 @@ impl CacheKey for FragReuseIndexKey<'_> {
+  116      }
+  117  }
+  118  
+  119 +/// Decoded fragment reuse details of an external `details.binpb`, keyed by where the
+  120 +/// file lives: a shallow clone's entry resolves to the source dataset's file. Each file
+  121 +/// is written once, under a fresh entry UUID. A hit does not check the file still exists.
+  122 +#[derive(Debug)]
+  123 +pub struct FragReuseDetailsKey<'a> {
+  124 +    pub store_identity: &'a str,
+  125 +    pub path: &'a object_store::path::Path,
+  126 +    pub offset: u64,
+  127 +    pub size: u64,
+  128 +}
+  129 +
+  130 +impl CacheKey for FragReuseDetailsKey<'_> {
+  131 +    type ValueType = FragReuseIndexDetails;
+  132 +
+  133 +    fn key(&self) -> Cow<'_, str> {
+  134 +        Cow::Owned(format!(
+  135 +            "frag_reuse_details/{}:{}/{}/{}/{}",
+  136 +            self.store_identity.len(),
+  137 +            self.store_identity,
+  138 +            self.path,
+  139 +            self.offset,
+  140 +            self.size
+  141 +        ))
+  142 +    }
+  143 +
+  144 +    fn type_name() -> &'static str {
+  145 +        "FragReuseIndexDetails"
+  146 +    }
+  147 +
+  148 +    fn schema() -> CacheKeySchema {
+  149 +        CacheKeySchema::new("lance.index.fragment-reuse-details-key", 1)
+  150 +    }
+  151 +
+  152 +    fn write_key(&self, builder: &mut KeyBuilder) {
+  153 +        builder.write_str(self.store_identity);
+  154 +        builder.write_str(self.path.as_ref());
+  155 +        builder.write_u64(self.offset);
+  156 +        builder.write_u64(self.size);
+  157 +    }
+  158 +}
+  159 +
+  160  #[derive(Clone, Copy, Debug)]
+  161  pub struct IndexMetadataKey<'a> {
+  162      pub version: u64,

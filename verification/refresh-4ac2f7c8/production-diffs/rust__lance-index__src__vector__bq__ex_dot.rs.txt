@@ -1,0 +1,108 @@
+@@ -307,6 +307,30 @@ pub fn ex_dot_kernel(ex_bits: u8) -> ExDotFn {
+  307      KERNELS[usize::from(ex_bits) - 1]
+  308  }
+  309  
+  310 +/// Available native kernels for controlled profiling and parity tests.
+  311 +pub fn ex_dot_kernel_variants(ex_bits: u8) -> Vec<(&'static str, ExDotFn)> {
+  312 +    // `mut` is only exercised on x86_64 where extra kernels may be pushed.
+  313 +    #[allow(unused_mut)]
+  314 +    let mut kernels = vec![
+  315 +        ("scalar", scalar_kernel(ex_bits)),
+  316 +        ("dispatched", ex_dot_kernel(ex_bits)),
+  317 +    ];
+  318 +    #[cfg(target_arch = "x86_64")]
+  319 +    {
+  320 +        if std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
+  321 +        {
+  322 +            kernels.push(("avx2", x86::avx2_kernel(ex_bits)));
+  323 +        }
+  324 +        if std::arch::is_x86_feature_detected!("avx512f") {
+  325 +            kernels.push(("avx512", x86::avx512_baseline_kernel(ex_bits)));
+  326 +            if matches!(ex_bits, 2 | 6) {
+  327 +                kernels.push(("avx512_four_chain", x86::four_chain_kernel(ex_bits)));
+  328 +            }
+  329 +        }
+  330 +    }
+  331 +    kernels
+  332 +}
+  333 +
+  334  fn select_ex_dot_kernel(ex_bits: u8) -> ExDotFn {
+  335      #[cfg(target_arch = "x86_64")]
+  336      {
+
+@@ -392,6 +416,13 @@ mod x86 {
+  416      }
+  417  
+  418      pub(super) fn avx512_kernel(ex_bits: u8) -> ExDotFn {
+  419 +        match ex_bits {
+  420 +            2 | 6 => four_chain_kernel(ex_bits),
+  421 +            _ => avx512_baseline_kernel(ex_bits),
+  422 +        }
+  423 +    }
+  424 +
+  425 +    pub(super) fn avx512_baseline_kernel(ex_bits: u8) -> ExDotFn {
+  426          match ex_bits {
+  427              1 => dot_u1_avx512_dispatch,
+  428              2 => dot_u2_avx512_dispatch,
+
+@@ -674,6 +705,60 @@ mod x86 {
+  705          };
+  706      }
+  707  
+  708 +    macro_rules! four_chain_kernel {
+  709 +        ($name:ident, $dispatch:ident, $unpack:ident, $bits:expr, $fallback:ident) => {
+  710 +            #[target_feature(enable = "avx512f")]
+  711 +            unsafe fn $name(query: &[f32], codes: &[u8]) -> f32 {
+  712 +                if !query.len().is_multiple_of(64) || codes.len() != query.len() * $bits / 8 {
+  713 +                    return unsafe { $fallback(query, codes) };
+  714 +                }
+  715 +                let mut acc = [_mm512_setzero_ps(); 4];
+  716 +                for group in 0..query.len() / 64 {
+  717 +                    let runs = unsafe { $unpack(codes.as_ptr().add(group * 8 * $bits)) };
+  718 +                    for (run, bytes) in runs.into_iter().enumerate() {
+  719 +                        unsafe {
+  720 +                            fma16_avx512(
+  721 +                                bytes,
+  722 +                                query.as_ptr().add(group * 64 + run * 16),
+  723 +                                &mut acc[run],
+  724 +                            );
+  725 +                        }
+  726 +                    }
+  727 +                }
+  728 +                _mm512_reduce_add_ps(_mm512_add_ps(
+  729 +                    _mm512_add_ps(acc[0], acc[1]),
+  730 +                    _mm512_add_ps(acc[2], acc[3]),
+  731 +                ))
+  732 +            }
+  733 +            fn $dispatch(query: &[f32], codes: &[u8]) -> f32 {
+  734 +                // SAFETY: the dispatcher checks AVX-512F first.
+  735 +                unsafe { $name(query, codes) }
+  736 +            }
+  737 +        };
+  738 +    }
+  739 +    four_chain_kernel!(
+  740 +        dot_u2_four_chain,
+  741 +        dot_u2_four_chain_dispatch,
+  742 +        unpack_u2,
+  743 +        2,
+  744 +        dot_u2_avx512
+  745 +    );
+  746 +    four_chain_kernel!(
+  747 +        dot_u6_four_chain,
+  748 +        dot_u6_four_chain_dispatch,
+  749 +        unpack_u6,
+  750 +        6,
+  751 +        dot_u6_avx512
+  752 +    );
+  753 +
+  754 +    pub(super) fn four_chain_kernel(bits: u8) -> super::ExDotFn {
+  755 +        match bits {
+  756 +            2 => dot_u2_four_chain_dispatch,
+  757 +            6 => dot_u6_four_chain_dispatch,
+  758 +            _ => avx512_kernel(bits),
+  759 +        }
+  760 +    }
+  761 +
+  762      x86_dot_kernel!(dot_u1_avx2, dot_u1_avx2_dispatch, unpack_u1, 1, 1);
+  763      x86_dot_kernel!(dot_u2_avx2, dot_u2_avx2_dispatch, unpack_u2, 2, 4);
+  764      x86_dot_kernel!(dot_u3_avx2, dot_u3_avx2_dispatch, unpack_u3, 3, 4);

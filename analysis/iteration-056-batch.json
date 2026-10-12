@@ -1,0 +1,530 @@
+{
+  "iteration": 56,
+  "previous_goal_turn_classification": "progress",
+  "files": [
+    {
+      "path": "rust/lance-file/src/versions/v2_0/writer.rs",
+      "module": "L1-modules/rust-lance-file-v20-compatibility.md",
+      "reviewed": true,
+      "role": "Public V2_0 concrete Writer reexported from the exact version parent. It independently owns ArrayFieldEncodingStrategy, field encoders, row accounting, object IO and optional metadata spill. Standard finish writes literal footer(0,3); concat_lance_footer produces embedded(2,0). The latter is public inside a private child and reached through parent self-described/mini helpers.",
+      "limits": "All952 physical lines read in ANALYZE56; no source execution or modification. No local test module, unsafe, mutex, task spawn or Drop implementation. FieldEncoder implementations and backend durability/cancellation remain pending; local IO order and non-rollback behavior do not prove current producers exercise every problematic shape. Compatibility tests are separately analyzed; no test pass is claimed.",
+      "ranges": [
+        [
+          1,
+          40,
+          "SPDX/imports connect panic, HashMap/Arc, Arrow arrays/batches, Bytes cursors/mutation, FuturesOrdered, core Schema/padding/errors, encoding strategies/tasks/pages/RepDef, object IO/store/path, logs, prost Any, Tokio async writes, tracing and file protobuf/options/type checks. This implementation does not compose the shared structural sink/pipeline."
+        ],
+        [
+          41,
+          51,
+          "PAD_BUFFER is64 bytes of decimal72/0x48. MAX_PAGE_BYTES is32MiB, with comments motivating historical V2_0 reader regressions and saying the write-time limit is not applied in2.1. This is commentary about encoder policy: the shared structural writer still resolves a32MiB max-page option (rust/lance-file/src/writer/structural.rs:414-439). DEFAULT_SPILL_BUFFER_LIMIT is256KiB; per-column floor means it is not a strict aggregate cap."
+        ],
+        [
+          52,
+          76,
+          "Private PageMetadataSpill owns writer/store/path, u64 position, per-column serialized-byte Vecs, per-column chunk(offset:u64,length:u32) Vecs and usize limit. Sidecar is interleaved chunks of length-delimited Page protobufs, with ownership/order supplied by the in-memory chunk index, not a persisted directory. Capacities and chunk vectors remain resident."
+        ],
+        [
+          77,
+          91,
+          "new creates sidecar before calculating max(256KiB/max(num_columns,1),64), then allocates two empty vectors per column. Zero columns avoids division by zero; high column counts can exceed the nominal aggregate floor budget. IO errors propagate; no cleanup operation is local."
+        ],
+        [
+          92,
+          109,
+          "append_page trusts column index, length-delimited-encodes into its existing buffer, maps protobuf encoding failure to IO with std InvalidData, and flushes at len>=limit. A whole message may overshoot threshold; no page semantic validation or checked indexing."
+        ],
+        [
+          110,
+          131,
+          "flush_column skips empty; write_all precedes appending(offset,len as u32), unchecked position addition and Vec.clear. A partial write failure retains buffer and old position, so replaying blindly is not rollback-safe. clear retains capacity. shutdown_writer flushes columns sequentially, awaits ObjectWriter::shutdown and discards its summary; stops on first error."
+        ],
+        [
+          132,
+          152,
+          "decode_spilled_chunk clones the Bytes handle/cursor and repeatedly decodes length-delimited Page messages into Vec until exhaustion; empty succeeds, decode failure becomes IO InvalidData. It performs syntax decoding only. Private PageSpillState stores either Pending(store,path) or Active(spill), with no failed/closed state."
+        ],
+        [
+          153,
+          174,
+          "Writer privately owns object writer, optional schema/type cache, field encoders, physical column metadata/mapping/count, aggregate/per-field row counts, global descriptors, schema map, boxed strategy, options and optional spill. Comments distinguish top-level field counts from physical columns and permit unequal field lengths. No derive or local Drop."
+        ],
+        [
+          175,
+          195,
+          "initial_column_metadata returns empty page/buffer vectors and absent encoding. try_new constructs lazy state then initialize(schema); failure drops the local writer without awaiting explicit abort. Public Writer construction returns Result."
+        ],
+        [
+          196,
+          218,
+          "new_lazy is infallible: stores object/options, initializes all counters/maps/vectors empty, schema/type cache/spill absent, and boxes ArrayFieldEncodingStrategy::new. It performs no schema/options validation or IO. Documentation says no arriving data makes finish fail; an empty batch can nevertheless initialize schema."
+        ],
+        [
+          219,
+          237,
+          "with_page_metadata_spill overwrites spill with Pending and returns owned self without a timing guard or migrating already retained pages; docs explicitly assign path cleanup to caller. do_write_buffer writes payload then 0x48 padding based on payload length to64, not current position. It cannot repair an already unaligned starting offset."
+        ],
+        [
+          238,
+          262,
+          "write_page consumes each buffer, records current tell/actual payload length, writes padded payload, then Any-wraps either Legacy or Structural description into Direct Page metadata with length=num_rows and priority=row_number. Description construction follows IO and performs no V2_0 grammar gate. column_idx casts directly to usize."
+        ],
+        [
+          263,
+          278,
+          "If Pending, take state then await sidecar creation; failure/cancellation leaves page_spill=None after payload IO. Active appends serialized page, None pushes into indexed column metadata, remaining Pending is unreachable. Indexing is trusted; configuring spill late does not migrate prior pages."
+        ],
+        [
+          279,
+          301,
+          "Instrumented write_pages polls FuturesOrdered results in insertion order and writes each returned page sequentially. First task/page error drops remaining local futures; spawned work cancellation is not established. Always flush object writer afterward, even with no tasks. Comment says flush observes already-failed uploads without waiting in-flight uploads; actual backend implementation remains pending."
+        ],
+        [
+          302,
+          325,
+          "write_batches awaits write_batch sequentially for borrowed iterator items and stops first error; empty iterator does nothing. prepare_field_arrays consumes indexed ArrayRefs and calls each selected encoder prepare_array before collect succeeds; earlier preparation is not locally rolled back on later error. FieldEncoder documentation requests preparation before state mutation, but its &mut API cannot itself enforce that (rust/lance-encoding/src/encoder.rs:175-183)."
+        ],
+        [
+          326,
+          347,
+          "initialize first validates explicit options, divides supplied data_cache_bytes by top-level schema field count or defaults8MiB, then resolves explicit max_page_bytes before env parse/untrimmed u64/default32MiB. Invalid parse warns; missing/non-Unicode env silently defaults; env0 is not rejected by explicit-option validation. Supplied cache budget plus empty schema divides by zero before schema validation."
+        ],
+        [
+          348,
+          370,
+          "Validate schema, resolve keep_original_array defaultfalse, set alignment64 and create BatchEncoder with stored strategy. Install physical count, zero field counters, encoders, blank column metadata and mapping; drain schema metadata into existing map, then store schema. Schema entries overwrite existing duplicate keys. Existing aggregate rows, type cache, globals and spill are not reset by this private function; normal lazy initialization runs once."
+        ],
+        [
+          371,
+          401,
+          "ensure_initialized converts batch Arrow schema only when schema absent, calls initialize, then unwraps stored schema. field_arrays enumerates desired schema fields and finds each batch column by name, clones Arc and collects; missing field InvalidInput names it, extra columns ignored. Entire field selection completes before prepare/encode. No positional field selection."
+        ],
+        [
+          402,
+          433,
+          "encode_columns first snapshots each chosen field row offset, then calls maybe_encode for each array with Arc clone, fresh RepDefBuilder, old offset and array.len as u64. Direct vector indexing assumes coherent state. Result<Vec<Vec<EncodeTask>>> may fail after earlier encoder mutation; no rollback. Task output page ordering is separately enforced by write_pages."
+        ],
+        [
+          434,
+          446,
+          "advance_columns unchecked-adds each selected prepared array length to its own field count and sets aggregate to max(previous aggregate,new total). It does not inspect other fields or guard overflow. Comments say after written; actual call occurs before awaiting page tasks."
+        ],
+        [
+          447,
+          476,
+          "write_batch logs shape/memory, ensures schema, lazily checks ExpectedTypes by name, collects desired fields then calls every prepare_array before zero-row and single-batch u32MAX checks. No separate recursive nullability helper here; preparation delegates encoder validation. Empty batches still require all desired fields and successful preparation. The error text describes whole files, but this guard limits one batch."
+        ],
+        [
+          477,
+          506,
+          "Create out-of-line planner at current tell/alignment64, maybe_encode all fields, then write external buffers with trailing padding and collect ordered tasks. Check aggregate u64 addition only after encoder/IO effects; advance every field by original batch.num_rows and aggregate likewise, then await write_pages. Page/flush failure leaves counters advanced. Prepared-array length is assumed consistent with batch length; no equality check here."
+        ],
+        [
+          507,
+          537,
+          "Public write_column documentation describes top-level logical index, append behavior, unequal root-field lengths, zero-length unwritten fields and explicit-schema requirement; Rust doctest writes lengths3 and1 through facade FileWriter. The actual presence check also accepts a previously initialized lazy writer. This is documentation, not an executed test or blanket read guarantee."
+        ],
+        [
+          538,
+          562,
+          "write_column requires schema, rejects out-of-range top-level index with counts, then rejects input array length>u32MAX. Lazily check type, call chosen encoder prepare_array and replace local array with result. No recheck of prepared output length/type or dedicated writer nullability check; external-only initializer can leave encoder vector empty and panic here."
+        ],
+        [
+          563,
+          585,
+          "Return if prepared array empty; otherwise encode singleton using old field offset, write external buffers padded, collect ordered tasks, advance selected field by prepared length then await page write/flush. No aggregate overflow check; failures can leave preparation, encoding, IO or row state changed. Other fields remain unchanged."
+        ],
+        [
+          586,
+          596,
+          "write_column_metadata serializes whole ColumnMetadata into Vec, records tell/length and writes raw bytes without length prefix or padding; returns descriptor. Serialization allocation coexists with owned metadata until return."
+        ],
+        [
+          597,
+          613,
+          "write_column_metadatas takes all metadata then spill state before awaited work. Active spill flushes/shuts down, reopens and moves chunk index; Pending/None yield no reader. Error after take does not restore either state. Comment delegates sidecar deletion to caller; no deletion is executed here."
+        ],
+        [
+          614,
+          632,
+          "For each column in order, sequentially read all indexed chunks with unchecked u64-to-usize and offset+length, map range errors to IO, decode/collect all pages and replace metadata.pages. Thus late spill drops preexisting retained page descriptions. Then serialize whole column and append descriptor. Memory holds a full column page vector plus serialized bytes and chunk lists; this is not bounded streaming replay."
+        ],
+        [
+          633,
+          646,
+          "make_file_descriptor converts borrowed core Schema through FieldsWithMeta into Some protobuf Schema plus num_rows length. It returns Ok locally, without schema or row consistency validation."
+        ],
+        [
+          647,
+          666,
+          "write_global_buffers rejects missing schema, takes schema_metadata into it, recursively unloads blobs in place, builds/serializes descriptor and writes raw bytes at current position. Global table entry0 is descriptor, followed by drained prior user-global descriptors. Schema mutation precedes IO; no length prefix/padding. Repeated invocation can replace metadata with an empty map."
+        ],
+        [
+          667,
+          697,
+          "add_schema_metadata inserts/replaces key/value without enforcing documented before-finish timing. initialize_with_external_metadata drains schema metadata into map, stores schema, sets num_columns by unchecked len as u32, replaces column metadata and sets aggregate rows. It does not validate buffers/schema/options or recreate encoders, type cache, mapping, field counts, globals or spill. Caller coherence is required."
+        ],
+        [
+          698,
+          710,
+          "add_global_buffer gets tell, writes payload padded, records position/raw length and returns descriptor Vec len as u32, so user indices begin1 before descriptor0 is emitted. No schema requirement, empty-buffer rejection, checked count cast or starting-alignment repair."
+        ],
+        [
+          711,
+          727,
+          "finish_writers removes all encoders with mem::take, then awaits each finish with fresh planner. External buffers are written raw although planner positions include padding (rust/lance-encoding/src/encoder.rs:130-159); multiple unaligned buffers depend on producer invariants. Debug assertion checks returned column count after those writes. Failures lose removed encoders."
+        ],
+        [
+          728,
+          760,
+          "Write every final page, borrow indexed metadata and record tell once, then write each column buffer padded while incrementing recorded buffer_pos only by raw length. Multiple unaligned buffers can have incorrect later recorded offsets; this is a deduction, not a reproduced producer case. Encoding is Any-wrapped Direct; count advances per returned physical column. Final total mismatch unconditionally panics, including release builds. No equal-field-row check."
+        ],
+        [
+          761,
+          789,
+          "finish borrows mutably, obtains tell, flushes all encoders into task vectors, writes external buffers padded and drains ordered pages/flush even if empty. Only call finish_writers if encoders remain, enabling external-metadata-only path to skip its count check. Docs promise close on success; backend semantics still delegated."
+        ],
+        [
+          790,
+          811,
+          "After field finishing, write descriptor/globals, record column-metadata start and consume/write column metadata. Append column offset table then global offset table, each pair two LEu64 without prefix; global count len as u32 unchecked. Every failure propagates with prior effects retained."
+        ],
+        [
+          812,
+          830,
+          "Append40-byte footer: three LEu64 starts(column metadata,column offsets,global offsets), two LEu32 counts(globals,columns), literal LEu16(0,3), then LANC. Await ObjectWriter shutdown; return aggregate num_rows and size from write result. No checksum, finished flag, idempotency, count validation or additional alignment. This historical standard V2_0 identity differs from embedded(2,0)."
+        ],
+        [
+          831,
+          851,
+          "abort is empty async body; comment refers to ObjectWriter Drop but call does not drop or abort it. tell casts current position to u64. write_external_buffer writes raw at current tell with no leading/trailing alignment, returning start/raw len, unlike structural external writes. Mapping getter borrows stored pairs unchanged."
+        ],
+        [
+          852,
+          874,
+          "concat_lance_footer reserves input length+1MiB, copies full batch.data and optionally clones batch core Schema through TryFrom<&Self>, builds descriptor and appends raw bytes; mini mode has no globals. No schema validation/blob unloading/alignment repair. Column metadata begins afterward. The Schema conversion here clones existing core schema (rust/lance-core/src/datatypes/schema.rs:922-927)."
+        ],
+        [
+          875,
+          910,
+          "For each page-table column in vector order, build pages preserving descriptors,num_rows,priority and Any-wrapping both Legacy/Structural encoding variants. Collect fallibly. No exact-version gate, relocation or descriptor bounds validation; supplied offsets must match copied prefix."
+        ],
+        [
+          911,
+          927,
+          "Copy column-level descriptors and Any-wrap column encoding; serialize whole metadata and append it raw with(position,length). ColumnInfo.index is unused, as is batch.top_level_columns; ordering is page_table order. Temporary metadata and bytes allocate."
+        ],
+        [
+          928,
+          952,
+          "Append column and global offset tables as LEu64 pairs, then same40-byte shape with unchecked counts and literal(2,0), not standard writer(0,3). Freeze BytesMut into Bytes. No IO, data decode, checksum or suffix validation."
+        ]
+      ]
+    },
+    {
+      "path": "rust/lance-file/src/testing.rs",
+      "module": "L1-modules/rust-lance-file-v20-compatibility.md",
+      "reviewed": true,
+      "role": "Public testing module helpers create a temporary local filesystem/scheduler fixture, fully collect input batches for writing, read all output batches and count rows. These are public Rust test utilities, not streaming production interfaces.",
+      "limits": "All123 lines read. Helpers use unwrap/assert extensively and return values rather than Result. No source tests or IO were executed. ObjectStore/scheduler/reader and decoder internals remain pending; no performance or durability result follows from these harness bodies.",
+      "ranges": [
+        [
+          1,
+          21,
+          "SPDX/imports connect Arc, Arrow RecordBatchReader/ArrowError, TryStreamExt, core cache/schema/tempfile, decoder plugins/filter, IO scheduler/params/cached size and file reader/version/writer options."
+        ],
+        [
+          22,
+          41,
+          "Public FsFixture exposes TempObjFile, Arc<ObjectStore>, Arc<ScanScheduler>. Default constructs temporary object path, local store and default_for_testing scheduler, retaining all three. Cleanup semantics are delegated to TempObjFile; no explicit Drop here."
+        ],
+        [
+          42,
+          60,
+          "WrittenFile publicly holds Arc<core Schema>, Vec<RecordBatch> and Vec<(u32,u32)> mapping. write_lance_file creates object writer then converts input reader schema and constructs exact-version facade writer; all failures unwrap. Returned original core schema is cloned into writer before later metadata mutations."
+        ],
+        [
+          61,
+          77,
+          "Collect entire RecordBatchReader into Result<Vec<_>,ArrowError> before any write_batch, unwrap errors, await each batch sequentially, clone mapping, add schema foo=bar, finish and discard summary. Return retained schema/data/mapping; returned schema does not receive added foo metadata because writer owned a clone. Input failure can occur after creating object and encoders."
+        ],
+        [
+          78,
+          81,
+          "test_cache returns fresh Arc<LanceCache> with128MiB capacity on every call; it is not shared global state."
+        ],
+        [
+          82,
+          101,
+          "read_lance_file opens scheduler with unknown file size, then FileReader::try_open with no explicit projection, supplied decoder plugins, a fresh test cache and default reader options. Each error unwraps; caller filter is retained for stream call."
+        ],
+        [
+          102,
+          112,
+          "Require read schema metadata foo=bar via unwrap/assert. Read RangeFull using batch size1024 and readahead16 with supplied filter, await stream creation then collect all RecordBatches into Vec. No comparison with original values in this helper."
+        ],
+        [
+          113,
+          123,
+          "count_lance_file calls full read helper, retains collected Vec until summation, sums each batch num_rows as usize. It is not a metadata-only count and inherits foo metadata assertion, decode/filter IO and unwrap panics."
+        ]
+      ]
+    },
+    {
+      "path": "rust/lance-file/src/compatibility_tests.rs",
+      "module": "L1-modules/rust-lance-file-v20-compatibility.md",
+      "reviewed": true,
+      "role": "Private cfg(test) compatibility harness compares current writer bytes with pinned baseline fixtures for V1/V2_0/V2_1/V2_2, validates current readers against those bytes, separately checks V2_0 embedded modes, and tests only same-revision V2_3 determinism.",
+      "limits": "All524 lines read; tests were not run. Checked-in binary payload interpretation remains pending even though hashes can be compared with README. Test assertions describe intended contracts, not observed passing results. No malformed-file, concurrent write, spill, cancellation or full format matrix is established by this one deterministic fixture.",
+      "ranges": [
+        [
+          1,
+          35,
+          "SPDX/imports connect Arrow builders/casts/types/schema, Bytes, core cache/schema, encoder/decoder APIs, IO params/writer/size, rstest/Tokio and current/legacy readers/writers plus FsFixture. Entire module is private cfg(test) through lib.rs."
+        ],
+        [
+          36,
+          52,
+          "compatibility_fixture_batch uses4097 rows: nonnull Int32 IDs0..4096; names null at multiples7 else formatted value-NNNN-deterministic-fixture; lists null at multiples11 else [i, null if i%5==0 otherwise2i,3i]. Numeric child type Int32 and list item nullable."
+        ],
+        [
+          53,
+          71,
+          "Int8 string dictionary appends null at multiples13 else red/green/blue by remainder0/1/2; first nonnull entry is green. Blob payload is nonnull LargeBinary text blob-NNNN-deterministic-payload for every row. Dictionary insertion unwraps."
+        ],
+        [
+          72,
+          99,
+          "Five-field Arrow schema: id nonnullable; name nullable Utf8 with compression=none; nullable List(item nullable Int32); nullable Dictionary(Int8,Utf8) with dict-values-compression=none; blob nullable LargeBinary marked lance-encoding:blob=true although actual array has no nulls. Build RecordBatch unwrap; no empty list appears in this original fixture."
+        ],
+        [
+          100,
+          135,
+          "v1_reader_expected_batch reconstructs fixture-specific lists: original null lists become empty, null child ints become0. Dictionary null keys become green, the first nonnull dictionary value; rebuild dictionary accordingly. Other arrays and full schema remain from input. Comment attributes these losses to historical V1 behavior; this function encodes an expected oracle, not an independently inspected legacy implementation. It assumes this deterministic input."
+        ],
+        [
+          136,
+          154,
+          "stable_fixture includes static bytes for V1,V2_0,V2_1,V2_2. V2_3 is unreachable with explicit unstable/no-fixture message. This test selection encodes no compatibility promise for prior unstable revisions."
+        ],
+        [
+          155,
+          174,
+          "assert_blob_column_eq downcasts both to LargeBinary, checks length then each null bit and valid payload; null payload bytes are intentionally not compared. Wrong physical type can panic during cast."
+        ],
+        [
+          175,
+          204,
+          "assert_record_batch_eq first checks full schema equality,row count,column count. A field literally named blob uses specialized LargeBinary oracle. Other arrays compare ArrayData; mismatch scans single-row slices for first difference then unwraps and panics with field/index/values. If only whole-array representation differs but no individual slice differs, diagnostic unwrap itself panics."
+        ],
+        [
+          205,
+          231,
+          "footer_version subtracts8 and reads two little-endian u16 with unchecked slice indexing; no size/magic validation. assert_wire_bytes_equal finds first differing byte over zipped common prefix and panics with offset/values, then separately requires lengths equal. Thus equal prefix with extra suffix fails."
+        ],
+        [
+          232,
+          256,
+          "write_current_fixture creates local FsFixture/object, options cacheSome1 and max-pageSome1024, othersDefault. V1 branch unreachable; V2_0 exact parent factory writes sequential slices of at most1024 rows then finish. For4097 rows there are5 input writes; option cache budget is divided by5 roots in writer initialization, yielding0 per field."
+        ],
+        [
+          257,
+          294,
+          "V2_1,V2_2,V2_3 branches use their exact factories with the same slice/write/finish sequence. Reopen output and read range0..summary.size_bytes as usize, then copy Bytes into Vec. All errors unwrap; helper contains no assertions on produced contents and is not itself a test."
+        ],
+        [
+          295,
+          317,
+          "Embedded helper explicitly uses cache1 per column,max-page1024,keep_original=true,alignment64 and exact V2_0 encoding strategy, encodes one supplied batch then returns self-described and mini encodings. These options differ from standard writer total-cache budget and defaultfalse keep-original."
+        ],
+        [
+          318,
+          348,
+          "Current-reader oracle persists provided bytes into temp object and explicitly shuts down, opens known-size scheduler, no projection/defaultplugins/no_cache/defaultoptions, then asserts normalized exact version and that at least one physical column has more than one page. It does not require every column to have multiple pages."
+        ],
+        [
+          349,
+          378,
+          "Read RangeFull with batch1024,readahead16,no_filter; collect all batches. Assert total rows, all schemas, then compare each batch against matching expected slice and final offset. It establishes ordered value/null/schema equality for fixture if run, not bounded-memory read behavior or malformed-input handling."
+        ],
+        [
+          379,
+          400,
+          "rstest cases V2_0/V2_1/V2_2 under tokio::test construct fixture/core schema and load dictionary values, write current bytes, demand byte equality to checked baseline, assert expected standard footer mapping, then read baseline through current reader. This tests writer determinism as well as backward reading for this input; no test execution is claimed."
+        ],
+        [
+          401,
+          420,
+          "Embedded compatibility uses only id/name columns of first257 rows, converts schema/sets dictionary, generates two byte forms and compares against respective includes. Both expected footer pairs must match V2_0 embedded mapping(2,0). It omits nested/list/dictionary/blob embedded data."
+        ],
+        [
+          421,
+          450,
+          "Parse self-described fixture with inferred schema and mini fixture with explicit supplied schema. Decode each using no_filter/defaultplugins,false,EncodedBatchLayout::Array,None, then full batch oracle against input. The false/None arguments are preserved literally; detailed decoder option semantics remain outside this file."
+        ],
+        [
+          451,
+          466,
+          "V2_3 test writes same fixture twice sequentially within current revision, asserts Vec byte equality, exact standard footer and reader roundtrip. It has no baseline fixture or previous-revision compatibility obligation."
+        ],
+        [
+          467,
+          502,
+          "V1 test loads baseline bytes, constructs core schema with dictionary values, writes five slices via V1Writer<NotSelfDescribing> with collect_stats_for_fields=Some(empty), finishes and reads actual bytes. Assert exact byte equality and V1 standard footer mapping. It is a frozen legacy compatibility check, not a model for new feature writers."
+        ],
+        [
+          503,
+          524,
+          "Copy baseline V1 bytes into a separate temp object and shutdown; open V1Reader with externally provided schema and read full row range. Assert5 legacy batches and compare against lossy V1 expected transformation. This does not require original null list/child/dictionary-key preservation."
+        ]
+      ]
+    },
+    {
+      "path": "rust/lance-file/test_data/exact_versions/README.md",
+      "module": "L1-modules/rust-lance-file-v20-compatibility.md",
+      "reviewed": true,
+      "role": "Fixture provenance, regeneration workflow, SHA-256 table and stable/unstable compatibility boundary. This documentation pins a commit, not a released package version.",
+      "limits": "All41 lines read. Baseline commit exists in local Git metadata; six declared hashes match the inventory snapshot. No generator or test was executed. Binary fixture contents remain pending; matching hashes do not prove semantic decoding or reproducibility.",
+      "ranges": [
+        [
+          1,
+          9,
+          "Claims generation at commit3a72f8a61e14613f517dded6816d4bfc77817c93 and names deterministic compatibility_fixture_batch. Lists primitive/nullable UTF8/list/dictionary/blob, multiple inputs/pages; embeddedV2_0 uses first257 id/name rows. The generator/test source independently specifies these inputs, but provenance is a documented claim until regeneration is actually executed."
+        ],
+        [
+          10,
+          24,
+          "Documents copying baseline-compatible datagen.rs into a clean detached worktree, invoking datagen.py with --source and removing worktree. Explains two separate processes and isolated Cargo target directory. --write is intended only to restore locked-baseline files. Commands are documentation and were not executed during this analysis."
+        ],
+        [
+          25,
+          33,
+          "Exact SHA-256 table names six files: v1,v2_0,v2_1,v2_2,v2_0_self_described,v2_0_mini. Full literal digests are retained in source appendix and MANIFEST. These hashes match inventory bytes but are not a substitute for per-file payload analysis."
+        ],
+        [
+          34,
+          41,
+          "Requires stable writers byte-identical and readers able to consume baseline. Explicit V2_0 standard footer(0,3), embedded(2,0); V2_3 unstable gets same-revision deterministic checks only. Warns regenerating from implementation under test is not independent compatibility evidence. No new feature support is prescribed for legacyV1."
+        ]
+      ]
+    },
+    {
+      "path": "rust/lance-file/test_data/exact_versions/datagen.py",
+      "module": "L1-modules/rust-lance-file-v20-compatibility.md",
+      "reviewed": true,
+      "role": "Standalone Python baseline-fixture orchestrator using only standard-library modules. It checks exact Git HEAD/cleanliness, temporarily installs a Rust example in the baseline checkout, runs two generators, compares output and optionally overwrites the six checked fixtures. This is not a Python binding API.",
+      "limits": "All129 lines read without executing/importing the script. Its workflow writes into the supplied baseline checkout and may run Cargo/network/build side effects; none was authorized or needed for this read-only KB analysis. Pinning commit is observed; dependency/environment reproducibility and runtime success remain unverified.",
+      "ranges": [
+        [
+          1,
+          22,
+          "SPDX and standard argparse/hashlib/os/shutil/subprocess/tempfile/Path imports. BASELINE_COMMIT exact40hex and FIXTURE_NAMES six entries in V1,V20,V21,V22,self-described,mini order. No Lance package version import/assertion; reproducibility guard is Git commit."
+        ],
+        [
+          23,
+          31,
+          "git_output runs argv git -C source with check=True,captured text, strips stdout; subprocess errors propagate with no local catch. No shell interpolation."
+        ],
+        [
+          32,
+          40,
+          "generate builds rust/lance-file/examples path and exact_version_fixture_generator.rs, remembers whether examples existed, creates directory, refuses replacing an existing target, then copies generator. Refusal/copy errors occur before try/finally, so a newly created directory or partial copy is not guaranteed cleanup on those paths."
+        ],
+        [
+          41,
+          64,
+          "Copy environment, override only CARGO_TARGET_DIR, run cargo run -p lance-file --example exact_version_fixture_generator -- output in baseline source with check=True. No --locked,--offline,profile override or toolchain pin in argv. finally unlinks target and removes examples if newly created; rmdir/unlink errors can mask Cargo error, concurrent contents can prevent rmdir. Other build modifications are not explicitly restored or checked afterward."
+        ],
+        [
+          65,
+          85,
+          "digest reads whole file and computes SHA256 hex. main parser requires Path --source, optional boolean --write; help promises replacement after runs agree. argparse rejects invalid CLI shape through its normal behavior."
+        ],
+        [
+          86,
+          95,
+          "Resolve source, demand exact git HEAD and empty porcelain status before generation; otherwise RuntimeError includes source/baseline. Fixture dir derives from resolved __file__, generator is sibling datagen.rs. No post-generation clean check or checksum validation of the generator itself."
+        ],
+        [
+          96,
+          108,
+          "Create two temporary output directories and one temporary Cargo target directory; both generate calls are sequential separate cargo-run processes sharing that target directory. Context managers clean temporary directories on unwind. It does not create separate target dirs per run or concurrent processes."
+        ],
+        [
+          109,
+          125,
+          "For each fixed name, read both whole outputs and compare bytes; mismatch errors immediately. With --write copy first output to checked fixture immediately; otherwise require existing checked fixture equal. Print name/digest after each success. This is per-file validation/publication, not all-six atomic replacement: an earlier fixture may be replaced before a later mismatch/failure. Missing output read errors propagate; no README-hash table comparison."
+        ],
+        [
+          126,
+          129,
+          "Only script entry __name__==__main__ invokes main. No catch/rollback/retry layer, imported library side effects beyond declarations, or embedded test case."
+        ]
+      ]
+    },
+    {
+      "path": "rust/lance-file/test_data/exact_versions/datagen.rs",
+      "module": "L1-modules/rust-lance-file-v20-compatibility.md",
+      "reviewed": true,
+      "role": "Standalone Rust example source intended for the pinned historical baseline API, not the current crate. Produces six deterministic binary fixtures from explicit Arrow data and baseline writers. Python copies it into a baseline examples directory before compilation.",
+      "limits": "All228 lines read without compilation/execution. Old previous::writer, LanceFileVersion, FileWriterOptions.format_version, EncodingOptions.version and EncodedBatchWriteExt references are intentional baseline APIs; current compatibility is not inferred. Local filesystem writes and unwrap/expect paths are generator behavior only.",
+      "ranges": [
+        [
+          1,
+          24,
+          "SPDX/imports include Arrow fixtures, async_trait, core schema, baseline default_encoding_strategy/encode_batch, previous legacy writer/ManifestProvider, FsFixture, selector and EncodedBatchWriteExt APIs. DynError=Box<dyn Error+Send+Sync> supports heterogeneous fallible generator operations."
+        ],
+        [
+          25,
+          36,
+          "Private NoManifest implements baseline async ManifestProvider::store_schema for any supplied writer/schema, returns Ok(None) and writes nothing. This selects no embedded legacy schema publication for V1 fixture."
+        ],
+        [
+          37,
+          53,
+          "Build4097 IDs and nullable names/list values using the same remainder rules as current compatibility fixture. Names format width4; list nonnull rows contain i, optional2i,3i; multiples11 null lists. No randomness."
+        ],
+        [
+          54,
+          72,
+          "DictionaryInt8 uses nulls at multiples13 and red/green/blue by remainder, with explicit expect on append. All LargeBinary payloads deterministic and nonnull. First dictionary value green."
+        ],
+        [
+          73,
+          101,
+          "Schema names/types/nullability and compression/blob metadata match compatibility fixture; RecordBatch::try_new expect reports schema/array disagreement. Nullable blob declaration does not add null values."
+        ],
+        [
+          102,
+          132,
+          "write_current_fixture uses baseline FileWriter::try_new with total cacheSome1,max-pageSome1024,format_versionSome(selector),otherDefault. Write slices up to1024, finish, reopen and read reported byte range into Vec. IO/encoding errors propagate DynError. The name current means current in the pinned baseline build, not live repository API."
+        ],
+        [
+          133,
+          157,
+          "write_v1_fixture uses V1Writer<NoManifest>, explicit schema and empty stats collection, same five-slice sequence; finish and collect raw bytes. It does not compare or decode outputs itself."
+        ],
+        [
+          158,
+          184,
+          "Embedded helper fixes V2_0, EncodingOptions(cache1,max1024,keeptrue,alignment64,version), chooses baseline default strategy, encode_batch, then baseline extension self-described and mini conversions, copying both Bytes into Vec. No historical API migration is performed by generator."
+        ],
+        [
+          185,
+          197,
+          "write_fixture uses std::fs::write(output/name), which can replace existing content, propagating errors. Tokio main reads only first positional OS-string argument, missing argument returns usage error, extra args ignored; create_dir_all output before constructing data."
+        ],
+        [
+          198,
+          218,
+          "Construct batch/core schema and set_dictionary, write V1 first, then selectorsV2_0,V2_1,V2_2 in order under fixed filenames. Sequential awaited generation/write; earlier outputs remain after later error until outer Python tempdir cleanup. No V2_3 baseline generation."
+        ],
+        [
+          219,
+          228,
+          "Project id/name and first257rows, convert embedded schema/set_dictionary, generate two modes and write self-described then mini. Return Ok. No internal hash assertion, footer parsing, cross-process comparison or reader roundtrip; outer orchestrator/current tests own those checks."
+        ]
+      ]
+    }
+  ]
+}

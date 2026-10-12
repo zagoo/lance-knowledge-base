@@ -1,0 +1,196 @@
+@@ -168,66 +168,46 @@ message FullZipLayout {
+  168  message SparseLayout {
+  169    // Description of the compression of values.
+  170    CompressiveEncoding value_compression = 1;
+  171 -  // Number of value buffers in each mini-block chunk. This does not include structural buffers.
+  172 -  uint64 num_buffers = 2;
+  173 -  /* Number of entries in the equivalent dense repetition / definition stream. This equals
+  174 -   * num_visible_items plus one structural placeholder for every list slot without children.
+  175 -   * Null leaf slots count as visible items because they still occupy positions in Arrow's
+  176 -   * leaf value buffer. For example, a nullable primitive with 100 slots, 30 of them null,
+  177 -   * has num_items = num_visible_items = 100.
+  178 -   */
+  179 -  uint64 num_items = 3;
+  180 -  // Number of leaf value slots encoded in the value chunks, including null leaf slots.
+  181 -  uint64 num_visible_items = 4;
+  182 -  // If true, chunk-local value buffer sizes use u32. Otherwise they use u16.
+  183 -  bool has_large_chunk = 5;
+  171    /* Structural layers ordered from outer-most to inner-most. This may be empty for a flat,
+  185 -   * non-nullable leaf page whose scheduling domain equals num_visible_items.
+  172 +   * non-nullable leaf page. The terminal domain gives the leaf slot count, including nulls.
+  173     */
+  187 -  repeated SparseStructuralLayer structural_layers = 6;
+  174 +  repeated SparseStructuralLayer structural_layers = 2;
+  175  }
+  176  
+  190 -/* A domain is a layer-local integer coordinate space [0, num_slots). A slot is one
+  177 +/* A domain is a layer-local integer coordinate space [0, size). A slot is one
+  178   * element in that space. The outer-most domain is the page's top-level rows; each
+  179   * layer's child domain is the next layer's parent domain, and the terminal child
+  193 - * domain contains num_visible_items leaf value slots.
+  180 + * domain contains the leaf value slots. Parent sizes are derived from the page row count
+  181 + * and preceding layers, not stored in each layer. The outer size is the page row count
+  182 + * divided exactly by the product of all fixed-size-list dimensions, including those below lists.
+  183   */
+  184  message SparseStructuralLayer {
+  185    // Exactly one layer kind is required.
+  186    oneof layer {
+  198 -    SparseValidityLayer validity = 1;
+  187 +    SparseValiditySet validity = 1;
+  188      SparseListLayer list = 2;
+  189      SparseFixedSizeListLayer fixed_size_list = 3;
+  190    }
+  191  }
+  192  
+  204 -message SparseValidityLayer {
+  205 -  // Number of nullable item or struct slots in this layer's parent and child domain.
+  206 -  uint64 num_slots = 1;
+  207 -  // Validity for the slots in this layer.
+  208 -  SparseValiditySet validity = 2;
+  209 -}
+  210 -
+  193  message SparseListLayer {
+  212 -  // Number of list, large-list, or map slots in this layer's parent domain.
+  213 -  uint64 num_slots = 1;
+  214 -  // Number of slots in this layer's child domain.
+  215 -  uint64 num_child_slots = 2;
+  194 +  // Child-domain size, equal to the sum of counts; available before reading count payloads.
+  195 +  uint64 num_child_slots = 1;
+  196    // Non-empty parent slots. Valid parent slots absent from this set are empty lists.
+  217 -  SparsePositionSet non_empty_positions = 3;
+  197 +  CompressiveEncoding non_empty_positions = 2;
+  198 +  // Cardinality of both non_empty_positions and counts.
+  199 +  uint64 num_non_empty_positions = 3;
+  200    // Positive child counts corresponding one-for-one with non_empty_positions.
+  219 -  SparseCountSet counts = 4;
+  201 +  CompressiveEncoding counts = 4;
+  202    // Validity for the parent slots in this layer.
+  203    SparseValiditySet validity = 5;
+  204  }
+  205  
+  206  message SparseFixedSizeListLayer {
+  225 -  // Number of fixed-size-list slots in this layer's parent domain.
+  226 -  uint64 num_slots = 1;
+  227 -  // Number of children per parent slot. The child domain has num_slots * dimension slots.
+  228 -  uint64 dimension = 2;
+  207 +  // Positive number of children per parent slot. The child-domain size is parent size * dimension.
+  208 +  uint64 dimension = 1;
+  209    // Validity for the parent slots in this layer.
+  230 -  SparseValiditySet validity = 3;
+  210 +  SparseValiditySet validity = 2;
+  211  }
+  212  
+  213  message SparseValiditySet {
+
+@@ -240,49 +220,16 @@ message SparseValiditySet {
+  220    }
+  221  
+  222    Meaning meaning = 1;
+  243 -  SparsePositionSet positions = 2;
+  244 -}
+  245 -
+  246 -message SparsePositionEmpty {}
+  247 -
+  248 -message SparsePositionAll {}
+  249 -
+  250 -message SparsePositionRange {
+  251 -  uint64 start = 1;
+  252 -  uint64 length = 2;
+  253 -}
+  254 -
+  255 -message SparsePositionSet {
+  256 -  oneof positions {
+  257 -    // Delta-compressed u64 positions. Cardinality is num_positions.
+  258 -    CompressiveEncoding explicit = 1;
+  259 -    // One contiguous, non-empty range.
+  260 -    SparsePositionRange range = 2;
+  261 -    // Every position in the domain.
+  262 -    SparsePositionAll all = 3;
+  263 -    // No positions in the domain.
+  264 -    SparsePositionEmpty empty = 4;
+  265 -  }
+  266 -  // Semantic cardinality of this set.
+  267 -  uint64 num_positions = 5;
+  268 -}
+  269 -
+  270 -message SparseCountEmpty {}
+  271 -
+  272 -message SparseCountConstant {
+  273 -  // Child count shared by every non-empty list slot.
+  274 -  uint64 value = 1;
+  275 -}
+  276 -
+  277 -message SparseCountSet {
+  278 -  oneof counts {
+  279 -    // Compressed u64 child counts. Cardinality comes from the containing position set.
+  280 -    CompressiveEncoding explicit = 1;
+  281 -    // One positive child count shared by every non-empty list slot.
+  282 -    SparseCountConstant constant = 2;
+  283 -    // No counts; valid only when there are no non-empty list slots.
+  284 -    SparseCountEmpty empty = 3;
+  285 -  }
+  223 +  /* Required unsigned u64 block encoding of strictly increasing absolute positions.
+  224 +   * The cardinality is num_positions. All values must be below the owning domain's
+  225 +   * derived size. This descriptor is required even when the sequence is empty.
+  226 +   *
+  227 +   * Positions and list counts follow the generic unsigned block contract,
+  228 +   * including empty sequences and payload framing. Counts need not be increasing.
+  229 +   */
+  230 +  CompressiveEncoding positions = 2;
+  231 +  // Semantic cardinality of the stored positions.
+  232 +  uint64 num_positions = 3;
+  233  }
+  234  
+  235  /* A layout used for pages where all (visible) values are the same scalar value.
+
+@@ -456,6 +403,41 @@ message Constant {
+  403    optional bytes value = 1;
+  404  }
+  405  
+  406 +/* A metadata-only arithmetic sequence for unstable Lance 2.3 only.
+  407 + *
+  408 + * The value at index i is `start + step * i`. The container supplies the
+  409 + * number of values. Writers use this encoding only when step is positive and
+  410 + * the final value fits in the declared bit width.
+  411 + *
+  412 + * The input is a u32 or u64 fixed-width data block.
+  413 + * There is no output buffer.
+  414 + */
+  415 +message Range {
+  416 +  // The width of each decompressed value. Must be 32 or 64.
+  417 +  uint64 uncompressed_bits_per_value = 1;
+  418 +  // The first value in the sequence.
+  419 +  uint64 start = 2;
+  420 +  // The positive difference between adjacent values.
+  421 +  uint64 step = 3;
+  422 +}
+  423 +
+  424 +/* An unstable Lance 2.3 non-decreasing unsigned fixed-width sequence
+  425 + * represented by its first value and the differences between adjacent values.
+  426 + *
+  427 + * The child contains one fewer value than the input. The container supplies
+  428 + * the input cardinality. Delta has a payload exactly when its child has one.
+  429 + *
+  430 + * The input is a u32 or u64 fixed-width data block.
+  431 + */
+  432 +message Delta {
+  433 +  // The width of each decompressed value. Must be 32 or 64.
+  434 +  uint64 uncompressed_bits_per_value = 1;
+  435 +  // The first uncompressed value.
+  436 +  uint64 base = 2;
+  437 +  // Compression applied to the adjacent differences.
+  438 +  CompressiveEncoding deltas = 3;
+  439 +}
+  440 +
+  441  /* A compression scheme in which a single fixed-width block is "packed" into
+  442   * a smaller fixed-width block values where each value has fewer bits.
+  443   *
+
+@@ -671,5 +653,7 @@ message CompressiveEncoding {
+  653          FixedSizeList fixed_size_list = 11;
+  654          PackedStruct packed_struct = 12;
+  655          VariablePackedStruct variable_packed_struct = 13;
+  656 +        Range range = 14;
+  657 +        Delta delta = 15;
+  658      }
+  659  }

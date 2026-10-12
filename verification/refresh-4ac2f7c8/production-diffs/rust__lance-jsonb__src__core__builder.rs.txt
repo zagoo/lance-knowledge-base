@@ -1,0 +1,140 @@
+@@ -0,0 +1,164 @@
+    1 +// SPDX-License-Identifier: Apache-2.0
+    2 +// SPDX-FileCopyrightText: Copyright The Lance Authors
+    3 +// SPDX-FileCopyrightText: Copyright 2023 Datafuse Labs
+    4 +// Adapted from databendlabs/jsonb at commit fba895c5ebe77ce2539e187f9c652f51cbf195c3.
+    5 +
+    6 +use core::ops::Range;
+    7 +
+    8 +use byteorder::BigEndian;
+    9 +use byteorder::WriteBytesExt;
+   10 +
+   11 +use super::constants::*;
+   12 +use super::jentry::JEntry;
+   13 +use crate::OwnedJsonb;
+   14 +use crate::RawJsonb;
+   15 +use crate::core::ExtensionItem;
+   16 +use crate::core::JsonbItem;
+   17 +use crate::core::NumberItem;
+   18 +use crate::error::Result;
+   19 +
+   20 +pub struct ArrayBuilder<'a> {
+   21 +    items: Vec<JsonbItem<'a>>,
+   22 +}
+   23 +
+   24 +impl<'a> ArrayBuilder<'a> {
+   25 +    pub(crate) fn with_capacity(capacity: usize) -> Self {
+   26 +        Self {
+   27 +            items: Vec::with_capacity(capacity),
+   28 +        }
+   29 +    }
+   30 +
+   31 +    pub(crate) fn push_jsonb_item(&mut self, item: JsonbItem<'a>) {
+   32 +        self.items.push(item);
+   33 +    }
+   34 +
+   35 +    pub(crate) fn build(self) -> Result<OwnedJsonb> {
+   36 +        let mut buf = Vec::new();
+   37 +        let header = ARRAY_CONTAINER_TAG | self.items.len() as u32;
+   38 +        buf.write_u32::<BigEndian>(header)?;
+   39 +
+   40 +        let mut jentry_index = reserve_jentries(&mut buf, self.items.len() * 4);
+   41 +        for item in self.items.into_iter() {
+   42 +            append_jsonb_item(&mut buf, &mut jentry_index, item)?;
+   43 +        }
+   44 +        Ok(OwnedJsonb::new(buf))
+   45 +    }
+   46 +}
+   47 +
+   48 +fn append_jsonb_item(buf: &mut Vec<u8>, jentry_index: &mut usize, item: JsonbItem) -> Result<()> {
+   49 +    match item {
+   50 +        JsonbItem::Null => {
+   51 +            let jentry = JEntry::make_null_jentry();
+   52 +            replace_jentry(buf, jentry, jentry_index);
+   53 +        }
+   54 +        JsonbItem::Boolean(v) => {
+   55 +            let jentry = if v {
+   56 +                JEntry::make_true_jentry()
+   57 +            } else {
+   58 +                JEntry::make_false_jentry()
+   59 +            };
+   60 +            replace_jentry(buf, jentry, jentry_index);
+   61 +        }
+   62 +        JsonbItem::Number(num) => match num {
+   63 +            NumberItem::Raw(data) => {
+   64 +                let jentry = JEntry::make_number_jentry(data.len());
+   65 +                replace_jentry(buf, jentry, jentry_index);
+   66 +                buf.extend_from_slice(data);
+   67 +            }
+   68 +            NumberItem::Number(num) => {
+   69 +                let len = num.compact_encode(&mut *buf)?;
+   70 +                let jentry = JEntry::make_number_jentry(len);
+   71 +                replace_jentry(buf, jentry, jentry_index);
+   72 +            }
+   73 +        },
+   74 +        JsonbItem::String(data) => {
+   75 +            let jentry = JEntry::make_string_jentry(data.len());
+   76 +            replace_jentry(buf, jentry, jentry_index);
+   77 +            buf.extend_from_slice(data.as_bytes());
+   78 +        }
+   79 +        JsonbItem::Extension(ext) => match ext {
+   80 +            ExtensionItem::Raw(data) => {
+   81 +                let jentry = JEntry::make_extension_jentry(data.len());
+   82 +                replace_jentry(buf, jentry, jentry_index);
+   83 +                buf.extend_from_slice(data);
+   84 +            }
+   85 +            ExtensionItem::Extension(ext) => {
+   86 +                let len = ext.compact_encode(&mut *buf)?;
+   87 +                let jentry = JEntry::make_extension_jentry(len);
+   88 +                replace_jentry(buf, jentry, jentry_index);
+   89 +            }
+   90 +        },
+   91 +        JsonbItem::Raw(raw_jsonb) => {
+   92 +            append_raw_jsonb_data(buf, jentry_index, raw_jsonb)?;
+   93 +        }
+   94 +        JsonbItem::Owned(owned_jsonb) => {
+   95 +            let raw_jsonb = owned_jsonb.as_raw();
+   96 +            append_raw_jsonb_data(buf, jentry_index, raw_jsonb)?;
+   97 +        }
+   98 +    }
+   99 +    Ok(())
+  100 +}
+  101 +
+  102 +fn append_raw_jsonb_data(
+  103 +    buf: &mut Vec<u8>,
+  104 +    jentry_index: &mut usize,
+  105 +    raw_jsonb: RawJsonb,
+  106 +) -> Result<()> {
+  107 +    let (header_type, _) = raw_jsonb.read_header(0)?;
+  108 +    if header_type == SCALAR_CONTAINER_TAG {
+  109 +        let scalar_jentry = raw_jsonb.read_jentry(4)?;
+  110 +        let range = Range {
+  111 +            start: 8,
+  112 +            end: raw_jsonb.len(),
+  113 +        };
+  114 +        let data = raw_jsonb.slice(range)?;
+  115 +        replace_jentry(buf, scalar_jentry, jentry_index);
+  116 +        buf.extend_from_slice(data);
+  117 +    } else {
+  118 +        let jentry = JEntry::make_container_jentry(raw_jsonb.len());
+  119 +        replace_jentry(buf, jentry, jentry_index);
+  120 +        buf.extend_from_slice(raw_jsonb.data);
+  121 +    }
+  122 +    Ok(())
+  123 +}
+  124 +
+  125 +fn reserve_jentries(buf: &mut Vec<u8>, len: usize) -> usize {
+  126 +    let old_len = buf.len();
+  127 +    let new_len = old_len + len;
+  128 +    buf.resize(new_len, 0);
+  129 +    old_len
+  130 +}
+  131 +
+  132 +fn replace_jentry(buf: &mut [u8], jentry: JEntry, jentry_index: &mut usize) {
+  133 +    let jentry_bytes = jentry.encoded().to_be_bytes();
+  134 +    for (i, b) in jentry_bytes.iter().enumerate() {
+  135 +        buf[*jentry_index + i] = *b;
+  136 +    }
+  137 +    *jentry_index += 4;
+  138 +}
+  139 +

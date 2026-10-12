@@ -1,0 +1,93 @@
+@@ -0,0 +1,92 @@
+    1 +// SPDX-License-Identifier: Apache-2.0
+    2 +// SPDX-FileCopyrightText: Copyright The Lance Authors
+    3 +
+    4 +//! Metric-specific adapters for streaming coreset IVF training.
+    5 +
+    6 +mod float_coreset;
+    7 +mod hamming_coreset;
+    8 +
+    9 +use arrow_array::FixedSizeListArray;
+   10 +use async_trait::async_trait;
+   11 +use lance_core::Result;
+   12 +use lance_linalg::distance::MetricType;
+   13 +
+   14 +use crate::dataset::Dataset;
+   15 +
+   16 +use super::{
+   17 +    FixedIvfTrainingRanges, FixedIvfTrainingSampler, KMeansProgressCallback,
+   18 +    StreamingKMeansMetricPolicy,
+   19 +};
+   20 +
+   21 +pub(in crate::index::vector::ivf) use float_coreset::FloatCoresetAlgorithm;
+   22 +pub(in crate::index::vector::ivf) use hamming_coreset::HammingCoresetAlgorithm;
+   23 +
+   24 +#[async_trait]
+   25 +pub(in crate::index::vector::ivf) trait StreamingCoresetAlgorithm:
+   26 +    Sync
+   27 +{
+   28 +    type Coreset;
+   29 +
+   30 +    fn metric_policy(&self) -> &dyn StreamingKMeansMetricPolicy;
+   31 +
+   32 +    fn prepare_sample(
+   33 +        &self,
+   34 +        training_data: FixedSizeListArray,
+   35 +        sampled_metric: MetricType,
+   36 +    ) -> Result<FixedSizeListArray>;
+   37 +
+   38 +    fn new_coreset(&self, dimension: usize, capacity: usize) -> Self::Coreset;
+   39 +
+   40 +    fn append_local_coreset(
+   41 +        &self,
+   42 +        coreset: &mut Self::Coreset,
+   43 +        data: &FixedSizeListArray,
+   44 +        local_k: usize,
+   45 +        max_iters: usize,
+   46 +        on_progress: KMeansProgressCallback,
+   47 +    ) -> Result<()>;
+   48 +
+   49 +    fn append_coreset(&self, coreset: &mut Self::Coreset, other: Self::Coreset) -> Result<()>;
+   50 +
+   51 +    fn reduce_coreset(
+   52 +        &self,
+   53 +        coreset: &mut Self::Coreset,
+   54 +        dimension: usize,
+   55 +        budget: usize,
+   56 +    ) -> Result<()>;
+   57 +
+   58 +    fn coreset_len(&self, coreset: &Self::Coreset) -> usize;
+   59 +
+   60 +    fn train_centroids(
+   61 +        &self,
+   62 +        coreset: Self::Coreset,
+   63 +        dimension: usize,
+   64 +        num_partitions: usize,
+   65 +        max_iters: usize,
+   66 +        on_progress: KMeansProgressCallback,
+   67 +    ) -> Result<FixedSizeListArray>;
+   68 +
+   69 +    async fn refine_with_sampler(
+   70 +        &self,
+   71 +        sampler: &FixedIvfTrainingSampler<'_>,
+   72 +        streaming_sample_size: usize,
+   73 +        sample_ranges: &FixedIvfTrainingRanges,
+   74 +        initial_centroids: &FixedSizeListArray,
+   75 +        passes: usize,
+   76 +        on_progress: KMeansProgressCallback,
+   77 +    ) -> Result<FixedSizeListArray>;
+   78 +
+   79 +    #[allow(clippy::too_many_arguments)]
+   80 +    async fn refine_with_resampling(
+   81 +        &self,
+   82 +        dataset: &Dataset,
+   83 +        column: &str,
+   84 +        total_sample_rate: usize,
+   85 +        streaming_sample_rate: usize,
+   86 +        num_partitions: usize,
+   87 +        initial_centroids: &FixedSizeListArray,
+   88 +        fragment_ids: Option<&[u32]>,
+   89 +        passes: usize,
+   90 +        on_progress: KMeansProgressCallback,
+   91 +    ) -> Result<FixedSizeListArray>;
+   92 +}

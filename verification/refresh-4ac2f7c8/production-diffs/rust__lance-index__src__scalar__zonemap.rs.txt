@@ -1,0 +1,61 @@
+@@ -1852,6 +1852,34 @@ impl ZoneMapSeedWriter {
+ 1852      }
+ 1853  }
+ 1854  
+ 1855 +impl ZoneMapSeedWriter {
+ 1856 +    /// Record the null positions of `chunk` as runs: one bitmap insert per
+ 1857 +    /// contiguous null region instead of one per null row, so all-null and
+ 1858 +    /// clustered-null data cost almost nothing to track. `base_offset` is the
+ 1859 +    /// fragment-local offset of the chunk's first row.
+ 1860 +    fn record_null_runs(&mut self, chunk: &ArrayRef, base_offset: u32) {
+ 1861 +        let len = chunk.len() as u32;
+ 1862 +        let Some(nulls) = chunk.nulls() else {
+ 1863 +            return;
+ 1864 +        };
+ 1865 +        // The validity buffer marks valid rows; the gaps between its set runs
+ 1866 +        // are the null runs.
+ 1867 +        let mut cursor = 0u32;
+ 1868 +        for (start, end) in nulls.inner().set_slices() {
+ 1869 +            let start = start as u32;
+ 1870 +            if start > cursor {
+ 1871 +                self.null_offsets
+ 1872 +                    .insert_range(base_offset + cursor..base_offset + start);
+ 1873 +            }
+ 1874 +            cursor = end as u32;
+ 1875 +        }
+ 1876 +        if cursor < len {
+ 1877 +            self.null_offsets
+ 1878 +                .insert_range(base_offset + cursor..base_offset + len);
+ 1879 +        }
+ 1880 +    }
+ 1881 +}
+ 1882 +
+ 1883  impl IndexSeedWriter for ZoneMapSeedWriter {
+ 1884      fn column_name(&self) -> &str {
+ 1885          &self.column_name
+
+@@ -1868,11 +1896,7 @@ impl IndexSeedWriter for ZoneMapSeedWriter {
+ 1896  
+ 1897              if chunk.null_count() > 0 {
+ 1898                  let base_offset = (self.next_zone_start + self.rows_in_current_zone) as u32;
+ 1871 -                for i in 0..chunk_len {
+ 1872 -                    if chunk.is_null(i) {
+ 1873 -                        self.null_offsets.insert(base_offset + i as u32);
+ 1874 -                    }
+ 1875 -                }
+ 1899 +                self.record_null_runs(&chunk, base_offset);
+ 1900              }
+ 1901  
+ 1902              self.rows_in_current_zone += chunk_len as u64;
+
+@@ -1919,7 +1943,9 @@ impl IndexSeedWriter for ZoneMapSeedWriter {
+ 1943          let batch = Self::seed_batch_from_zones(&self.completed_zones, &self.data_type)?;
+ 1944  
+ 1945          // Embed null bitmap in schema metadata so deserialize_seed can reconstruct null_rows.
+ 1922 -        let null_offsets = std::mem::take(&mut self.null_offsets);
+ 1946 +        let mut null_offsets = std::mem::take(&mut self.null_offsets);
+ 1947 +        // Run containers make contiguous null regions a few bytes each.
+ 1948 +        null_offsets.optimize();
+ 1949          let bitmap_bytes = if null_offsets.is_empty() {
+ 1950              Vec::default()
+ 1951          } else {

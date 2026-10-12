@@ -1,0 +1,562 @@
+@@ -0,0 +1,561 @@
+    1 +// SPDX-License-Identifier: Apache-2.0
+    2 +// SPDX-FileCopyrightText: Copyright The Lance Authors
+    3 +// SPDX-FileCopyrightText: Copyright 2023 Datafuse Labs
+    4 +// Adapted from databendlabs/jsonb at commit fba895c5ebe77ce2539e187f9c652f51cbf195c3.
+    5 +
+    6 +use core::ops::Range;
+    7 +use std::borrow::Cow;
+    8 +use std::io::Write;
+    9 +
+   10 +use byteorder::BigEndian;
+   11 +use byteorder::WriteBytesExt;
+   12 +use ethnum::i256;
+   13 +
+   14 +use super::constants::*;
+   15 +use super::jentry::JEntry;
+   16 +use crate::Number;
+   17 +use crate::OwnedJsonb;
+   18 +use crate::RawJsonb;
+   19 +use crate::core::ExtensionItem;
+   20 +use crate::core::JsonbItem;
+   21 +use crate::core::JsonbItemType;
+   22 +use crate::core::NumberItem;
+   23 +use crate::error::*;
+   24 +use crate::extension::Date;
+   25 +use crate::extension::ExtensionValue;
+   26 +use crate::extension::Interval;
+   27 +use crate::extension::Timestamp;
+   28 +use crate::extension::TimestampTz;
+   29 +use crate::number::Decimal64;
+   30 +use crate::number::Decimal128;
+   31 +use crate::number::Decimal256;
+   32 +
+   33 +impl<'a> JsonbItem<'a> {
+   34 +    pub(crate) fn from_raw_jsonb(raw_jsonb: RawJsonb<'a>) -> Result<Self> {
+   35 +        let (header_type, _) = raw_jsonb.read_header(0)?;
+   36 +        match header_type {
+   37 +            SCALAR_CONTAINER_TAG => {
+   38 +                let (jentry, data) = raw_jsonb.read_jentry_and_data(4, 8)?;
+   39 +                let item = match jentry.type_code {
+   40 +                    NULL_TAG => JsonbItem::Null,
+   41 +                    TRUE_TAG => JsonbItem::Boolean(true),
+   42 +                    FALSE_TAG => JsonbItem::Boolean(false),
+   43 +                    NUMBER_TAG => JsonbItem::Number(NumberItem::Raw(data)),
+   44 +                    STRING_TAG => {
+   45 +                        let s = Cow::Borrowed(unsafe { std::str::from_utf8_unchecked(data) });
+   46 +                        JsonbItem::String(s)
+   47 +                    }
+   48 +                    EXTENSION_TAG => JsonbItem::Extension(ExtensionItem::Raw(data)),
+   49 +                    _ => {
+   50 +                        return Err(Error::InvalidJsonb);
+   51 +                    }
+   52 +                };
+   53 +                Ok(item)
+   54 +            }
+   55 +            OBJECT_CONTAINER_TAG | ARRAY_CONTAINER_TAG => Ok(JsonbItem::Raw(raw_jsonb)),
+   56 +            _ => Err(Error::InvalidJsonb),
+   57 +        }
+   58 +    }
+   59 +}
+   60 +
+   61 +impl<'a> RawJsonb<'a> {
+   62 +    /// Returns the type information of a JSONB data item
+   63 +    ///
+   64 +    /// # Returns
+   65 +    ///
+   66 +    /// Returns `Result<JsonbItemType>`, where `JsonbItemType` can be one of:
+   67 +    /// - `JsonbItemType::Null` - represents a null value
+   68 +    /// - `JsonbItemType::Boolean` - represents a boolean value (true or false)
+   69 +    /// - `JsonbItemType::Number` - represents a numeric type
+   70 +    /// - `JsonbItemType::String` - represents a string type
+   71 +    /// - `JsonbItemType::Extension` - represents an extension type
+   72 +    /// - `JsonbItemType::Array(n)` - represents an array type, where n is the number of array elements
+   73 +    /// - `JsonbItemType::Object(n)` - represents an object type, where n is the number of key-value pairs
+   74 +    ///
+   75 +    /// # Errors
+   76 +    ///
+   77 +    /// Returns `Error::InvalidJsonb` if the JSONB data format is invalid
+   78 +    pub(crate) fn jsonb_item_type(&self) -> Result<JsonbItemType> {
+   79 +        let (header_type, header_len) = self.read_header(0)?;
+   80 +        match header_type {
+   81 +            SCALAR_CONTAINER_TAG => {
+   82 +                let jentry = self.read_jentry(4)?;
+   83 +
+   84 +                match jentry.type_code {
+   85 +                    NULL_TAG => Ok(JsonbItemType::Null),
+   86 +                    TRUE_TAG => Ok(JsonbItemType::Boolean),
+   87 +                    FALSE_TAG => Ok(JsonbItemType::Boolean),
+   88 +                    NUMBER_TAG => Ok(JsonbItemType::Number),
+   89 +                    STRING_TAG => Ok(JsonbItemType::String),
+   90 +                    EXTENSION_TAG => Ok(JsonbItemType::Extension),
+   91 +                    _ => Err(Error::InvalidJsonb),
+   92 +                }
+   93 +            }
+   94 +            ARRAY_CONTAINER_TAG => Ok(JsonbItemType::Array(header_len)),
+   95 +            OBJECT_CONTAINER_TAG => Ok(JsonbItemType::Object(header_len)),
+   96 +            _ => Err(Error::InvalidJsonb),
+   97 +        }
+   98 +    }
+   99 +
+  100 +    pub(crate) fn get_object_value_by_key_name(
+  101 +        &self,
+  102 +        key_name: &Cow<'a, str>,
+  103 +        eq_func: impl Fn(&[u8], &[u8]) -> bool,
+  104 +    ) -> Result<Option<JsonbItem<'a>>> {
+  105 +        let (header_type, length) = self.read_header(0)?;
+  106 +        if header_type != OBJECT_CONTAINER_TAG || length == 0 {
+  107 +            return Ok(None);
+  108 +        }
+  109 +        let mut index = 0;
+  110 +        let mut jentry_offset = 4;
+  111 +        let mut item_offset = 4 + 8 * length;
+  112 +
+  113 +        let mut key_matched = false;
+  114 +        let name_len = key_name.len();
+  115 +        let name_bytes = key_name.as_bytes();
+  116 +        while index < length {
+  117 +            let key_jentry = self.read_jentry(jentry_offset)?;
+  118 +            let key_len = key_jentry.length as usize;
+  119 +
+  120 +            index += 1;
+  121 +            jentry_offset += 4;
+  122 +            item_offset += key_len;
+  123 +
+  124 +            // check if key match the name.
+  125 +            if name_len == key_len {
+  126 +                let key_range = Range {
+  127 +                    start: item_offset - key_len,
+  128 +                    end: item_offset,
+  129 +                };
+  130 +                let key_data = self.slice(key_range)?;
+  131 +                if eq_func(name_bytes, key_data) {
+  132 +                    key_matched = true;
+  133 +                    break;
+  134 +                }
+  135 +            }
+  136 +        }
+  137 +
+  138 +        if !key_matched {
+  139 +            return Ok(None);
+  140 +        }
+  141 +        let val_index = index - 1;
+  142 +        // skip unmatched keys and values.
+  143 +        while index < length + val_index {
+  144 +            let jentry = self.read_jentry(jentry_offset)?;
+  145 +            index += 1;
+  146 +            jentry_offset += 4;
+  147 +            item_offset += jentry.length as usize;
+  148 +        }
+  149 +
+  150 +        // read value item data
+  151 +        let value_jentry = self.read_jentry(jentry_offset)?;
+  152 +        let value_len = value_jentry.length as usize;
+  153 +
+  154 +        let value_range = Range {
+  155 +            start: item_offset,
+  156 +            end: item_offset + value_len,
+  157 +        };
+  158 +        let value_data = self.slice(value_range)?;
+  159 +        let value_item = jentry_to_jsonb_item(value_jentry, value_data);
+  160 +        Ok(Some(value_item))
+  161 +    }
+  162 +
+  163 +    pub(super) fn read_header(&self, index: usize) -> Result<(u32, usize)> {
+  164 +        let header = self.read_u32(index)?;
+  165 +        let header_type = header & CONTAINER_HEADER_TYPE_MASK;
+  166 +        match header_type {
+  167 +            SCALAR_CONTAINER_TAG | OBJECT_CONTAINER_TAG | ARRAY_CONTAINER_TAG => {}
+  168 +            _ => {
+  169 +                return Err(Error::InvalidJsonb);
+  170 +            }
+  171 +        }
+  172 +        let header_len = header & CONTAINER_HEADER_LEN_MASK;
+  173 +        Ok((header_type, header_len as usize))
+  174 +    }
+  175 +
+  176 +    pub(super) fn read_jentry(&self, index: usize) -> Result<JEntry> {
+  177 +        let jentry_encoded = self.read_u32(index)?;
+  178 +        let jentry = JEntry::decode_jentry(jentry_encoded);
+  179 +        Ok(jentry)
+  180 +    }
+  181 +
+  182 +    pub(super) fn read_jentry_and_data(
+  183 +        &self,
+  184 +        index: usize,
+  185 +        data_index: usize,
+  186 +    ) -> Result<(JEntry, &'a [u8])> {
+  187 +        let jentry = self.read_jentry(index)?;
+  188 +        let range = Range {
+  189 +            start: data_index,
+  190 +            end: data_index + jentry.length as usize,
+  191 +        };
+  192 +        let data = self.slice(range)?;
+  193 +        Ok((jentry, data))
+  194 +    }
+  195 +
+  196 +    pub(super) fn read_u32(&self, idx: usize) -> Result<u32> {
+  197 +        let bytes: [u8; 4] = self
+  198 +            .data
+  199 +            .get(idx..idx + 4)
+  200 +            .ok_or(Error::InvalidEOF)?
+  201 +            .try_into()
+  202 +            .unwrap();
+  203 +        Ok(u32::from_be_bytes(bytes))
+  204 +    }
+  205 +
+  206 +    pub(super) fn slice(&self, range: Range<usize>) -> Result<&'a [u8]> {
+  207 +        // Check for potential out-of-bounds access before creating item
+  208 +        if range.end > self.len() {
+  209 +            return Err(Error::InvalidJsonb);
+  210 +        }
+  211 +        Ok(&self.data[range])
+  212 +    }
+  213 +}
+  214 +
+  215 +impl OwnedJsonb {
+  216 +    pub(crate) fn from_item(item: JsonbItem<'_>) -> Result<Self> {
+  217 +        match item {
+  218 +            JsonbItem::Raw(raw_jsonb) => Ok(raw_jsonb.to_owned()),
+  219 +            JsonbItem::Owned(owned_jsonb) => Ok(owned_jsonb),
+  220 +            _ => {
+  221 +                let mut len = match item {
+  222 +                    JsonbItem::Null => 0,
+  223 +                    JsonbItem::Boolean(_) => 0,
+  224 +                    JsonbItem::Number(NumberItem::Raw(data)) => data.len(),
+  225 +                    JsonbItem::String(ref s) => s.len(),
+  226 +                    JsonbItem::Extension(ExtensionItem::Raw(data)) => data.len(),
+  227 +                    // The estimated lengths for number and extension.
+  228 +                    _ => 10,
+  229 +                };
+  230 +
+  231 +                // add the length of header and jentry.
+  232 +                len += 8;
+  233 +                let mut buf = Vec::with_capacity(len);
+  234 +                let header = SCALAR_CONTAINER_TAG;
+  235 +                buf.write_u32::<BigEndian>(header)?;
+  236 +
+  237 +                match item {
+  238 +                    JsonbItem::Null => {
+  239 +                        let jentry = JEntry::make_null_jentry();
+  240 +                        buf.write_u32::<BigEndian>(jentry.encoded())?;
+  241 +                    }
+  242 +                    JsonbItem::Boolean(v) => {
+  243 +                        let jentry = if v {
+  244 +                            JEntry::make_true_jentry()
+  245 +                        } else {
+  246 +                            JEntry::make_false_jentry()
+  247 +                        };
+  248 +                        buf.write_u32::<BigEndian>(jentry.encoded())?;
+  249 +                    }
+  250 +                    JsonbItem::Number(num) => match num {
+  251 +                        NumberItem::Raw(data) => {
+  252 +                            let jentry = JEntry::make_number_jentry(data.len());
+  253 +                            buf.write_u32::<BigEndian>(jentry.encoded())?;
+  254 +                            buf.extend_from_slice(data);
+  255 +                        }
+  256 +                        NumberItem::Number(num) => {
+  257 +                            let mut data = vec![];
+  258 +                            let len = num.compact_encode(&mut data)?;
+  259 +                            let jentry = JEntry::make_number_jentry(len);
+  260 +                            buf.write_u32::<BigEndian>(jentry.encoded())?;
+  261 +                            buf.extend_from_slice(&data);
+  262 +                        }
+  263 +                    },
+  264 +                    JsonbItem::String(s) => {
+  265 +                        let jentry = JEntry::make_string_jentry(s.len());
+  266 +                        buf.write_u32::<BigEndian>(jentry.encoded())?;
+  267 +                        buf.extend_from_slice(s.as_bytes());
+  268 +                    }
+  269 +                    JsonbItem::Extension(ext) => match ext {
+  270 +                        ExtensionItem::Raw(data) => {
+  271 +                            let jentry = JEntry::make_extension_jentry(data.len());
+  272 +                            buf.write_u32::<BigEndian>(jentry.encoded())?;
+  273 +                            buf.extend_from_slice(data);
+  274 +                        }
+  275 +                        ExtensionItem::Extension(ext) => {
+  276 +                            let mut data = vec![];
+  277 +                            let len = ext.compact_encode(&mut data)?;
+  278 +                            let jentry = JEntry::make_extension_jentry(len);
+  279 +                            buf.write_u32::<BigEndian>(jentry.encoded())?;
+  280 +                            buf.extend_from_slice(&data);
+  281 +                        }
+  282 +                    },
+  283 +                    _ => unreachable!(),
+  284 +                }
+  285 +                Ok(Self::new(buf))
+  286 +            }
+  287 +        }
+  288 +    }
+  289 +}
+  290 +
+  291 +impl Number {
+  292 +    #[inline]
+  293 +    pub(crate) fn compact_encode<W: Write>(&self, mut writer: W) -> Result<usize> {
+  294 +        match self {
+  295 +            Self::Int64(v) => {
+  296 +                if *v == 0 {
+  297 +                    writer.write_all(&[NUMBER_ZERO])?;
+  298 +                    return Ok(1);
+  299 +                }
+  300 +                writer.write_all(&[NUMBER_INT])?;
+  301 +                if *v >= i8::MIN.into() && *v <= i8::MAX.into() {
+  302 +                    writer.write_all(&(*v as i8).to_be_bytes())?;
+  303 +                    Ok(2)
+  304 +                } else if *v >= i16::MIN.into() && *v <= i16::MAX.into() {
+  305 +                    writer.write_all(&(*v as i16).to_be_bytes())?;
+  306 +                    Ok(3)
+  307 +                } else if *v >= i32::MIN.into() && *v <= i32::MAX.into() {
+  308 +                    writer.write_all(&(*v as i32).to_be_bytes())?;
+  309 +                    Ok(5)
+  310 +                } else {
+  311 +                    writer.write_all(&v.to_be_bytes())?;
+  312 +                    Ok(9)
+  313 +                }
+  314 +            }
+  315 +            Self::UInt64(v) => {
+  316 +                if *v == 0 {
+  317 +                    writer.write_all(&[NUMBER_ZERO])?;
+  318 +                    return Ok(1);
+  319 +                }
+  320 +                writer.write_all(&[NUMBER_UINT])?;
+  321 +                if *v <= u8::MAX.into() {
+  322 +                    writer.write_all(&(*v as u8).to_be_bytes())?;
+  323 +                    Ok(2)
+  324 +                } else if *v <= u16::MAX.into() {
+  325 +                    writer.write_all(&(*v as u16).to_be_bytes())?;
+  326 +                    Ok(3)
+  327 +                } else if *v <= u32::MAX.into() {
+  328 +                    writer.write_all(&(*v as u32).to_be_bytes())?;
+  329 +                    Ok(5)
+  330 +                } else {
+  331 +                    writer.write_all(&v.to_be_bytes())?;
+  332 +                    Ok(9)
+  333 +                }
+  334 +            }
+  335 +            Self::Float64(v) => {
+  336 +                if v.is_nan() {
+  337 +                    writer.write_all(&[NUMBER_NAN])?;
+  338 +                    return Ok(1);
+  339 +                } else if v.is_infinite() {
+  340 +                    if v.is_sign_negative() {
+  341 +                        writer.write_all(&[NUMBER_NEG_INF])?;
+  342 +                    } else {
+  343 +                        writer.write_all(&[NUMBER_INF])?;
+  344 +                    }
+  345 +                    return Ok(1);
+  346 +                }
+  347 +                writer.write_all(&[NUMBER_FLOAT])?;
+  348 +                writer.write_all(&v.to_be_bytes())?;
+  349 +                Ok(9)
+  350 +            }
+  351 +            Self::Decimal64(v) => {
+  352 +                writer.write_all(&[NUMBER_DECIMAL])?;
+  353 +                writer.write_all(&v.value.to_be_bytes())?;
+  354 +                writer.write_all(&v.scale.to_be_bytes())?;
+  355 +                Ok(10)
+  356 +            }
+  357 +            Self::Decimal128(v) => {
+  358 +                writer.write_all(&[NUMBER_DECIMAL])?;
+  359 +                writer.write_all(&v.value.to_be_bytes())?;
+  360 +                writer.write_all(&v.scale.to_be_bytes())?;
+  361 +                Ok(18)
+  362 +            }
+  363 +            Self::Decimal256(v) => {
+  364 +                writer.write_all(&[NUMBER_DECIMAL])?;
+  365 +                writer.write_all(&v.value.to_be_bytes())?;
+  366 +                writer.write_all(&v.scale.to_be_bytes())?;
+  367 +                Ok(34)
+  368 +            }
+  369 +        }
+  370 +    }
+  371 +
+  372 +    #[inline]
+  373 +    pub(crate) fn decode(bytes: &[u8]) -> Result<Self> {
+  374 +        let mut len = bytes.len();
+  375 +        assert!(len > 0);
+  376 +        len -= 1;
+  377 +
+  378 +        let ty = bytes[0];
+  379 +        let num = match ty {
+  380 +            NUMBER_ZERO => Self::UInt64(0),
+  381 +            NUMBER_NAN => Self::Float64(f64::NAN),
+  382 +            NUMBER_INF => Self::Float64(f64::INFINITY),
+  383 +            NUMBER_NEG_INF => Self::Float64(f64::NEG_INFINITY),
+  384 +            NUMBER_INT => match len {
+  385 +                1 => Self::Int64(i8::from_be_bytes(bytes[1..].try_into().unwrap()) as i64),
+  386 +                2 => Self::Int64(i16::from_be_bytes(bytes[1..].try_into().unwrap()) as i64),
+  387 +                4 => Self::Int64(i32::from_be_bytes(bytes[1..].try_into().unwrap()) as i64),
+  388 +                8 => Self::Int64(i64::from_be_bytes(bytes[1..].try_into().unwrap())),
+  389 +                _ => {
+  390 +                    return Err(Error::InvalidJsonbNumber);
+  391 +                }
+  392 +            },
+  393 +            NUMBER_UINT => match len {
+  394 +                1 => Self::UInt64(u8::from_be_bytes(bytes[1..].try_into().unwrap()) as u64),
+  395 +                2 => Self::UInt64(u16::from_be_bytes(bytes[1..].try_into().unwrap()) as u64),
+  396 +                4 => Self::UInt64(u32::from_be_bytes(bytes[1..].try_into().unwrap()) as u64),
+  397 +                8 => Self::UInt64(u64::from_be_bytes(bytes[1..].try_into().unwrap())),
+  398 +                _ => {
+  399 +                    return Err(Error::InvalidJsonbNumber);
+  400 +                }
+  401 +            },
+  402 +            NUMBER_FLOAT => Self::Float64(f64::from_be_bytes(bytes[1..].try_into().unwrap())),
+  403 +            NUMBER_DECIMAL => match len {
+  404 +                9 => {
+  405 +                    let value = i64::from_be_bytes(bytes[1..9].try_into().unwrap());
+  406 +                    let scale = u8::from_be_bytes(bytes[9..10].try_into().unwrap());
+  407 +                    let dec = Decimal64 { scale, value };
+  408 +                    Self::Decimal64(dec)
+  409 +                }
+  410 +                17 => {
+  411 +                    let value = i128::from_be_bytes(bytes[1..17].try_into().unwrap());
+  412 +                    let scale = u8::from_be_bytes(bytes[17..18].try_into().unwrap());
+  413 +                    let dec = Decimal128 { scale, value };
+  414 +                    Self::Decimal128(dec)
+  415 +                }
+  416 +                18 => {
+  417 +                    // Compatible with deprecated Decimal128 formats, including precision
+  418 +                    let value = i128::from_be_bytes(bytes[1..17].try_into().unwrap());
+  419 +                    let scale = u8::from_be_bytes(bytes[18..19].try_into().unwrap());
+  420 +                    let dec = Decimal128 { scale, value };
+  421 +                    Self::Decimal128(dec)
+  422 +                }
+  423 +                33 => {
+  424 +                    let value = i256::from_be_bytes(bytes[1..33].try_into().unwrap());
+  425 +                    let scale = u8::from_be_bytes(bytes[33..34].try_into().unwrap());
+  426 +                    let dec = Decimal256 { scale, value };
+  427 +                    Self::Decimal256(dec)
+  428 +                }
+  429 +                34 => {
+  430 +                    // Compatible with deprecated Decimal256 formats, including precision
+  431 +                    let value = i256::from_be_bytes(bytes[1..33].try_into().unwrap());
+  432 +                    let scale = u8::from_be_bytes(bytes[34..35].try_into().unwrap());
+  433 +                    let dec = Decimal256 { scale, value };
+  434 +                    Self::Decimal256(dec)
+  435 +                }
+  436 +                _ => {
+  437 +                    return Err(Error::InvalidJsonbNumber);
+  438 +                }
+  439 +            },
+  440 +            _ => {
+  441 +                return Err(Error::InvalidJsonbNumber);
+  442 +            }
+  443 +        };
+  444 +        Ok(num)
+  445 +    }
+  446 +}
+  447 +
+  448 +impl ExtensionValue<'_> {
+  449 +    #[inline]
+  450 +    pub(crate) fn compact_encode<W: Write>(&self, mut writer: W) -> Result<usize> {
+  451 +        match self {
+  452 +            ExtensionValue::Binary(v) => {
+  453 +                writer.write_all(&[EXTENSION_BINARY])?;
+  454 +                let len = v.len() + 1;
+  455 +                writer.write_all(v)?;
+  456 +                Ok(len)
+  457 +            }
+  458 +            ExtensionValue::Date(v) => {
+  459 +                writer.write_all(&[EXTENSION_DATE])?;
+  460 +                writer.write_all(&v.value.to_be_bytes())?;
+  461 +                Ok(5)
+  462 +            }
+  463 +            ExtensionValue::Timestamp(v) => {
+  464 +                writer.write_all(&[EXTENSION_TIMESTAMP])?;
+  465 +                writer.write_all(&v.value.to_be_bytes())?;
+  466 +                Ok(9)
+  467 +            }
+  468 +            ExtensionValue::TimestampTz(v) => {
+  469 +                writer.write_all(&[EXTENSION_TIMESTAMP_TZ])?;
+  470 +                writer.write_all(&v.value.to_be_bytes())?;
+  471 +                writer.write_all(&v.offset.to_be_bytes())?;
+  472 +                Ok(13)
+  473 +            }
+  474 +            ExtensionValue::Interval(v) => {
+  475 +                writer.write_all(&[EXTENSION_INTERVAL])?;
+  476 +                writer.write_all(&v.months.to_be_bytes())?;
+  477 +                writer.write_all(&v.days.to_be_bytes())?;
+  478 +                writer.write_all(&v.micros.to_be_bytes())?;
+  479 +                Ok(17)
+  480 +            }
+  481 +        }
+  482 +    }
+  483 +
+  484 +    #[inline]
+  485 +    pub(crate) fn decode(bytes: &[u8]) -> Result<ExtensionValue<'_>> {
+  486 +        let mut len = bytes.len();
+  487 +        assert!(len > 0);
+  488 +        len -= 1;
+  489 +
+  490 +        let ty = bytes[0];
+  491 +        let val = match ty {
+  492 +            EXTENSION_BINARY => {
+  493 +                let v = &bytes[1..len + 1];
+  494 +                ExtensionValue::Binary(v)
+  495 +            }
+  496 +            EXTENSION_DATE => {
+  497 +                if len != 4 {
+  498 +                    return Err(Error::InvalidJsonbNumber);
+  499 +                }
+  500 +                let value = i32::from_be_bytes(bytes[1..5].try_into().unwrap());
+  501 +
+  502 +                ExtensionValue::Date(Date { value })
+  503 +            }
+  504 +            EXTENSION_TIMESTAMP => {
+  505 +                if len != 8 {
+  506 +                    return Err(Error::InvalidJsonbNumber);
+  507 +                }
+  508 +                let value = i64::from_be_bytes(bytes[1..9].try_into().unwrap());
+  509 +
+  510 +                ExtensionValue::Timestamp(Timestamp { value })
+  511 +            }
+  512 +            EXTENSION_TIMESTAMP_TZ => {
+  513 +                if len != 9 && len != 12 {
+  514 +                    return Err(Error::InvalidJsonbNumber);
+  515 +                }
+  516 +                let value = i64::from_be_bytes(bytes[1..9].try_into().unwrap());
+  517 +                let offset = if len == 9 {
+  518 +                    let hours = i8::from_be_bytes(bytes[9..10].try_into().unwrap());
+  519 +                    (hours as i32) * 3_600
+  520 +                } else {
+  521 +                    i32::from_be_bytes(bytes[9..13].try_into().unwrap())
+  522 +                };
+  523 +
+  524 +                ExtensionValue::TimestampTz(TimestampTz { offset, value })
+  525 +            }
+  526 +            EXTENSION_INTERVAL => {
+  527 +                if len != 16 {
+  528 +                    return Err(Error::InvalidJsonbNumber);
+  529 +                }
+  530 +                let months = i32::from_be_bytes(bytes[1..5].try_into().unwrap());
+  531 +                let days = i32::from_be_bytes(bytes[5..9].try_into().unwrap());
+  532 +                let micros = i64::from_be_bytes(bytes[9..17].try_into().unwrap());
+  533 +                ExtensionValue::Interval(Interval {
+  534 +                    months,
+  535 +                    days,
+  536 +                    micros,
+  537 +                })
+  538 +            }
+  539 +            _ => {
+  540 +                return Err(Error::InvalidJsonbExtension);
+  541 +            }
+  542 +        };
+  543 +        Ok(val)
+  544 +    }
+  545 +}
+  546 +
+  547 +pub(super) fn jentry_to_jsonb_item(jentry: JEntry, data: &[u8]) -> JsonbItem<'_> {
+  548 +    match jentry.type_code {
+  549 +        NULL_TAG => JsonbItem::Null,
+  550 +        TRUE_TAG => JsonbItem::Boolean(true),
+  551 +        FALSE_TAG => JsonbItem::Boolean(false),
+  552 +        NUMBER_TAG => JsonbItem::Number(NumberItem::Raw(data)),
+  553 +        STRING_TAG => {
+  554 +            let s = Cow::Borrowed(unsafe { std::str::from_utf8_unchecked(data) });
+  555 +            JsonbItem::String(s)
+  556 +        }
+  557 +        EXTENSION_TAG => JsonbItem::Extension(ExtensionItem::Raw(data)),
+  558 +        CONTAINER_TAG => JsonbItem::Raw(RawJsonb::new(data)),
+  559 +        _ => unreachable!(),
+  560 +    }
+  561 +}

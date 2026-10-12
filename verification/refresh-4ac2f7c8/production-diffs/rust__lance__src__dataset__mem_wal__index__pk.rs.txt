@@ -1,0 +1,270 @@
+@@ -0,0 +1,269 @@
+    1 +// SPDX-License-Identifier: Apache-2.0
+    2 +// SPDX-FileCopyrightText: Copyright The Lance Authors
+    3 +
+    4 +//! The memtable's primary-key index: the newest visible position of a key, for
+    5 +//! deduplication.
+    6 +
+    7 +use std::sync::Arc;
+    8 +use std::sync::atomic::Ordering;
+    9 +
+   10 +use arrow_array::RecordBatch;
+   11 +use arrow_schema::{DataType, Field, Schema as ArrowSchema, SchemaRef};
+   12 +use datafusion::common::ScalarValue;
+   13 +use lance_core::{Error, Result};
+   14 +
+   15 +use super::pk_key::{encode_pk_batch, encode_pk_tuple};
+   16 +use super::{BTreeMemIndex, IndexStore, PrimaryKeyIndex, RowPosition};
+   17 +
+   18 +/// The column a composite key index is keyed on: the order-preserving encoded
+   19 +/// tuple, stored as `Binary` so a [`BTreeMemIndex`] indexes it directly.
+   20 +const PK_KEY_COLUMN: &str = "__pk_key__";
+   21 +
+   22 +/// A composite key index is held directly, never looked up by field id.
+   23 +const COMPOSITE_PK_FIELD_ID: i32 = -1;
+   24 +
+   25 +pub(super) enum PkIndex {
+   26 +    /// A user index on exactly the key column, the entry named `entry`, which
+   27 +    /// the insert loop maintains. Held by name, since a plugin may hand out a
+   28 +    /// fresh capability wrapper each time.
+   29 +    Shared {
+   30 +        index: Arc<dyn PrimaryKeyIndex>,
+   31 +        entry: String,
+   32 +    },
+   33 +    /// A B-tree the store maintains itself, held apart from the named indexes
+   34 +    /// so no user index name can collide with it.
+   35 +    Owned(OwnedPk),
+   36 +}
+   37 +
+   38 +pub(super) enum OwnedPk {
+   39 +    /// Over the key column.
+   40 +    Single(Arc<BTreeMemIndex>),
+   41 +    /// Over the encoded key tuple, which no batch carries, so it is built from
+   42 +    /// `columns` at insert.
+   43 +    Composite {
+   44 +        index: Arc<BTreeMemIndex>,
+   45 +        columns: Vec<String>,
+   46 +        key_schema: SchemaRef,
+   47 +    },
+   48 +}
+   49 +
+   50 +impl PkIndex {
+   51 +    /// The key index for `pk_columns`, sharing a user index on exactly the key
+   52 +    /// column when one can serve.
+   53 +    pub(super) fn new(store: &IndexStore, pk_columns: &[(String, i32)]) -> Option<Self> {
+   54 +        match pk_columns {
+   55 +            [] => None,
+   56 +            [(column, field_id)] => Some(
+   57 +                store
+   58 +                    .indexes
+   59 +                    .iter()
+   60 +                    .filter(|(_, index)| index.columns() == std::slice::from_ref(column))
+   61 +                    .find_map(|(name, index)| {
+   62 +                        let index = index.clone().as_primary_key()?;
+   63 +                        Some(Self::Shared {
+   64 +                            index,
+   65 +                            entry: name.clone(),
+   66 +                        })
+   67 +                    })
+   68 +                    .unwrap_or_else(|| {
+   69 +                        Self::Owned(OwnedPk::Single(Arc::new(BTreeMemIndex::new(
+   70 +                            *field_id,
+   71 +                            column.clone(),
+   72 +                        ))))
+   73 +                    }),
+   74 +            ),
+   75 +            columns => Some(Self::Owned(OwnedPk::Composite {
+   76 +                index: Arc::new(BTreeMemIndex::new(
+   77 +                    COMPOSITE_PK_FIELD_ID,
+   78 +                    PK_KEY_COLUMN.to_string(),
+   79 +                )),
+   80 +                columns: columns.iter().map(|(column, _)| column.clone()).collect(),
+   81 +                key_schema: Arc::new(ArrowSchema::new(vec![Field::new(
+   82 +                    PK_KEY_COLUMN,
+   83 +                    DataType::Binary,
+   84 +                    false,
+   85 +                )])),
+   86 +            })),
+   87 +        }
+   88 +    }
+   89 +
+   90 +    pub(super) fn index(&self) -> &dyn PrimaryKeyIndex {
+   91 +        match self {
+   92 +            Self::Shared { index, .. } => index.as_ref(),
+   93 +            Self::Owned(owned) => owned.btree().as_ref(),
+   94 +        }
+   95 +    }
+   96 +
+   97 +    /// The key index the store maintains itself, if it shares no user index.
+   98 +    pub(super) fn owned(&self) -> Option<&OwnedPk> {
+   99 +        match self {
+  100 +            Self::Shared { .. } => None,
+  101 +            Self::Owned(owned) => Some(owned),
+  102 +        }
+  103 +    }
+  104 +
+  105 +    pub(super) fn describe(&self) -> String {
+  106 +        match self {
+  107 +            Self::Shared { entry, .. } => format!("shared({entry})"),
+  108 +            Self::Owned(OwnedPk::Single(index)) => format!("owned({})", index.column_name()),
+  109 +            Self::Owned(OwnedPk::Composite { columns, .. }) => {
+  110 +                format!("composite({})", columns.join(", "))
+  111 +            }
+  112 +        }
+  113 +    }
+  114 +}
+  115 +
+  116 +impl OwnedPk {
+  117 +    pub(super) fn btree(&self) -> &Arc<BTreeMemIndex> {
+  118 +        match self {
+  119 +            Self::Single(index) | Self::Composite { index, .. } => index,
+  120 +        }
+  121 +    }
+  122 +
+  123 +    /// Index `batch`, reporting whether any key was already held when
+  124 +    /// `report_existing`.
+  125 +    pub(super) fn insert(
+  126 +        &self,
+  127 +        batch: &RecordBatch,
+  128 +        row_offset: RowPosition,
+  129 +        report_existing: bool,
+  130 +    ) -> Result<bool> {
+  131 +        let insert = |index: &BTreeMemIndex, batch: &RecordBatch| {
+  132 +            if report_existing {
+  133 +                index.insert_and_report_existing(batch, row_offset)
+  134 +            } else {
+  135 +                index.insert(batch, row_offset).map(|()| false)
+  136 +            }
+  137 +        };
+  138 +        match self {
+  139 +            Self::Single(index) => insert(index, batch),
+  140 +            Self::Composite {
+  141 +                index,
+  142 +                columns,
+  143 +                key_schema,
+  144 +            } => {
+  145 +                let positions = columns
+  146 +                    .iter()
+  147 +                    .map(|column| {
+  148 +                        batch.schema().index_of(column).map_err(|_| {
+  149 +                            Error::invalid_input(format!(
+  150 +                                "primary-key column '{column}' is not in the batch"
+  151 +                            ))
+  152 +                        })
+  153 +                    })
+  154 +                    .collect::<Result<Vec<_>>>()?;
+  155 +                let keys = RecordBatch::try_new(
+  156 +                    key_schema.clone(),
+  157 +                    vec![Arc::new(encode_pk_batch(batch, &positions)?)],
+  158 +                )?;
+  159 +                insert(index, &keys)
+  160 +            }
+  161 +        }
+  162 +    }
+  163 +}
+  164 +
+  165 +impl IndexStore {
+  166 +    /// Maintain a primary-key index, so the memtable can answer the newest
+  167 +    /// visible version of a key. Call once, after the indexes are added and
+  168 +    /// before any row is inserted.
+  169 +    pub fn enable_pk_index(&mut self, pk_columns: &[(String, i32)]) {
+  170 +        assert!(
+  171 +            pk_columns.is_empty() || !self.has_rows.load(Ordering::Acquire),
+  172 +            "a primary-key index must be enabled before any row is inserted"
+  173 +        );
+  174 +        self.pk_index = PkIndex::new(self, pk_columns);
+  175 +        if let Some(PkIndex::Owned(OwnedPk::Single(index))) = &self.pk_index {
+  176 +            self.filter_catalog.add_own_key_index(index.column_name());
+  177 +        }
+  178 +    }
+  179 +
+  180 +    /// Whether the memtable has a primary-key index.
+  181 +    pub fn has_pk_index(&self) -> bool {
+  182 +        self.pk_index.is_some()
+  183 +    }
+  184 +
+  185 +    /// Sorted `(key, row id)` batches for training the generation's on-disk
+  186 +    /// key index: the typed key for one column, the encoded tuple for several.
+  187 +    /// Positions are the flushed file's row ids.
+  188 +    pub fn pk_training_batches(&self, batch_size: usize) -> Result<Vec<RecordBatch>> {
+  189 +        match &self.pk_index {
+  190 +            None => Ok(Vec::new()),
+  191 +            Some(pk) => pk.index().training_batches(batch_size),
+  192 +        }
+  193 +    }
+  194 +
+  195 +    /// The newest position of the key `values` (in key-column order) visible
+  196 +    /// at `max_visible_row`, or `None`.
+  197 +    pub fn pk_newest_visible(
+  198 +        &self,
+  199 +        values: &[ScalarValue],
+  200 +        max_visible_row: RowPosition,
+  201 +    ) -> Option<RowPosition> {
+  202 +        match (self.pk_index.as_ref()?, values) {
+  203 +            (PkIndex::Owned(OwnedPk::Composite { index, columns, .. }), values)
+  204 +                if values.len() == columns.len() =>
+  205 +            {
+  206 +                // Insert encoded every stored key the same way, so a key that
+  207 +                // fails to encode is not stored.
+  208 +                let key = encode_pk_tuple(values).ok()?;
+  209 +                index.newest_visible(&ScalarValue::Binary(Some(key)), max_visible_row)
+  210 +            }
+  211 +            (PkIndex::Owned(OwnedPk::Composite { .. }), _) => None,
+  212 +            (pk, [value]) => pk.index().newest_visible(value, max_visible_row),
+  213 +            (_, _) => None,
+  214 +        }
+  215 +    }
+  216 +
+  217 +    /// Whether `position` is the newest visible row of `values`. False without
+  218 +    /// a primary-key index, so callers check [`Self::has_pk_index`] first.
+  219 +    pub fn pk_is_newest(
+  220 +        &self,
+  221 +        values: &[ScalarValue],
+  222 +        position: RowPosition,
+  223 +        max_visible_row: RowPosition,
+  224 +    ) -> bool {
+  225 +        self.pk_newest_visible(values, max_visible_row) == Some(position)
+  226 +    }
+  227 +
+  228 +    /// Whether `key`, already in the index's key space, has a version visible
+  229 +    /// at `max_visible_row`.
+  230 +    pub fn pk_contains_key(&self, key: &ScalarValue, max_visible_row: RowPosition) -> bool {
+  231 +        self.pk_index
+  232 +            .as_ref()
+  233 +            .is_some_and(|pk| pk.index().newest_visible(key, max_visible_row).is_some())
+  234 +    }
+  235 +
+  236 +    /// Whether the primary-key index holds no rows, or there is none.
+  237 +    pub fn pk_is_empty(&self) -> bool {
+  238 +        self.pk_index
+  239 +            .as_ref()
+  240 +            .is_none_or(|pk| pk.index().is_empty())
+  241 +    }
+  242 +
+  243 +    /// Whether any key was rewritten. Never resets: a memtable flushes as a
+  244 +    /// unit.
+  245 +    pub fn pk_has_overrides(&self) -> bool {
+  246 +        self.pk_has_overrides.load(Ordering::Acquire)
+  247 +    }
+  248 +
+  249 +    /// Whether inserts must report rewrites. Any index may push a search's
+  250 +    /// top-k down, which a rewrite makes unsafe, so every keyed table tracks
+  251 +    /// them.
+  252 +    pub(super) fn should_track_pk_overrides(&self) -> bool {
+  253 +        self.pk_index.is_some() && !self.pk_has_overrides()
+  254 +    }
+  255 +
+  256 +    /// The shared key index, if it is the entry named `name`.
+  257 +    pub(super) fn shared_pk_named(&self, name: &str) -> Option<&Arc<dyn PrimaryKeyIndex>> {
+  258 +        match &self.pk_index {
+  259 +            Some(PkIndex::Shared { index, entry }) if entry == name => Some(index),
+  260 +            _ => None,
+  261 +        }
+  262 +    }
+  263 +
+  264 +    pub(super) fn mark_pk_overrides(&self, had_existing: bool) {
+  265 +        if had_existing {
+  266 +            self.pk_has_overrides.store(true, Ordering::Release);
+  267 +        }
+  268 +    }
+  269 +}

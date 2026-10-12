@@ -1,0 +1,147 @@
+@@ -0,0 +1,146 @@
+    1 +// SPDX-License-Identifier: Apache-2.0
+    2 +// SPDX-FileCopyrightText: Copyright The Lance Authors
+    3 +// SPDX-FileCopyrightText: Copyright 2023 Datafuse Labs
+    4 +// Adapted from databendlabs/jsonb at commit fba895c5ebe77ce2539e187f9c652f51cbf195c3.
+    5 +
+    6 +use std::cmp::Ordering;
+    7 +use std::fmt::Display;
+    8 +use std::str::FromStr;
+    9 +
+   10 +use crate::RawJsonb;
+   11 +use crate::error::Error;
+   12 +use crate::parse_value;
+   13 +
+   14 +/// Represents a JSONB data that owns its underlying data.
+   15 +///
+   16 +/// This struct provides ownership over the binary JSONB representation.
+   17 +/// `OwnedJsonb` is primarily used to create JSONB data from other data types (such as JSON String).
+   18 +/// However, for most operations, it's necessary to convert an `OwnedJsonb` to a `RawJsonb` using the `as_raw()` method
+   19 +/// to avoid unnecessary copying and to take advantage of the performance benefits of the read-only access of the `RawJsonb`.
+   20 +#[derive(Debug, Clone)]
+   21 +pub struct OwnedJsonb {
+   22 +    /// The underlying `Vec<u8>` containing the binary JSONB data.
+   23 +    pub(crate) data: Vec<u8>,
+   24 +}
+   25 +
+   26 +impl OwnedJsonb {
+   27 +    /// Creates a new OwnedJsonb from a Vec<u8>.
+   28 +    ///
+   29 +    /// # Arguments
+   30 +    ///
+   31 +    /// * `data` - The `Vec<u8>` containing the JSONB data.
+   32 +    ///
+   33 +    /// # Returns
+   34 +    ///
+   35 +    /// A new `OwnedJsonb` instance.
+   36 +    pub(crate) fn new(data: Vec<u8>) -> Self {
+   37 +        Self { data }
+   38 +    }
+   39 +
+   40 +    /// Creates a `RawJsonb` view of the owned data.
+   41 +    /// This is useful for passing the data to functions that expect a `RawJsonb`.
+   42 +    /// This does *not* transfer ownership.
+   43 +    ///
+   44 +    /// # Returns
+   45 +    ///
+   46 +    /// A `RawJsonb` instance referencing the owned data.
+   47 +    pub fn as_raw(&self) -> RawJsonb<'_> {
+   48 +        RawJsonb::new(self.data.as_slice())
+   49 +    }
+   50 +
+   51 +    /// Consumes the OwnedJsonb and returns the underlying `Vec<u8>`.
+   52 +    ///
+   53 +    /// # Returns
+   54 +    ///
+   55 +    /// The underlying `Vec<u8>` containing the JSONB data.
+   56 +    pub fn to_vec(self) -> Vec<u8> {
+   57 +        self.data
+   58 +    }
+   59 +}
+   60 +
+   61 +/// Creates an `OwnedJsonb` from a borrowed byte slice.  The byte slice is copied into a new `Vec<u8>`.
+   62 +impl From<&[u8]> for OwnedJsonb {
+   63 +    fn from(data: &[u8]) -> Self {
+   64 +        Self {
+   65 +            data: data.to_vec(),
+   66 +        }
+   67 +    }
+   68 +}
+   69 +
+   70 +/// Creates an `OwnedJsonb` from a `Vec<u8>`. This is a simple ownership transfer.
+   71 +impl From<Vec<u8>> for OwnedJsonb {
+   72 +    fn from(data: Vec<u8>) -> Self {
+   73 +        Self { data }
+   74 +    }
+   75 +}
+   76 +
+   77 +/// Parses a string into an `OwnedJsonb`.
+   78 +/// The string is parsed into a JSON value, then encoded into the binary JSONB format.
+   79 +impl FromStr for OwnedJsonb {
+   80 +    type Err = Error;
+   81 +
+   82 +    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+   83 +        let value = parse_value(s.as_bytes())?;
+   84 +        let mut data = Vec::new();
+   85 +        value.write_to_vec(&mut data);
+   86 +        Ok(Self { data })
+   87 +    }
+   88 +}
+   89 +
+   90 +/// Allows accessing the underlying byte slice as a reference.
+   91 +/// This enables easy integration with functions that expect a `&[u8]`.
+   92 +impl AsRef<[u8]> for OwnedJsonb {
+   93 +    fn as_ref(&self) -> &[u8] {
+   94 +        self.data.as_ref()
+   95 +    }
+   96 +}
+   97 +
+   98 +/// Implements the Display trait, allowing OwnedJsonb to be formatted as a string using the `{}` format specifier.
+   99 +impl Display for OwnedJsonb {
+  100 +    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+  101 +        let raw_jsonb = self.as_raw();
+  102 +        write!(f, "{}", raw_jsonb.to_string())
+  103 +    }
+  104 +}
+  105 +
+  106 +impl Eq for OwnedJsonb {}
+  107 +
+  108 +impl PartialEq for OwnedJsonb {
+  109 +    fn eq(&self, other: &Self) -> bool {
+  110 +        self.partial_cmp(other) == Some(Ordering::Equal)
+  111 +    }
+  112 +}
+  113 +
+  114 +/// Implements `PartialOrd` for `OwnedJsonb`, allowing comparison of two `OwnedJsonb` values.
+  115 +///
+  116 +/// The comparison logic handles different JSONB types (scalar, array, object) and considers null values.
+  117 +/// The ordering is defined as follows:
+  118 +///
+  119 +/// 1. Null is considered greater than any other type.
+  120 +/// 2. Scalars are compared based on their type and value (String > Number > Boolean).
+  121 +/// 3. Arrays are compared element by element.
+  122 +/// 4. Objects are compared based on their keys and values.
+  123 +/// 5. Arrays are greater than objects and scalars.
+  124 +/// 6. Objects are greater than scalars.
+  125 +/// 7. If the types are incompatible, None is returned.
+  126 +#[allow(clippy::non_canonical_partial_ord_impl)]
+  127 +impl PartialOrd for OwnedJsonb {
+  128 +    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+  129 +        let self_raw = self.as_raw();
+  130 +        let other_raw = other.as_raw();
+  131 +        self_raw.partial_cmp(&other_raw)
+  132 +    }
+  133 +}
+  134 +
+  135 +/// Implements `Ord` for `OwnedJsonb`, allowing comparison of two `OwnedJsonb` values using the total ordering.
+  136 +/// This implementation leverages the `PartialOrd` implementation, returning `Ordering::Equal` for incomparable values.
+  137 +impl Ord for OwnedJsonb {
+  138 +    fn cmp(&self, other: &Self) -> Ordering {
+  139 +        let self_raw = self.as_raw();
+  140 +        let other_raw = other.as_raw();
+  141 +        match self_raw.partial_cmp(&other_raw) {
+  142 +            Some(ordering) => ordering,
+  143 +            None => Ordering::Equal,
+  144 +        }
+  145 +    }
+  146 +}

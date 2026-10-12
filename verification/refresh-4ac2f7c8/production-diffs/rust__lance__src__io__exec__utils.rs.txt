@@ -1,0 +1,227 @@
+@@ -1,11 +1,14 @@
+    1  // SPDX-License-Identifier: Apache-2.0
+    2  // SPDX-FileCopyrightText: Copyright The Lance Authors
+    3  
+    4 +use crate::datatypes::Field as LanceField;
+    5 +use crate::datatypes::Schema as LanceSchema;
+    6  use lance_datafusion::utils::{
+    7      BYTES_READ_METRIC, ExecutionPlanMetricsSetExt, INDEX_CACHE_HITS_METRIC,
+    8      INDEX_CACHE_MISSES_METRIC, INDEX_COMPARISONS_METRIC, INDICES_LOADED_METRIC, IOPS_METRIC,
+    9      PARTS_LOADED_METRIC, REQUESTS_METRIC,
+   10  };
+   11 +use lance_encoding::decoder::estimate_bytes_per_row;
+   12  use lance_index::metrics::{IndexTiming, MetricsCollector};
+   13  use lance_io::scheduler::{IoStats, ScanScheduler, ScanStats};
+   14  use lance_table::format::IndexMetadata;
+
+@@ -18,9 +21,10 @@ use std::sync::{Arc, Mutex};
+   21  use std::task::{Context, Poll};
+   22  
+   23  use arrow_array::{Array, RecordBatch, UInt64Array};
+   21 -use arrow_schema::SchemaRef;
+   24 +use arrow_schema::{DataType, SchemaRef};
+   25  use async_trait::async_trait;
+   26  use datafusion::common::runtime::SpawnedTask;
+   27 +use datafusion::common::stats::Precision;
+   28  use datafusion::error::{DataFusionError, Result as DataFusionResult};
+   29  use datafusion::physical_plan::metrics::{
+   30      BaselineMetrics, Count, ExecutionPlanMetricsSet, Gauge, MetricBuilder, MetricValue, Time,
+
+@@ -34,6 +38,7 @@ use datafusion_physical_plan::execution_plan::{Boundedness, EmissionType};
+   38  use futures::future::{BoxFuture, Shared};
+   39  use futures::stream::FuturesUnordered;
+   40  use futures::{FutureExt, Stream, StreamExt, TryStreamExt};
+   41 +use lance_arrow::DataTypeExt as _;
+   42  use lance_core::error::{CloneableResult, Error};
+   43  use lance_core::utils::futures::{Capacity, SharedStreamExt};
+   44  use lance_core::{ROW_ID, Result};
+
+@@ -1066,8 +1071,196 @@ impl MetricsCollector for IndexMetrics {
+ 1071      }
+ 1072  }
+ 1073  
+ 1074 +/// Minimum estimated row width, matching DataFusion's default collect thresholds:
+ 1075 +/// 1 MiB / 128 Ki rows = 8 bytes per row. DataFusion uses the byte threshold instead
+ 1076 +/// of the row threshold whenever a byte estimate is available. This floor keeps
+ 1077 +/// narrow schemas from admitting more rows than the default row threshold allows.
+ 1078 +///
+ 1079 +/// Custom threshold ratios can break that agreement. This is a planning estimate,
+ 1080 +/// not a bound on runtime memory, which also includes allocation and join overhead.
+ 1081 +const MIN_BYTES_PER_ROW: f64 = 8.0;
+ 1082 +
+ 1083 +/// Whether the columns a node emits include a materialized blob payload.
+ 1084 +///
+ 1085 +/// A payload has no schema-determined width and is not bounded by the row count,
+ 1086 +/// so a node carrying one reports no size at all.
+ 1087 +///
+ 1088 +/// Decided from what the node emits, matched against the dataset's own fields,
+ 1089 +/// because the public output schema strips the blob marker and a projection's blob
+ 1090 +/// mode describes what it fetches rather than what it carries. Descriptors remain
+ 1091 +/// eligible for estimation, including a seeded width for any URI field.
+ 1092 +fn carries_blob_payload(emitted: &arrow_schema::Fields, dataset: &[LanceField]) -> bool {
+ 1093 +    emitted.iter().any(|field| {
+ 1094 +        let Some(lance) = dataset.iter().find(|f| f.name == *field.name()) else {
+ 1095 +            return false;
+ 1096 +        };
+ 1097 +        carried(field.data_type(), lance)
+ 1098 +    })
+ 1099 +}
+ 1100 +
+ 1101 +/// Whether `emitted` holds a blob payload described by `lance`, at any nesting.
+ 1102 +fn carried(emitted: &DataType, lance: &LanceField) -> bool {
+ 1103 +    match emitted {
+ 1104 +        DataType::Binary | DataType::LargeBinary => lance.is_blob(),
+ 1105 +        DataType::Struct(children) => carries_blob_payload(children, &lance.children),
+ 1106 +        // A list's payload is its child's. The dataset field nests the same way, so
+ 1107 +        // the child is matched positionally rather than by name.
+ 1108 +        DataType::List(child)
+ 1109 +        | DataType::LargeList(child)
+ 1110 +        | DataType::ListView(child)
+ 1111 +        | DataType::LargeListView(child)
+ 1112 +        | DataType::FixedSizeList(child, _) => lance
+ 1113 +            .children
+ 1114 +            .first()
+ 1115 +            .is_some_and(|lance_child| carried(child.data_type(), lance_child)),
+ 1116 +        DataType::Map(entries, _) => lance
+ 1117 +            .children
+ 1118 +            .first()
+ 1119 +            .is_some_and(|lance_child| carried(entries.data_type(), lance_child)),
+ 1120 +        _ => false,
+ 1121 +    }
+ 1122 +}
+ 1123 +
+ 1124 +/// The average list length [`estimate_bytes_per_row`] assumes when it sizes a
+ 1125 +/// list's values. Mirrored here so a list's child buffers are counted as many
+ 1126 +/// times as its values are.
+ 1127 +const ASSUMED_LIST_LENGTH: f64 = 5.0;
+ 1128 +
+ 1129 +/// Values per row the decoder's estimate would charge, with dictionaries counted
+ 1130 +/// as their keys rather than expanded to what they decode to.
+ 1131 +///
+ 1132 +/// Unlike the decoder's estimate, this charges only dictionary keys. Shared
+ 1133 +/// dictionary values are omitted because their cardinality and size are unknown.
+ 1134 +fn seeded_value_bytes_per_row(data_type: &DataType) -> f64 {
+ 1135 +    match data_type {
+ 1136 +        DataType::Dictionary(key, _) => key.byte_width_opt().unwrap_or(1) as f64,
+ 1137 +        DataType::List(child) | DataType::LargeList(child) => {
+ 1138 +            ASSUMED_LIST_LENGTH * seeded_value_bytes_per_row(child.data_type())
+ 1139 +        }
+ 1140 +        DataType::FixedSizeList(child, dim) => {
+ 1141 +            *dim as f64 * seeded_value_bytes_per_row(child.data_type())
+ 1142 +        }
+ 1143 +        DataType::Map(entries, _) => {
+ 1144 +            ASSUMED_LIST_LENGTH * seeded_value_bytes_per_row(entries.data_type())
+ 1145 +        }
+ 1146 +        DataType::Struct(fields) => fields
+ 1147 +            .iter()
+ 1148 +            .map(|field| seeded_value_bytes_per_row(field.data_type()))
+ 1149 +            .sum(),
+ 1150 +        other => estimate_bytes_per_row(other),
+ 1151 +    }
+ 1152 +}
+ 1153 +
+ 1154 +/// Bytes per row of the Arrow buffers that hold no values: validity bitmaps and
+ 1155 +/// offsets. [`seeded_value_bytes_per_row`] covers the values, so the two are summed.
+ 1156 +///
+ 1157 +/// Allocation padding and per-array object size are omitted; the schema describes
+ 1158 +/// neither buffer capacities nor batch counts.
+ 1159 +fn arrow_overhead_bytes_per_row(field: &arrow_schema::Field) -> f64 {
+ 1160 +    let validity = if field.is_nullable() { 1.0 / 8.0 } else { 0.0 };
+ 1161 +    // Variable-width types carry `n + 1` offsets; the extra one is a per-batch
+ 1162 +    // constant this ignores.
+ 1163 +    let buffers = match field.data_type() {
+ 1164 +        DataType::Utf8 | DataType::Binary => 4.0,
+ 1165 +        DataType::LargeUtf8 | DataType::LargeBinary => 8.0,
+ 1166 +        DataType::List(child) => 4.0 + ASSUMED_LIST_LENGTH * arrow_overhead_bytes_per_row(child),
+ 1167 +        DataType::Map(entries, _) => {
+ 1168 +            4.0 + ASSUMED_LIST_LENGTH * arrow_overhead_bytes_per_row(entries)
+ 1169 +        }
+ 1170 +        DataType::LargeList(child) => {
+ 1171 +            8.0 + ASSUMED_LIST_LENGTH * arrow_overhead_bytes_per_row(child)
+ 1172 +        }
+ 1173 +        DataType::FixedSizeList(child, dim) => *dim as f64 * arrow_overhead_bytes_per_row(child),
+ 1174 +        DataType::Struct(fields) => fields
+ 1175 +            .iter()
+ 1176 +            .map(|field| arrow_overhead_bytes_per_row(field))
+ 1177 +            .sum(),
+ 1178 +        // Keys are already charged; the shared dictionary values are omitted.
+ 1179 +        DataType::Dictionary(_, _) => 0.0,
+ 1180 +        _ => 0.0,
+ 1181 +    };
+ 1182 +    validity + buffers
+ 1183 +}
+ 1184 +
+ 1185 +/// Estimated Arrow bytes per row of one field.
+ 1186 +///
+ 1187 +/// Uses schema widths for fixed-size values and assumes a validity bitmap for
+ 1188 +/// nullable fields. Dictionary values, allocation padding, and per-batch overhead
+ 1189 +/// are omitted. Variable-width values use decoder seeds, such as 64 bytes for a
+ 1190 +/// string and five items for a list, rather than measured sizes.
+ 1191 +fn arrow_bytes_per_row(field: &arrow_schema::Field) -> f64 {
+ 1192 +    // A `NullArray` is a row count and nothing else: no values buffer and no
+ 1193 +    // validity bitmap whatever the field's nullability says.
+ 1194 +    if matches!(field.data_type(), DataType::Null) {
+ 1195 +        return 0.0;
+ 1196 +    }
+ 1197 +    let validity = if field.is_nullable() { 1.0 / 8.0 } else { 0.0 };
+ 1198 +    match field.data_type() {
+ 1199 +        DataType::Boolean => validity + 1.0 / 8.0,
+ 1200 +        DataType::Struct(fields) => {
+ 1201 +            validity
+ 1202 +                + fields
+ 1203 +                    .iter()
+ 1204 +                    .map(|field| arrow_bytes_per_row(field))
+ 1205 +                    .sum::<f64>()
+ 1206 +        }
+ 1207 +        // Fixed-size lists store child values without an offset buffer.
+ 1208 +        DataType::FixedSizeList(child, dim) => validity + *dim as f64 * arrow_bytes_per_row(child),
+ 1209 +        // Count one key per row. The shared values buffer can be substantial,
+ 1210 +        // but its size and cardinality are not described by the schema.
+ 1211 +        DataType::Dictionary(key, _) => validity + key.byte_width_opt().unwrap_or(1) as f64,
+ 1212 +        // Arrow covers fixed-width types missing from `byte_width_opt`.
+ 1213 +        other => match other.byte_width_opt().or_else(|| other.primitive_width()) {
+ 1214 +            Some(width) => validity + width as f64,
+ 1215 +            // `arrow_overhead_bytes_per_row` carries the validity term for these.
+ 1216 +            None => seeded_value_bytes_per_row(other) + arrow_overhead_bytes_per_row(field),
+ 1217 +        },
+ 1218 +    }
+ 1219 +}
+ 1220 +
+ 1221 +/// Estimated Arrow bytes per row, floored at [`MIN_BYTES_PER_ROW`].
+ 1222 +///
+ 1223 +/// Returns `None` for a carried blob payload or a nonpositive estimated width.
+ 1224 +/// Uses schema widths where available and decoder seeds otherwise. Callers cache
+ 1225 +/// this at construction; dataset metadata identifies blobs in the output schema.
+ 1226 +pub(crate) fn estimated_bytes_per_row(
+ 1227 +    schema: &arrow_schema::Schema,
+ 1228 +    dataset_schema: &LanceSchema,
+ 1229 +) -> Option<f64> {
+ 1230 +    if carries_blob_payload(schema.fields(), &dataset_schema.fields) {
+ 1231 +        return None;
+ 1232 +    }
+ 1233 +    let bytes_per_row: f64 = schema
+ 1234 +        .fields()
+ 1235 +        .iter()
+ 1236 +        .map(|field| arrow_bytes_per_row(field))
+ 1237 +        .sum();
+ 1238 +    if bytes_per_row <= 0.0 {
+ 1239 +        return None;
+ 1240 +    }
+ 1241 +    Some(bytes_per_row.max(MIN_BYTES_PER_ROW))
+ 1242 +}
+ 1243 +
+ 1244 +/// A row count scaled by a width from [`estimated_bytes_per_row`], always inexact.
+ 1245 +///
+ 1246 +/// Returns `Absent` when either the row count or width is unavailable.
+ 1247 +pub(crate) fn estimated_total_byte_size(
+ 1248 +    num_rows: Precision<usize>,
+ 1249 +    bytes_per_row: Option<f64>,
+ 1250 +) -> Precision<usize> {
+ 1251 +    let (Some(rows), Some(bytes_per_row)) = (num_rows.get_value(), bytes_per_row) else {
+ 1252 +        return Precision::Absent;
+ 1253 +    };
+ 1254 +    // A float-to-int cast saturates at `usize::MAX` rather than wrapping, so a
+ 1255 +    // huge row count degrades to an enormous estimate instead of a tiny one.
+ 1256 +    Precision::Inexact((*rows as f64 * bytes_per_row).ceil() as usize)
+ 1257 +}
+ 1258 +

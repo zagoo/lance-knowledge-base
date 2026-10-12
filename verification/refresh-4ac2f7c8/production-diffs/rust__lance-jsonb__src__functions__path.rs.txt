@@ -1,0 +1,138 @@
+@@ -0,0 +1,137 @@
+    1 +// SPDX-License-Identifier: Apache-2.0
+    2 +// SPDX-FileCopyrightText: Copyright The Lance Authors
+    3 +// SPDX-FileCopyrightText: Copyright 2023 Datafuse Labs
+    4 +// Adapted from databendlabs/jsonb at commit fba895c5ebe77ce2539e187f9c652f51cbf195c3.
+    5 +
+    6 +// This file contains functions that dealing with path-based access to JSONB data.
+    7 +
+    8 +use std::borrow::Cow;
+    9 +
+   10 +use crate::OwnedJsonb;
+   11 +use crate::RawJsonb;
+   12 +use crate::core::ArrayIterator;
+   13 +use crate::error::*;
+   14 +
+   15 +impl RawJsonb<'_> {
+   16 +    /// Gets the element at the specified index in a JSONB array.
+   17 +    ///
+   18 +    /// If the JSONB value is an array, this function returns the element at the given `index` as an `OwnedJsonb`.
+   19 +    /// If the `index` is out of bounds, it returns `Ok(None)`.
+   20 +    /// If the JSONB value is not an array (e.g., it's an object or a scalar), this function also returns `Ok(None)`.
+   21 +    ///
+   22 +    /// # Arguments
+   23 +    ///
+   24 +    /// * `self` - The JSONB value.
+   25 +    /// * `index` - The index of the desired element.
+   26 +    ///
+   27 +    /// # Returns
+   28 +    ///
+   29 +    /// * `Ok(Some(OwnedJsonb))` - The element at the specified index as an `OwnedJsonb` if the input is an array and the index is valid.
+   30 +    /// * `Ok(None)` - If the input is not an array, or if the index is out of bounds.
+   31 +    /// * `Err(Error)` - If an error occurred during decoding (e.g., invalid JSONB data).
+   32 +    ///
+   33 +    /// # Examples
+   34 +    ///
+   35 +    /// ```rust
+   36 +    /// use lance_jsonb::OwnedJsonb;
+   37 +    ///
+   38 +    /// let arr_jsonb = r#"[1, "hello", {"a": 1}]"#.parse::<OwnedJsonb>().unwrap();
+   39 +    /// let raw_jsonb = arr_jsonb.as_raw();
+   40 +    ///
+   41 +    /// let element0 = raw_jsonb.get_by_index(0).unwrap();
+   42 +    /// assert_eq!(element0.unwrap().to_string(), "1");
+   43 +    ///
+   44 +    /// let element1 = raw_jsonb.get_by_index(1).unwrap();
+   45 +    /// assert_eq!(element1.unwrap().to_string(), r#""hello""#);
+   46 +    ///
+   47 +    /// let element2 = raw_jsonb.get_by_index(2).unwrap();
+   48 +    /// assert_eq!(element2.unwrap().to_string(), r#"{"a":1}"#);
+   49 +    ///
+   50 +    /// let element3 = raw_jsonb.get_by_index(3).unwrap();
+   51 +    /// assert!(element3.is_none()); // Index out of bounds
+   52 +    ///
+   53 +    /// let obj_jsonb = r#"{"a": 1}"#.parse::<OwnedJsonb>().unwrap();
+   54 +    /// let raw_jsonb = obj_jsonb.as_raw();
+   55 +    /// let element = raw_jsonb.get_by_index(0).unwrap();
+   56 +    /// assert!(element.is_none()); // Not an array
+   57 +    /// ```
+   58 +    pub fn get_by_index(&self, index: usize) -> Result<Option<OwnedJsonb>> {
+   59 +        let array_iter_opt = ArrayIterator::new(*self)?;
+   60 +        if let Some(mut array_iter) = array_iter_opt
+   61 +            && let Some(item_result) = array_iter.nth(index)
+   62 +        {
+   63 +            let item = item_result?;
+   64 +            let value = OwnedJsonb::from_item(item)?;
+   65 +            return Ok(Some(value));
+   66 +        }
+   67 +        Ok(None)
+   68 +    }
+   69 +
+   70 +    /// Gets the value associated with a given key in a JSONB object.
+   71 +    ///
+   72 +    /// If the JSONB value is an object, this function searches for a key matching the provided `name`
+   73 +    /// and returns the associated value as an `OwnedJsonb`.
+   74 +    /// The `ignore_case` parameter controls whether the key search is case-sensitive.
+   75 +    /// If the key is not found, it returns `Ok(None)`.
+   76 +    /// If the JSONB value is not an object (e.g., it's an array or a scalar), this function also returns `Ok(None)`.
+   77 +    ///
+   78 +    /// # Arguments
+   79 +    ///
+   80 +    /// * `self` - The JSONB value.
+   81 +    /// * `name` - The key to search for.
+   82 +    /// * `ignore_case` - Whether the key search should be case-insensitive.
+   83 +    ///
+   84 +    /// # Returns
+   85 +    ///
+   86 +    /// * `Ok(Some(OwnedJsonb))` - The value associated with the key as an `OwnedJsonb`, if the input is an object and the key is found.
+   87 +    /// * `Ok(None)` - If the input is not an object, or if the key is not found.
+   88 +    /// * `Err(Error)` - If an error occurred during decoding (e.g., invalid JSONB data).
+   89 +    ///
+   90 +    /// # Examples
+   91 +    ///
+   92 +    /// ```rust
+   93 +    /// use lance_jsonb::OwnedJsonb;
+   94 +    ///
+   95 +    /// let obj_jsonb = r#"{"a": 1, "b": "hello", "c": [1, 2]}"#.parse::<OwnedJsonb>().unwrap();
+   96 +    /// let raw_jsonb = obj_jsonb.as_raw();
+   97 +    ///
+   98 +    /// let value_a = raw_jsonb.get_by_name("a", false).unwrap();
+   99 +    /// assert_eq!(value_a.unwrap().to_string(), "1");
+  100 +    ///
+  101 +    /// let value_b = raw_jsonb.get_by_name("b", false).unwrap();
+  102 +    /// assert_eq!(value_b.unwrap().to_string(), r#""hello""#);
+  103 +    ///
+  104 +    /// let value_c = raw_jsonb.get_by_name("c", false).unwrap();
+  105 +    /// assert_eq!(value_c.unwrap().to_string(), "[1,2]");
+  106 +    ///
+  107 +    /// let value_d = raw_jsonb.get_by_name("d", false).unwrap();
+  108 +    /// assert!(value_d.is_none()); // Key not found
+  109 +    ///
+  110 +    /// // Case-insensitive search
+  111 +    /// let value_a_case_insensitive = raw_jsonb.get_by_name("A", true).unwrap();
+  112 +    /// assert_eq!(value_a_case_insensitive.unwrap().to_string(), "1");
+  113 +    ///
+  114 +    /// let arr_jsonb = "[1, 2, 3]".parse::<OwnedJsonb>().unwrap();
+  115 +    /// let raw_jsonb = arr_jsonb.as_raw();
+  116 +    /// let value = raw_jsonb.get_by_name("a", false).unwrap();
+  117 +    /// assert!(value.is_none()); // Not an object
+  118 +    /// ```
+  119 +    pub fn get_by_name(&self, name: &str, ignore_case: bool) -> Result<Option<OwnedJsonb>> {
+  120 +        let key_name = Cow::Borrowed(name);
+  121 +        if let Some(val_item) =
+  122 +            self.get_object_value_by_key_name(&key_name, |name, key| key.eq(name))?
+  123 +        {
+  124 +            let value = OwnedJsonb::from_item(val_item)?;
+  125 +            return Ok(Some(value));
+  126 +        }
+  127 +        if ignore_case
+  128 +            && let Some(val_item) = self.get_object_value_by_key_name(&key_name, |name, key| {
+  129 +                key.eq_ignore_ascii_case(name)
+  130 +            })?
+  131 +        {
+  132 +            let value = OwnedJsonb::from_item(val_item)?;
+  133 +            return Ok(Some(value));
+  134 +        }
+  135 +        Ok(None)
+  136 +    }
+  137 +}

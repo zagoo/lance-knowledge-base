@@ -1,0 +1,110 @@
+[
+  {
+    "id": 2,
+    "path": "rust/lance-table/src/rowids/version.rs",
+    "start": 121,
+    "end": 146,
+    "unit": "lines",
+    "read_at": "2026-10-04T04:22:49.050Z",
+    "evidence": "121 |         if position >= self.indexed_total_len {\n122 |             return Err(Error::internal(format!(\n123 |                 \"version column position {} out of range (total_len={})\",\n124 |                 position, self.indexed_total_len\n125 |             )));\n126 |         }\n127 | \n128 |         let run_offsets = self.run_offsets.as_ref().unwrap();\n129 |         let mut run_index = match run_offsets.binary_search(&position) {\n130 |             Ok(run_index) => run_index,\n131 |             Err(run_index) => run_index - 1,\n132 |         };\n133 |         while run_index + 1 < run_offsets.len() && run_offsets[run_index + 1] <= position {\n134 |             run_index += 1;\n135 |         }\n136 |         self.run_index = run_index;\n137 |         self.offset_in_run = position - run_offsets[run_index];\n138 |         self.position = position;\n139 |         self.run_len = None;\n140 |         #[cfg(test)]\n141 |         {\n142 |             self.indexed_seek_count += 1;\n143 |         }\n144 |         Ok(())\n145 |     }\n146 | "
+  },
+  {
+    "id": 5,
+    "path": "rust/lance-file/test_data/exact_versions/datagen.rs",
+    "start": 25,
+    "end": 36,
+    "unit": "lines",
+    "read_at": "2026-10-04T04:22:49.051Z",
+    "evidence": "25 | struct NoManifest;\n26 | \n27 | #[async_trait]\n28 | impl ManifestProvider for NoManifest {\n29 |     async fn store_schema(\n30 |         _: &mut dyn Writer,\n31 |         _: &LanceSchema,\n32 |     ) -> lance_core::Result<Option<usize>> {\n33 |         Ok(None)\n34 |     }\n35 | }\n36 | "
+  },
+  {
+    "id": 6,
+    "path": "rust/lance-file/src/reader.rs",
+    "start": 4644,
+    "end": 4675,
+    "unit": "lines",
+    "read_at": "2026-10-04T04:22:49.051Z",
+    "evidence": "4644 |     #[tokio::test]\n4645 |     async fn test_read_global_buffer_out_of_range() {\n4646 |         let fs = FsFixture::default();\n4647 | \n4648 |         write_file_with_global_buffer(&fs, Bytes::from_static(b\"hello\")).await;\n4649 | \n4650 |         let file_scheduler = fs\n4651 |             .scheduler\n4652 |             .open_file(&fs.tmp_path, &CachedFileSize::unknown())\n4653 |             .await\n4654 |             .unwrap();\n4655 |         let file_reader = FileReader::try_open(\n4656 |             file_scheduler,\n4657 |             None,\n4658 |             Arc::<DecoderPlugins>::default(),\n4659 |             &test_cache(),\n4660 |             FileReaderOptions::default(),\n4661 |         )\n4662 |         .await\n4663 |         .unwrap();\n4664 | \n4665 |         // The file has two global buffers (schema at 0, \"hello\" at 1); index 2 is\n4666 |         // out of range and must surface a descriptive error rather than panicking.\n4667 |         let err = file_reader.read_global_buffer(2).await.unwrap_err();\n4668 |         assert!(\n4669 |             matches!(err, lance_core::Error::InvalidInput { .. }),\n4670 |             \"expected InvalidInput, got: {err:?}\"\n4671 |         );\n4672 |         let msg = err.to_string();\n4673 |         assert!(msg.contains('2'), \"error should mention the index: {msg}\");\n4674 |     }\n4675 | "
+  },
+  {
+    "id": 7,
+    "path": "rust/lance-table/src/io/commit/external_manifest.rs",
+    "start": 1349,
+    "end": 1358,
+    "unit": "lines",
+    "read_at": "2026-10-04T04:22:49.052Z",
+    "evidence": "1349 |     fn test_manifest() -> Manifest {\n1350 |         let arrow_schema = ArrowSchema::new(vec![ArrowField::new(\"id\", DataType::Int32, false)]);\n1351 |         Manifest::new(\n1352 |             Schema::try_from(&arrow_schema).unwrap(),\n1353 |             Arc::new(vec![]),\n1354 |             DataStorageFormat::new(LanceFileVersion::Stable.resolve()),\n1355 |             HashMap::new(),\n1356 |         )\n1357 |     }\n1358 | "
+  },
+  {
+    "id": 8,
+    "path": "protos/rowids.proto",
+    "start": 30,
+    "end": 44,
+    "unit": "lines",
+    "read_at": "2026-10-04T04:22:49.052Z",
+    "evidence": "30 |     /// A range of u64 values with holes.\n31 |     message RangeWithHoles {\n32 |         /// The start of the range, inclusive.\n33 |         uint64 start = 1;\n34 |         /// The end of the range, exclusive.\n35 |         uint64 end = 2;\n36 |         /* The holes in the range, as a sorted array of values;\n37 |          * Binary search can be used to check whether a value is a hole and should\n38 |          * be skipped. This can also be used to count the number of holes before a\n39 |          * given value, if you need to find the logical offset of a value in the\n40 |          * segment.\n41 |          */\n42 |         EncodedU64Array holes = 3;\n43 |     }\n44 | "
+  },
+  {
+    "id": 9,
+    "path": "rust/lance-core/src/utils/bit.rs",
+    "start": 33,
+    "end": 47,
+    "unit": "lines",
+    "read_at": "2026-10-04T04:22:49.052Z",
+    "evidence": "33 | \n34 | /// Returns the number of padding bytes needed to align `n` to `align`.\n35 | ///\n36 | /// ```\n37 | /// use lance_core::utils::bit::pad_bytes_to;\n38 | ///\n39 | /// assert_eq!(pad_bytes_to(0, 8), 0);\n40 | /// assert_eq!(pad_bytes_to(1, 8), 7);\n41 | /// assert_eq!(pad_bytes_to(8, 8), 0);\n42 | /// assert_eq!(pad_bytes_to(9, 8), 7);\n43 | /// ```\n44 | pub fn pad_bytes_to(n: usize, align: usize) -> usize {\n45 |     debug_assert!(is_pwr_two(align as u64));\n46 |     (align - (n & (align - 1))) & (align - 1)\n47 | }"
+  },
+  {
+    "id": 10,
+    "path": "rust/lance-core/src/cache/registry.rs",
+    "start": 150,
+    "end": 172,
+    "unit": "lines",
+    "read_at": "2026-10-04T04:22:49.052Z",
+    "evidence": "150 | /// Look up the constructor for `config.kind` and build a backend.\n151 | ///\n152 | /// Returns `Err` if no backend has been registered under that identifier.\n153 | pub fn build_from_config(config: &BackendConfig) -> Result<Arc<dyn CacheBackend>> {\n154 |     ensure_builtin_backends()?;\n155 |     let kind = normalize_backend_kind(&config.kind)?;\n156 |     let config = BackendConfig {\n157 |         kind: kind.clone(),\n158 |         options: config.options.clone(),\n159 |     };\n160 |     let build = {\n161 |         let map = registry_lock()?;\n162 |         map.get(&kind).copied()\n163 |     };\n164 |     match build {\n165 |         Some(build) => build(&config),\n166 |         None => Err(Error::invalid_input(format!(\n167 |             \"unknown cache backend kind: {:?}\",\n168 |             kind\n169 |         ))),\n170 |     }\n171 | }\n172 | "
+  },
+  {
+    "id": 13,
+    "path": "protos/encodings_v2_1.proto",
+    "start": 288,
+    "end": 309,
+    "unit": "lines",
+    "read_at": "2026-10-04T04:22:57.852Z",
+    "evidence": "288 | /* A layout used for pages where all (visible) values are the same scalar value.\n289 |  *\n290 |  * This generalizes the prior AllNullLayout semantics for file_version >= 2.2.\n291 |  *\n292 |  * There may be buffers of repetition and definition information if required in order\n293 |  * to interpret what kind of nulls are present / which items are visible.\n294 |  */\n295 | message ConstantLayout {\n296 |   // The meaning of each repdef layer, used to interpret repdef buffers correctly\n297 |   repeated RepDefLayer layers = 5;\n298 | \n299 |   /* Inline fixed-width scalar value bytes.\n300 |    *\n301 |    * This MUST only be used for types where a single non-null element is represented by a single\n302 |    * fixed-width Arrow value buffer (i.e. no offsets buffer, no child data).\n303 |    *\n304 |    * Constraints:\n305 |    * - MUST be absent for an all-null page\n306 |    * - MUST be <= 32 bytes if present\n307 |    */\n308 |   optional bytes inline_value = 6;\n309 | "
+  },
+  {
+    "id": 14,
+    "path": "protos/transaction.proto",
+    "start": 12,
+    "end": 38,
+    "unit": "lines",
+    "read_at": "2026-10-04T04:22:57.852Z",
+    "evidence": "12 | /* A transaction represents the changes to a dataset.\n13 |  *\n14 |  * This has two purposes:\n15 |  * 1. When retrying a commit, the transaction can be used to re-build an updated\n16 |  *    manifest.\n17 |  * 2. When there's a conflict, this can be used to determine whether the other\n18 |  *    transaction is compatible with this one.\n19 |  */\n20 | message Transaction {\n21 |   /* The version of the dataset this transaction was built from.\n22 |    *\n23 |    * For example, for a delete transaction this means the version of the dataset\n24 |    * that was read from while evaluating the deletion predicate.\n25 |    */\n26 |   uint64 read_version = 1;\n27 | \n28 |   // The UUID that unique identifies a transaction.\n29 |   string uuid = 2;\n30 | \n31 |   // Optional version tag.\n32 |   string tag = 3;\n33 | \n34 |   /* Optional properties for the transaction\n35 |    * __lance_commit_message is a reserved key\n36 |    */\n37 |   map<string, string> transaction_properties = 4;\n38 | "
+  },
+  {
+    "id": 18,
+    "path": "rust/lance-file/src/versions/v1/encoding.rs",
+    "start": 103,
+    "end": 115,
+    "unit": "lines",
+    "read_at": "2026-10-04T04:22:57.852Z",
+    "evidence": "103 |         let dict_info = field.dictionary.as_mut().ok_or_else(|| {\n104 |             Error::io(format!(\n105 |                 \"v1 dictionary field '{}' is missing dictionary metadata\",\n106 |                 field.name\n107 |             ))\n108 |         })?;\n109 |         let values = dict_info.values.as_ref().ok_or_else(|| {\n110 |             Error::invalid_input(format!(\n111 |                 \"v1 dictionary field '{}' is missing dictionary values\",\n112 |                 field.name\n113 |             ))\n114 |         })?;\n115 | "
+  },
+  {
+    "id": 19,
+    "path": "rust/lance-core/src/datatypes/field.rs",
+    "start": 953,
+    "end": 1011,
+    "unit": "lines",
+    "read_at": "2026-10-04T04:22:57.852Z",
+    "evidence": "953 |             // input struct (data/uri). When intersecting schemas for projection we want to keep\n954 |             // the projected blob layout instead of intersecting by child names.\n955 |             if self.is_blob() {\n956 |                 return Ok(self.clone());\n957 |             }\n958 | \n959 |             let children = self\n960 |                 .children\n961 |                 .iter()\n962 |                 .filter_map(|c| {\n963 |                     if let Some(other_child) = other.child(&c.name) {\n964 |                         let intersection = c.do_intersection(other_child, ignore_types).ok()?;\n965 |                         Some(intersection)\n966 |                     } else {\n967 |                         None\n968 |                     }\n969 |                 })\n970 |                 .collect::<Vec<_>>();\n971 |             let f = Self {\n972 |                 name: self.name.clone(),\n973 |                 id: if self.id >= 0 { self.id } else { other.id },\n974 |                 parent_id: self.parent_id,\n975 |                 logical_type: self.logical_type.clone(),\n976 |                 metadata: self.metadata.clone(),\n977 |                 encoding: self.encoding.clone(),\n978 |                 nullable: self.nullable,\n979 |                 children,\n980 |                 dictionary: self.dictionary.clone(),\n981 |                 unenforced_primary_key_position: self.unenforced_primary_key_position,\n982 |                 unenforced_clustering_key_position: self.unenforced_clustering_key_position,\n983 |             };\n984 |             return Ok(f);\n985 |         }\n986 | \n987 |         if (!ignore_types && self_type != other_type) || self.name != other.name {\n988 |             return Err(Error::arrow(format!(\n989 |                 \"Attempt to intersect different fields: ({}, {}) and ({}, {})\",\n990 |                 self.name, self_type, other.name, other_type\n991 |             )));\n992 |         }\n993 | \n994 |         Ok(if self.id >= 0 {\n995 |             self.clone()\n996 |         } else {\n997 |             other.clone()\n998 |         })\n999 |     }\n1000 | \n1001 |     /// Intersection of two [`Field`]s.\n1002 |     ///\n1003 |     pub fn intersection(&self, other: &Self) -> Result<Self> {\n1004 |         self.do_intersection(other, false)\n1005 |     }\n1006 | \n1007 |     /// Intersection of two [`Field`]s, ignoring data types.\n1008 |     pub fn intersection_ignore_types(&self, other: &Self) -> Result<Self> {\n1009 |         self.do_intersection(other, true)\n1010 |     }\n1011 | "
+  },
+  {
+    "id": 20,
+    "path": "protos/file2.proto",
+    "start": 97,
+    "end": 116,
+    "unit": "lines",
+    "read_at": "2026-10-04T04:22:57.852Z",
+    "evidence": "97 |  * ## Data Pages\n98 |  *\n99 |  * A lot of flexibility is provided in how data is stored.  A page's buffers do\n100 |  * not strictly need to be contiguous on the disk.  However, it is recommended\n101 |  * that buffers within a page be grouped together for best performance.\n102 |  *\n103 |  * Data pages should be large.  The only time a page should be written to disk\n104 |  * is when the writer needs to flush the page to disk because it has accumulated\n105 |  * too much data.  Pages are not read in sequential order and if pages are too\n106 |  * small then the seek overhead (or request overhead) will be problematic.  We\n107 |  * generally advise that pages be at least 8MB or larger.\n108 |  *\n109 |  * ## Encodings\n110 |  *\n111 |  * Specific encodings are not part of this minimal format.  They are provided\n112 |  * by extensions. Readers and writers should be designed so that encodings can\n113 |  * be easily added and removed. Ideally, they should allow for this without\n114 |  * requiring recompilation through some kind of plugin system.\n115 |  */\n116 | "
+  }
+]

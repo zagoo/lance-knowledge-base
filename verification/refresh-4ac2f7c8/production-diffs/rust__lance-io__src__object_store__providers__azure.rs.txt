@@ -1,0 +1,51 @@
+@@ -335,24 +335,36 @@ impl StorageOptions {
+  335          Self(opts)
+  336      }
+  337  
+  338 -    /// Add values from the environment to storage options
+  338 +    /// Add values from the environment without overriding explicit options,
+  339 +    /// including aliases, case variants, and empty-string values.
+  340      pub fn with_env_azure(&mut self) {
+  340 -        for (os_key, os_value) in &ENV_OPTIONS.0 {
+  341 -            if !self.0.contains_key(os_key) {
+  342 -                self.0.insert(os_key.clone(), os_value.clone());
+  343 -            }
+  344 -        }
+  341 +        self.merge_env_options(&ENV_OPTIONS.0, |key| {
+  342 +            AzureConfigKey::from_str(key)
+  343 +                .ok()
+  344 +                .map(|key| key.as_ref().to_string())
+  345 +        });
+  346      }
+  347  
+  347 -    /// Subset of options relevant for azure storage
+  348 +    /// Return options recognized by [`AzureConfigKey`], ignoring unknown keys.
+  349 +    ///
+  350 +    /// When aliases conflict, the exact canonical name (such as
+  351 +    /// `azure_storage_account_name`) wins, followed by case variants of that name.
+  352 +    /// Remaining ties use the lexicographically smallest original key. Empty
+  353 +    /// values are preserved.
+  354 +    ///
+  355 +    /// ```
+  356 +    /// use std::collections::HashMap;
+  357 +    /// use lance_io::object_store::StorageOptions;
+  358 +    /// use object_store::azure::AzureConfigKey;
+  359 +    ///
+  360 +    /// let options = StorageOptions(HashMap::from([
+  361 +    ///     ("account_name".into(), "alias".into()),
+  362 +    ///     ("azure_storage_account_name".into(), "canonical".into()),
+  363 +    /// ]));
+  364 +    /// assert_eq!(options.as_azure_options()[&AzureConfigKey::AccountName], "canonical");
+  365 +    /// ```
+  366      pub fn as_azure_options(&self) -> HashMap<AzureConfigKey, String> {
+  349 -        self.0
+  350 -            .iter()
+  351 -            .filter_map(|(key, value)| {
+  352 -                let az_key = AzureConfigKey::from_str(&key.to_ascii_lowercase()).ok()?;
+  353 -                Some((az_key, value.clone()))
+  354 -            })
+  355 -            .collect()
+  367 +        self.as_cloud_options()
+  368      }
+  369  
+  370      #[allow(clippy::manual_map)]

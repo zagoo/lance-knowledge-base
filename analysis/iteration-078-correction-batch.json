@@ -1,0 +1,793 @@
+{
+  "iteration": 78,
+  "files": [
+    {
+      "path": "rust/lance-table/src/rowids.rs",
+      "module": "L1-modules/rust-lance-table.md",
+      "reviewed": true,
+      "role": "Row-ID sequence facade, construction and mutation, stateful selection, ID-mask to positional-range conversion, set conversion, slicing, rechunking and ReadBatchParams selection.",
+      "ranges": [
+        [
+          1,
+          38,
+          "SPDX/module docs describe fragment-order row IDs and dataset-wide RowIdIndex. bitmap,encoded_array,index,runs,serde modules are private; segment/version are public despite the preceding all-private comment. Reexports expose FragmentRowIdIndex,RowIdIndex,read_row_ids,write_row_ids. Imports connect DeepSizeOf,core errors,ReadBatchParams,RowAddrMask/TreeMap/RowSetOps,exact-size iterator adapter,segment cursor and tracing. No storage IO is performed by this file; serialization is a reexport from serde."
+        ],
+        [
+          39,
+          66,
+          "Public RowIdSequence is a private Vec<U64Segment> tuple field, deriving Debug,Clone,DeepSizeOf,PartialEq,Eq,Default. Equality compares representations, not only yielded IDs. Type contract assumes table-wide unique u64 IDs except tombstones, without requiring global order/contiguity. Crate-visible Debug/Default RowIdSequenceCursor stores segment index, preceding row count, optional cached segment length, SegmentCursorState and last requested index; it owns no sequence reference or identity."
+        ],
+        [
+          67,
+          91,
+          "Private advance_segment adds cached length (or0), increments segment index, clears length and resets segment cursor. get resets the whole cursor if index precedes rows_passed or last_index, then remembers the request. It scans segments, lazily caches len, delegates local rank to SegmentCursorState or advances. Empty segments are skipped; exhaustion returns None. Arithmetic is unchecked usize. Switching source/mutating it without a reset is unsupported by the state assumptions but not prevented by a lifetime tie."
+        ],
+        [
+          92,
+          130,
+          "extend_range returns immediately for empty/reversed selection, leaving state/output unchanged. Otherwise it resets on backward start, stores requested end-1 even if beyond EOF, walks segments and appends clipped local subranges. End exhaustion truncates silently. Finishing a segment advances and resets the bitmap state. It advances logical count by requested count, assuming segment extension emitted exactly that many valid values; malformed segment invariants are not revalidated."
+        ],
+        [
+          131,
+          172,
+          "extend_dense_range duplicates the sparse sequence traversal but calls SegmentCursorState::extend_dense_range. Comment says sharing the loop measurably slowed sparse system-only scans; this is source rationale, not a benchmark measured here. Empty/backward/EOF/segment-reset behavior matches the ordinary path. No density test occurs inside this method."
+        ],
+        [
+          173,
+          208,
+          "Display reads up to11 front values and11 back values because break is after len>10, reverses the back vector and probes one remaining item to choose ellipsis. Front values are written without separators; last values use comma-space; ellipsis is comma-space-dot-dot-dot. Thus Range0..3 displays [012], not a conventional comma-separated list. At most23 values are consumed, but underlying sparse-span iteration may scan more slots. It is diagnostic text, not a parsable canonical serialization."
+        ],
+        [
+          209,
+          236,
+          "From<Range<u64>> wraps one raw range without validation; From<&[u64]> wraps one selected segment even for empty input and assumes uniqueness. Private find_duplicate first checks strictly increasing adjacent pairs without allocating; if that fails, clones/sorts all values and returns the first equal pair, hence the smallest duplicate value after sorting. Unsorted unique inputs pay the sorting copy; empty/singleton input passes the fast check."
+        ],
+        [
+          237,
+          266,
+          "new uses empty Vec Default. try_from_iter collects all input into Vec, returns canonical empty sequence for empty input, rejects a duplicate with InvalidInput including duplicate ID and total count, then constructs one U64Segment from the original order. It validates uniqueness only within this input. Comment says commit does not recheck dataset-wide uniqueness; that downstream claim remains pending commit analysis. Segment constructor is another collection stage, though moving a Vec iterator can permit allocation reuse; no streaming interface or global uniqueness proof."
+        ],
+        [
+          267,
+          278,
+          "iter flat_maps boxed segment iterators and exposes DoubleEndedIterator, preserving segment order. len sums segment.len as u64 with ordinary addition, inheriting per-segment usize casts/popcount work. is_empty checks only whether the segment Vec is empty, not whether total len is0. From(0..0), From(empty slice) and delete-all can therefore have len0 but is_empty false, unlike new/try_from_iter(empty)."
+        ],
+        [
+          279,
+          301,
+          "row_id_range scans segment bounds twice for minimum start and maximum end and returns inclusive bounds, or None if no segment supplies bounds. It is conservative and does not test membership. The comment that no values implies None has a caveat: a nonempty enclosing bitmap range with zero present bits still supplies bounds via segment.range (rust/lance-table/src/rowids/segment.rs:360-376). It does not canonicalize malformed compressed array bases."
+        ],
+        [
+          302,
+          320,
+          "extend consumes another sequence, merging only the existing final plain Range and incoming first plain Range when their endpoints touch. It replaces the final segment then moves remaining incoming segments; otherwise appends all. No overlap/duplicate/order validation, empty-segment cleanup, total-length overflow check or other representation optimization. Existing internal adjacent ranges are not swept."
+        ],
+        [
+          321,
+          339,
+          "use_range_segments visits every segment and replaces each successful as_ranges result, reporting whether any changed. No config/version gate exists in this public method. Comment explains reader performance motivation and intended table opt-in. A contextual caller in transaction/manifest_build.rs75-122 gates through lance.row_ids.range_segments and read/rewrites changed inline sequences; full transaction integration remains pending. Wire expansion is the existing sequence serde path, not a new protobuf arm."
+        ],
+        [
+          340,
+          366,
+          "delete first find_ids orders matching requested values by segment/local position. It replaces the backing Vec with a new Vec of equal capacity, clones unaffected segments from old storage, rebuilds affected ones through segment.delete and clones the tail. Even no matching IDs clones every segment. Empty results are retained as segments, so delete-all differs from mask-all. Duplicate requests are not deduplicated and may violate segment.delete preconditions; panic during rebuilding can leave self partially reconstructed."
+        ],
+        [
+          367,
+          397,
+          "mask accepts u32 physical positions and returns Result but has no Err branch. It walks original segment cutoffs using unchecked len-as-u32 and additions, consumes each position below cutoff, subtracts original offset and passes local positions to segment.mask. Inputs are assumed ordered/unique: descending positions can underflow after crossing a segment, duplicates can trigger segment count shortcuts, and an out-of-range front can hide later smaller positions. Remaining past-end positions are ignored. Segments mutate incrementally, then empty segments are removed even for an empty mask."
+        ],
+        [
+          398,
+          430,
+          "find_ids allocates one match Vec per segment and cycles segment enumeration. Despite the optimization comment, each input ID always scans exactly all segments because there is no break after a match; the iterator returns to its initial position for the next input. It first checks segment.range then segment.position, recording each matching local ordinal, including repeated requests and IDs present in multiple segments. Missing IDs are ignored. It sorts every segment match list but does not deduplicate."
+        ],
+        [
+          431,
+          455,
+          "find_ids computes contiguous slices into its eventual output for nonempty match lists, then converts each ordinal back to an ID with segment.get(...).unwrap. Output is segment order then local ordinal order, preserving duplicate requested matches. Position/get consistency is assumed; inconsistent public segment state can panic. Work includes all-segment searches plus sorting and another get for every match."
+        ],
+        [
+          456,
+          494,
+          "slice(len0) returns an empty borrowed RowIdSeqSlice regardless of offset. Positive len subtracts segment lengths to locate start and endpoint, then forms an inclusive segment slice. It does not return Result or clamp: offset at/past total or excessive positive len leads to slice-index panic; offset_start+len can overflow. A boundary end remains in the preceding segment because comparison is<=. Empty intermediate segments are traversed. Values are not copied at construction."
+        ],
+        [
+          495,
+          515,
+          "segments exposes immutable &[U64Segment]. The preceding get/out-of-bounds/None doc lines are misplaced on this accessor; it always returns a slice. Public get instead scans segment lengths from the beginning, returns delegated local get at first containing ordinal or None after EOF. Offsets/additions are unchecked usize; bitmap len recomputation can scan its storage on every independent get."
+        ],
+        [
+          516,
+          541,
+          "select creates a private cursor and last-index tracker and returns a lazy filter_map iterator. On consumption, strict decrease panics with Selection is not sorted; equal indices are allowed and repeat values. Out-of-bounds requests are dropped but still become last_index, so a later lower valid request panics. Crate-visible cursor() merely creates default state without binding its lifetime to self."
+        ],
+        [
+          542,
+          558,
+          "cursor_with_dense_range_expansion chooses dense mode only for exactly one RangeWithBitmap segment. It computes segment.len once, seeds cached length and calls segment density advisory; other shapes return an uncached default cursor/false. The threshold is segment.len>=bitmap.len-floor(bitmap.len/4), from segment.rs346-354. This avoids repeating initial popcount but does not validate storage or select among multiple dense segments."
+        ],
+        [
+          559,
+          593,
+          "select_range_with_cursor and dense counterpart preallocate Vec to selection.len before delegating; oversized requested ranges can allocate far beyond available output even though EOF is clipped. select_with_cursor returns lazy filter_map over the reusable cursor and permits decreasing indices via rewind. All three are pub(crate). Dense method trusts the caller policy. The returned iterator borrows the sequence and cursor for its lifetime, which extends beyond the method return while the iterator is used. The cursor itself stores scan state without a sequence reference, so it can be reused after that borrow ends."
+        ],
+        [
+          594,
+          620,
+          "mask_to_offset_ranges is public and instrumented at debug with skip_all. It translates selected row IDs to present ordinal ranges, preserving sequence order and separate segment boundaries. Extracts finite allow-list with RowSetOps::len; bitmap segment count/total span and optional shared sorted-ID Vec are computed lazily. RowAddrMask is an exclusive AllowList/BlockList enum, so this fast path omits no simultaneous block list (context: rust/lance-select/src/mask.rs:24-79)."
+        ],
+        [
+          621,
+          646,
+          "Plain Range path constructs RowAddrTreeMap, applies mask, walks inclusive low32 runs, recombines high32 fragment and offsets, subtracts range.start/adds prior sequence offset, and coalesces adjacent runs within this segment. End reconstruction uses bitwise OR of frag<<32 and low_end+1. At low_end=u32MAX with odd fragment, carry bit overlaps existing high bits: for singleton ID8589934591 in range8589934591..8589934592, computed end is4294967296 and subtraction underflows instead of producing ordinal1. This is source-derived, unexecuted; iter_runs exposes inclusive u32 runs and insert_range can store that singleton (rust/lance-select/src/mask.rs:545-588; rust/lance-select/src/mask.rs:801-810)."
+        ],
+        [
+          647,
+          674,
+          "Holes path creates full range set, removes each hole and subtracts only successful removals from total offset, applies mask, clones/decodes/sorts holes and walks selected addresses. For each address it subtracts count of holes strictly below it, then groups ordinals. Sorting permits the tested unsorted unique hole list here, unlike several segment methods. Duplicate/outside holes can disagree with the successful-removal count and rank subtraction; valid unique in-range holes are assumed."
+        ],
+        [
+          675,
+          705,
+          "Bitmap fast path applies only with finite allow count. On first such bitmap, scans all sequence segments to cache bitmap count and summed enclosing numeric span, using ordinary u64 additions/subtractions. Uses direct selected-ID processing only if total selected count<=total bitmap span; otherwise fallback. This is a global heuristic, not each segment density. One bitmap streams allowed IDs; multiple bitmaps materialize allowed IDs once for binary-search slicing."
+        ],
+        [
+          706,
+          740,
+          "For multiple bitmap segments, lazily call allow_list.row_addrs once and cache Some(Vec<sorted IDs>) or None. For each applicable segment increment offset by bitmap.count_ones, binary-search the cached IDs at start/end and feed that subrange to bitmap_selected_offsets; single bitmap filters streamed addresses by range containment. If row_addrs unavailable, fall through. Contextual row_addrs collects an iterator per tree entry before flattening, so streaming avoids copying all IDs but is not allocation-free (rust/lance-select/src/mask.rs:497-515)."
+        ],
+        [
+          741,
+          763,
+          "Bitmap fallback materializes full range set, scans every numeric slot, removes missing bits while reducing total count, applies mask, then incrementally consumes bitmap logical iterator to count earlier holes for selected addresses. Iterator unwrap relies on valid bitmap length. This path scales with enclosing span plus selected values, whereas fast path popcounts intervening prefixes and selected IDs. No errors are returned locally; malformed padding/span can make fast and fallback lengths disagree."
+        ],
+        [
+          764,
+          781,
+          "Ranges path advances total by runs.present_len, inserts each base-adjusted present gap into a new tree map, applies mask and translates each address through runs.position(relative as u32).expect before grouping. HoleRuns invariants and inserted-set containment justify expect for valid data. It does not coalesce output with a prior segment."
+        ],
+        [
+          782,
+          800,
+          "SortedArray and Array both enumerate values in stored order and use mask.selected, producing ordinal=local index+prior count through GroupingIterator; sorting the IDs is neither required nor performed. Then advance by array length. Method returns accumulated Vec with no cross-segment range merge. Comment suggests sorted-array optimization but no separate algorithm exists."
+        ],
+        [
+          801,
+          839,
+          "Private GroupingIterator stores inner iterator and optional current half-open range. next extends only when next ID equals current end; otherwise yields old range and starts ID..ID+1. At inner EOF it takes the remaining range. It assumes appropriate order/distinctness for nonoverlapping increasing output; does not validate either, and ID+1 is unchecked at u64MAX. No FusedIterator/ExactSizeIterator guarantee is added."
+        ],
+        [
+          840,
+          864,
+          "bitmap_selected_offsets assumes sorted in-range IDs. Missing bitmap bits return None without advancing prefix state. Present IDs add popcount over bitmap slice previous_position..position, leave previous_position at the selected position, and emit offset_start+live_before. Including the previous selected bit in the next slice gives correct rank increments; repeated IDs repeat offsets. Relative subtraction/casts and sorted-delta subtraction are unchecked. GroupingIterator collects the local output Vec."
+        ],
+        [
+          865,
+          907,
+          "From<&RowIdSequence> for RowAddrTreeMap builds each segment in a fresh temporary set, then unions it into aggregate. Range inserts bounds; bitmap removes every absent slot; holes remove listed values; Ranges inserts present gaps; arrays insert each value. Isolating removals per segment preserves values present in overlapping other segments. Set conversion loses sequence order/duplicate multiplicity. It inherits tree-map edge behavior: contextual insert_range saturates excluded end0 to0, so Range0..0 inserts ID0 rather than nothing (rust/lance-select/src/mask.rs:545-588; rust/lance-select/src/mask.rs:1014-1019); full dependency analysis remains pending."
+        ],
+        [
+          908,
+          945,
+          "Public Debug RowIdSeqSlice has private borrowed segment slice, first start offset and last end offset. iter computes exact remaining size from sum of segment lengths minus trimmed prefixes/suffixes, then boxes iterators using skip/take for edge segments and full iteration for middle segments. One-segment case takes offset_last-offset_start. Calls exact_size adapter but return type advertises only Iterator; size_hint still reflects supplied count and decrements through that adapter. Arithmetic assumes valid slice; source borrow forbids ordinary mutation while view lives."
+        ],
+        [
+          946,
+          987,
+          "Public rechunk_sequences consumes sequence and u64 size iterables plus allow_incomplete, collecting all sizes/output upfront. Flattens owned segment vectors into Peekable and tracks u64 offset within current segment. InvalidInput closures include chunk index/expected size/remaining count or processed/expected chunk counts. Docs motivate later allocation of IDs for inserted rows, but this function never creates those IDs itself and returns a Vec, not a stream."
+        ],
+        [
+          988,
+          1013,
+          "For each requested chunk create an empty sequence. While remaining>0, inspect current segment length minus segment_offset. Empty/exhausted segments are consumed and offset reset; if no segment remains, allow_incomplete breaks with a short chunk, otherwise error. Later requested chunks still appear as empty when exhausted and incomplete allowed. A zero-sized chunk skips this loop and emits an empty Vec-backed sequence without consuming empty input segments."
+        ],
+        [
+          1014,
+          1043,
+          "If segment has more remaining values than requested, slice requested ordinal range, extend output and keep current segment with increased offset. Equal/less consumes segment, slices remaining values and extends, resetting offset and subtracting count. Even a whole uncut segment is rebuilt through U64Segment::slice, which materializes/re-encodes values; plain range input can cost proportional rows. u64-to-usize casts are unchecked. Adjacent plain output ranges may merge through extend."
+        ],
+        [
+          1044,
+          1053,
+          "After all chunk sizes, any peeked segment produces too-many error regardless of its length or allow_incomplete. Thus leftover empty segments cause an error even when total row cardinalities match; zero chunk sizes do not drain them. allow_incomplete allows shortages only, never excess input. Earlier output allocations are discarded on Result error; consumed inputs cannot be recovered."
+        ],
+        [
+          1054,
+          1089,
+          "select_row_ids accepts borrowed sequence and ReadBatchParams and returns owned Vec. Error closure includes u32 index and freshly computed sequence.len. Indices reads Arrow values buffer directly, without inspecting validity. Nondecreasing values check only last against length then use cursor-based select; arbitrary order uses independent get per index and errors at first missing. Duplicates preserve repeated output; empty values return empty. Nullable index-array policy belongs to ReadBatchParams producers and is not enforced here."
+        ],
+        [
+          1090,
+          1113,
+          "Range checks only end<=sequence.len as usize then slices start,end-start. Ranges sums lengths with unchecked subtraction/casts, preallocates full requested count before per-range end checks, then slices/extends in supplied order. Neither rejects reverse bounds explicitly; arithmetic/panics can precede an InvalidInput. Error offset casts end to u32 and can truncate diagnostic values. A zero-length range accepted by end check uses slice empty shortcut."
+        ],
+        [
+          1114,
+          1129,
+          "RangeFull collects every ID. RangeTo checks end, then slices0..end. RangeFrom performs sequence.len as usize minus start with no explicit start bound check; excessive start can underflow/panic rather than return InvalidInput. All returned data is materialized; no IO, schema conversion or cancellation handling occurs here."
+        ],
+        [
+          1130,
+          1157,
+          "cfg(test) imports module, pretty_assertions and Bitmap. Range fixture asserts len10/nonempty/exact iteration. rstest checked-constructor cases cover sorted contiguous, sorted gapped, sparse and reverse inputs, checking exact order and length. These tests were read, not executed."
+        ],
+        [
+          1158,
+          1190,
+          "Checked construction tests pin contiguous input to one Range and empty input to len0/is_empty true. Three duplicate patterns (adjacent,separated,unsorted) require InvalidInput and must-be-unique substring. No global cross-sequence duplicate or infallible constructor rejection is asserted."
+        ],
+        [
+          1191,
+          1233,
+          "Extend test pins adjacent plain range merge and disjoint range retention. Delete test pins alternating survivors to bitmap, cross-segment deletion with missing requested IDs ignored, and delete-all to one Range0..0. It does not assert is_empty after delete-all or test duplicate deletion requests."
+        ],
+        [
+          1234,
+          1284,
+          "Slice fixture uses six segments spanning Range,holes,sorted array,bitmap,general array and final Range. Nested offset/len loops keep only valid bounds, compare values with full-iteration skip/take and check equal size-hint bounds/actual length. Loops exclude len==total and offset==total; separate test covers offset10,len0. Ranges representation and invalid positive bounds are absent."
+        ],
+        [
+          1285,
+          1334,
+          "Nested assert_rechunked compares exact sequence structures for small-to-large, large-to-small and equal chunks, including adjacency coalescing. Too-few and too-many cases assert only is_err, not error variants/messages. All chunks here are positive and valid total counts except deliberate mismatches."
+        ],
+        [
+          1335,
+          1401,
+          "select_row_ids fixture covers sorted/unsorted Indices, Range,Full,To,From and multiple Ranges across two mixed segment sequences. It constructs a flattened-values/explicit-index oracle and checks exact output. No compact Ranges segment, nullable indices, reverse bounds or oversized From case appears."
+        ],
+        [
+          1402,
+          1446,
+          "Bounds fixture checks InvalidInput for sorted/unsorted index1000, Range end1000 and RangeTo1000 over ten IDs; omits Ranges/RangeFrom. Treemap conversion fixture asserts explicit sorted union of six mixed segments. It does not assert sequence order survives set conversion."
+        ],
+        [
+          1447,
+          1467,
+          "Overlapping-bounds regression uses complementary even/odd bitmaps over0..6 and requires the aggregate set contain all six IDs, preventing one segment missing-bit removal from erasing another segment live ID. Oracle includes both explicit0..6 and collected sequence membership."
+        ],
+        [
+          1468,
+          1523,
+          "Position-mask fixture derives ordered positions for one removal from each of five representation segments, applies mask and asserts exact survivor segment encodings. It covers valid unique offsets, not malformed ordering/duplicates or Result failure."
+        ],
+        [
+          1524,
+          1558,
+          "Mask-all fixture over Range and SortedArray requires an empty segment Vec, unlike delete-all. Selection fixture constructs five mixed segments and checks sorted picks including past-end57 drop against flattened expected values."
+        ],
+        [
+          1559,
+          1583,
+          "Ordinary cursor selection tests chunk sizes1/3/7/16 across all values, a forward6..19 request, rewind1..8 and a tail request extending five past EOF. Results match independent slices of the flattened sequence; they do not reuse a cursor on a different sequence."
+        ],
+        [
+          1584,
+          1620,
+          "Bitmap40 with holes3/4/17/39 plus a plain five-row segment yields41 values. Tests full selection, sparse/repeated/past-end picks, sequential range chunks and rewind2..6 against flattened values. This covers bitmap byte boundaries and segment transition but not cached-length invalidation after mutation."
+        ],
+        [
+          1621,
+          1665,
+          "Dense cursor fixture uses one90%-present bitmap and asserts dense selection plus seeded len. Sequential chunks (including byte boundary and past-end) and rewind match expected. Half-full bitmap chooses sparse while still caching20; adding another segment disables dense and leaves lenNone. Threshold equality and all-zero nonempty bitmap are not tested."
+        ],
+        [
+          1666,
+          1697,
+          "Large cursor regression creates one-million-slot bitmap with every17th bit cleared after initial Range0..8. It compares full selection and sorted boundary/stride9973/tail/past-end picks to a flattened oracle. Comment predicts a restart-per-index slowdown, but no elapsed-time assertion or benchmark measurement is performed."
+        ],
+        [
+          1698,
+          1730,
+          "Large fixture additionally reads final100,000 values in one range and chunks1/7/8/9/1024/4097, checking exact concatenation. Separate should_panic test consumes public selection[2,4,3] and requires Selection is not sorted. Internal select_with_cursor decreasing-index iterator is not directly tested by this case."
+        ],
+        [
+          1731,
+          1774,
+          "Mask-to-offset examples cover even selection in Range0..10, allow/block54 within40..60, holes2/6, and an intentionally unsorted hole array[47,43] with allow/block44. Exact expected ordinal ranges demonstrate holes sorted locally for rank correction. These low-value fixtures do not reach high32 boundaries."
+        ],
+        [
+          1775,
+          1804,
+          "Bitmap mask examples cover live0/1/4/5/6/7 with even allowed IDs and separate40..45 bitmap allow/block44. Expected ranges pin omitted holes and present ordinal rank; only allow-list case takes the finite-ID optimization."
+        ],
+        [
+          1805,
+          1839,
+          "Sparse bitmap1024 with holes3/7/64/1000 follows a five-row segment. Mask includes live/hole/outside boundary IDs and expected offsets7..8,66..68,1024..1025. Empty and all-missing masks yield empty. Full-fragment allow marker forces fallback and preserves adjacent segment boundary ranges0..5,5..1025."
+        ],
+        [
+          1840,
+          1879,
+          "Sorted/general array masks check stored-order ordinal grouping, mixed-segment example preserves global offsets, default mask selects full Range and allow_nothing selects none. No empty Range0..0/high32 carry case is included."
+        ],
+        [
+          1880,
+          1901,
+          "Brute-force oracle enumerates each segment values, tests mask.selected and groups resulting ordinals separately per segment. Comment claims no shared logic, but it reuses GroupingIterator and segment.iter/len, so it is independent of optimized mask branches rather than wholly independent. Agreement on fixtures cannot prove all-input equivalence."
+        ],
+        [
+          1902,
+          1924,
+          "Private TestRng holds u64 state. next replaces zero with1, performs xorshift12/25/27 and wrapping multiplication0x2545_F491_4F6C_DD1D; below debug-asserts positive bound then modulo. Seeds0 and1 start identically; modulo sampling is not claimed unbiased. Generator comments introduce disjoint-range fixtures and missing-ID lists."
+        ],
+        [
+          1925,
+          1955,
+          "random_sequence chooses1..4 segments with initial cursor<1000. Kind0 is Range span1..300; kind1/2 bitmap span50..1999 with random hole probability10..90 percent but first slot forced live. Records missing IDs and advances cursor; these generated segments never have empty presence."
+        ],
+        [
+          1956,
+          1996,
+          "Kind3 builds range span20..199 with1..5 sampled holes, sorts/deduplicates them and records them. Final kind makes1..8 sampled IDs within span3*count+1, deduplicates then chooses shuffled Array or SortedArray; advances cursor by full span. No Ranges form, overlapping ranges, huge IDs, empty segments or malformed storage. Returns sequence, recorded holes and next cursor."
+        ],
+        [
+          1997,
+          2019,
+          "random_allow_mask chooses mainly live IDs, sometimes known holes, lower-outside IDs when live[0]>0, or IDs at/past past_end. It preallocates requested count then converts through TreeMap, so duplicates collapse and actual allowed cardinality can be smaller. It assumes live nonempty; random_sequence guarantees that for its fixtures."
+        ],
+        [
+          2020,
+          2043,
+          "Fifty seeded randomized cases generate sequence/live IDs, assert nonempty, and compare allow_nothing,allow_all-live,default,empty/nonempty block masks, three small mixed allow masks and one medium mask. Seeds0/1 duplicate initial generator state. Assertions verify equality to the local brute-force oracle, not timing or a formal proof."
+        ],
+        [
+          2044,
+          2071,
+          "Further randomized masks add a broad allowed region beyond every segment to force fallback and masks containing only holes/outside IDs. Each mask compares optimized result and oracle with seed/mask-index context. The generator restricts ID domains to small values, so u32/u64 boundary arithmetic is not exercised."
+        ],
+        [
+          2072,
+          2105,
+          "Two-bitmap regression follows Range0..5 with100..110 missing102/107 and200..205 missing200. Selected/live/hole/outside IDs yield explicit split ranges0..1,4..5,5..6,7..8,12..13,13..14,16..17 plus oracle equality. All-missing mask yields empty. This pins shared finite-selection cache semantics and lack of cross-segment merging."
+        ],
+        [
+          2106,
+          2118,
+          "Broad two-bitmap allow list includes all live IDs and100 outside IDs, requiring equality with oracle through fallback. It does not measure one-time materialization or assert how many dependency iterators were created."
+        ],
+        [
+          2119,
+          2152,
+          "Rechunk empty-segment test begins with exact-fit two chunks and a smaller-segment accumulation into one chunk, asserting both counts and concrete values. These first scenarios contain no empty segments despite the test name."
+        ],
+        [
+          2153,
+          2186,
+          "Rechunk fixtures then place one empty Range between live runs with split3/1 and multiple consecutive empties while building a three-row chunk. Both assert output cardinality and values. Empty segments are consumed only while some requested chunk still needs rows."
+        ],
+        [
+          2187,
+          2219,
+          "Boundary empty between two positive chunks is skipped when filling the next chunk. Incomplete fixture has two live IDs then trailing empty and requested5, returning only those two. It does not cover trailing empty after an exactly filled final chunk, zero-sized chunks or excess input with allow_incomplete."
+        ],
+        [
+          2220,
+          2250,
+          "row_id_range tests cover empty raw Range returningNone, exact10..=19, unsorted input bounded around10/50 and disjoint-range union0..=104. They do not test is_empty consistency, all-missing nonzero bitmap bounds or noncanonical relative array bases."
+        ],
+        [
+          2251,
+          2271,
+          "Clustered live values0..600 excluding50..250 and300..310 initially select bitmap. use_range_segments returns true and yields one Ranges; second call returns false and preserves exact equality. It validates local idempotence, not manifest configuration or on-disk reader performance."
+        ],
+        [
+          2272,
+          2309,
+          "Compact Ranges fixture compares full values/count, cursor chunks37, selected indices, allow/block masks and treemap conversion against bitmap; protobuf encode/decode must equal the compact sequence. It exercises serde folding but does not establish historical released compatibility. File ends here; no direct Display, invalid mask, duplicate delete, source-switch cursor or high-domain range regression is present. All tests are source-read only."
+        ]
+      ],
+      "limits": "All2,309 physical lines read in ten bounded numbered chunks. This file is synchronous; no storage reads/writes, task scheduling, cancellation or commit occurs locally. Segment/serde/version primitives are fully analyzed. Contextual snippets in lance-select mask.rs, table utils/stream.rs and transaction/manifest_build.rs establish limited dependencies/callers only; those full files remain pending and their snippets do not count as completed coverage. Dataset compaction/update/merge-insert rechunk callers were located lexically, not fully traced. No source edits, network, build/test/benchmark execution or measured performance claims. Transaction::assign_row_ids now supplies a reviewed allocation/extension consumer and resolve_update_version_metadata supplies ID-to-source scanning (rust/lance-table/src/transaction/row_version.rs:97-295; rust/lance-table/src/transaction/row_version.rs:332-405); full builder and dataset callers remain pending."
+    },
+    {
+      "path": "rust/lance-encoding/src/compression.rs",
+      "module": "L1-modules/rust-lance-encoding.md",
+      "role": "Shared structural compression contracts, statistic-driven selection helpers, metadata parsing, decoder dispatch and 40 local test functions. Production version policy is composed outside this module.",
+      "reviewed": true,
+      "limits": "Every line read in bounded primary outputs in ANALYZE77. No source build, test, lint, benchmark, generator, installation or network. Runtime effects and no-bitpacking concern are source deductions, not reproductions. Partial dependencies are not promoted.",
+      "ranges": [
+        [
+          1,
+          18,
+          "SPDX/module docs describe structural compression after validity/offset shredding, transparent independent per-value access, opaque atomic mini-block chunks and whole-block compression with least random access. Documentation says2.1, but helpers are also composed by later version strategies. This module has no concrete default CompressionStrategy implementation or file-version argument."
+        ],
+        [
+          19,
+          74,
+          "Imports connect Arc, Arrow UInt64 statistics/DataType, Field, LanceBuffer, error helpers, compression parameters, miniblock/per-value interfaces, protobuf21, all physical codecs and FSST constants. InlineBitpacking/OutOfLineBitpacking imports alone are cfg(bitpacking); many other imports are unconditional. No async, IO, unsafe or local environment read in this file."
+        ],
+        [
+          75,
+          85,
+          "Private constants: default RLE threshold0.5, general block size32768 bytes, RLE block header size_of u64=8. Despite default-threshold naming/comment, the ratio check runs only when params.rle_threshold is Some; no0.5 rejection applies in automatic mode. Header cost is added to RLE block payload estimate, not mini estimate. (rust/lance-encoding/src/compression.rs:174-198; rust/lance-encoding/src/compression.rs:278-322)"
+        ],
+        [
+          86,
+          105,
+          "Public BlockCompressor:Debug+Send+Sync requires compress(DataBlock)->Result<(Option<LanceBuffer>,CompressiveEncoding)>. None means metadata-only, while Some(empty) is an actual payload. Whole-block opaque/self-described contract is stated; trait itself enforces no metadata/count/shape invariant."
+        ],
+        [
+          106,
+          140,
+          "Public CompressionStrategy:Send+Sync+Debug requires block, per-value and mini-block factory methods accepting Field and borrowed DataBlock, returning boxed codecs. Selection can inspect initialized statistics. Comment describes mini chunks0..16KiB; this trait does not enforce size. Concrete version policies live in lance-file."
+        ],
+        [
+          141,
+          153,
+          "Crate-internal compress_required_block creates selected block compressor then compresses owned data. Propagates factory/codec errors and rejects None payload with Internal; Some(empty) accepted. It returns payload plus descriptor and performs no IO or additional count validation."
+        ],
+        [
+          154,
+          173,
+          "Private try_bss_for_mini_block refuses missing compression and exact none before considering BssMode(defaultAuto). If should_use_bss returns true, constructs ByteStreamSplitEncoder using bits cast to usize. It does not parse codec name: fsst or unknown non-none strings satisfy this initial prerequisite; downstream wrapping differs."
+        ],
+        [
+          174,
+          199,
+          "rle_is_applicable permits fixed widths8/16/32/64 only, expects scalar RunCount (panic if absent/type/shape invalid), and applies strict runs<num_values*threshold only when explicitly configured. No finite/range validation: NaN fails comparison, negative/zero normally reject, >1 allowed locally. Return logical raw bytes as u128 num_values*(bits/8), not physical buffer length."
+        ],
+        [
+          200,
+          219,
+          "rle_beats_raw_and_bitpacking requires encoded<raw; with bitpacking feature compares estimated inline bytes and rejects only when bitpacking strictly smaller. A tie with raw loses, a tie with bitpacking favors RLE. Unknown/unavailable bitpacking estimate adds no restriction."
+        ],
+        [
+          220,
+          234,
+          "Fixed-u8 mini RLE first applies width/ratio gate, estimates payload with MAX_MINIBLOCK_VALUES segmentation and U8 run lengths, suppresses estimator errors into None via ok?, and selects RleEncoder only if estimate beats raw/bitpacking. No actual trial compression here."
+        ],
+        [
+          235,
+          268,
+          "Child-aware mini RLE selects adaptive run width/estimated bytes and optional child compression config; constructs encoder with same config for values/lengths and child bitpacking enabled. Measure selected_payload_size only if child compression exists or bitpacking compiled AND initial estimate is >=raw or worse than estimated inline. Otherwise trust estimate. Measurement/estimator errors become None fallback. Final raw/bitpacking comparison repeats; selection may allocate/compress children then actual encode repeats work. (rust/lance-encoding/src/encodings/physical/rle.rs:1013-1039)"
+        ],
+        [
+          269,
+          277,
+          "rle_child_compression_config returns None for missing/exact none/fsst. Other strings parse via case-sensitive CompressionScheme; unknown parse error silently becomes None here. Valid codec plus optional level retained, without invoking compressor feature validation in this helper. (rust/lance-encoding/src/encodings/physical/block.rs:124-138)"
+        ],
+        [
+          278,
+          323,
+          "try_rle_for_block_with_width rechecks widths, requires initialized RunCount and optional strict explicit threshold, adds8-byte header with saturating u128 addition, requires total<logical raw size and rejects if block-bitpacking estimate strictly smaller. Creates raw-child RleEncoder with selected run width; tie with bitpacking favors RLE. Params compression/level/BSS are not used here."
+        ],
+        [
+          324,
+          345,
+          "Fixed-u8 and adaptive block wrappers return Ok(None) for unsupported widths, then estimate using no segment bound before invoking common ratio/size gate. Estimation errors propagate via Result, unlike mini selection. Adaptive chooses run width; fixed forcesU8."
+        ],
+        [
+          346,
+          371,
+          "Private estimate adapters pass actual LanceBuffer, declared count, fixed width and optional max segment to physical RLE estimators. Adaptive estimator chooses cheapest among8/16/32 run-length widths; equal cost retains earlier narrower width. Cost is entries*(value bytes+length bytes), without block header. Full entry collection and payload behavior are now covered in the physical RLE analysis. (rust/lance-encoding/src/encodings/physical/rle.rs:221-328; rust/lance-encoding/src/encodings/physical/rle.rs:385-1944) (rust/lance-encoding/src/encodings/physical/rle.rs:138-218)"
+        ],
+        [
+          372,
+          386,
+          "Private mini bitpacking with feature enabled requires successful inline size estimate, which accepts only native widths, then returns InlineBitpacking. Feature disabled returnsNone. No statistical scan performed here beyond borrowed estimate inputs."
+        ],
+        [
+          387,
+          420,
+          "Feature-gated inline estimator rejects unsupported width or zero declared count. Expects UInt64 BitWidth array; for every statistic entry, counts one native header word plus floor(1024*maxbits/nativebits) words, sums/multiplies saturating u128, and requires estimate strictly smaller than actual physical data_size. Tail treated as padded1024. Converts total to u64 orNone; no validation of stat length/nulls/width range or physical/logical count consistency."
+        ],
+        [
+          421,
+          449,
+          "Private block bitpacking requires8/16/32/64 and initialized BitWidth, max unwrap panics for empty stats. max>=native skips. Single stat segment with min_size_bytes(max)>=actual data_size skips. Declared count<=1024 selects Inline, otherwise OutOfLine(max,native). Function and public wrapper are ungated despite references to cfg-imported types: no-bitpacking compile concern, not compiled here."
+        ],
+        [
+          450,
+          474,
+          "Feature-gated block bitpacking cost rejects unsupported widths/zero count, gets statistic max optionally (empty=>None), estimates inline padded1024+header for count<=1024 or out-of-line words otherwise, converts to bytes with saturation and requires strictly smaller physical data_size. Eligibility and estimate are separate logic; do not assume the private selection helper performs this exact full-cost check."
+        ],
+        [
+          475,
+          510,
+          "Feature-gated out-of-line word estimate checked-converts count/widths to usize, rejects compressed>=native, computes ceil(count/1024) chunks and ceil(1024*compressed/native) words/chunk. Whole chunks return product; a runt tail is padded/compressed only if padding-bit cost strictly less than saved bits, otherwise raw tail words. Tie uses raw tail. Some usize products remain unchecked; no positive-native-width guard for standalone helper."
+        ],
+        [
+          511,
+          525,
+          "maybe_wrap_general_for_mini_block leaves inner unchanged for missing/exact none/fsst. Other strings must parse, with Unknown compression scheme InvalidInput on failure. Wraps GeneralMiniBlockCompressor with chosen level; no trial ratio check and no local feature validation at construction."
+        ],
+        [
+          526,
+          554,
+          "try_general_compression returnsNone for exact none. Any other explicit scheme parses and uses CompressedBufferEncoder::try_new, propagating unsupported/config errors, returning codec and original config. Automatic selection occurs only if physical data_size>32768 (strict), using default encoder/config. Comment says currently unused but try_general_block below calls it. Default encoder prefers compiled zstd(level0), else lz4(levelNone), else none. (rust/lance-encoding/src/encodings/physical/block.rs:471-489)"
+        ],
+        [
+          555,
+          587,
+          "Public field_metadata_params copies compression verbatim, parses i32 level/f64 RLE threshold with ok() silently ignoring malformed strings, parses BssMode with warning on invalid, and parses signed i64 minichunk with warning on invalid. Negative/zero chunk sizes and nonfinite/out-of-range f64 parse successfully; semantic checks not here. Defaults leave all fields None. No column/type merge or version filter here."
+        ],
+        [
+          588,
+          600,
+          "Public finalize_miniblock_compressor applies general wrapper only for direct FixedWidth; all other block kinds return selected codec unchanged. Variable-width helpers perform their own wrapping. Packed structs/fixed-size lists do not acquire a wrapper through this function."
+        ],
+        [
+          601,
+          619,
+          "Public try_uncompressed_fixed_width_miniblock picks raw ValueEncoder for directFixedWidth plus exactnone without reading stats. Public try_byte_stream_split_miniblock type-guards directFixedWidth then delegates BSS prerequisite/heuristic. Nonmatching kinds returnNone."
+        ],
+        [
+          620,
+          641,
+          "Public try_fixed_u8_rle_miniblock and try_child_rle_miniblock are directFixedWidth guards around respective policies; former preserves original u8 raw-child grammar, latter adaptive width and child selection. They do not accept nullable/list/struct wrappers as fixed data. Version gating belongs to callers."
+        ],
+        [
+          642,
+          655,
+          "Public try_bitpacking_miniblock directFixedWidth delegates optional feature-gated choice; public try_raw_fixed_width_miniblock returns rawValueEncoder for direct fixed only, no stat or parameter checks."
+        ],
+        [
+          656,
+          698,
+          "Public try_variable_width_miniblock returnsOk(None) for other kinds, rejects offset width except32/64, then reads DataSize and MaxLength before exactnone raw shortcut. FSST selected if explicitfsst OR missing compression and non-Binary/non-LargeBinary field and max length>=FSST minimum and data size>=FSST minimum. Choose FSST or BinaryMini(minichunk). Explicit non-fsst/non-none scheme parses and wraps GeneralMini; no automatic general wrapper. Explicit zstd/lz4 bypass autoFSST. Invalid strings error; absent stats panic even withnone."
+        ],
+        [
+          699,
+          725,
+          "Public fixed-packed mini helper accepts Struct only, rejects has_variable_width_child (any direct non-FixedWidth child) withInvalidInput, otherwise FixedMini. Empty struct passes this gate and fails deeper encoder assumptions. Raw fixed-size-list mini helper usesValueEncoder. Raw per-value acceptsFixedWidth orFixedSizeList only. (rust/lance-encoding/src/data.rs:1037-1041; rust/lance-encoding/src/encodings/physical/packed.rs:40-68)"
+        ],
+        [
+          726,
+          738,
+          "Private validate_packed_struct returnsNone for nonStruct, rejects child count differing from schema field children, then reports has_variable_width_child. Does not check nonempty children, row counts, actual schema type agreement, validity or buffers. Deeper packed encoders validate additional invariants."
+        ],
+        [
+          739,
+          756,
+          "Public reject_packed_struct_per_value uses that validation. Variable child returnsNotSupported with file-format message; fixed-only returnsInvalidInput saying per-value should not be used. For nonstruct returnsOk(None). No version argument; productionV2.1 selects this helper. (rust/lance-file/src/versions/v2_1/compression.rs:85-104)"
+        ],
+        [
+          757,
+          776,
+          "Public try_variable_packed_struct_per_value validates and returnsNone nonstruct, errorsInvalidInput for fixed-only, otherwise builds variable packed encoder from injected Arc strategy and cloned field children. ProductionV2.2 uses this; decoder support does not imply writers select it in every version. (rust/lance-file/src/versions/v2_2/compression.rs:77-99)"
+        ],
+        [
+          777,
+          798,
+          "Public try_packed_struct_per_value supports either variable or fixed-only Struct after count validation; clones children and retains strategy only for variable encoder. ProductionV2.3 and test StructuralU32 use this general helper, so test mode differs from productionV2.2 fixed-packed restriction. (rust/lance-file/src/versions/v2_3/compression.rs:77-99; rust/lance-encoding/src/testing.rs:162-181)"
+        ],
+        [
+          799,
+          823,
+          "Public variable per-value returnsNone nonvariable and rawVariableEncoder immediately for exactnone, before stat/offset validation. Otherwise reads MaxLength/DataSize. If (max_length>32768 OR any explicit nonfsst scheme) AND size>=32768, returns exactzstd with configuredlevel via try_new, or defaultCompressedBufferEncoder for every other case. Thus explicitlz4/unknown can select defaultcodec; explicitfsst with sufficiently large max length can be superseded. This branch bypasses offset-width validation."
+        ],
+        [
+          824,
+          842,
+          "Remaining variable per-value path validates offsets32/64 and buildsrawVariableEncoder. FSST only explicitfsst or automaticmissingcompression with nonbinary field and max/data thresholds; else raw. Consequently explicit general requests on payloads smaller than32768 fall back raw without parsing, including unknown names; configured levels affect only exactzstd large branch. Default encoder choice is feature-dependent, not alwayszstd. (rust/lance-encoding/src/encodings/physical/block.rs:471-489)"
+        ],
+        [
+          843,
+          871,
+          "Public fixed-u8/adaptive RLE block wrappers type-guardFixedWidth and propagate Result; public bitpacking block type-guards and calls ungated helper. No version or compression=none bypass inside these entry points. Version strategy ordering determines whether they run."
+        ],
+        [
+          872,
+          895,
+          "Public try_general_block drops config half of private return while boxedencoder retains it. Public try_raw_block supports FixedWidth->ValueEncoder and VariableWidth->VariableEncoder only; unlike rawpervalue it does not acceptFixedSizeList. NonmatchingkindNone."
+        ],
+        [
+          896,
+          909,
+          "Public MiniBlockDecompressor:Debug+Send+Sync requires decode(Vec<LanceBuffer>,external count)->Result<DataBlock>. Optional decoded_size_bytes defaultsNone; documentation requires exact aggregate data_size for a single FixedWidth allocation and says multibuffer/layout-dependent outputs shouldNone. This is a contract, not enforced by trait."
+        ],
+        [
+          910,
+          933,
+          "Public FixedPerValueDecompressor requiresdecode(FixedWidthDataBlock,external count) and bits_per_value, with exact optional decoded_size defaultNone; comment requires byte-multiplewidth but trait has no check. Public VariablePerValueDecompressor requiresdecode(VariableWidthBlock), with no separatecount orsize estimator. All requireDebug+Send+Sync."
+        ],
+        [
+          934,
+          950,
+          "Public BlockDecompressor requiresdecode(Optionpayload,externalcount). requires_payload defaulttrue; infer_num_values(payload) defaultsOk(None), documented to avoid materializing decoded payload. These hooks support metadata-only and recoverable-count child codecs; no automatic enforcement at trait level."
+        ],
+        [
+          951,
+          961,
+          "Crate-internal require_block_payload rejectsNone asInvalidInput namingcodec, acceptsSomeempty. require_no_block_payload rejects everySome includingempty with metadata-only message, acceptsNone. They distinguish payload presence from byte length."
+        ],
+        [
+          962,
+          987,
+          "Public DecompressionStrategy requires mini,fixedpervalue,variablepervalue,block factories. Mini receives an extra dyn DecompressionStrategy for nested dispatch; other methods onlyself. Public empty DefaultDecompressionStrategy derivesDebug/Default; no state/cache/config/version fields."
+        ],
+        [
+          988,
+          1030,
+          "Default mini factory unwraps outer compression (missing panics). Flat->ValueDecompressor. Inline bitpacking uses feature if enabled elseNotSupported. Variable unwraps offsets descriptor/inner compression, requiresFlat orpanics, casts bits to u8 before BinaryMini constructor validation; values subdescriptor ignored here. FSST recursively invokes suppliedstrategy for nestedvalues then wraps table."
+        ],
+        [
+          1031,
+          1079,
+          "Default mini supports FixedPacked, rejectsVariablePacked asNotSupported, handlesFSL fallibly, buildsRLE using suppliedstrategy and BSS only with nestedFlat (unwrap/panic; castswidth). General requires values/configInvalidInput, recurses through self mini factory while passing suppliedstrategy onward, converts scheme/level and wraps GeneralMini. Other tags todo! panic, includingConstant/Dictionary/OutOfLine. No version/recursion-depth gate."
+        ],
+        [
+          1080,
+          1100,
+          "Default fixed per-value supportsConstant(optionalbytes copied to LanceBuffer alignment1),Flat,FSL andPackedStructFixed. Missing outer descriptor unwraps, unsupported tags todo! panic withdebug. No generic General/FSST/RLE fixed per-value support."
+        ],
+        [
+          1101,
+          1126,
+          "Default variable per-value Variable unwraps offsetsFlat, asserts width<255 rather than validating32/64, then returns passthroughVariableDecoder; valuesdescriptor ignored. FSST wraps cloned symbol table around hardcodedVariableDecoder, ignoring nestedFSSTvalues. General requires compressionconfig and chooses CompressedBufferEncoder::from_scheme, ignoring descriptorvalues andlevel for read."
+        ],
+        [
+          1127,
+          1170,
+          "VariablePacked variable factory loops descriptors requiring values andlayout, recursively uses self fixed/variable factory per BitsPerValue/BitsPerLength, retains configuredwidth and Arc decoder, then creates packedvariable decoder. No nonempty/layout-width agreement/recursion-depth validation here. Unsupportedtags todo! panic. Child factory errors propagate."
+        ],
+        [
+          1171,
+          1237,
+          "Blockfactory supportsInline,Flat,Constant,Variable(header-drivenBinaryBlock),FSL,OutOfLine,General,RLE. OutOfLine requires nestedFlat but unwraps missingvalue/compression, uses compressedinnerwidth anduncompressedouterwidth. General requires values/config, recurses selfblock, convertsconfig and invokes fallibleGeneralBlockconstructor. Others todo! panic. Inline/OutOfLine arms reference cfg-imported types without cfg; no-feature build remains unverified. Variabledescriptorcontents unused."
+        ],
+        [
+          1238,
+          1290,
+          "Crate-internal create_rle_decompressor requires values/run_lengths descriptors, constructs both child readers before width/dependency checks, requires valuebits8/16/32/64 and run-lengthbits8/16/32, and rejects both children requiringnum_values because neither could infer run count. Bothidentity ->rawRleDecompressor; otherwise child-aware. Errors InvalidInput with contextual widths/roles; errors from childfactory propagate first."
+        ],
+        [
+          1291,
+          1313,
+          "Private create_rle_child_decompressor requires compression, validates grammar to(bits,requirescount,needsdecoder), uses suppliedstrategy.create_block_decompressor only for nonflatchildren, else buildsidentityflat. Flat child descriptor optionaldata compression is not inspected by thisvalidator."
+        ],
+        [
+          1314,
+          1362,
+          "RLE child grammar acceptsFlat(bits,false,false),General(config required,values and innercompression required) with allowedinner checked below, andOutOfLine with mandatory nestedFlat. OutOfLine requires external run count and returns uncompressedwidth; General needsblockdecoder and inherits innercountneed. Othertags includingInline rejected with named InvalidInput. Flatcompressedwidth/optionaldata not validated here."
+        ],
+        [
+          1363,
+          1390,
+          "General RLE inner grammar permits onlyFlat (count-independent) orOutOfLine->Flat (count-dependent). NestedGeneral/RLE/Inline/Constant/etc rejected. Custom strategy cannot bypass this syntactic gate. Width validity checked by outerRLE after child construction; no versioncapability check."
+        ],
+        [
+          1391,
+          1408,
+          "Private compression_name maps all13 protobuf compression variants to stable human-readable labels for errors: flat,variable,fsst,out-of-line bitpacking,inline bitpacking,general,constant,dictionary,byte stream split,packed struct,fixed-size list,variable packed struct,rle. No payload/descriptor introspection."
+        ],
+        [
+          1409,
+          1449,
+          "cfg(test) module importsHashMap,Arc,Arrowfields,parameters,physicalBssMode/ComputeStat/TestEncoding/extractchain. Helpers strategy delegates toTestEncoding; baseline alwaysStructuralU16; selected_block_codec creates/compressesclone and returnscodec+descriptor discardingpayload; context is new(0,true,true) regardlessmode; testfield nullabletrue/id=-1. None are runtime evidence."
+        ],
+        [
+          1450,
+          1490,
+          "Fixed-run fixture allocates count*floor(width/8), sets values_per_run=max(count/run_count,1), increments byte by17 everygroup and writes byte+j per word; computes realstats. run_count0 dividesbyzero; requestedrun_count can differ from realized transitions due integerdivision. No manualstat injection despite helpername/comment."
+        ],
+        [
+          1491,
+          1549,
+          "Ordinary fixedfixture zeroallocates and writes only first byte i%256 pervalue, leaves higherbyteszero, computesstats. rle_run_length_bits unwraps directRLE/runlengthFlat; expect_rle_encoding acceptsdirectRLE oroneGeneralwrapper containingRLE and panicsotherwise. Not recursive arbitrarywrapper support."
+        ],
+        [
+          1550,
+          1614,
+          "Variablefixture creates offsets from varying lengths: avg0->1, else max(avg+i%8-4,1) capped2*avg. Fills everybyte with rowindex+j wrapping, casts offsets to signed32 or keeps64, unsupportedwidthpanics; initializesstats. Capacity/casts unchecked. FSSTcandidate is4096values,width32,average FSSTleastmax+16. No actual NULL payload despite nullablefieldmetadata."
+        ],
+        [
+          1615,
+          1673,
+          "Two tests configure columnpattern *_id or typeInt32, disableBSS, set lowrunthreshold and lz4/zstd; fixture1000rows with100/50runs. AssertdebugGeneral+RLE orRLE respectively, not roundtrip or exactratio/codecbytes. baselineStructuralU16 policy."
+        ],
+        [
+          1674,
+          1716,
+          "Bitpacking-gated regression #6626 uses1024zeros then1024ones u16, assertsOutOfLine debug. Parameterized full-width rejection uses1600(runt) and2048(whole) signed64 -1values, asserts try_bitpacking_blockNone. Tests coverzero statsegment andfullbitwidthskip, no direct malformedstatcase."
+        ],
+        [
+          1717,
+          1771,
+          "Sparse RLE block header test uses two i32 repeated42, expectsrawValueEncoder/Flat since8-byteheader defeats savings. Bitpacking-gated sparse test uses2048u16 alternatingruns length2 and assertsOutOfLine selected/descriptor. Both create actualcompressed data but discardpayload; no decoding."
+        ],
+        [
+          1772,
+          1823,
+          "Bitpacking-gated mini test uses256u64,64runs each4 alternating3/4/5 and assertsInline, notRLE. check_uncompressed_encoding requires chain variable->flat oflength2 orflat length1; it examines descriptors, not payload equality."
+        ],
+        [
+          1824,
+          1866,
+          "test_none_compression configures embeddings columnnone and tests fixed32/1000 plus variable32/10 average32768 for bothmini andpervalue. Compresses and assertsraw descriptorchains only; no roundtrip/count/bytecomparison orwholeblockcase."
+        ],
+        [
+          1867,
+          1907,
+          "Metadata-none test repeats bothinterfaces forBinaryfield metadata exactnone andsamefixed/variablefixtures. Verifies strategy metadata path throughdescriptornames; mismatchedfielddatatype/fixedpayload accepted bytest."
+        ],
+        [
+          1908,
+          1961,
+          "AutomaticFSST tests same4096-rowcandidate: Binaryfield selectsBinaryMini+VariableEncoder and excludesFSSTdebug, Utf8 selectsFsstMini+FsstPerValue. They inspect factories only, do not compress/decode orcoverLargeBinary/thresholdboundaries."
+        ],
+        [
+          1962,
+          2017,
+          "ExplicitFSST Binaryfield test overridesexclusion andexpectsFSSTbothfactories. zstd-gated largepervalue test uses64values average40KiB andlevel19, assertsdebugZstdBufferCompressor andcompression_level19; no actualpayloadroundtrip orlz4/unknownrequestcase."
+        ],
+        [
+          2018,
+          2082,
+          "Parameter merge test setsInt32type lz4/threshold.5 anduser_idcolumn zstd/level6/threshold.2; assertscolumnwins plusotherfieldtypefallback. Pattern test log_* matcheslog_messages but notmessages_log. These test parameter APIs, not metadata invalidvaluebehavior orfullpatternprecedence."
+        ],
+        [
+          2083,
+          2116,
+          "Legacy_metadata_support name means fieldmetadata exactnone, not legacyfileformat; assertsValueEncoder. Defaultbehavior fixture requests600runs/1000 but integer helperrealizes1000runs; acceptsrawValue orInline. Comments naming600runs are inaccurate for fixturealgorithm."
+        ],
+        [
+          2117,
+          2159,
+          "Metadata compression zstdlevel6 test assertsGeneralMini only, notlevelorinnercodec. MetadataRLEthreshold.8 withBSSoff and100runs/1000 assertsRLEdebug. No malformedmetadata/rangevalidation tests."
+        ],
+        [
+          2160,
+          2210,
+          "Sparse mini1000repeated7 i32 withthreshold1/BSSoff encodesu16runlength. Samefixture underStructuralU16/U32 preservesu8. These tests inspect directRLE descriptorFlat child width without roundtrip."
+        ],
+        [
+          2211,
+          2260,
+          "Sparse4096zeroi32 fixture assertsRLE andu16width, exercising selectedwidthcost beforebitpacking. Sparse sorted dictionaryindices four300-value runs likewiseexpectu16. No explicitraw bytecostassertion."
+        ],
+        [
+          2261,
+          2340,
+          "Sparse10runs each128values keepsu8. Feature-gated lz4-or-zstd request over8192 distinctu32 runs of4 withBSSoff/threshold1 underStructuralU16/U32 assertsbothRLEchildrenFlat; helper toleratesGeneralouterwrapper. Confirms released-mode childgrammar, notabsenceofoutergeneralcompression."
+        ],
+        [
+          2341,
+          2382,
+          "Bitpacking-gated sparse8192i32 runs of4 assertsRLE, valueschildOutOfLine andrunlengthchildFlat. Doesnotdecode, anddoesnotassertallchildmetadatawidths/payloadcost."
+        ],
+        [
+          2383,
+          2430,
+          "Bitpacking-gated sparse8192u64 runs of8 cycling3/4/5 assertsRLE survivescomparisonwithInline afterchildselection; valuesOutOfLine andlengthsFlat. No actualroundtrip orprecisesizethresholdassertion."
+        ],
+        [
+          2431,
+          2490,
+          "Metadata override test replaces columnlz4/threshold.3 withmetadata none andexpectsValueEncoder. Mixedconfiguration leaves typelz4/threshold.5, addsmetadatalevel3, assertsGeneralMini only; despitecomment it doesnotassertlevel3."
+        ],
+        [
+          2491,
+          2533,
+          "BSSmetadata testsFloat32/100 andFloat64/100 withon+lz4; assertBSS orGeneralMini+BSS debug. Fixtures are bytepatterns, not numerictemperature/distribution. No automaticheuristicboundaryoractualroundtrip here."
+        ],
+        [
+          2534,
+          2586,
+          "Feature-gated generalblockStructuralU32 test FixedSizeBinary3 =>24bits/1024values requests availablelz4preferelsezstd, assertGeneraldescriptor,defaultdecode andexactbits,count,allpayloadbytes. This isactualtestcode forroundtrip butnotexecuted inKBtask."
+        ],
+        [
+          2587,
+          2640,
+          "Private gated assert_general_block_preserves_compression_level builds24-bit1024fixture andcomparesentireBufferCompression descriptor againstrequested scheme/Optionlevel. zstdcaseassertsNone retained; lz4caseassertsSome7 retained. Testsdescriptorconfiguration, not runtimecodec honoring of level."
+        ],
+        [
+          2641,
+          2698,
+          "Feature-gated StructuralU16 explicitgeneralrequest test assertsnoGeneralblockdescriptor. StructuralU32 none over24bits/20000 (>32768bytes) confirmsautomaticgeneraldisabled. Neither assertswhichalternativecodec exceptnonGeneral."
+        ],
+        [
+          2699,
+          2750,
+          "Sparse70000repeated42 i32 block choosesu32runlength, defaultdecoderroundtripsallvalues. StructuralU32 samefixturekeepsu8 andchecksdescriptoronly. No directu16blockcasehere. Testmodegatesmustbecrosscheckedagainstproductionstrategies."
+        ],
+        [
+          2751,
+          2821,
+          "Two blockpolicytests create1000u16values as10runs of100: StructuralU32 assertsRLEdebug; StructuralU16 assertsnotRLE. File ends 40 test functions (oneparameterizedtwocases), helpers andmodulebrace. Local gaps: decoder malformed/missingmetadata,customnestedstrategy,negative/nonfiniteparams,invalidstatmaps,per-valuefallback edgecases,no-bitpacking builds andstrictthresholdboundary. Alltestsread,noneexecuted."
+        ]
+      ]
+    }
+  ]
+}

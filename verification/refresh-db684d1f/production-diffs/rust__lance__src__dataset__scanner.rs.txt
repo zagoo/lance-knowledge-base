@@ -1,0 +1,396 @@
+@@ -102,11 +102,11 @@ use crate::dataset::row_offsets_to_row_addresses;
+  102  use crate::dataset::rowids::{live_row_addrs_to_row_ids, translate_addr_treemap_to_row_ids};
+  103  use crate::dataset::utils::SchemaAdapter;
+  104  use crate::index::DatasetIndexInternalExt;
+  105 -use crate::index::scalar::fetch_index_details;
+  105  use crate::index::scalar::inverted::{
+  106      fts_index_fragment_bitmap, load_segment_details, load_segments, normalize_inverted_details,
+  107      resolve_fts_field, resolve_query_document_granularity, validate_combined_fields_target_column,
+  108  };
+  109 +use crate::index::scalar::{IndexDetails, fetch_index_details};
+  110  use crate::index::scalar_logical::{load_named_scalar_segments, scalar_index_fragment_bitmap};
+  111  use crate::index::vector::utils::{
+  112      default_distance_type_for, get_vector_dim, get_vector_type, validate_distance_type_for,
+
+@@ -1101,6 +1101,13 @@ impl AggregateExprBuilder<true> {
+ 1101  ///   .buffered(16)
+ 1102  ///   .sum()
+ 1103  /// ```
+ 1104 +#[derive(Clone)]
+ 1105 +struct ScalarIndexSelection {
+ 1106 +    index_name: String,
+ 1107 +    segments: Arc<Vec<IndexMetadata>>,
+ 1108 +    segment_uuids: Option<Arc<HashSet<Uuid>>>,
+ 1109 +}
+ 1110 +
+ 1111  #[derive(Clone)]
+ 1112  pub struct Scanner {
+ 1113      dataset: Arc<Dataset>,
+
+@@ -1197,6 +1204,9 @@ pub struct Scanner {
+ 1204      /// If set, this scanner serves only these fragments.
+ 1205      fragments: Option<Vec<Fragment>>,
+ 1206  
+ 1207 +    /// If set, scalar-index planning is restricted to this logical index and optional segment set.
+ 1208 +    scalar_index_selection: Option<ScalarIndexSelection>,
+ 1209 +
+ 1210      /// If set, this scanner will only search the specified vector index segments.
+ 1211      index_segments: Option<Vec<Uuid>>,
+ 1212  
+
+@@ -1427,6 +1437,217 @@ impl TakeOperation {
+ 1437      }
+ 1438  }
+ 1439  
+ 1440 +impl Dataset {
+ 1441 +    /// Count rows matching `filter` while pinning scalar-index planning to `index_name`.
+ 1442 +    ///
+ 1443 +    /// When `segment_uuids` is present, only those physical index segments are opened and their
+ 1444 +    /// current fragment coverage defines the count scope. That coverage is accepted only when the
+ 1445 +    /// selection includes every segment that contributes to it. After a fragment-reuse rewrite, one
+ 1446 +    /// source segment can advertise every destination fragment while still depending on sibling
+ 1447 +    /// segments; an incomplete selection is rejected. A supplied `fragment_ids` list must exactly
+ 1448 +    /// equal the selected segments' current coverage.
+ 1449 +    #[instrument(skip_all)]
+ 1450 +    pub async fn count_indexed_rows(
+ 1451 +        &self,
+ 1452 +        index_name: &str,
+ 1453 +        filter: &str,
+ 1454 +        segment_uuids: Option<&[Uuid]>,
+ 1455 +        fragment_ids: Option<&[u32]>,
+ 1456 +    ) -> Result<u64> {
+ 1457 +        if index_name.is_empty() {
+ 1458 +            return Err(Error::invalid_input("index_name must not be empty"));
+ 1459 +        }
+ 1460 +        if filter.is_empty() {
+ 1461 +            return Err(Error::invalid_input("filter must not be empty"));
+ 1462 +        }
+ 1463 +
+ 1464 +        let requested_fragments = fragment_ids
+ 1465 +            .map(|fragment_ids| {
+ 1466 +                let fragment_set = fragment_ids.iter().copied().collect::<RoaringBitmap>();
+ 1467 +                if fragment_set.len() != fragment_ids.len() as u64 {
+ 1468 +                    return Err(Error::invalid_input(format!(
+ 1469 +                        "fragment_ids contains duplicate fragment IDs: {fragment_ids:?}"
+ 1470 +                    )));
+ 1471 +                }
+ 1472 +                let unknown = &fragment_set - self.fragment_bitmap.as_ref();
+ 1473 +                if !unknown.is_empty() {
+ 1474 +                    return Err(Error::invalid_input(format!(
+ 1475 +                        "fragment_ids contains unknown fragment IDs: {:?}",
+ 1476 +                        unknown.iter().collect::<Vec<_>>()
+ 1477 +                    )));
+ 1478 +                }
+ 1479 +                Ok(fragment_set)
+ 1480 +            })
+ 1481 +            .transpose()?;
+ 1482 +
+ 1483 +        let all_indices = self.load_indices().await?;
+ 1484 +        let (selected_segments, selected_segment_uuids, fragment_scope) = if let Some(
+ 1485 +            segment_uuids,
+ 1486 +        ) = segment_uuids
+ 1487 +        {
+ 1488 +            if segment_uuids.is_empty() {
+ 1489 +                return Err(Error::invalid_input(
+ 1490 +                    "segment_uuids must contain at least one UUID",
+ 1491 +                ));
+ 1492 +            }
+ 1493 +            let selected_uuid_set = segment_uuids.iter().copied().collect::<HashSet<_>>();
+ 1494 +            if selected_uuid_set.len() != segment_uuids.len() {
+ 1495 +                return Err(Error::invalid_input(format!(
+ 1496 +                    "segment_uuids contains duplicate UUIDs: {segment_uuids:?}"
+ 1497 +                )));
+ 1498 +            }
+ 1499 +
+ 1500 +            let mut selected_segments = Vec::with_capacity(segment_uuids.len());
+ 1501 +            let mut selected_coverage = RoaringBitmap::new();
+ 1502 +            for segment_uuid in segment_uuids {
+ 1503 +                let segment = all_indices
+ 1504 +                    .iter()
+ 1505 +                    .find(|segment| segment.uuid == *segment_uuid)
+ 1506 +                    .ok_or_else(|| {
+ 1507 +                        Error::invalid_input(format!(
+ 1508 +                            "Scalar index segment {segment_uuid} does not exist"
+ 1509 +                        ))
+ 1510 +                    })?;
+ 1511 +                if segment.name != index_name {
+ 1512 +                    return Err(Error::invalid_input(format!(
+ 1513 +                        "Scalar index segment {segment_uuid} belongs to index '{}', not requested index '{index_name}'",
+ 1514 +                        segment.name
+ 1515 +                    )));
+ 1516 +                }
+ 1517 +                let Some(field_id) = segment.keyed_field() else {
+ 1518 +                    return Err(Error::invalid_input(format!(
+ 1519 +                        "Scalar index '{index_name}' segment {segment_uuid} has no keyed field"
+ 1520 +                    )));
+ 1521 +                };
+ 1522 +                let field = self.schema().field_by_id(field_id).ok_or_else(|| {
+ 1523 +                        Error::internal(format!(
+ 1524 +                            "Scalar index '{index_name}' segment {segment_uuid} references missing field ID {field_id}"
+ 1525 +                        ))
+ 1526 +                    })?;
+ 1527 +                let field_path =
+ 1528 +                    if let Some(ancestors) = self.schema().field_ancestry_by_id(field.id) {
+ 1529 +                        let field_refs = ancestors
+ 1530 +                            .iter()
+ 1531 +                            .map(|field| field.name.as_str())
+ 1532 +                            .collect::<Vec<_>>();
+ 1533 +                        lance_core::datatypes::format_field_path(&field_refs)
+ 1534 +                    } else {
+ 1535 +                        field.name.clone()
+ 1536 +                    };
+ 1537 +                let details = IndexDetails(fetch_index_details(self, &field_path, segment).await?);
+ 1538 +                if details.is_vector() || details.get_plugin().is_err() {
+ 1539 +                    return Err(Error::invalid_input(format!(
+ 1540 +                        "Index '{index_name}' segment {segment_uuid} is not a usable scalar index segment"
+ 1541 +                    )));
+ 1542 +                }
+ 1543 +                let coverage = segment.fragment_bitmap.as_ref().ok_or_else(|| {
+ 1544 +                        Error::invalid_input(format!(
+ 1545 +                            "Scalar index '{index_name}' segment {segment_uuid} is missing fragment coverage"
+ 1546 +                        ))
+ 1547 +                    })?;
+ 1548 +                let current_coverage = coverage & self.fragment_bitmap.as_ref();
+ 1549 +                if current_coverage.is_empty() {
+ 1550 +                    return Err(Error::invalid_input(format!(
+ 1551 +                        "Scalar index '{index_name}' segment {segment_uuid} does not cover any current dataset fragments"
+ 1552 +                    )));
+ 1553 +                }
+ 1554 +                selected_coverage |= current_coverage;
+ 1555 +                selected_segments.push(segment.clone());
+ 1556 +            }
+ 1557 +            // Rewritten coverage is the contributor closure: a sibling whose bitmap
+ 1558 +            // overlaps this scope still owns rows in those fragments. Opening only
+ 1559 +            // the requested UUIDs would publish that scope and then under-count.
+ 1560 +            reject_incomplete_segment_contributors(
+ 1561 +                index_name,
+ 1562 +                all_indices.as_ref(),
+ 1563 +                &selected_uuid_set,
+ 1564 +                &selected_coverage,
+ 1565 +            )?;
+ 1566 +
+ 1567 +            if let Some(requested_fragments) = requested_fragments.as_ref()
+ 1568 +                && requested_fragments != &selected_coverage
+ 1569 +            {
+ 1570 +                return Err(Error::invalid_input(format!(
+ 1571 +                    "fragment_ids {:?} do not match selected segment coverage {:?} for scalar index '{index_name}'",
+ 1572 +                    requested_fragments.iter().collect::<Vec<_>>(),
+ 1573 +                    selected_coverage.iter().collect::<Vec<_>>()
+ 1574 +                )));
+ 1575 +            }
+ 1576 +
+ 1577 +            (
+ 1578 +                selected_segments,
+ 1579 +                Some(Arc::new(selected_uuid_set)),
+ 1580 +                Some(selected_coverage),
+ 1581 +            )
+ 1582 +        } else {
+ 1583 +            let selected_segments = all_indices
+ 1584 +                .iter()
+ 1585 +                .filter(|segment| segment.name == index_name)
+ 1586 +                .cloned()
+ 1587 +                .collect::<Vec<_>>();
+ 1588 +            if selected_segments.is_empty() {
+ 1589 +                return Err(Error::invalid_input(format!(
+ 1590 +                    "Scalar index '{index_name}' does not exist or has no usable segments"
+ 1591 +                )));
+ 1592 +            }
+ 1593 +            (selected_segments, None, requested_fragments)
+ 1594 +        };
+ 1595 +
+ 1596 +        let mut scanner = self.scan();
+ 1597 +        scanner.filter(filter)?;
+ 1598 +        scanner.project::<String>(&[])?;
+ 1599 +        scanner.with_row_id();
+ 1600 +        scanner.with_scalar_index_selection(
+ 1601 +            index_name.to_string(),
+ 1602 +            selected_segments,
+ 1603 +            selected_segment_uuids,
+ 1604 +        );
+ 1605 +        if let Some(fragment_scope) = fragment_scope {
+ 1606 +            let fragments = self
+ 1607 +                .fragments()
+ 1608 +                .iter()
+ 1609 +                .filter(|fragment| fragment_scope.contains(fragment.id as u32))
+ 1610 +                .cloned()
+ 1611 +                .collect();
+ 1612 +            scanner.with_fragments(fragments);
+ 1613 +        }
+ 1614 +        scanner.count_rows().await
+ 1615 +    }
+ 1616 +}
+ 1617 +
+ 1618 +/// Reject a UUID selection whose advertised fragments still depend on an unselected segment.
+ 1619 +fn reject_incomplete_segment_contributors(
+ 1620 +    index_name: &str,
+ 1621 +    indices: &[IndexMetadata],
+ 1622 +    selected_uuids: &HashSet<Uuid>,
+ 1623 +    selected_coverage: &RoaringBitmap,
+ 1624 +) -> Result<()> {
+ 1625 +    let mut missing = Vec::new();
+ 1626 +    let mut shared_fragments = RoaringBitmap::new();
+ 1627 +    for segment in indices {
+ 1628 +        if segment.name != index_name || selected_uuids.contains(&segment.uuid) {
+ 1629 +            continue;
+ 1630 +        }
+ 1631 +        let Some(coverage) = segment.fragment_bitmap.as_ref() else {
+ 1632 +            continue;
+ 1633 +        };
+ 1634 +        let overlap = coverage & selected_coverage;
+ 1635 +        if overlap.is_empty() {
+ 1636 +            continue;
+ 1637 +        }
+ 1638 +        shared_fragments |= overlap;
+ 1639 +        missing.push(segment.uuid);
+ 1640 +    }
+ 1641 +    if missing.is_empty() {
+ 1642 +        return Ok(());
+ 1643 +    }
+ 1644 +    missing.sort_unstable();
+ 1645 +    Err(Error::invalid_input(format!(
+ 1646 +        "Scalar index '{index_name}' selection omits contributing segments {missing:?} for fragments {:?}. Select every segment that covers those fragments",
+ 1647 +        shared_fragments.iter().collect::<Vec<_>>()
+ 1648 +    )))
+ 1649 +}
+ 1650 +
+ 1651  impl Scanner {
+ 1652      pub fn new(dataset: Arc<Dataset>) -> Self {
+ 1653          let projection_plan = ProjectionPlan::full(dataset.clone()).unwrap();
+
+@@ -1456,6 +1677,7 @@ impl Scanner {
+ 1677              use_stats: true,
+ 1678              ordered: true,
+ 1679              fragments: None,
+ 1680 +            scalar_index_selection: None,
+ 1681              index_segments: None,
+ 1682              fast_search: false,
+ 1683              use_scalar_index: true,
+
+@@ -1505,6 +1727,20 @@ impl Scanner {
+ 1727          self
+ 1728      }
+ 1729  
+ 1730 +    fn with_scalar_index_selection(
+ 1731 +        &mut self,
+ 1732 +        index_name: String,
+ 1733 +        segments: Vec<IndexMetadata>,
+ 1734 +        segment_uuids: Option<Arc<HashSet<Uuid>>>,
+ 1735 +    ) -> &mut Self {
+ 1736 +        self.scalar_index_selection = Some(ScalarIndexSelection {
+ 1737 +            index_name,
+ 1738 +            segments: Arc::new(segments),
+ 1739 +            segment_uuids,
+ 1740 +        });
+ 1741 +        self
+ 1742 +    }
+ 1743 +
+ 1744      /// Restrict vector index search to the specified index segments.
+ 1745      ///
+ 1746      /// This setting is only supported for vector search.
+
+@@ -2221,12 +2457,12 @@ impl Scanner {
+ 2457      /// Default value is false.
+ 2458      ///
+ 2459      /// This is essentially a weak consistency search, only on the indexed data.
+ 2460 +    /// Row IDs are used internally but are only returned when explicitly requested.
+ 2461      pub fn fast_search(&mut self) -> &mut Self {
+ 2462          if let Some(q) = self.nearest.as_mut() {
+ 2463              q.use_index = true;
+ 2464          }
+ 2465          self.fast_search = true;
+ 2229 -        self.projection_plan.include_row_id(); // fast search requires _rowid
+ 2466          self
+ 2467      }
+ 2468  
+
+@@ -3073,7 +3309,14 @@ impl Scanner {
+ 3309          // Check expr filter
+ 3310          let filter_plan = if let Some(filter) = self.filter.expr_filter.as_ref() {
+ 3311              let expr = filter.to_datafusion(self.dataset.schema(), filter_schema.as_ref())?;
+ 3076 -            let index_info = self.dataset.scalar_index_info().await?;
+ 3312 +            let index_info = match self.scalar_index_selection.as_ref() {
+ 3313 +                Some(selection) => {
+ 3314 +                    self.dataset
+ 3315 +                        .scalar_index_info_for_segments(selection.segments.as_ref())
+ 3316 +                        .await?
+ 3317 +                }
+ 3318 +                None => self.dataset.scalar_index_info().await?,
+ 3319 +            };
+ 3320              let filter_plan =
+ 3321                  planner.create_filter_plan(expr.clone(), &index_info, use_scalar_index)?;
+ 3322  
+
+@@ -3108,6 +3351,15 @@ impl Scanner {
+ 3351              FilterPlan::new(query_filter, ExprFilterPlan::default())
+ 3352          };
+ 3353  
+ 3354 +        if let Some(selection) = self.scalar_index_selection.as_ref()
+ 3355 +            && filter_plan.expr_filter_plan.index_query.is_none()
+ 3356 +        {
+ 3357 +            return Err(Error::invalid_input(format!(
+ 3358 +                "Filter cannot be planned using scalar index '{}'",
+ 3359 +                selection.index_name
+ 3360 +            )));
+ 3361 +        }
+ 3362 +
+ 3363          // Check query filter
+ 3364          if filter_plan.query_filter.is_some()
+ 3365              && self.nearest.is_none()
+
+@@ -3774,10 +4026,17 @@ impl Scanner {
+ 4026                      )
+ 4027                      .await?
+ 4028                          & target_fragments;
+ 3777 -                    Some(Arc::new(
+ 4029 +                    let mut exec =
+ 4030                          ScalarIndexExec::new(self.dataset.clone(), index_query, result_format)
+ 3779 -                            .with_fragment_scope(fragment_scope),
+ 3780 -                    ) as Arc<dyn ExecutionPlan>)
+ 4031 +                            .with_fragment_scope(fragment_scope);
+ 4032 +                    if let Some(segment_uuids) = self
+ 4033 +                        .scalar_index_selection
+ 4034 +                        .as_ref()
+ 4035 +                        .and_then(|selection| selection.segment_uuids.clone())
+ 4036 +                    {
+ 4037 +                        exec = exec.with_segment_uuids(segment_uuids);
+ 4038 +                    }
+ 4039 +                    Some(Arc::new(exec) as Arc<dyn ExecutionPlan>)
+ 4040                  } else {
+ 4041                      None
+ 4042                  }
+
+@@ -7080,11 +7339,18 @@ impl Scanner {
+ 7339  
+ 7340          // Build the MaterializeIndexExec, blocking stale row addresses so the index never
+ 7341          // emits them. Stale rows are re-scored separately via a targeted take below.
+ 7083 -        let mat_exec = MaterializeIndexExec::new(
+ 7342 +        let mut mat_exec = MaterializeIndexExec::new(
+ 7343              self.dataset.clone(),
+ 7344              index_expr.clone(),
+ 7345              Arc::new(relevant_frags),
+ 7346          );
+ 7347 +        if let Some(segment_uuids) = self
+ 7348 +            .scalar_index_selection
+ 7349 +            .as_ref()
+ 7350 +            .and_then(|selection| selection.segment_uuids.clone())
+ 7351 +        {
+ 7352 +            mat_exec = mat_exec.with_segment_uuids(segment_uuids);
+ 7353 +        }
+ 7354          let mat_exec = match self.stale_rows_block_mask(&stale_rows).await? {
+ 7355              Some(block) => mat_exec.with_overlay_block(block),
+ 7356              None => mat_exec,
+
+@@ -7911,6 +8177,13 @@ impl Scanner {
+ 8177                  //    unless fast_search allows skipping uncovered fragments.
+ 8178                  let mut exec =
+ 8179                      ScalarIndexExec::new(self.dataset.clone(), index_query.clone(), result_format);
+ 8180 +                if let Some(segment_uuids) = self
+ 8181 +                    .scalar_index_selection
+ 8182 +                    .as_ref()
+ 8183 +                    .and_then(|selection| selection.segment_uuids.clone())
+ 8184 +                {
+ 8185 +                    exec = exec.with_segment_uuids(segment_uuids);
+ 8186 +                }
+ 8187                  if missing_frags.is_empty() && !relevant_frags.is_empty() {
+ 8188                      exec = exec.with_fragment_scope(
+ 8189                          relevant_frags

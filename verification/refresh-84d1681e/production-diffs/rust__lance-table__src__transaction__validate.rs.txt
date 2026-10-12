@@ -1,0 +1,83 @@
+@@ -215,9 +215,43 @@ fn merge_fragments_valid(manifest: &Manifest, new_fragments: &[Fragment]) -> Res
+  215          )));
+  216      }
+  217  
+  218 -    // Collect new fragment IDs
+  219 -    let new_fragment_map: HashMap<u64, &Fragment> =
+  220 -        new_fragments.iter().map(|f| (f.id, f)).collect();
+  218 +    // Id 0 means unassigned (assigned at commit, like Append); a non-zero id
+  219 +    // unknown to the manifest was pre-reserved. The first occurrence of each
+  220 +    // previous id is the existing fragment (mirrors build_manifest), so staged
+  221 +    // id-0 fragments must follow the existing ones.
+  222 +    let mut new_fragment_map: HashMap<u64, &Fragment> = HashMap::new();
+  223 +    for fragment in new_fragments {
+  224 +        if fragment.id != 0 && new_fragment_map.contains_key(&fragment.id) {
+  225 +            return Err(Error::invalid_input(format!(
+  226 +                "Merge operation contains duplicate fragment id {}. \
+  227 +                 New fragments must use id 0 (assigned at commit time) or a unique reserved id.",
+  228 +                fragment.id
+  229 +            )));
+  230 +        }
+  231 +        new_fragment_map.entry(fragment.id).or_insert(fragment);
+  232 +    }
+  233 +
+  234 +    // build_manifest treats the FIRST occurrence of each previous id as the
+  235 +    // merged existing fragment, so a staged id-0 fragment listed before the
+  236 +    // fragment it collides with would silently take that fragment's place.
+  237 +    // The row-count and row-id-metadata checks below only catch that swap
+  238 +    // when the two fragments differ; enforce the order structurally instead:
+  239 +    // every fragment classified as existing must precede every new one.
+  240 +    let previous_ids: HashSet<u64> = original_fragments.iter().map(|f| f.id).collect();
+  241 +    let mut seen_previous: HashSet<u64> = HashSet::new();
+  242 +    let mut first_new_id: Option<u64> = None;
+  243 +    for fragment in new_fragments {
+  244 +        let is_existing = previous_ids.contains(&fragment.id) && seen_previous.insert(fragment.id);
+  245 +        if !is_existing {
+  246 +            first_new_id.get_or_insert(fragment.id);
+  247 +        } else if let Some(new_id) = first_new_id {
+  248 +            return Err(Error::invalid_input(format!(
+  249 +                "Merge operation lists existing fragment {} after a new fragment \
+  250 +                 (id {}). New fragments must be listed after every existing fragment.",
+  251 +                fragment.id, new_id
+  252 +            )));
+  253 +        }
+  254 +    }
+  255  
+  256      // Check that all original fragments are preserved in the new fragments list
+  257      // Validate that each original fragment's metadata is preserved
+
+@@ -235,6 +269,16 @@ fn merge_fragments_valid(manifest: &Manifest, new_fragments: &[Fragment]) -> Res
+  269                      new_fragment.physical_rows
+  270                  )));
+  271              }
+  272 +            // A previous-id fragment without row id metadata on a stable
+  273 +            // dataset is most likely a staged fragment listed too early.
+  274 +            if manifest.uses_stable_row_ids() && new_fragment.row_id_meta.is_none() {
+  275 +                return Err(Error::invalid_input(format!(
+  276 +                    "Merge operation dropped row id metadata for existing fragment {}. \
+  277 +                     New fragments (id 0) must be listed after the existing fragments; \
+  278 +                     they are assigned row ids at commit time.",
+  279 +                    original_fragment.id
+  280 +                )));
+  281 +            }
+  282          } else {
+  283              missing_fragments.push(original_fragment.id);
+  284          }
+
+@@ -272,10 +316,12 @@ fn merge_schema_valid(
+  316      fragments: &[Fragment],
+  317  ) -> Result<()> {
+  318      let prior_schema = &manifest.schema;
+  275 -    let new_fragment_map: HashMap<u64, &Fragment> = fragments
+  276 -        .iter()
+  277 -        .map(|fragment| (fragment.id, fragment))
+  278 -        .collect();
+  319 +    // First occurrence wins: a later staged fragment with placeholder id 0 is
+  320 +    // not fragment 0's merged version.
+  321 +    let mut new_fragment_map: HashMap<u64, &Fragment> = HashMap::new();
+  322 +    for fragment in fragments {
+  323 +        new_fragment_map.entry(fragment.id).or_insert(fragment);
+  324 +    }
+  325  
+  326      // Remap and semantic errors first: a renumbered schema usually violates
+  327      // both the shared-id and new-id clauses.

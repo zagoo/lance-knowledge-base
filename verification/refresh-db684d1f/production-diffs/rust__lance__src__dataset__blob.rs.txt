@@ -1,0 +1,47 @@
+@@ -5194,7 +5194,7 @@ fn resolve_managed_base_id(
+ 5194      Ok(file.base_id)
+ 5195  }
+ 5196  
+ 5197 -fn field_contains_blob(field: &LanceField) -> bool {
+ 5197 +pub(super) fn field_contains_blob(field: &LanceField) -> bool {
+ 5198      field.is_blob_v2() || field.children.iter().any(field_contains_blob)
+ 5199  }
+ 5200  
+
+@@ -5279,7 +5279,10 @@ fn visit_managed_row(
+ 5279  }
+ 5280  
+ 5281  /// Discover referenced objects from stored descriptors without reading payloads.
+ 5282 -async fn managed_references(dataset: &Dataset) -> Result<HashSet<(Option<u32>, String)>> {
+ 5282 +async fn managed_references(
+ 5283 +    dataset: &Dataset,
+ 5284 +    mut scan: super::scanner::Scanner,
+ 5285 +) -> Result<HashSet<(Option<u32>, String)>> {
+ 5286      let fields = dataset
+ 5287          .schema()
+ 5288          .fields
+
+@@ -5293,7 +5296,6 @@ async fn managed_references(dataset: &Dataset) -> Result<HashSet<(Option<u32>, S
+ 5296          .iter()
+ 5297          .map(|field| field.name.as_str())
+ 5298          .collect::<Vec<_>>();
+ 5296 -    let mut scan = dataset.scan();
+ 5299      scan.project(&names)?;
+ 5300      scan.with_row_address();
+ 5301      let mut stream = scan.try_into_stream().await?;
+
+@@ -5322,8 +5324,12 @@ async fn managed_references(dataset: &Dataset) -> Result<HashSet<(Option<u32>, S
+ 5324  }
+ 5325  
+ 5326  /// Resolve only objects within the cleanup owner's deletion jurisdiction.
+ 5325 -pub(super) async fn managed_paths(dataset: &Dataset, owner: &Dataset) -> Result<HashSet<Path>> {
+ 5326 -    let references = managed_references(dataset).await?;
+ 5327 +pub(super) async fn managed_paths(
+ 5328 +    dataset: &Dataset,
+ 5329 +    owner: &Dataset,
+ 5330 +    scan: super::scanner::Scanner,
+ 5331 +) -> Result<HashSet<Path>> {
+ 5332 +    let references = managed_references(dataset, scan).await?;
+ 5333      let mut paths = HashSet::new();
+ 5334      let mut bases = HashMap::new();
+ 5335      for (id, uri) in references {

@@ -1,0 +1,113 @@
+@@ -27,6 +27,7 @@ use lance_select::RowAddrTreeMap;
+   27  use lance_table::format::Fragment;
+   28  
+   29  use crate::Dataset;
+   30 +use crate::dataset::fragment_slice::validate_physical_rows;
+   31  
+   32  use super::filtered_read::{
+   33      FilteredReadExec, FilteredReadOptions, FilteredReadPlan, FilteredReadThreadingMode,
+
+@@ -39,6 +40,10 @@ use super::table_identifier::{resolve_dataset, table_identifier_from_dataset};
+   40  
+   41  /// Convert a [`FilteredReadExec`] to proto for serialization.
+   42  ///
+   43 +/// Sliced plans require coordinated planner/executor upgrades. Older executors
+   44 +/// can ignore the physical allowlist and read outside the requested slices;
+   45 +/// this wire protocol does not negotiate capabilities.
+   46 +///
+   47  /// Uses `table_identifier_from_dataset` by default (no manifest bytes).
+   48  /// The caller can replace the `table` field with
+   49  /// [`table_identifier_from_dataset_with_manifest`] if desired.
+
+@@ -66,6 +71,10 @@ pub async fn filtered_read_exec_to_proto(
+   71  }
+   72  
+   73  /// Reconstruct a [`FilteredReadExec`] from proto.
+   74 +///
+   75 +/// A supplied dataset must be the snapshot used to plan the scan. Sliced plans
+   76 +/// require the planner and all executors to support physical row selections;
+   77 +/// mixed-version execution with older executors is unsupported.
+   78  pub async fn filtered_read_exec_from_proto(
+   79      proto: pb::FilteredReadExecProto,
+   80      dataset: Option<Arc<Dataset>>,
+
+@@ -125,6 +134,18 @@ fn fr_options_to_proto(
+  134          None
+  135      };
+  136  
+  137 +    let physical_row_addr_allowlist = options
+  138 +        .physical_row_addr_prefilter
+  139 +        .as_ref()
+  140 +        .map(|rows| {
+  141 +            let mut rows = rows.as_ref().clone();
+  142 +            rows.optimize();
+  143 +            let mut bytes = Vec::with_capacity(rows.serialized_size());
+  144 +            rows.serialize_into(&mut bytes)?;
+  145 +            Ok::<Vec<u8>, Error>(bytes)
+  146 +        })
+  147 +        .transpose()?;
+  148 +
+  149      Ok(pb::FilteredReadOptionsProto {
+  150          scan_range_before_filter: options
+  151              .scan_range_before_filter
+
+@@ -150,6 +171,7 @@ fn fr_options_to_proto(
+  171              .file_reader_options
+  172              .as_ref()
+  173              .and_then(|o| o.batch_size_bytes),
+  174 +        physical_row_addr_allowlist,
+  175      })
+  176  }
+  177  
+
+@@ -170,11 +192,17 @@ async fn fr_options_from_proto(
+  192          options = options.with_fragments(Arc::new(fragments));
+  193      }
+  194  
+  195 +    // Physical row selection must remain an option until local planning. In
+  196 +    // particular, a serialized exec may not have a pre-computed plan yet.
+  197 +    if let Some(bytes) = proto.physical_row_addr_allowlist {
+  198 +        let rows = RowAddrTreeMap::deserialize_from(Cursor::new(bytes))?;
+  199 +        validate_physical_rows(dataset, &rows).await?;
+  200 +        options = options.with_physical_row_addr_prefilter(Arc::new(rows));
+  201 +    }
+  202 +
+  203      // Scan ranges
+  204      if let Some(range) = proto.scan_range_before_filter {
+  175 -        options = options
+  176 -            .with_scan_range_before_filter(range_from_proto(&range))
+  177 -            .map_err(|e| Error::internal(e.to_string()))?;
+  205 +        options = options.with_scan_range_before_filter(range_from_proto(&range))?;
+  206      }
+  207      if let Some(range) = proto.scan_range_after_filter {
+  208          options = options
+
+@@ -217,6 +245,14 @@ async fn fr_options_from_proto(
+  245      // Filters — require filter_schema_ipc when filters are present
+  246      let has_filters =
+  247          proto.refine_filter_substrait.is_some() || proto.full_filter_substrait.is_some();
+  248 +    // The same pairing `FilteredReadOptions::with_filter` rejects. The two fields
+  249 +    // are assigned independently below, so without this a wire message carrying a
+  250 +    // refine filter alone would build options that setter would have refused.
+  251 +    if proto.refine_filter_substrait.is_some() && proto.full_filter_substrait.is_none() {
+  252 +        return Err(Error::invalid_input_source(
+  253 +            "refine_filter is set but full_filter is not".into(),
+  254 +        ));
+  255 +    }
+  256      if has_filters {
+  257          let filter_schema =
+  258              schema_from_bytes(proto.filter_schema_ipc.as_ref().ok_or_else(|| {
+
+@@ -250,8 +286,10 @@ pub fn plan_to_proto(
+  286      filter_schema: &Arc<ArrowSchema>,
+  287      state: &SessionState,
+  288  ) -> Result<pb::FilteredReadPlanProto> {
+  253 -    let mut buf = Vec::with_capacity(plan.rows.serialized_size());
+  254 -    plan.rows.serialize_into(&mut buf)?;
+  289 +    let mut rows = plan.rows.clone();
+  290 +    rows.optimize();
+  291 +    let mut buf = Vec::with_capacity(rows.serialized_size());
+  292 +    rows.serialize_into(&mut buf)?;
+  293  
+  294      // Deduplicate filter expressions by Arc pointer identity.
+  295      let mut ptr_to_id: HashMap<*const Expr, u32> = HashMap::new();

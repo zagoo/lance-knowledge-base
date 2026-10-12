@@ -1,0 +1,353 @@
+@@ -30,13 +30,15 @@ use lance_core::datatypes::Field;
+   30  use lance_core::datatypes::Schema as LanceSchema;
+   31  use lance_file::version::{LanceFileVersion, V2_FORMAT_2_0, V2_FORMAT_2_1, V2_FORMAT_2_2};
+   32  use lance_io::object_store::{LanceNamespaceStorageOptionsProvider, StorageOptionsProvider};
+   33 +use lance_table::format::Manifest;
+   34  use lance_table::io::commit::CommitHandler;
+   35  use lance_table::io::commit::external_manifest::ExternalManifestCommitHandler;
+   36 +use lance_table::transaction::resolve_arrow_field_ids;
+   37  use prost::Message;
+   38  use prost_types::Any;
+   39  use roaring::RoaringBitmap;
+   40  use std::cell::Cell;
+   39 -use std::collections::HashMap;
+   41 +use std::collections::{HashMap, HashSet};
+   42  use std::sync::Arc;
+   43  use uuid::Uuid;
+   44  
+
+@@ -1514,13 +1516,69 @@ fn convert_to_rust_transaction(
+ 1516          .build())
+ 1517  }
+ 1518  
+ 1519 +struct ConvertedSchema {
+ 1520 +    schema: LanceSchema,
+ 1521 +    field_id_remap: HashMap<i32, i32>,
+ 1522 +}
+ 1523 +
+ 1524 +fn convert_arrow_schema(
+ 1525 +    arrow_schema: &Schema,
+ 1526 +    manifest: Option<&Manifest>,
+ 1527 +    operation_name: &str,
+ 1528 +) -> Result<ConvertedSchema> {
+ 1529 +    // Project can rename by explicit ID but must not treat positional IDs as identity.
+ 1530 +    let original_schema = if operation_name == "Project" {
+ 1531 +        LanceSchema {
+ 1532 +            fields: arrow_schema
+ 1533 +                .fields
+ 1534 +                .iter()
+ 1535 +                .map(|field| Field::try_from(field.as_ref()))
+ 1536 +                .collect::<lance_core::Result<_>>()?,
+ 1537 +            metadata: arrow_schema.metadata.clone(),
+ 1538 +        }
+ 1539 +    } else {
+ 1540 +        LanceSchema::try_from(arrow_schema).map_err(|e| {
+ 1541 +            Error::input_error(format!(
+ 1542 +                "Failed to convert Arrow schema to Lance schema: {}",
+ 1543 +                e
+ 1544 +            ))
+ 1545 +        })?
+ 1546 +    };
+ 1547 +
+ 1548 +    let Some(manifest) = manifest.filter(|manifest| {
+ 1549 +        !manifest.uses_non_reusable_field_ids() && operation_name != "Overwrite"
+ 1550 +    }) else {
+ 1551 +        return Ok(ConvertedSchema {
+ 1552 +            schema: original_schema,
+ 1553 +            field_id_remap: HashMap::new(),
+ 1554 +        });
+ 1555 +    };
+ 1556 +    let schema = LanceSchema::from_arrow_schema(
+ 1557 +        arrow_schema,
+ 1558 +        Some(manifest.schema.clone()),
+ 1559 +        Some(manifest.max_field_id()),
+ 1560 +    )?;
+ 1561 +
+ 1562 +    let field_id_remap = original_schema
+ 1563 +        .fields_pre_order()
+ 1564 +        .zip(schema.fields_pre_order())
+ 1565 +        .filter_map(|(original, canonical)| {
+ 1566 +            (original.id >= 0 && original.id != canonical.id).then_some((original.id, canonical.id))
+ 1567 +        })
+ 1568 +        .collect();
+ 1569 +    Ok(ConvertedSchema {
+ 1570 +        schema,
+ 1571 +        field_id_remap,
+ 1572 +    })
+ 1573 +}
+ 1574 +
+ 1575  fn convert_schema_from_operation(
+ 1576      env: &mut JNIEnv,
+ 1577      java_operation: &JObject,
+ 1578      java_allocator: &JObject,
+ 1521 -    dataset: Option<&mut BlockingDataset>,
+ 1522 -    read_version: u64,
+ 1523 -) -> Result<LanceSchema> {
+ 1579 +    manifest: Option<&Manifest>,
+ 1580 +    operation_name: &str,
+ 1581 +) -> Result<ConvertedSchema> {
+ 1582      let schema_ptr = env
+ 1583          .call_method(
+ 1584              java_operation,
+
+@@ -1531,32 +1589,32 @@ fn convert_schema_from_operation(
+ 1589          .j()?;
+ 1590      let c_schema_ptr = schema_ptr as *mut FFI_ArrowSchema;
+ 1591      let c_schema = unsafe { FFI_ArrowSchema::from_raw(c_schema_ptr) };
+ 1592 +    let arrow_schema = Schema::try_from(&c_schema)?;
+ 1593  
+ 1535 -    if let Some(dataset) = dataset {
+ 1536 -        let arrow_schema = Schema::try_from(&c_schema)?;
+ 1594 +    convert_arrow_schema(&arrow_schema, manifest, operation_name)
+ 1595 +}
+ 1596  
+ 1538 -        // Derive field ids based on the transaction read dataset schema.
+ 1539 -        let read_schema = {
+ 1540 -            if dataset.inner.version().version == read_version {
+ 1541 -                dataset.inner.schema().clone()
+ 1542 -            } else {
+ 1543 -                let read_dataset = dataset.checkout_version(read_version)?;
+ 1544 -                read_dataset.inner.schema().clone()
+ 1545 -            }
+ 1546 -        };
+ 1597 +type DataFileIdentity = (Option<u32>, String);
+ 1598  
+ 1548 -        let max_field_id = dataset.inner.manifest().max_field_id();
+ 1549 -        let schema =
+ 1550 -            LanceSchema::from_arrow_schema(&arrow_schema, Some(read_schema), Some(max_field_id))?;
+ 1551 -        Ok(schema)
+ 1552 -    } else {
+ 1553 -        let schema = Schema::try_from(&c_schema)?;
+ 1554 -        LanceSchema::try_from(&schema).map_err(|e| {
+ 1555 -            Error::input_error(format!(
+ 1556 -                "Failed to convert Arrow schema to Lance schema: {}",
+ 1557 -                e
+ 1558 -            ))
+ 1559 -        })
+ 1599 +fn remap_fragment_field_ids(
+ 1600 +    fragments: &mut [Fragment],
+ 1601 +    field_id_remap: &HashMap<i32, i32>,
+ 1602 +    retained_files: &HashSet<DataFileIdentity>,
+ 1603 +) {
+ 1604 +    if field_id_remap.is_empty() {
+ 1605 +        return;
+ 1606 +    }
+ 1607 +    for fragment in fragments {
+ 1608 +        for file in fragment.referenced_lance_files_mut() {
+ 1609 +            if retained_files.contains(&(file.base_id, file.path.clone())) {
+ 1610 +                continue;
+ 1611 +            }
+ 1612 +            for field_id in Arc::make_mut(&mut file.fields) {
+ 1613 +                if let Some(canonical_id) = field_id_remap.get(field_id) {
+ 1614 +                    *field_id = *canonical_id;
+ 1615 +                }
+ 1616 +            }
+ 1617 +        }
+ 1618      }
+ 1619  }
+ 1620  
+
+@@ -1581,10 +1639,7 @@ trait SchemaExt {
+ 1639          max_existing_id: Option<i32>,
+ 1640      ) -> Result<()>;
+ 1641  
+ 1584 -    /// Create schema from `arrow_schema`, with field id priority below:
+ 1585 -    /// 1. arrow metadata field id.
+ 1586 -    /// 2. field id from `base_schema`.
+ 1587 -    /// 3. field id from `max_existing_id`.
+ 1642 +    /// Create a schema from `arrow_schema` using the legacy Java conversion rules.
+ 1643      fn from_arrow_schema(
+ 1644          arrow_schema: &Schema,
+ 1645          base_schema: Option<LanceSchema>,
+
+@@ -1598,7 +1653,6 @@ impl SchemaExt for LanceSchema {
+ 1653          base_schema: Option<LanceSchema>,
+ 1654          max_existing_id: Option<i32>,
+ 1655      ) -> Result<()> {
+ 1601 -        // Set id from base_schema
+ 1656          if let Some(base_schema) = &base_schema {
+ 1657              for field in self.fields.iter_mut() {
+ 1658                  if let Some(base_field) = base_schema.field(&field.name) {
+
+@@ -1612,7 +1666,7 @@ impl SchemaExt for LanceSchema {
+ 1666              .map(|s| s.max_field_id().unwrap_or(-1))
+ 1667              .unwrap_or(-1);
+ 1668          let max_id = max_id.max(max_existing_id.unwrap_or(-1));
+ 1615 -        self.set_field_id(Some(max_id));
+ 1669 +        self.try_set_field_id(Some(max_id))?;
+ 1670          Ok(())
+ 1671      }
+ 1672  
+
+@@ -1690,11 +1744,23 @@ fn convert_to_rust_operation(
+ 1744      read_version: u64,
+ 1745  ) -> Result<Operation> {
+ 1746      let op_name = env.get_string_from_method(java_operation, "name")?;
+ 1693 -    let op = match op_name.as_str() {
+ 1694 -        "Project" => Operation::Project {
+ 1695 -            preserves_nullability: env
+ 1696 -                .get_boolean_from_method(java_operation, "preservesNullability")?,
+ 1697 -            schema: convert_schema_from_operation(
+ 1747 +    let read_dataset = if matches!(op_name.as_str(), "Project" | "Overwrite" | "Merge") {
+ 1748 +        match dataset {
+ 1749 +            Some(dataset) if dataset.inner.version().version != read_version => {
+ 1750 +                Some(dataset.checkout_version(read_version)?)
+ 1751 +            }
+ 1752 +            Some(dataset) => Some(dataset.clone()),
+ 1753 +            None => None,
+ 1754 +        }
+ 1755 +    } else {
+ 1756 +        None
+ 1757 +    };
+ 1758 +    let manifest = read_dataset
+ 1759 +        .as_ref()
+ 1760 +        .map(|dataset| dataset.inner.manifest());
+ 1761 +    let mut op = match op_name.as_str() {
+ 1762 +        "Project" => {
+ 1763 +            let ConvertedSchema { schema, .. } = convert_schema_from_operation(
+ 1764                  env,
+ 1765                  java_operation,
+ 1766                  allocator.ok_or_else(|| {
+
+@@ -1702,10 +1768,15 @@ fn convert_to_rust_operation(
+ 1768                          "BufferAllocator is required for Project operations".to_string(),
+ 1769                      )
+ 1770                  })?,
+ 1705 -                dataset,
+ 1706 -                read_version,
+ 1707 -            )?,
+ 1708 -        },
+ 1771 +                manifest,
+ 1772 +                &op_name,
+ 1773 +            )?;
+ 1774 +            Operation::Project {
+ 1775 +                preserves_nullability: env
+ 1776 +                    .get_boolean_from_method(java_operation, "preservesNullability")?,
+ 1777 +                schema,
+ 1778 +            }
+ 1779 +        }
+ 1780          "UpdateConfig" => {
+ 1781              let config_updates_obj = env
+ 1782                  .call_method(
+
+@@ -1829,10 +1900,7 @@ fn convert_to_rust_operation(
+ 1900                          base.extract_object(env)
+ 1901                      })
+ 1902                  })?;
+ 1832 -            // Pass None for dataset so that the new schema is not validated
+ 1833 -            // against the old schema. Overwrite replaces the entire dataset,
+ 1834 -            // so fields with the same name but different types are allowed.
+ 1835 -            let schema = convert_schema_from_operation(
+ 1903 +            let ConvertedSchema { schema, .. } = convert_schema_from_operation(
+ 1904                  env,
+ 1905                  java_operation,
+ 1906                  allocator.ok_or_else(|| {
+
+@@ -1840,8 +1908,8 @@ fn convert_to_rust_operation(
+ 1908                          "BufferAllocator is required for Overwrite operations".to_string(),
+ 1909                      )
+ 1910                  })?,
+ 1843 -                None,
+ 1844 -                read_version,
+ 1911 +                manifest,
+ 1912 +                &op_name,
+ 1913              )?;
+ 1914              Operation::Overwrite {
+ 1915                  fragments,
+
+@@ -2010,25 +2078,40 @@ fn convert_to_rust_operation(
+ 2078              Operation::DataOverlay { groups }
+ 2079          }
+ 2080          "Merge" => {
+ 2013 -            let fragments: Vec<Fragment> =
+ 2081 +            let mut fragments: Vec<Fragment> =
+ 2082                  import_vec_from_method(env, java_operation, "fragments", |env, fragment| {
+ 2083                      fragment.extract_object(env)
+ 2084                  })?;
+ 2085 +            let ConvertedSchema {
+ 2086 +                schema,
+ 2087 +                field_id_remap,
+ 2088 +            } = convert_schema_from_operation(
+ 2089 +                env,
+ 2090 +                java_operation,
+ 2091 +                allocator.ok_or_else(|| {
+ 2092 +                    Error::input_error(
+ 2093 +                        "BufferAllocator is required for Merge operations".to_string(),
+ 2094 +                    )
+ 2095 +                })?,
+ 2096 +                manifest,
+ 2097 +                &op_name,
+ 2098 +            )?;
+ 2099 +            let retained_files = if field_id_remap.is_empty() {
+ 2100 +                HashSet::new()
+ 2101 +            } else {
+ 2102 +                manifest
+ 2103 +                    .into_iter()
+ 2104 +                    .flat_map(|manifest| manifest.fragments.iter())
+ 2105 +                    .flat_map(|fragment| fragment.referenced_lance_files())
+ 2106 +                    .map(|file| (file.base_id, file.path.clone()))
+ 2107 +                    .collect()
+ 2108 +            };
+ 2109 +            remap_fragment_field_ids(&mut fragments, &field_id_remap, &retained_files);
+ 2110              Operation::Merge {
+ 2111                  fragments,
+ 2112                  preserves_nullability: env
+ 2113                      .get_boolean_from_method(java_operation, "preservesNullability")?,
+ 2021 -                schema: convert_schema_from_operation(
+ 2022 -                    env,
+ 2023 -                    java_operation,
+ 2024 -                    allocator.ok_or_else(|| {
+ 2025 -                        Error::input_error(
+ 2026 -                            "BufferAllocator is required for Merge operations".to_string(),
+ 2027 -                        )
+ 2028 -                    })?,
+ 2029 -                    dataset,
+ 2030 -                    read_version,
+ 2031 -                )?,
+ 2114 +                schema,
+ 2115              }
+ 2116          }
+ 2117          "Restore" => {
+
+@@ -2037,7 +2120,7 @@ fn convert_to_rust_operation(
+ 2120                  env.call_method(java_operation, "version", "()J", &[])?
+ 2121                      .j()?,
+ 2122              )?;
+ 2040 -            return Ok(Operation::Restore { version });
+ 2123 +            Operation::Restore { version }
+ 2124          }
+ 2125          "ReserveFragments" => {
+ 2126              let java_num_fragments = env
+
+@@ -2048,7 +2131,7 @@ fn convert_to_rust_operation(
+ 2131                      "reserveFragments.numFragments must be non-negative, got {java_num_fragments}"
+ 2132                  ))
+ 2133              })?;
+ 2051 -            return Ok(Operation::ReserveFragments { num_fragments });
+ 2134 +            Operation::ReserveFragments { num_fragments }
+ 2135          }
+ 2136          "CreateIndex" => {
+ 2137              let new_indices =
+
+@@ -2059,10 +2142,10 @@ fn convert_to_rust_operation(
+ 2142                  import_vec_from_method(env, java_operation, "getRemovedIndices", |env, index| {
+ 2143                      index.extract_object(env)
+ 2144                  })?;
+ 2062 -            return Ok(Operation::CreateIndex {
+ 2145 +            Operation::CreateIndex {
+ 2146                  new_indices,
+ 2147                  removed_indices,
+ 2065 -            });
+ 2148 +            }
+ 2149          }
+ 2150          "UpdateMemWalState" => {
+ 2151              let compacted_sstables = import_vec_from_method(
+
+@@ -2097,6 +2180,7 @@ fn convert_to_rust_operation(
+ 2180              )));
+ 2181          }
+ 2182      };
+ 2183 +    resolve_arrow_field_ids(manifest, &mut op)?;
+ 2184      Ok(op)
+ 2185  }
+ 2186  

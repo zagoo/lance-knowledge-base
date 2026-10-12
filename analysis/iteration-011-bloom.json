@@ -1,0 +1,212 @@
+{
+  "iteration": 11,
+  "files": [
+    {
+      "path": "rust/lance-core/src/utils/bloomfilter.rs",
+      "module": "L1-modules/rust-lance-core-bloom.md",
+      "reviewed": true,
+      "role": "Public directory module for storage-agnostic Bloom-filter primitives, exposing byte conversion and split-block Bloom filters. It assigns higher-level Lance index semantics to consuming crates.",
+      "limits": "This directory declaration and both child implementations are analyzed. Actual scalar-index files, null handling, dispatch and format metadata in lance-index remain pending. (rust/lance-core/src/utils/bloomfilter.rs:4-10)",
+      "ranges": [
+        [
+          1,
+          8,
+          "SPDX and module docs explicitly describe generic storage-agnostic structures with no Lance semantics; higher-level scalar Bloom index in lance-index is an example consumer named by the docs, not a resolved caller graph."
+        ],
+        [
+          9,
+          10,
+          "Unconditionally public as_bytes and sbbf modules expose the two local implementations. No feature gate or registration logic exists in this file."
+        ]
+      ]
+    },
+    {
+      "path": "rust/lance-core/src/utils/bloomfilter/as_bytes.rs",
+      "module": "L1-modules/rust-lance-core-bloom.md",
+      "reviewed": true,
+      "role": "Public AsBytes trait and13 concrete primitive/string/slice implementations used as the canonical input byte representation for SBBF hashing. All numeric forms use explicit little-endian representation; borrowed textual/byte forms do not allocate.",
+      "limits": "The external reference URL is preserved as source attribution only; no network source was read. Scalar-index canonicalization, null handling and cross-language value mapping remain pending. Only the listed types implement AsBytes here, and floating equality normalization is absent. Tests were read, not executed. (rust/lance-core/src/utils/bloomfilter/as_bytes.rs:4-92; rust/lance-core/src/utils/bloomfilter/as_bytes.rs:94-164)",
+      "ranges": [
+        [
+          1,
+          14,
+          "SPDX and module docs describe a local counterpart to the Parquet AsBytes trait without that external dependency. Public AsBytes::as_bytes(&self)->impl AsRef<[u8]> allows implementations to return arrays or borrowed slices, rather than requiring one concrete return type or always allocating. The external reference is not fetched."
+        ],
+        [
+          15,
+          38,
+          "AsBytes for i32/i64/f32/f64 returns each value's to_le_bytes fixed-size array. Width is4 or8 bytes; floating bit patterns are preserved, with no normalization for positive/negative zero or NaN payloads. This defines hash input bytes, not application-level numeric equality."
+        ],
+        [
+          39,
+          63,
+          "u8 returns a one-element array with return bound AsRef<[Self]> (Self=u8); u16/u32/u64 return their little-endian arrays. No type tag or length prefix is included, so equal-width signed/unsigned values with equal bits have equal input bytes across implementations."
+        ],
+        [
+          64,
+          87,
+          "i8 casts to u8 and returns that single byte, retaining the low-eight-bit representation; i16 uses to_le_bytes. str delegates to its inherent UTF-8 as_bytes and [u8] returns the borrowed slice unchanged. Neither borrowed form includes a terminator, copies payload bytes or normalizes Unicode. No explicit String or fixed-byte-array implementation is declared here."
+        ],
+        [
+          88,
+          97,
+          "bool maps true to[1u8] and false to[0u8]. Those bytes overlap the corresponding u8 values by design; no logical-type discriminator is added. The private cfg(test) module imports the parent definitions."
+        ],
+        [
+          98,
+          118,
+          "Signed integer tests check i32 hexadecimal0x12345678 gives[78,56,34,12] and i64 hexadecimal0x123456789ABCDEF0 gives[F0,DE,BC,9A,78,56,34,12], with exact4/8-byte lengths. They do not cover negative signed values or unsigned implementations."
+        ],
+        [
+          119,
+          139,
+          "Float tests assert f32/f64 1.0 little-endian IEEE byte patterns and lengths. They omit signed zero, infinities, NaNs and alternative NaN payloads; no normalization requirement is implied by these positive fixtures."
+        ],
+        [
+          140,
+          153,
+          "String test explicitly calls AsBytes::as_bytes on str hello and expects its UTF-8 bytes; byte-slice test retains[1,2,3,4,5]. Neither tests Unicode normalization or owned String generic inference."
+        ],
+        [
+          154,
+          164,
+          "Boolean test checks both true->[1] and false->[0], then closes the module. All local assertions were inspected, not executed."
+        ]
+      ]
+    },
+    {
+      "path": "rust/lance-core/src/utils/bloomfilter/sbbf.rs",
+      "module": "L1-modules/rust-lance-core-bloom.md",
+      "reviewed": true,
+      "role": "Public split-block Bloom-filter implementation, dedicated error/result types and fluent builder. Private256-bit blocks, fixed salts and xxHash64(seed0) define membership and a headerless raw little-endian bitset representation. A bounded-size constructor uses an analytical probability estimate; generic byte conversion is supplied by its sibling trait.",
+      "limits": "All622 lines were read, including scalar loops, endian-dependent unsafe transmute and tests. External Parquet/paper/issue URLs were not fetched; compatibility is the module's stated intent plus the exact local algorithm, not cross-implementation fixture validation. The raw filter has no Lance scalar-index metadata, version or null semantics. No runtime tests/benchmarks were run; false-positive performance, upstream compatibility, current callers and released-format classification remain pending. (rust/lance-core/src/utils/bloomfilter/sbbf.rs:21-36; rust/lance-core/src/utils/bloomfilter/sbbf.rs:76-212; rust/lance-core/src/utils/bloomfilter/sbbf.rs:482-622)",
+      "ranges": [
+        [
+          1,
+          37,
+          "SPDX plus full ASF license notice preserve origin attribution. Module docs describe a local public-API adaptation of Arrow Parquet SBBF, link the upstream spec/implementation and a FIXME issue asking for upstream public visibility. These links are source commentary, not verified external evidence. Imports are sibling AsBytes, libm::lgamma, standard Error/Display/Write and twox_hash::XxHash64."
+        ],
+        [
+          38,
+          75,
+          "Public SbbfError derives Debug with InvalidFpp{fpp:f64}, WriteError{source:io::Error}, InvalidData{message:String}. Display includes probability, underlying write error or malformed-data reason respectively. Error::source returns Some only for WriteError. Public Result<T> aliases std::result::Result<T,SbbfError>, distinct from lance_core::Result; no automatic IO From conversion is provided here."
+        ],
+        [
+          76,
+          95,
+          "Private SALT has eight exact u32 values in lane order:0x47b6137b,0x44974d91,0x8824ad5b,0xa2b7289d,0x705495c7,0x2df1424b,0x9efc4947,0x5c6bfb31. Private Block([u32;8]) derives Debug/Copy/Clone and represents256 bits/32bytes. Associated ZERO initializes all words0. Changing salt or lane order changes existing filter membership interpretation."
+        ],
+        [
+          96,
+          108,
+          "Block::mask(x) for each of eight lanes multiplies x by its salt with wrapping u32 arithmetic, shifts right27 to obtain bit index0..31, and sets exactly1<<index. It returns one bit per lane in a new fixed array, without heap allocation."
+        ],
+        [
+          109,
+          133,
+          "to_le_bytes delegates to native-byte transmute on little-endian targets; other targets swap each u32 before native conversion. to_ne_bytes performs the only unsafe block: value transmute [u32;8] into[u8;32]. Safety comment correctly relies on equal size and no invalid bit patterns in either array; it does not borrow misaligned memory or extend lifetimes. swap_bytes exists only on non-little-endian targets. Local tests do not execute every target architecture."
+        ],
+        [
+          134,
+          169,
+          "insert ORs each lane with its mask bit, never clearing bits. check returns false at the first lane lacking its bit, otherwise true after all eight. Private Index/IndexMut implementations delegate to the underlying array and use its bounds checks; loop indices0..8 are valid. Membership requires all eight bits, whereas later intersection tests need only one shared bit."
+        ],
+        [
+          170,
+          192,
+          "Private false_positive_probability(ndv,log_space_bytes) implements the locally documented analytical model: bytes=2^log, ndv converted to f64; zero ndv returns0 and density ndv/(bytes*8)>2 returns1 early. Otherwise lambda=256/((bytes*8)/ndv), loglambda=ln(lambda). The u64 shift is used only at internal binary-search midpoints<64; this function does not itself validate arbitrary shift inputs. External paper attribution is not independently checked."
+        ],
+        [
+          193,
+          213,
+          "The estimator sums i=749 down through0 (750 terms). logp=i*ln(lambda)-lambda-lgamma(i+1); logfinner=8*ln(1-(31/32)^i); add exp(logp+logfinner), then min(result,1). Descending order aims to add smaller terms first; comment claims750 converges for tests, not a rigorous bound for all inputs. Float rounding/underflow remains part of the implementation."
+        ],
+        [
+          214,
+          233,
+          "Size bounds are private log2 byte exponents5 and27 (32B through128MiB). min_log2_bytes binary-searches low0/high64, setting high when estimated probability<=target, otherwise low, and returns high when adjacent. It returns an exponent in1..=64, not yet constrained to allocation bounds. Midpoints never equal64, so estimator shifts stay within u64 width."
+        ],
+        [
+          234,
+          270,
+          "Public Sbbf derives Debug/Clone with private Vec<Block>. new(bitset) rejects only lengths not divisible by32 as InvalidData, then parses each32-byte chunk into eight little-endian u32 words and collects owned blocks. It accepts empty input, non-power-of-two block counts and sizes beyond the bounded constructor maximum. Empty filters serialize/intersect but insert/check index block0 and panic (rust/lance-core/src/utils/bloomfilter/sbbf.rs:290-317). SIMD optimization is a doc intent; local source uses scalar loops."
+        ],
+        [
+          271,
+          289,
+          "with_log2_num_bytes takes an exponent despite doc wording about number of bytes, clamps it to[5,27], allocates a zero byte vector of1<<clamped exponent, then parses/copies it into block storage through new().unwrap(). The unwrap is guarded by a positive multiple-of32 allocation; peak construction holds both vectors temporarily. with_ndv_fpp accepts range[0,1), including0 and signed negative zero, and rejects1,negative nonzero,NaN/infinity. It estimates an exponent then applies the same clamp, so requested probability is not guaranteed when size saturates."
+        ],
+        [
+          290,
+          319,
+          "hash_to_block_index takes high32 bits of hash, saturating-multiplies by number of blocks in u64, then shifts right32 and casts usize. For ordinary positive block counts this maps the upper hash fraction to a block; extremely large counts with saturation bias mapping. insert<T:AsBytes+?Sized> and check hash canonical bytes through hash_as_bytes; insert_hash/check_hash use low32 for the block mask and directly index. Empty raw filters panic. check_hash docs simultaneously allow false positives and claim every uninserted hash returns false; the latter is incorrect for a Bloom filter and contradicted by the bit-test algorithm. Correct guarantee for matching hash/layout is no false negatives for inserted hashes; false means definitely absent."
+        ],
+        [
+          320,
+          338,
+          "write_bitset writes every block's32 little-endian bytes via Write::write_all, wrapping the first IO error as WriteError; earlier output may already be written and no rollback or flush occurs. to_bytes allocates a Vec with blocks.len()*32 capacity and appends each block in order. Both emit raw bitset only, without magic, version, hash ID, seed, type tag, probability or count header. Empty raw filters emit zero bytes."
+        ],
+        [
+          339,
+          353,
+          "num_blocks returns Vec length. size_bytes is live length*32; estimated_memory_size is capacity*sizeof(Block), accounting allocated block storage only. Despite its total-memory doc, it excludes the Sbbf/Vec header and construction/serialization temporaries. No DeepSizeOf implementation exists here."
+        ],
+        [
+          354,
+          380,
+          "might_intersect requires equal block counts, else InvalidData with both sizes. It returns true as soon as any lane word shares any set bit, otherwise false. This is weaker than testing a complete eight-bit element mask and can have many false positives. No-false-negative set-disjointness interpretation requires filters built with matching canonicalization/hash/layout; equal length alone cannot verify provenance. Two empty raw filters return false."
+        ],
+        [
+          381,
+          417,
+          "might_intersect_bytes allocates self.to_bytes before calling static bytes_might_intersect. Static method rejects unequal byte lengths, then checks each byte AND for any nonzero bit. It accepts equal empty or non-multiple-of32 slices because it does not validate Bloom structure. False implies no common represented element only under compatible encoding assumptions; arbitrary byte overlap itself is exact. There is no eight-lane check, SIMD intrinsic, async operation or persisted schema validation in these methods."
+        ],
+        [
+          418,
+          426,
+          "Private SEED=0 and generic hash_as_bytes feed AsBytes bytes directly to XxHash64::oneshot. There is no type discriminator or normalization stage; signed-zero/NaN behavior and cross-type byte collisions follow the sibling implementations (rust/lance-core/src/utils/bloomfilter/as_bytes.rs:15-92). Seed/hash algorithm must agree for insertion, query and interpretation of serialized filters."
+        ],
+        [
+          427,
+          461,
+          "Public SbbfBuilder owns private optional ndv,fpp,log2_num_bytes fields. new sets all None; consuming expected_items/false_positive_probability/log2_num_bytes setters replace their option without validation. The last method accepts a log2 exponent despite a doc saying bytes directly. No Clone/Debug derive is declared for the builder."
+        ],
+        [
+          462,
+          481,
+          "build prioritizes Some(log2_num_bytes) and returns the clamped-size constructor even when ndv/fpp are also supplied or fpp is invalid. Only absent explicit size plus both ndv/fpp invokes probability validation; incomplete input returns InvalidData requiring either size or both values. It does not reject mutually exclusive options, despite the repository rule for new builder design. Default delegates to new, so default.build fails for missing config."
+        ],
+        [
+          482,
+          507,
+          "Private tests check exact xxHash64(seed0) empty-string result17241709254077376921, then for1000 low32 integers assert each mask lane is a power of two and inserting/checking that same value into a fresh zero Block succeeds. These do not compare a full upstream golden bitset or test non-little-endian serialization."
+        ],
+        [
+          508,
+          527,
+          "SBBF membership test allocates2^10 bytes and inserts integers0..1000, checking each immediately; it does not recheck all at the end or measure false-positive rate. Builder test with ndv1000/fpp0.01 asserts only nonzero block count, not achieved probability or exact allocation."
+        ],
+        [
+          528,
+          550,
+          "String fixture inserts str hello/world and a byte slice bytes, checks all three and rejects one specific not_inserted string. The variables are borrowed strs, not owned String implementations. This one negative check does not prove no false positives generally."
+        ],
+        [
+          551,
+          576,
+          "Numeric fixture inserts42i32,12345i64,PI f64 and true, checks each and rejects999i32. It does not exercise unsigned types, false, floating signed zero/NaN or cross-type canonicalization."
+        ],
+        [
+          577,
+          593,
+          "Estimator test asserts unbounded min_log2_bytes results: ndv10 at fpp0.1/0.01/0.001 yields3/4/5; ndv100 yields7/8/8; ndv1000 yields10/11/12. The small exponents3/4 are estimator outputs, while public construction clamps them to5. No empirical FPP sampling or boundary-probability test appears."
+        ],
+        [
+          594,
+          622,
+          "Serialization test builds ndv100/fpp0.01, inserts0..50, serializes to_bytes, asserts nonempty length==size_bytes, reparses with new, compares block count, rechecks all inserted values and rejects999. It does not test write_bitset failures, malformed/empty raw input, intersections, conflicting builder options, exact bytes or architecture compatibility. Tests were inspected but not executed; module ends."
+        ]
+      ]
+    }
+  ]
+}

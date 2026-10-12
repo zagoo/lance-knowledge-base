@@ -1,0 +1,278 @@
+{
+  "iteration": 66,
+  "phase": "VERIFY",
+  "changes": [
+    {
+      "path": "rust/lance-file/src/versions/v1/writer/mod.rs",
+      "start": 1152,
+      "end": 1172,
+      "claim_id": 9,
+      "kind": "cardinality clarification",
+      "before": "stats_schema helper creates one nonnullable Struct root named decimal field ID, with nonnullable Int64 null_count and nullable min_value/max_value using supplied DataType. It preserves caller field iteration order and supplies no root metadata.",
+      "after": "stats_schema helper creates one nonnullable Struct root per input (field_id, DataType) pair, named by that decimal field ID, with nonnullable Int64 null_count and nullable min_value/max_value using supplied DataType. It preserves caller field iteration order and supplies no root metadata.",
+      "reason": "Fresh source maps each input pair to one Struct root; make the per-input cardinality explicit rather than allowing a single-root reading."
+    }
+  ],
+  "derived_symbols_synchronized": 1,
+  "files": [
+    {
+      "path": "rust/lance-file/src/versions/v1/writer/mod.rs",
+      "module": "L1-modules/rust-lance-file-v1-writer.md",
+      "role": "Frozen V1 writer and static schema-provider seam: owned writer/schema, nullability checks, batch/statistics mutation, recursive array page writes and ordered footer/shutdown. Includes seven active tests and test-only provider/statistics/whole-file helpers.",
+      "reviewed": true,
+      "limits": "All 1311 physical lines were read in five complete bounded source outputs during ANALYZE63. No source code, tests, benchmarks, fixture generators, build/lint/install commands or internet were executed. Writer/statistics.rs is now fully analyzed in its own L2 and L1 supplement; all2249 lines and fourteen test entry points are covered. Contextual Dataset adapter/open, Arrow predicates and IO framing establish local calls only; full Dataset/backend lifecycle remains pending. Source-derived partial-write, overflow, parent-validity and repeated-finish risks were not runtime-reproduced. Preserve frozen legacy behavior and implement new capabilities in current-format paths (AGENTS.md:13-18).",
+      "ranges": [
+        [
+          1,
+          34,
+          "SPDX header, private statistics child module and imports. Arrow arrays/builders/ArrayData support recursive writes and offset construction; async_recursion boxes recursion and async_trait implements the static manifest hook. Lance Schema/error, ObjectStore/Writer, legacy codecs/page tables/metadata and shared FileWriteSummary form the boundaries. No modern encoder, current-version strategy or feature/environment lookup is present."
+        ],
+        [
+          35,
+          52,
+          "Public async_trait ManifestProvider declares static async store_schema(&mut dyn Writer,&Schema)->Result<Option<usize>>. It separates file storage from the table manifest type; docs require dictionaries already persisted and their schema offsets/lengths populated. The provider returns an optional position but this trait does not validate it or specify atomicity/cleanup. The documented table implementation uses a schema-only V1 Manifest and writes it through do_write_manifest, avoiding a second dictionary write (rust/lance-table/src/io/manifest.rs:232-250)."
+        ],
+        [
+          53,
+          65,
+          "Test-only pub(crate) empty NotSelfDescribing implements ManifestProvider and immediately returns Ok(None), without writing bytes. It is not a production export. Footer metadata serializes absence as zero through the existing metadata conversion; the reader requires an externally supplied schema in these fixtures."
+        ],
+        [
+          66,
+          87,
+          "Public generic FileWriter requires M:ManifestProvider+Send+Sync and owns public Box<dyn Writer>, private Schema, signed next batch_id, PageTable, Metadata, optional StatisticsCollector and PhantomData<M>. The marker carries provider type without constructing provider state. No custom Drop, abort guard, closed flag or ownership-consuming finish exists. Replacing/writing the public object_writer can desynchronize existing tables/metadata. The ignored documentation example uses obsolete new/write(single batch)/shutdown syntax and missing awaits; actual API is try_new/write(slice)/finish."
+        ],
+        [
+          88,
+          97,
+          "Public FileWriterOptions derives Debug/Clone/Default and has only collect_stats_for_fields:Option<Vec<i32>>. Default None requests all schema IDs that support statistics; Some(empty) disables the collector. Some(nonempty) is projected with include_all_children=true in the constructor, so requesting a struct parent can include descendants. No size/version/compression option or explicit unknown/duplicate/negative-ID validation exists here."
+        ],
+        [
+          98,
+          108,
+          "Public async try_new creates the target writer before constructing Self. It owns the supplied Schema and borrows options. Store creation errors propagate; any later panic/construction failure has no local delete/abort handling. Publication, overwrite policy and backend durability belong to ObjectStore/Writer implementations, not this call."
+        ],
+        [
+          109,
+          137,
+          "with_object_writer clones explicit stats IDs or obtains every schema field ID; nonempty IDs project a stats schema including descendants, then StatisticsCollector::try_new may still return None if no supported field exists. Empty IDs bypass projection/collector. It initializes next batch0 and default page table/metadata and retains schema/writer. No schema validation, dictionary hydration, counter limit or writer-position check occurs. Collector creation is Option, not a Result error (rust/lance-file/src/versions/v1/writer/statistics.rs:586-629); this local body always returns Ok after successful construction."
+        ],
+        [
+          138,
+          158,
+          "schema returns a borrowed stored Schema. Private recursive verify_field_nullability rejects arr.null_count()>0 only when the corresponding stored Field is nonnullable, returning InvalidInput naming the field. It zips schema children with ArrayData child_data and recurses without applying an ancestor validity mask, slicing logical list children, checking child counts, or qualifying the name with ancestors. Extra children on either side are ignored by zip locally; earlier schema compatibility and Arrow construction supply other constraints."
+        ],
+        [
+          159,
+          165,
+          "verify_nullability_constraints zips top-level batch columns and stored fields by position, converts each array to ArrayData, and propagates the first recursive nullability failure. It does not itself compare field count, name, type or order; public write performs schema compatibility first."
+        ],
+        [
+          166,
+          188,
+          "write takes a slice of RecordBatch and returns success immediately for an empty slice: no schema validation, stats, bytes, flush or batch-ID change. Otherwise it validates every batch before mutating writer state: Arrow-to-Lance Schema conversion, check_compatible using default options except Ignore nullability, then actual stored-field null checks. Defaults ignore metadata, dictionary contents and field IDs, but require normal ordered field/name/logical-type compatibility; blob logical comparison retains its shared-child exception (rust/lance-core/src/datatypes/field.rs:83-103; rust/lance-core/src/datatypes/field.rs:423-440; rust/lance-core/src/datatypes/schema.rs:930-980). The comment assumes dictionary compatibility was checked elsewhere; this function neither checks nor unifies values."
+        ],
+        [
+          189,
+          200,
+          "If a collector exists, fields_in_batches traverses scalar leaves of structs and appends one statistics row per matching field ID for the entire supplied slice. Statistics are mutated before any page writes and are not rolled back on later errors/cancellation. No stats row is collected for list descendants or other nested fields. Unsupported/missing builders are skipped; collection executes synchronously within the async write future."
+        ],
+        [
+          201,
+          224,
+          "Clone top-level fields to avoid self borrowing, then process fields sequentially in schema order. For each field, resolve every batch column by name and collect borrowed ArrayRefs, with InvalidInput on a missing name. Call recursive write_array with the current batch_id and shared mutable page table; all supplied batches become one stored batch. There is no task spawn, field-level concurrency, transaction or rollback: earlier bytes/page entries/stats survive a later field error."
+        ],
+        [
+          225,
+          237,
+          "After all fields succeed, cast each input row count to i32, sum unchecked, and push cumulative Metadata length. Flush underlying AsyncWrite before returning so in-flight requests keep being polled and do not time out while caller waits. Increment batch_id only after flush succeeds. A flush failure can therefore leave page entries/stats and cumulative row metadata advanced with batch_id unchanged; retry is not locally safe/idempotent. Casts, sums, cumulative offsets and batch increment have no checked overflow handling. Flush is not final shutdown/publication."
+        ],
+        [
+          238,
+          254,
+          "add_metadata inserts owned key/value strings into stored schema metadata, replacing duplicate keys. finish_with_metadata clones/extends every provided entry (caller entries win), then invokes finish. Neither enforces a before-finish state, validates reserved keys, changes data pages, or restores metadata on finalization failure."
+        ],
+        [
+          255,
+          272,
+          "finish borrows self mutably, writes footer, then explicitly calls Writer::shutdown on the inner writer. Its authoritative size comes from shutdown WriteResult, not tell after shutdown; it discards other WriteResult identity metadata. Row count is last signed cumulative offset or0, cast to u64. No closed marker, repeated-finish guard, automatic abort/delete, idempotent retry or Drop finalization is provided. A footer error skips shutdown; shutdown error returns failure after footer mutation/writes."
+        ],
+        [
+          273,
+          291,
+          "len delegates Metadata::len (last cumulative offset cast to usize); is_empty is len()==0 and may be true after a zero-row stored batch. tell forwards the mutable underlying Writer cursor/error, not a durability guarantee. next_batch_id returns signed counter incremented only after successful flush. These accessors do not establish a finished state or validate overflows."
+        ],
+        [
+          292,
+          334,
+          "Private boxed-recursive write_array asserts a nonempty array slice, dispatches on the first actual array DataType and collects dyn Array references. Null routes to payload-free page metadata, fixed-stride types to Plain, then binary-like types to VarBinary. The Arrow predicate includes Utf8View/BinaryView while BinaryEncoder supports only the four offset-based types; reaching that adapter with views is not implicit conversion (rust/lance-arrow/src/lib.rs:99-137; rust/lance-file/src/versions/v1/encoding/binary.rs:91-105). No mixed-array type preflight is local."
+        ],
+        [
+          335,
+          366,
+          "Dictionary dispatch writes keys using the first array key type. Struct converts every array through the asserting cast helper then recursively writes child fields. Explicit FixedSizeList/FixedSizeBinary branches duplicate the earlier fixed-stride predicate and are not reached for those types under the current predicate; they do not provide broader element support."
+        ],
+        [
+          367,
+          392,
+          "List and LargeList route to respective i32/i64 offset writers; unmatched types return Schema error naming the actual type. This differs from reader unsupported-type panic. Dispatch is based on actual array type, with encoding tags asserted later in adapters; no compression strategy or version choice is negotiated here."
+        ],
+        [
+          393,
+          405,
+          "write_null_array sums lengths through i32 casts, awaits tell and records PageInfo at current position with logical row count, then returns. It writes no payload and does not inspect field.encoding or validity. Position may be shared with another page; table entry is enough for Null reconstruction. No checked count conversion."
+        ],
+        [
+          406,
+          425,
+          "write_fixed_stride_array asserts field.encoding==Some(Plain) and nonempty arrays, then PlainEncoder using first actual DataType. Only after encode success does it sum i32 logical row lengths and set/overwrite (field.id,batch_id) PageInfo with returned offset. The length is elements, not bytes; encoding failure may already have written bytes without a page entry. No separate validity buffer is written by this adapter."
+        ],
+        [
+          426,
+          442,
+          "write_binary_array asserts VarBinary, invokes BinaryEncoder and records returned position plus summed i32 logical element count. Binary returned position points to absolute i64 offsets after value bytes, not the beginning of payload. This wrapper performs no validity write, mixed-type check, row limit check or rollback."
+        ],
+        [
+          443,
+          461,
+          "write_dictionary_arr asserts Dictionary, encodes keys only via DictionaryEncoder with supplied key DataType and stores key-byte offset plus logical key count. Dictionary values are not pulled from batches, compared, merged or stored here; footer uses the separate stored schema dictionaries. A missing or stale schema dictionary can therefore fail at finalization or disagree with already emitted keys."
+        ],
+        [
+          462,
+          490,
+          "write_struct_array asserts every StructArray has exactly field.children.len columns, then walks child schema order. Resolve each batch child by name, return Schema error with child name and actual struct DataType if absent, and recursively write collected child arrays sequentially. No parent page or struct-parent validity is persisted; child bytes can precede a later error. Async recursion boxes nested calls, without spawning tasks."
+        ],
+        [
+          491,
+          524,
+          "write_list_array allocates an i32 positions builder with capacity equal to total logical rows (although it appends rows+1 positions), a retained Vec of sliced child arrays and initial0. For every list, assert offsets nonempty; slice child values from first through final offset, normalize each subsequent offset by subtracting that list start and adding accumulated last_offset, then append via unchecked i32 casts. It ignores list validity and keeps every child value in the selected span, including storage behind null lists. Arithmetic and offset/index conversions are unchecked; sliced tails outside the selected span are not encoded."
+        ],
+        [
+          525,
+          538,
+          "Write normalized positions first through the Plain adapter using the list parent Field, so that parent page length is total list rows+1. Then gather retained child slices and recursively write children[0] at the same batch ID. Missing child panics at indexing; a child failure can leave parent position bytes/table entry. No separate list validity, child-name metadata rewrite or parent null mask is persisted."
+        ],
+        [
+          539,
+          573,
+          "write_large_list_array mirrors List with an Int64 positions builder and unchecked i64 casts, but uses usize start/end/accumulation internally. Initial0 plus normalized per-array offsets concatenate logical lists and selected child spans. No list validity or offset-overflow validation; builder capacity again omits the terminal extra slot."
+        ],
+        [
+          574,
+          587,
+          "LargeList writes the i64 parent positions page first, gathers retained values, then recursively writes the first schema child at the same batch ID. Its parent page length includes terminal offset. Error/cancellation after positions has no local undo; zero logical rows still have one position if the outer supplied batch slice is nonempty."
+        ],
+        [
+          588,
+          625,
+          "write_statistics mutably finishes the optional collector. A nonempty successful stats batch has a debug-only row-count equality with next_batch_id; convert its Arrow schema to fresh Lance Schema and call schema.field_ids for leaf_field_ids despite that accessor including all preorder IDs, including struct roots (rust/lance-core/src/datatypes/schema.rs:600-604). Write each stats root recursively at batch0 using a separate page table, then serialize that table from field ID0. Return schema, all IDs and table offset. Propagate collector/write errors; absent collector or zero stats rows yields None. Collector builders are finished before these writes, so a later failure does not preserve unconsumed stats for retry (rust/lance-file/src/versions/v1/writer/statistics.rs:635-670)."
+        ],
+        [
+          626,
+          638,
+          "write_footer first unwraps minimum ID across all stored schema fields, including parents, then serializes the ordinary page table and stores its position. Empty schema panics before page-table write; nonempty schema without any page entries gets the page-table empty InvalidInput (rust/lance-file/src/versions/v1/page_table.rs:94-113). Next write statistics and replace stats_metadata. No staging/footer commit marker or rollback is installed."
+        ],
+        [
+          639,
+          653,
+          "Footer then persists stored schema dictionary values, mutating offsets/lengths, calls static M::store_schema and records its optional position, writes framed Metadata, and emits metadata position plus shared major0/minor2/LANC tail. Provider offsets are trusted, and provider errors occur after previous data/table/stats/dictionary side effects. WriteExt framing is u32 LE size then protobuf; tail is i64 LE position, i16 LE major/minor and magic bytes (rust/lance-io/src/traits.rs:83-106; rust/lance-file/src/format.rs:30-33). No alignment padding or v2 footer is added here. End of generic implementation."
+        ],
+        [
+          654,
+          671,
+          "Private fields_in_batches requires a nonempty batch slice (indexes batches[0]) and initially pairs schema roots with per-position arrays across all batches using zip. It allocates a Vec of borrowed arrays per visited field; mismatched count/order is not checked locally. Public write validates first and returns early on empty input."
+        ],
+        [
+          672,
+          693,
+          "Iterator uses a LIFO work stack: roots are initially pushed in forward order, then popped in reverse; structs push children in forward order and likewise visit reverse. Struct nodes themselves are not emitted. Other nested types are skipped entirely, including their descendants; scalar leaves return field plus array references. Traversal does not combine ancestor null masks with child validity, and collection order differs from the collector BTreeMap output ordering."
+        ],
+        [
+          694,
+          714,
+          "Test-only module imports Arrow temporal/decimal/dictionary/nested arrays, timezone types, concat, Arc and the V1 FileReader. Seven active Tokio tests and local fixture helpers follow; no source test is executed by this knowledge-base analysis."
+        ],
+        [
+          715,
+          792,
+          "test_write_file builds a 19-root Arrow schema covering Null, Boolean, Int64, Float32, Utf8, Decimal128/256(7,3), four Duration units, UInt32-key UTF8 dictionary, FixedSizeList<Float32,16>, FixedSizeBinary8, List/LargeList<UTF8>, List/LargeList<dictionary>, and Struct<Int64,UTF8>. Nullability varies but no non-Null-type null entries are constructed later. The schema is explicitly supplied on read, so this is not self-describing discovery coverage."
+        ],
+        [
+          793,
+          832,
+          "Broad roundtrip fixture creates 100 dictionary values cycling a/b/c, a 1600-value Float32 buffer grouped16, 800 bytes all123 grouped8, and 100 two-element lists with 200 string/dictionary children for each offset width. Values are nonnull and list offsets start0; it does not exercise sliced/null lists or changed dictionaries across batches."
+        ],
+        [
+          833,
+          879,
+          "The 19 columns each have100 rows: Null length100; Boolean mod3; Int64/Float32 and decimal values0..99; decimal precision7/scale3; Duration values0..99; prepared dictionary/fixed/list arrays; and a struct whose Int64 child is100..199 and string child0..99. RecordBatch construction unwraps Arrow validation. These exact values/types form the equality oracle rather than a performance measurement."
+        ],
+        [
+          880,
+          902,
+          "Attach dictionary values into the Lance schema before constructing NotSelfDescribing memory writer; write one batch, finish, reopen with original hydrated schema and compare complete batch equality. No shutdown size, schema-only manifest, IO count, cancellation or failed-write assertion is made."
+        ],
+        [
+          903,
+          939,
+          "Dictionary-first-field fixture puts a UInt32/UTF8 dictionary in sole column d with100 cyclic a/b/c values, preloads schema dictionary, writes/finishes and reopens using that schema. Exact equality covers dictionary at field0, not remapping, evolving dictionary contents, null keys or dictionary hydration from file."
+        ],
+        [
+          940,
+          984,
+          "Temporal fixture writes two rows of TimestampSecond without timezone [11111111,22222222] and TimestampMicrosecond with America/Los_Angeles [3333333,4444444]. Reopen with supplied schema and assert whole-batch equality. It proves those metadata/unit/value combinations only, not timezone conversion or all temporal types."
+        ],
+        [
+          985,
+          1015,
+          "Empty nonnullable UTF8 fixture writes a nonempty outer slice containing a zero-row RecordBatch, finishes, asserts summary.num_rows==0, reopens batch0 and asserts zero rows. It does not test write(&[]), finishing before any write, empty schema, size bytes or the number of stored batches. This differs from the empty-slice no-op."
+        ],
+        [
+          1016,
+          1053,
+          "Statistics fixture declares Int64 i/i2, List<Int32> l, and struct s(si:Int64,sb:UTF8), then explicitly selects IDs[0,1,5,6]. Its comments claim requested-only, struct traversal and list omission coverage, but no supported scalar is omitted from the request and the list itself is not requested; it does not isolate all those policies."
+        ],
+        [
+          1054,
+          1102,
+          "Write two separate stored batches. First has3 rows: i=[1,2,3],i2=[4,5,6], list[1,2,3]/[4,5]/[],si=[1,2,3],sb=[a,b,c]. Second has2 rows: i=[5,6],i2=[10,11], list[1,2,3]/[],si=[4,5],sb=[d,e]. All statistics-target values are nonnull; empty lists are present but not statistics targets."
+        ],
+        [
+          1103,
+          1151,
+          "Finish and read stats for the same four IDs; require Some and exact schema equality with Int64 fields0/1/5 and Utf8 field6. Assert two-row stats: null counts all0; minima [1,5],[4,10],[1,4],[a,d]; maxima [3,6],[6,11],[3,5],[c,e]. The linked FIXME says maxima should not be incremented, but actual expected UTF8 maxima equal observed maxima c/e; do not infer incremented output from that stale comment."
+        ],
+        [
+          1152,
+          1172,
+          "stats_schema helper creates one nonnullable Struct root per input (field_id, DataType) pair, named by that decimal field ID, with nonnullable Int64 null_count and nullable min_value/max_value using supplied DataType. It preserves caller field iteration order and supplies no root metadata."
+        ],
+        [
+          1173,
+          1207,
+          "Private test Stats stores field_id, null-count Vec and min/max ArrayRefs. stats_batch derives root types from minima, builds child fields matching stats_schema, clones count values and array Arcs, creates all-valid structs, then unwraps RecordBatch construction. It performs no independent max-type or length validation before Arrow constructors."
+        ],
+        [
+          1208,
+          1228,
+          "read_file_as_one_batch opens with supplied Schema, reads all stored batches sequentially, retains them all in Vec and concatenates using reader schema. Unwraps every step; this is a test convenience, not a streaming production path or memory bound."
+        ],
+        [
+          1229,
+          1265,
+          "Shared-buffer test slices one Int32 array0..1000 into250 four-row writes, finishes and asserts object size strictly below16000 bytes. Read all batches via helper and compare column i exactly to original array. This catches repeated whole-buffer storage for this scalar case; it does not assert exact file size, request count, memory usage, null handling or zero-copy execution."
+        ],
+        [
+          1266,
+          1295,
+          "Schema-hole fixture constructs two Int32 fields explicitly assigned IDs0 and2, with missing1, and ten-row arrays a=0..9,b=10..19. Arrow batch schema names/types match while Arrow conversion may assign different IDs; the public writer default comparison ignores field IDs."
+        ],
+        [
+          1296,
+          1311,
+          "Write and finish the hole fixture, move out in-memory page_table, and assert entries(0,0) and(2,0) exist. No reopen, disk page-table decode, missing-ID1 assertion or full data equality is made here; serialized hole representation is covered separately by page-table tests. End of tests and file."
+        ]
+      ]
+    }
+  ]
+}

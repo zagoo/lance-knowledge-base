@@ -1,0 +1,166 @@
+@@ -1,7 +1,9 @@
+    1  // SPDX-License-Identifier: Apache-2.0
+    2  // SPDX-FileCopyrightText: Copyright The Lance Authors
+    3  
+    4 +use crate::scalar::RowAddrTranslatorRef;
+    5  use lance_core::utils::row_addr_remap::RowAddrRemap;
+    6 +use lance_index_core::remapping::RowAddrTranslator;
+    7  use lance_index_core::remapping::{BatchRowIdRemapper, remap_row_ids_roaring_tree_map_async};
+    8  use std::any::Any;
+    9  use std::collections::BTreeMap;
+
+@@ -387,24 +389,45 @@ impl NGramIndex {
+  389          })
+  390      }
+  391  
+  390 -    fn remap_state(
+  392 +    async fn remap_state(
+  393          &self,
+  394          state: NGramIndexSpillState,
+  393 -        mapping: &RowAddrRemap,
+  395 +        mapping: RowAddrTranslatorRef<'_>,
+  396      ) -> Result<Vec<RecordBatch>> {
+  395 -        let bitmaps = state
+  396 -            .bitmaps
+  397 -            .into_iter()
+  398 -            .map(|posting_list| {
+  399 -                RoaringTreemap::from_iter(posting_list.into_iter().filter_map(|row_id| {
+  400 -                    match mapping.get(row_id) {
+  401 -                        Some(Some(new_row_id)) => Some(new_row_id),
+  402 -                        Some(None) => None,
+  403 -                        None => Some(row_id),
+  404 -                    }
+  405 -                }))
+  406 -            })
+  407 -            .collect();
+  397 +        // A spill batch is bounded in serialized bytes, not in cardinality: a
+  398 +        // common n-gram in a large full-coverage index decodes into millions
+  399 +        // of addresses. Each posting is translated in slices of at most
+  400 +        // `TRANSLATION_SLICE` addresses into a fresh bitmap, so the temporary
+  401 +        // storage is bounded by the slice, never by the posting.
+  402 +        const TRANSLATION_SLICE: usize = 64 * 1024;
+  403 +        async fn translate_slice(
+  404 +            mapping: RowAddrTranslatorRef<'_>,
+  405 +            slice: &mut Vec<u64>,
+  406 +            translated: &mut RoaringTreemap,
+  407 +        ) -> Result<()> {
+  408 +            // An address the translator does not touch stays as it is; a
+  409 +            // deleted row is dropped.
+  410 +            for new_row_id in mapping.remap_row_addrs(slice).await?.into_iter().flatten() {
+  411 +                translated.insert(new_row_id);
+  412 +            }
+  413 +            slice.clear();
+  414 +            Ok(())
+  415 +        }
+  416 +        let mut bitmaps = Vec::with_capacity(state.bitmaps.len());
+  417 +        for posting_list in state.bitmaps {
+  418 +            let mut translated = RoaringTreemap::new();
+  419 +            let mut slice = Vec::with_capacity(TRANSLATION_SLICE.min(posting_list.len() as usize));
+  420 +            for row_id in posting_list.iter() {
+  421 +                slice.push(row_id);
+  422 +                if slice.len() == TRANSLATION_SLICE {
+  423 +                    translate_slice(mapping, &mut slice, &mut translated).await?;
+  424 +                }
+  425 +            }
+  426 +            if !slice.is_empty() {
+  427 +                translate_slice(mapping, &mut slice, &mut translated).await?;
+  428 +            }
+  429 +            bitmaps.push(translated);
+  430 +        }
+  431  
+  432          NGramIndexSpillState {
+  433              tokens: state.tokens,
+
+@@ -546,6 +569,38 @@ impl Index for NGramIndex {
+  569      }
+  570  }
+  571  
+  572 +impl NGramIndex {
+  573 +    /// The one remap implementation: the legacy `remap` (an in-memory
+  574 +    /// mapping, borrowed as a synchronous translator) and `remap_streaming`
+  575 +    /// both come here, so neither copies a map nor delegates to the other.
+  576 +    async fn remap_with(
+  577 +        &self,
+  578 +        mapping: RowAddrTranslatorRef<'_>,
+  579 +        dest_store: &dyn IndexStore,
+  580 +    ) -> Result<CreatedIndex> {
+  581 +        let reader = self.store.open_index_file(POSTINGS_FILENAME).await?;
+  582 +        let mut writer = dest_store
+  583 +            .new_index_file(POSTINGS_FILENAME, POSTINGS_SCHEMA.clone())
+  584 +            .await?;
+  585 +
+  586 +        let mut spill_stream =
+  587 +            NGramIndexBuilder::stream_spill_reader(reader, MAX_POSTING_LIST_BATCH_BYTES)?;
+  588 +        while let Some(state) = spill_stream.try_next().await? {
+  589 +            for batch in self.remap_state(state, mapping).await? {
+  590 +                writer.write_record_batch(batch).await?;
+  591 +            }
+  592 +        }
+  593 +
+  594 +        let file = writer.finish().await?;
+  595 +
+  596 +        Ok(CreatedIndex {
+  597 +            index_details: prost_types::Any::from_msg(&pbold::NGramIndexDetails::default())?,
+  598 +            index_version: NGRAM_INDEX_VERSION,
+  599 +            files: vec![file],
+  600 +        })
+  601 +    }
+  602 +}
+  603 +
+  604  #[async_trait]
+  605  impl ScalarIndex for NGramIndex {
+  606      async fn search(
+
+@@ -651,26 +706,15 @@ impl ScalarIndex for NGramIndex {
+  706          mapping: &RowAddrRemap,
+  707          dest_store: &dyn IndexStore,
+  708      ) -> Result<CreatedIndex> {
+  654 -        let reader = self.store.open_index_file(POSTINGS_FILENAME).await?;
+  655 -        let mut writer = dest_store
+  656 -            .new_index_file(POSTINGS_FILENAME, POSTINGS_SCHEMA.clone())
+  657 -            .await?;
+  658 -
+  659 -        let mut spill_stream =
+  660 -            NGramIndexBuilder::stream_spill_reader(reader, MAX_POSTING_LIST_BATCH_BYTES)?;
+  661 -        while let Some(state) = spill_stream.try_next().await? {
+  662 -            for batch in self.remap_state(state, mapping)? {
+  663 -                writer.write_record_batch(batch).await?;
+  664 -            }
+  665 -        }
+  666 -
+  667 -        let file = writer.finish().await?;
+  709 +        self.remap_with(mapping.into(), dest_store).await
+  710 +    }
+  711  
+  669 -        Ok(CreatedIndex {
+  670 -            index_details: prost_types::Any::from_msg(&pbold::NGramIndexDetails::default())?,
+  671 -            index_version: NGRAM_INDEX_VERSION,
+  672 -            files: vec![file],
+  673 -        })
+  712 +    async fn remap_streaming(
+  713 +        &self,
+  714 +        translator: &RowAddrTranslator,
+  715 +        dest_store: &dyn IndexStore,
+  716 +    ) -> Result<CreatedIndex> {
+  717 +        self.remap_with(translator.as_ref(), dest_store).await
+  718      }
+  719  
+  720      async fn update(
+
+@@ -1834,6 +1878,7 @@ impl ScalarIndexPlugin for NGramIndexPlugin {
+ 1878          &self,
+ 1879          index_store: Arc<dyn IndexStore>,
+ 1880          _index_details: &prost_types::Any,
+ 1881 +        _index_version: u32,
+ 1882          frag_reuse_index: Option<Arc<dyn RowIdRemapper>>,
+ 1883          cache: &LanceCache,
+ 1884      ) -> Result<Arc<dyn ScalarIndex>> {
+
+@@ -1847,6 +1892,7 @@ impl ScalarIndexPlugin for NGramIndexPlugin {
+ 1892          &self,
+ 1893          index_store: Arc<dyn IndexStore>,
+ 1894          _index_details: &prost_types::Any,
+ 1895 +        _index_version: u32,
+ 1896          remapping: Option<Arc<dyn BatchRowIdRemapper>>,
+ 1897          cache: &LanceCache,
+ 1898      ) -> Result<Arc<dyn ScalarIndex>> {

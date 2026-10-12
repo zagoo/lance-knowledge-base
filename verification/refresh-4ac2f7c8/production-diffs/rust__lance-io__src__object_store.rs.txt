@@ -1,0 +1,65 @@
+@@ -1690,6 +1690,64 @@ impl FromStr for LanceConfigKey {
+ 1690  pub struct StorageOptions(pub HashMap<String, String>);
+ 1691  
+ 1692  impl StorageOptions {
+ 1693 +    #[cfg(any(feature = "aws", feature = "azure", feature = "gcp"))]
+ 1694 +    fn as_cloud_options<K>(&self) -> HashMap<K, String>
+ 1695 +    where
+ 1696 +        K: FromStr + AsRef<str> + Eq + std::hash::Hash,
+ 1697 +    {
+ 1698 +        let mut options: HashMap<K, (&str, &str)> = HashMap::new();
+ 1699 +        for (source_key, value) in &self.0 {
+ 1700 +            let Ok(config_key) = K::from_str(&source_key.to_ascii_lowercase()) else {
+ 1701 +                continue;
+ 1702 +            };
+ 1703 +            let source_key = source_key.as_str();
+ 1704 +            let canonical_key = config_key.as_ref();
+ 1705 +            // Rank spellings so conflicting aliases cannot depend on HashMap iteration order.
+ 1706 +            if let Some((selected_key, _)) = options.get(&config_key)
+ 1707 +                && (
+ 1708 +                    !source_key.eq_ignore_ascii_case(canonical_key),
+ 1709 +                    source_key != canonical_key,
+ 1710 +                    source_key,
+ 1711 +                ) >= (
+ 1712 +                    !selected_key.eq_ignore_ascii_case(canonical_key),
+ 1713 +                    *selected_key != canonical_key,
+ 1714 +                    *selected_key,
+ 1715 +                )
+ 1716 +            {
+ 1717 +                continue;
+ 1718 +            }
+ 1719 +            options.insert(config_key, (source_key, value.as_str()));
+ 1720 +        }
+ 1721 +        options
+ 1722 +            .into_iter()
+ 1723 +            .map(|(key, (_, value))| (key, value.to_string()))
+ 1724 +            .collect()
+ 1725 +    }
+ 1726 +
+ 1727 +    #[cfg(any(feature = "aws", feature = "azure", feature = "gcp"))]
+ 1728 +    fn merge_env_options(
+ 1729 +        &mut self,
+ 1730 +        env_options: impl IntoIterator<
+ 1731 +            Item = (impl AsRef<std::ffi::OsStr>, impl AsRef<std::ffi::OsStr>),
+ 1732 +        >,
+ 1733 +        canonical_key: impl Fn(&str) -> Option<String>,
+ 1734 +    ) {
+ 1735 +        // Aliases must block environment defaults without rewriting the caller's keys.
+ 1736 +        let mut configured_keys: HashSet<String> = self
+ 1737 +            .0
+ 1738 +            .keys()
+ 1739 +            .filter_map(|key| canonical_key(&key.to_ascii_lowercase()))
+ 1740 +            .collect();
+ 1741 +        for (key, value) in env_options {
+ 1742 +            if let (Some(key), Some(value)) = (key.as_ref().to_str(), value.as_ref().to_str())
+ 1743 +                && let Some(config_key) = canonical_key(&key.to_ascii_lowercase())
+ 1744 +                && configured_keys.insert(config_key.clone())
+ 1745 +            {
+ 1746 +                self.0.insert(config_key, value.to_string());
+ 1747 +            }
+ 1748 +        }
+ 1749 +    }
+ 1750 +
+ 1751      /// Create a new instance of [`StorageOptions`]
+ 1752      pub fn new(options: HashMap<String, String>) -> Self {
+ 1753          let mut options = options;

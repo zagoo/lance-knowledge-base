@@ -1,0 +1,26 @@
+@@ -60,6 +60,7 @@ use lance_table::format::{Fragment, IndexMetadata, Manifest};
+   60  use lance_table::io::commit::{
+   61      CommitError, CommitHandler, commit_handler_from_url, write_manifest_file_to_path,
+   62  };
+   63 +use lance_table::transaction::validate_non_reusable_field_id_transition;
+   64  use object_store::{Error as ObjectStoreError, path::Path};
+   65  use roaring::RoaringBitmap;
+   66  use std::io::Cursor;
+
+@@ -2065,6 +2066,16 @@ impl ManifestNamespace {
+ 2066                  schema.clone(),
+ 2067                  fragments,
+ 2068              );
+ 2069 +            if let Err(err) = validate_non_reusable_field_id_transition(
+ 2070 +                dataset.manifest(),
+ 2071 +                &manifest,
+ 2072 +                &transaction.operation,
+ 2073 +            ) {
+ 2074 +                self.cleanup_staged_manifest_files(&object_store, &staged_data_files, &[])
+ 2075 +                    .await;
+ 2076 +                return Err(err);
+ 2077 +            }
+ 2078 +            manifest.update_max_field_id();
+ 2079              let target_version = manifest.version;
+ 2080  
+ 2081              let index_uuids = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];

@@ -1,0 +1,258 @@
+{
+  "iteration": 13,
+  "files": [
+    {
+      "path": "rust/lance-core/src/cache/codec.rs",
+      "module": "L1-modules/rust-lance-core-cache.md",
+      "reviewed": true,
+      "role": "Cache-entry LCE1 envelope parser/writer, explicit hit/miss reasons, serializable-type trait and allocation-free type-erased codec descriptor with function-pointer adapters.",
+      "limits": "The source calls the outer envelope stabilized/stability-critical while the CacheCodecImpl format documentation explicitly remains experimental. This file alone does not resolve a released stable-format guarantee; repository compatibility rules take precedence over speculative preservation of intermediate unstable builds. Exact wrapper behavior is established, but concrete production body codecs, backend Miss handling and lance_arrow IPC implementation remain pending. No tests executed or external specifications fetched. (rust/lance-core/src/cache/codec.rs:22-36; rust/lance-core/src/cache/codec.rs:51-60; rust/lance-core/src/cache/codec.rs:191-228; rust/lance-core/src/cache/codec.rs:317-370)",
+      "ranges": [
+        [
+          1,
+          37,
+          "SPDX/module docs describe concrete CacheCodecImpl -> type-erased CacheCodec. The declared envelope is LCE1 magic4, envelope_version u8, type-id byte length LEu16 plus UTF-8, body-version LEu32, then body. Hand framing is called stability-critical/unchanging, while bodies use protobuf headers by convention. Parse/identity/version/body Result failures become cache misses; historical shape self-healing is current documentation, not a mandate to add old-unstable migrations."
+        ],
+        [
+          38,
+          61,
+          "Imports Write,Arc,Bytes,core Error/Result and sibling entry IO. Public MAGIC=[L,C,E,1] with hex4C434531. Comments claim this avoids earlier small-length/tag shapes, but no arbitrary-payload collision proof or released-fixture verification is present. Public exposure allows backends to inspect prefixes."
+        ],
+        [
+          62,
+          75,
+          "has_cache_envelope checks only first4 bytes equal MAGIC using get; returns false for length<4 and true for exactly4 magic bytes even though no complete envelope exists. Private ENVELOPE_VERSION=u8=1 is the only accepted outer version."
+        ],
+        [
+          76,
+          103,
+          "Private ParsedEnvelope borrows type_id and owns type_version/body_offset. parse_envelope starts offset0, safely gets4 magic bytes then version byte; mismatch/truncation returns None. Offset additions here are bounded small constants. No allocation, IO, logging or error object is made by the parser itself."
+        ],
+        [
+          104,
+          119,
+          "Parser gets LEu16 id byte length, borrows that many bytes, validates UTF-8, then reads LEu32 body version. Returns body_offset=11+id_byte_length, bounded at65546 by u16 length. Empty/NUL-containing type IDs and version0 are accepted. It does not check body availability/content, trailing bytes, checksum, type identity or version support; wrapper handles the latter two."
+        ],
+        [
+          120,
+          139,
+          "write_envelope first checks UTF-8 byte length fitsu16, otherwise Error::io includes actual length and65535 limit with no writes yet. It then write_all's magic/version/length/id/body-version in order and returns11+id.len(). IO failures propagate and can leave a partial envelope; there is no rollback, buffering, flush or checksum."
+        ],
+        [
+          140,
+          166,
+          "Section separator and public Debug/Clone/Copy/PartialEq/Eq CacheMissReason enumerate InvalidEnvelope (bad/unknown/truncated/non-UTF8 framing), TypeMismatch, VersionTooNew and BodyError. Docs assign all reasons recomputation by the backend and allow distinct metrics; this enum itself neither evicts nor invokes a loader."
+        ],
+        [
+          167,
+          186,
+          "Public Debug CacheDecode<T> is Hit(T) or Miss(CacheMissReason). Consuming hit() returns Some(value) or None, discarding any reason. There is no Result error channel or automatic retry in this helper."
+        ],
+        [
+          187,
+          208,
+          "CacheCodecImpl documentation explicitly marks serialized format experimental/no stability guarantee between releases, then describes future append-only TYPE_ID/protobuf field/enum rules and version bumps. Separate TYPE_ID docs below say must not change once shipped. Record this tension rather than inferring a released guarantee. Body serialization order and version-aware matching read order are implementor obligations; wrapper owns envelope only."
+        ],
+        [
+          209,
+          230,
+          "Public CacheCodecImpl:Send+Sync requires TYPE_ID:static str, CURRENT_VERSION:u32, serialize(&self,&mut CacheEntryWriter)->Result<()> and deserialize(&mut CacheEntryReader)->Result<Self> where Self:Sized. Constants and deserialize return make this a concrete implementation trait, not the erased backend object. It does not require Any,DeepSizeOf or Debug; from_impl later adds static lifetime. No mandated protobuf header is type-enforced."
+        ],
+        [
+          231,
+          251,
+          "pub(crate) ArcAny aliases Arc<dyn Any+Send+Sync>. Public Copy/Clone CacheCodec contains static type id,u32 version and two plain function pointers for erased-body write/read. Descriptor construction itself allocates no heap state; function-pointer execution can allocate or fail. Private fields prevent outside direct mutation."
+        ],
+        [
+          252,
+          260,
+          "Custom Debug prints CacheCodec with type_id and version and finish_non_exhaustive, omitting function-pointer fields. It does not serialize bytes or invoke codecs."
+        ],
+        [
+          261,
+          277,
+          "serialize_via_impl<T:CacheCodecImpl+static> downcast_ref expects exact concrete T and panics with cache-layer-bug message if wrong, then calls T::serialize. deserialize_via_impl delegates T::deserialize with ?, allocates Arc<T> on success and erases it. Panic/allocation failures are not caught here."
+        ],
+        [
+          278,
+          298,
+          "Public CacheCodec::new accepts explicit static type id,u32 version and write/read function pointers, supporting orphan-rule custom adapters. It simply stores fields without checking identity uniqueness/nonemptiness/id length, version range, concrete type coherence, or roundtrip compatibility. Length validation happens when writing envelope."
+        ],
+        [
+          299,
+          316,
+          "from_impl<T> copies associated TYPE_ID/CURRENT_VERSION and monomorphized adapter pointers. Const type_id(&self) returns static identity for backend routing. No public version accessor appears in this implementation; readers get stored input version from CacheEntryReader."
+        ],
+        [
+          317,
+          323,
+          "serialize writes the full envelope first, constructs CacheEntryWriter::with_pos at body offset, then calls erased serializer directly. A body error or adapter wrong-type panic can leave envelope/partial body in the underlying writer. No temporary full-entry buffer or transactional write is provided by this wrapper."
+        ],
+        [
+          324,
+          344,
+          "deserialize returns CacheDecode<ArcAny>; parser failure logs debug and returns InvalidEnvelope, then exact type-id mismatch logs actual/expected and returns TypeMismatch. Order matters: malformed framing is rejected before identity, and identity before body-version gate. The never fails doc concerns Result parse failures, not a panic-catching guarantee."
+        ],
+        [
+          345,
+          357,
+          "If input body version>codec version, logs and returns VersionTooNew without calling body decoder. Older/equal values, including0, are passed to implementation; there is no minimum supported version registry or backward migration here. Wrapper numeric ordering alone does not prove body can read every older version."
+        ],
+        [
+          358,
+          372,
+          "Constructs reader over original whole Bytes at envelope.body_offset with input type_version. Decoder Ok is Hit without checking reader consumed all bytes; Err logs full Display and becomes BodyError with original detailed error discarded from outcome. Panics are not caught and custom callbacks can perform arbitrary effects despite local in-memory parsing. No checksum/authentication or postdecode concrete-type validation is present."
+        ],
+        [
+          373,
+          403,
+          "cfg(test) Widget stores n:u32, uses TYPE_ID=test.Widget/v1. Its body writes a raw length-prefixed four-byte LE n, with no protobuf header; decoder reads raw then requires exactly4 payload bytes, otherwise Error::io bad widget. This demonstrates body primitive choice is implementor-defined."
+        ],
+        [
+          404,
+          429,
+          "serialize_widget makes fresh Arc Widget, serializes into Vec and converts Bytes, unwrapping errors. miss_reason converts Hit to None/Miss to reason. deserialize_widget uses wrapper then downcasts and try_unwrap's Arc, assuming test codec returns sole-owned Widget. These are private test helpers with no production panic guarantee."
+        ],
+        [
+          430,
+          448,
+          "Roundtrip test asserts LCE1 prefix and DEADBEEF Widget equality; magic helper test includes valid bytes, exactly MAGIC alone(true), short LCE,false foreign/empty. It explicitly separates prefix recognition from full envelope validation."
+        ],
+        [
+          449,
+          477,
+          "Wrong-first-byte fixture expects InvalidEnvelope. Historical-shape test synthesizes LEu64 length42 plus42 zeros, and a small tag-byte vector, both misses. These are in-source synthetic cases, not checked-in released fixtures or implemented legacy decoders."
+        ],
+        [
+          478,
+          500,
+          "Unknown envelope byteFF returns InvalidEnvelope. Manually framed some.OtherType plus otherwise plausible raw widget body returns TypeMismatch. Tests do not verify combined-invalid precedence beyond these one-cause fixtures."
+        ],
+        [
+          501,
+          525,
+          "CURRENT_VERSION+1 with matching type/raw body yields VersionTooNew. Truncation test cuts valid entry at0,1,4,5,7,9 and expects InvalidEnvelope; it samples positions rather than every envelope boundary and does not cover invalid UTF-8 id."
+        ],
+        [
+          526,
+          553,
+          "One-byte raw Widget payload under valid envelope yields BodyError. reader_exposes_envelope_version writes body-version7 and constructs CacheEntryReader directly at recorded offset, confirming version7/raw value5; it bypasses CacheCodec's version1 gate and does not prove wrapper reads future versions. No tests here cover writer failures/overlong id, older-version branching, trailing-byte acceptance, wrong-type serialize panic or custom decoder panic."
+        ]
+      ]
+    },
+    {
+      "path": "rust/lance-core/src/cache/entry_io.rs",
+      "module": "L1-modules/rust-lance-core-cache.md",
+      "reviewed": true,
+      "role": "Streaming body writer and cursor-based cache reader with protobuf header framing, discriminant bytes, raw blobs and delegated aligned Arrow IPC sections.",
+      "limits": "Local header/tag/cursor mechanics are fully established. Arrow IPC alignment, self-delimitation, malformed-input behavior and zero-copy details delegate to lance_arrow::ipc, which remains pending. The module's all reads zero-copy prose cannot mean no allocations: protobuf decode produces owned messages and read_ipc_batches returns an owned vector. No runtime tests executed. (rust/lance-core/src/cache/entry_io.rs:4-18; rust/lance-core/src/cache/entry_io.rs:117-202)",
+      "ranges": [
+        [
+          1,
+          27,
+          "SPDX/docs describe streaming without full-entry buffering and section borrowing from Bytes, with64-byte absolute IPC alignment. Body grammar is LEu32-length protobuf HEADER, aligned self-delimiting ARROW_IPC, and LEu64-length RAW_BLOB. Imports Write,RecordBatch,Bytes,prost Message and core Error/Result. Actual IPC byte machinery resides in lance_arrow, not this file."
+        ],
+        [
+          28,
+          54,
+          "Public CacheEntryWriter stores private mutable dyn Write reference and absolute usize pos. Public new starts0 for standalone/nested buffers; crate-visible with_pos trusts caller-supplied preceding-byte count (normally envelope). Neither inspects actual writer length or seeks. Incorrect supplied pos can misalign subsequent IPC."
+        ],
+        [
+          55,
+          61,
+          "write_u8 uses write_all of exactly one untagged byte, advances pos by1 only after success and returns Ok. This is a body discriminant, not the typed tag+payload key encoding. Position increment is unchecked usize arithmetic."
+        ],
+        [
+          62,
+          72,
+          "write_header<P:Message> encodes entire header into a Vec, then checks length fitsu32; excessive size yields IO-category error after allocation. Writes LEu32 length then full encoded payload, advancing pos by4+len only after both succeed. Thus it buffers each header though not the entire entry; partial IO errors may leave bytes written with old pos. No rollback or flush occurs."
+        ],
+        [
+          73,
+          88,
+          "write_ipc delegates one RecordBatch plus &mut pos to lance_arrow::ipc::write_ipc_section, converting external error to Error::io(display). write_ipc_batches accepts IntoIterator<Item=RecordBatch>, delegates analogous multi-batch helper, with docs requiring at least one batch. Empty-iterator enforcement, IPC framing and allocation behavior remain dependency analysis tasks."
+        ],
+        [
+          89,
+          99,
+          "write_raw delegates a borrowed byte slice to write_len_prefixed_bytes and, only on success, advances pos by8+payload length. Docs require payload's own stable portable encoding; no validation of that requirement occurs. Error is stringified into IO category, losing typed original source at this wrapper boundary."
+        ],
+        [
+          100,
+          116,
+          "raw_writer exposes mutable underlying writer for already self-delimiting or whole-body formats. It does not track any bytes written through it; documented restriction forbids interleaving those writes with write_ipc alignment. Nothing in the type system enforces this or resynchronizes pos. It can avoid buffering a whole raw body just to measure length."
+        ],
+        [
+          117,
+          138,
+          "Public CacheEntryReader owns borrowed Bytes reference,usize offset,u32 version. new accepts all values without offset<=len validation and stores them; it neither copies body bytes nor parses envelope. Zero-copy documentation applies to returned Bytes/buffer backing, not absence of all metadata/object allocations. Public body() later can panic for invalid offset."
+        ],
+        [
+          139,
+          153,
+          "version returns stored body-version number with no validation. read_u8 safely get's current index or IO missing-tag error, advancing offset by1 only on success. EOF/error leaves cursor unchanged; caller-created out-of-range offset also errors without indexing panic on this path."
+        ],
+        [
+          154,
+          172,
+          "read_header<P:Message+Default> checks offset+4 with checked_add and upper bound, interprets exact4 LE bytes, checks len_end+declared_length and bound, then prost-decodes that exact slice. Truncated prefix/body and malformed protobuf yield distinct IO messages. Slice-to-array unwrap is justified by successful4-byte range check. Offset advances only after successful decode; no explicit size cap below available input is imposed and P may allocate owned fields."
+        ],
+        [
+          173,
+          191,
+          "read_ipc/read_ipc_batches/read_raw delegate whole data plus mutable offset to lance_arrow helpers and stringify errors into Error::io. Multi-batch API returns Vec<RecordBatch>, collecting decoded batch handles by its signature. Cursor state after delegated error and buffer alignment/zero-copy guarantees cannot be proved by these forwarding bodies alone."
+        ],
+        [
+          192,
+          203,
+          "body returns data.slice(offset..) as a cheap shared Bytes view without advancing cursor. Valid offset at end yields empty; arbitrary out-of-range offset allowed by new can make slice panic. Repeated calls expose same remaining range; no EOF assertion or consumption method is added."
+        ],
+        [
+          204,
+          229,
+          "cfg(test) imports parent,Arc,Int32Array/UInt64Array,Arrow schema and IPC_SECTION_ALIGNMENT. write_body uses Vec plus with_pos; it changes logical starting position only, not preprending actual prefix bytes. int_batch builds one nonnull Int32 column i and unwraps RecordBatch validity."
+        ],
+        [
+          230,
+          246,
+          "Byte roundtrip writes7,255, compares exact2 bytes, reads both and asserts third read diagnostic contains missing tag byte. It exercises EOF rather than usize-max offset or mutation on error."
+        ],
+        [
+          247,
+          265,
+          "Header roundtrip uses prost's u64 message implementation for1234 (comment calls it UInt64Value), compares LEu32 prefix with encoded_len, checks total4+encoded length, decodes same number and requires empty remaining body. Dependency protobuf encoding bytes are not independently specified by this test."
+        ],
+        [
+          266,
+          289,
+          "Header rejection tests use only2 prefix bytes and declared payload16 with3 actual bytes, asserting truncated length prefix/body text respectively. They do not assert error variant or cursor preservation."
+        ],
+        [
+          290,
+          306,
+          "Malformed protobuf fixture uses field1 varint tag08 followed by three FF continuation bytes with correct outer length; read_header<u64> must return text containing decode failed. This checks one invalid varint, not all protobuf malformations or resource limits."
+        ],
+        [
+          307,
+          326,
+          "Raw fixture writes length-prefixed[1,2,3] followed by untracked raw_writer[9,9], asserts total13 bytes, reads raw and sees2 remaining bytes. Reader version test directly supplies7 and expects7. Neither validates codec version gating or interleaved IPC after untracked writes."
+        ],
+        [
+          327,
+          355,
+          "Alignment test actually prepends13 AA envelope-model bytes, starts pos13, writes header1234 then Int32 batch[1,2,3]. Computes expected next multiple of imported IPC alignment, requires nonempty all-zero padding, decodes header/batch from offset13 and requires EOF. This is a source assertion of absolute-entry alignment, not a direct full-byte IPC specification or executed test."
+        ],
+        [
+          356,
+          364,
+          "Multi-batch roundtrip writes two Int32 batches[1,2] and[3] as one section, then compares decoded Vec exactly. Empty iterator, differing schemas, malformed IPC, input buffer address alignment and explicit allocation counts are not covered."
+        ],
+        [
+          365,
+          392,
+          "Mixed-section test creates nonnull UInt64 column u=[MAX,0], emits discriminant2,header99,IPC batch,raw[7,7,7], then consumes in same order and requires empty body. It proves intended local sequencing through assertions in source only. There are no failing-writer, huge-header, invalid-constructor-offset or zero-copy pointer-identity tests in this module."
+        ]
+      ]
+    }
+  ]
+}

@@ -1,0 +1,413 @@
+{
+  "iteration": 76,
+  "files": [
+    {
+      "path": "rust/lance-encoding/src/encodings/physical/packed.rs",
+      "module": "L1-modules/rust-lance-encoding.md",
+      "role": "Row-major packed structs: fixed mini-block, fixed and variable per-value interfaces, child accumulators and nine local tests. File-version selection belongs to the caller.",
+      "reviewed": true,
+      "limits": "Every physical source line read during ANALYZE76 in bounded untruncated primary reads. No repository build, test, lint, benchmark, generator or installation executed. Failure-path observations are source deductions, not reproductions; contextual files remain pending unless previously analyzed.",
+      "ranges": [
+        [
+          1,
+          39,
+          "SPDX/module documentation presents row-major struct packing and transparency only when children are transparent. Imports connect Arrow UInt64 stats, Field, compression traits, ValueEncoder/Decoder, DataBlockBuilder, buffers and protobuf21 helpers. No production async, IO, unsafe or local feature/version gate."
+        ],
+        [
+          40,
+          70,
+          "Private struct_data_block_to_fixed_width_data_block obtains scalar DataSize (panic if absent/wrong type), reserves that many bytes, takes count from first child, and copies each row/child FixedWidth slice using supplied field bits/8. Empty children, wrong kinds, missing width entries or short slices panic; widths/count consistency and byte alignment are assumed. Width sum and arithmetic unchecked. Fresh FixedWidth stats; struct validity discarded."
+        ],
+        [
+          71,
+          105,
+          "Public Debug Default empty PackedStructFixedWidthMiniBlockEncoder implements MiniBlockCompressor. Requires Struct else InvalidInputSource with block-encoder wording; unwraps every child FixedWidth, zips bytes, then calls boxed raw ValueEncoder with supplied context. Wraps result in PackedStruct(inner,field widths). No recursive child compression, ratio test or extra validation."
+        ],
+        [
+          106,
+          133,
+          "Public Debug PackedStructFixedWidthMiniBlockDecompressor stores Vec<u64> widths and boxed MiniBlockDecompressor. Public new unwraps descriptor.values.compression, accepts only Flat via ValueDecompressor::from_flat; other compression panics with Lance2.1 wording. Does not validate nonempty/aligned widths or sum agreement."
+        ],
+        [
+          134,
+          187,
+          "Mini decode asserts one buffer, invokes inner with external count, requires FixedWidth else panic, and asserts total row width byte-aligned. Floor each child width/8, construct prefix positions using len-1 (empty list underflow), allocate per-child count*width and copy strided slices. No check sum(child widths)==row width, so malformed widths can overlap/cross rows or leave bytes unused. Returns Struct with None validity/fresh stats; no size estimator override."
+        ],
+        [
+          188,
+          221,
+          "Private Debug FixedPackedFieldData wraps one FixedWidthDataBlock. append_row_bytes rejects non-byte-aligned widths, uses checked row*bytes and checked end, rejects end beyond actual buffer, and copies slice. It does not check block logical count or trailing unused bytes. Validation runs only for visited rows; zero rows bypass it."
+        ],
+        [
+          222,
+          258,
+          "Private Debug VariablePackedFieldData distinguishes Fixed from Variable(block,bits_per_length). Fixed delegates; variable requires prefix bits multiple8 and byte width4or8, then dispatches on offset width32/64. These are compressed child lengths, not necessarily original Arrow string lengths."
+        ],
+        [
+          259,
+          297,
+          "Variable append borrows unsigned typed offsets, directly indexes row and row+1, checks only end<=data.len, computes end-start and enforces matching prefix width before writing little-endian u32/u64 length and selected payload. Unsupported offset width InvalidInput. Missing offsets, decreasing ranges and unchecked subtraction/casts can panic or truncate; there is no explicit start<=end validation. No null bitmap in row bytes."
+        ],
+        [
+          298,
+          326,
+          "Private check_struct_validity validates Struct variant, at least one child, exact metadata field count and equal child logical counts. All errors InvalidInput. Despite name, it does not validate struct/child nullability, actual buffer sizes, schema types or offset validity."
+        ],
+        [
+          327,
+          357,
+          "Public Debug PackedStructVariablePerValueEncoder stores Arc<dyn CompressionStrategy> and Vec<Field>; public new stores without checks. Per-value compress calls check_struct_validity and retains original child count. Sequentially asks the supplied strategy to create and execute a child per-value compressor for each schema field."
+        ],
+        [
+          358,
+          384,
+          "For Fixed compressed children record nested encoding and bits_per_value; for Variable children record nested encoding and offset width as bits_per_length. Store corresponding local append wrappers. No post-compression count agreement or metadata/type consistency checks on custom child compressors."
+        ],
+        [
+          385,
+          417,
+          "Build all row payloads in one growing Vec, record initial0 and each ending offset in Vec<u64>, track maximum row length and checked aggregate length. Capacity count-as-usize+1 is unchecked. Choose32-bit offsets only if total bytes and max row length<=u32::MAX, allocating a converted Vec; else64. Return VariableWidth with original count/fresh stats and VariablePackedStruct field metadata. Row buffers coexist with compressed children, and no struct validity is retained."
+        ],
+        [
+          418,
+          443,
+          "Crate-internal Debug PackedStructFixedPerValueEncoder retains only field count from constructor Vec<Field>. Per-value compress validates struct/counts then rejects has_variable_width_child. That helper means any direct child not FixedWidth, including fixed-size-list/nullable/nested structs; it is not a recursive variable-width test. (rust/lance-encoding/src/data.rs:1037-1041)"
+        ],
+        [
+          444,
+          466,
+          "Fixed per-value compression uses raw ValueEncoder for each child, discards its descriptor, requires Fixed result and checked-adds bits_per_value. Errors identify unsupported fixed layout or row-width overflow. The direct-child precheck prevents using ValueEncoder fixed-size-list support here."
+        ],
+        [
+          467,
+          495,
+          "Reserve row bytes using saturating rowbytes*count, then interleave fields via guarded append_row_bytes; debug-check cumulative row size. Byte-alignment comment assumes rows were visited, so zero rows do not exercise append checks. Return FixedWidth with summed width/original count/fresh stats and PackedStruct(Flat(sum,None),field widths); no adaptive compression."
+        ],
+        [
+          496,
+          523,
+          "Crate-internal Debug VariablePackedStructFieldKind has Fixed{bits_per_value,Arc<dyn FixedPerValueDecompressor>} and Variable{bits_per_length,Arc<dyn VariablePerValueDecompressor>}. Crate-internal Debug wrapper exposes kind within crate. Public Debug PackedStructVariablePerValueDecompressor has private fields and crate-internal infallible new; descriptor parsing is external."
+        ],
+        [
+          524,
+          564,
+          "Private Debug FixedFieldAccumulator owns DataBlockBuilder,width and one zero-filled placeholder value. append_empty appends0..1. new rejects non-byte-alignment, checked-divides by8 and checked-multiplies capacity by count, then allocates one placeholder. Zero width passes these checks; size-to-usize casts unchecked. Builder allocation is lazy until append. (rust/lance-encoding/src/data.rs:2071-2088)"
+        ],
+        [
+          565,
+          586,
+          "Fixed accumulator finish expects FixedWidth or InvalidInput. Private FieldAccumulator variants are Fixed,Variable32 and Variable64, the latter two each hold a builder and empty value. Underlying builder.finish panics if no append ever occurred; thus zero-row variable-packed decode with any configured field reaches a panic, not the local mismatch error. Fixed width0 can later divide by zero in builder finish. These are source deductions only. (rust/lance-encoding/src/data.rs:344-377; rust/lance-encoding/src/data.rs:2113-2116)"
+        ],
+        [
+          587,
+          605,
+          "FieldAccumulator::append_empty inserts one placeholder into every field: fixed zero bytes or variable empty bytes with equal offsets. Comment connects empty full-zip payload to rep/def null/invalid items; local representation does not mark placeholders null, relying on the surrounding structural layer."
+        ],
+        [
+          606,
+          633,
+          "VariablePerValueDecompressor copies all input offsets into Vec<u64>, accepting32/64 only, then requires exact length count-as-usize+1. Wrong width/count returns InvalidInput. Does not require first offset0 or final offset exactly payload length; casts/count addition unchecked."
+        ],
+        [
+          634,
+          672,
+          "Build one accumulator per field. Fixed uses checked allocation estimate; each variable builder uses entire packed input length as estimate and a one-value empty block offsets[0,0] with matching32/64 width. Unsupported bits_per_length InvalidInput. Many variable fields can reserve multiples of the input size once builders materialize."
+        ],
+        [
+          673,
+          713,
+          "For each row, cast offsets to usize and reject end beyond bytes or start>end. Empty row appends placeholders to all fields and continues. Otherwise initialize cursor and iterate field/accumulator pairs; fixed child consumes configured byte width after row-bound check, copying into a temporary one-value FixedWidth block then appending. No outer prefix/suffix exhaustion check."
+        ],
+        [
+          714,
+          754,
+          "Variable32 child requires four prefix bytes within row, reads u32LE payload length, bounds-checks payload end, copies bytes into a temporary one-value VariableWidth block offsets[0,len], appends, advances cursor. Cursor additions unchecked; malformed inputs return InvalidInput for ordinary bounds failures. No UTF-8/type validation here."
+        ],
+        [
+          755,
+          802,
+          "Variable64 mirrors with eight prefix bytes/u64LE length cast to usize. Wrong accumulator/layout pairing InvalidInput. After every nonempty row, cursor must exactly equal row_end; trailing bytes rejected. Empty rows bypass that field parse entirely. No child codec invoked during row splitting."
+        ],
+        [
+          803,
+          836,
+          "Finalize each fixed builder, then invoke its FixedPerValueDecompressor with external total count. Variable32 builder must yield VariableWidth else panic, debug-check width32, set width from field length metadata and invoke child variable decoder. No check decoded child count/type matches outer schema."
+        ],
+        [
+          837,
+          867,
+          "Variable64 finalize mirrors32. Mismatch returns InvalidInput. Return Struct children with fresh BlockInfo and validityNone. Decoding materializes offsets, copied per-field payloads and temporary row blocks; no streaming, size-estimator override or local async/IO. Child errors propagate."
+        ],
+        [
+          868,
+          914,
+          "Private Debug PackedStructFixedFieldDecoder stores width and boxed fixed decoder. Crate-internal Debug PackedStructFixedPerValueDecompressor stores these. Its crate-internal fallible new requires values and compression, rejects non-Flat, then builds raw ValueDecompressor for every listed width. It ignores the parent Flat width/data descriptor and accepts empty width lists; child alignment/sum checked later."
+        ],
+        [
+          915,
+          946,
+          "Fixed per-value decode rejects non-byte-aligned input row or child widths, sums child byte widths and requires equality with input row bytes. Sum/casts unchecked. Require actual buffer at least saturating(rowbytes*external count), not exact length, ignoring input block.num_values and surplus bytes. All local errors InvalidInput."
+        ],
+        [
+          947,
+          982,
+          "Allocate/copy every child by strided slices and raw-decode with external count, then Struct validityNone/fresh stats. bits_per_value sums configured child widths unchecked. Empty child list with zero row width returns empty Struct, which cannot itself preserve an independent row count. No decoded-size override."
+        ],
+        [
+          983,
+          1050,
+          "Private cfg(test) module imports Arrow types, test strategies, protobuf and metadata keys. Five private helpers convert Int64,Int32,String,LargeString,Binary arrays into expected block variants or panic. Tests construct nonnullable payloads unless explicitly exercising an empty row; schema nullable flags alone do not create null data."
+        ],
+        [
+          1051,
+          1132,
+          "variable_packed_struct_round_trip uses UInt32[1,2,42] and Utf8 offsets[0,1,4,4]/bytes abcz with nullable schema flag but no actual nulls; compute child stats, StructuralU32 strategy, require Variable result/default decode. Assert both child widths, raw id bytes and full string offsets/payload. No exact packed-byte or field-descriptor assertion."
+        ],
+        [
+          1133,
+          1208,
+          "variable_packed_struct_large_utf8_round_trip uses Int64[10,20,30,40] and four LargeUtf8 strings including a long sentence. StructuralU32/default decode, checks fixed child and64-bit offsets/all string bytes. It verifies large offset type with small data, not >4GiB allocation."
+        ],
+        [
+          1209,
+          1251,
+          "Async variable_packed_struct_utf8_round_trip creates three rows UInt32+Utf8+LargeUtf8, marks packed metadata true, uses u32 structural harness and expects variable_packed_struct name. This is harness source evidence; no test executed here."
+        ],
+        [
+          1252,
+          1343,
+          "variable_packed_struct_multi_variable_round_trip combines Utf8 categories, Binary payloads including one empty item and Int32 values across four rows. StructuralU32/default decode verifies offsets, bytes and bit widths for all three fields. No null value despite nullable field metadata."
+        ],
+        [
+          1344,
+          1374,
+          "variable_packed_struct_requires_v22 builds Int64+Utf8 three-row struct and asserts StructuralU16 strategy create_per_value returns NotSupported. Name does not prove production V2.2 all-fixed support: test StructuralU32 uses all-packed helper, while production V2.2 allows only variable-packed per-value and V2.3 adds fixed per-value. (rust/lance-encoding/src/testing.rs:162-181; rust/lance-file/src/versions/v2_2/compression.rs:77-93; rust/lance-file/src/versions/v2_3/compression.rs:77-92)"
+        ],
+        [
+          1375,
+          1405,
+          "Empty-row test explicitly constructs fixed32 raw and variable32 raw child decoders, avoiding strategy selection. Configures one fixed and one variable field to isolate placeholder behavior."
+        ],
+        [
+          1406,
+          1443,
+          "Writes packed row1 [u32LE1][u32LE1][a] and row3 [u32LE2][u32LE0]; row offsets[0,9,9,17]. Decode must produce fixed[1,0,2], variable offsets[0,1,1,1] and bytes a. This is an empty middle row, not a zero-row block or validation of rep/def/nullable Arrow output."
+        ],
+        [
+          1444,
+          1503,
+          "fixed_packed_struct_round_trip compresses Int32[1,2,3,4]+Int64[10,20,30,40] using StructuralU32 test strategy; require Fixed result, default fixed decode count4, assert both child widths/payloads. No exact interleaved bytes or malformed-layout assertion."
+        ],
+        [
+          1504,
+          1539,
+          "Async fixed_packed_struct_full_zip_round_trip forces packed=true and fullzip metadata for the same two fields/four rows. u32 structural harness expects packed_struct name. Comment calls this file-writer wiring; test strategy is not identical to production V2.2 policy. No direct mini-block test appears in this module."
+        ],
+        [
+          1540,
+          1571,
+          "fixed_packed_struct_rejects_variable_child directly constructs fixed encoder over Int32+Utf8 two rows, asserts InvalidInput and fixed-width substring. Nine test functions total. Local gaps include zero rows, zero width, malformed descriptors/offsets/prefixes, misaligned widths, null child codecs and input/count mismatch. Tests read only."
+        ]
+      ]
+    },
+    {
+      "path": "rust/lance-encoding/src/statistics.rs",
+      "module": "L1-modules/rust-lance-encoding.md",
+      "role": "DataBlock statistic keys, eager/lazy computation, shared cached Arrow arrays, approximate cardinality, bit/run/entropy estimators and ten local tests.",
+      "reviewed": true,
+      "limits": "Every physical source line read during ANALYZE76 in bounded untruncated primary reads. No repository build, test, lint, benchmark, generator or installation executed. Failure-path observations are source deductions, not reproductions; contextual files remain pending unless previously analyzed.",
+      "ranges": [
+        [
+          1,
+          18,
+          "SPDX and imports: Arc,fmt,RandomState/Hash,Arrow arrays/primitive bounds,HyperLogLogPlus,PrimInt and every relevant DataBlock variant. Statistics describe physical representations; no async, IO or local unsafe. Dependencies supply typed-buffer borrowing and HLL internals, not reimplemented here."
+        ],
+        [
+          19,
+          51,
+          "Public Clone Copy PartialEq Eq Hash Stat variants BitWidth,DataSize,Cardinality,FixedSize,NullCount,MaxLength,RunCount,BytePositionEntropy; manual Debug spells variant name and Display delegates Debug. FixedSize has no computation here; NullCount only supplied by AllNull here. Most values use UInt64Array, with lengths depending on statistic."
+        ],
+        [
+          52,
+          72,
+          "Public ComputeStat declares compute_stat(&mut self) without Result. DataBlock dispatch no-ops Empty,Constant,AllNull,Dictionary; Nullable computes underlying data only; FixedWidth,VariableWidth,FixedSizeList,Opaque,Struct delegate. Panics/poisoned locks are not converted into recoverable errors."
+        ],
+        [
+          73,
+          88,
+          "VariableWidth compute requires shared statistic map empty or panics, computes physical data_size and max_length, then inserts DataSize/MaxLength under write lock. No cardinality yet. Empty check and insertion are separate lock acquisitions; once-only condition is not atomic across shared BlockInfo clones."
+        ],
+        [
+          89,
+          116,
+          "FixedWidth compute eagerly calculates physical DataSize, chunked BitWidth, MaxLength=floor(bits/8), RunCount and BytePositionEntropy before one write lock inserts all five. No once-only guard and no clearing other entries, including cached Cardinality. Recomputing after data changes can retain stale cardinality, especially with shared BlockInfo. (rust/lance-encoding/src/data.rs:63-85)"
+        ],
+        [
+          117,
+          139,
+          "FixedSizeList compute delegates child unchanged; comment suggests future list-splitting optimization but no special list algorithm exists. Opaque computes/inserts DataSize only. Repeated fixed-list compute over already-computed variable child can encounter variable once-only panic."
+        ],
+        [
+          140,
+          160,
+          "Public GetStat:fmt::Debug exposes optional Arc<dyn Array>, expect_stat panics missing key with self/stat, and generic expect_single_stat<T> downcasts primitive array, panics if len!=1 and returns value0. Wrong type panics via Arrow accessor; scalar helper does not inspect validity of the array element."
+        ],
+        [
+          161,
+          186,
+          "DataBlock get_stat returns None for Empty/Constant and delegates every other variant. Nullable simply forwards to underlying data; its null bitmap and own BlockInfo do not participate. Comment about deprecation in2.1 is design guidance, not an attribute. NULL semantics are therefore not generally represented in these statistics."
+        ],
+        [
+          187,
+          216,
+          "Variable getter panics if whole map empty, even for an unsupported requested stat. Existing entry clones Arc; absent non-Cardinality returnsNone. Missing Cardinality computes outside lock, then takes write lock, rechecks map nonempty and entry-or-inserts. Concurrent callers may duplicate a full scan; first cached value wins."
+        ],
+        [
+          217,
+          231,
+          "FixedSizeList getter asks child for same stat. MaxLength maps returned UInt64 value0 multiplied by dimension, unchecked; every other stat forwards unchanged. Cardinality/run/bit statistics describe child elements, not distinct lists; no dimension scaling except MaxLength."
+        ],
+        [
+          232,
+          259,
+          "Variable compute_cardinality creates HyperLogLogPlus<&[u8],Xxh3Builder> with precision4 and unwraps constructor. Comment motivates xxhash versus SipHash1-3 based on estimates, not a measured guarantee in this task.32-bit path hashes every adjacent unsigned offset window payload, including empty strings; no logical-count/null filtering."
+        ],
+        [
+          260,
+          281,
+          "64-bit cardinality path mirrors with offsets cast to usize. Unsupported width unreachable panic. Return hll.count() as u64 in one UInt64Array; approximate floating estimate is truncated by cast. Descending/out-of-bounds offsets can panic; offset windows drive count independently of num_values."
+        ],
+        [
+          282,
+          310,
+          "Variable max_length scans differences of every adjacent unsigned32/64 offset pair and returns maximum or0 for fewer than two offsets. Unsupported width unreachable. Does not validate monotonicity, payload bounds or logical count; descending subtraction can panic/wrap depending checks. Length is encoded bytes, not Unicode character count."
+        ],
+        [
+          311,
+          323,
+          "AllNull get_stat dynamically creates scalar NullCount=num_values or DataSize=0, otherwiseNone; no initialized map required. MaxLength and Cardinality are not supplied."
+        ],
+        [
+          324,
+          352,
+          "Fixed getter also panics empty map, returns cached Arc first, and lazily computes only missing Cardinality for widths64or128. Other absent stats returnNone. Compute outside lock, then entry-or-insert; unlike Variable no second empty-map check. Cache can be shared across cloned blocks. (rust/lance-encoding/src/data.rs:63-85)"
+        ],
+        [
+          353,
+          370,
+          "Fixed max_bit_widths returns[0] immediately when num_values0. Otherwise local CHUNK_SIZE=1024 and nested calculate_max_bit_width<T:PrimInt> process all physical typed values in chunks, OR each chunk then compute width-leading_zeros. It does not restrict scans to num_values or validate length consistency."
+        ],
+        [
+          371,
+          407,
+          "Bit width dispatch interprets physical bytes as unsigned8/16/32/64 words; other widths return one configured-width entry (including1/128). Signed negatives contribute full native bit patterns, as do raw float bits. Nonzero count with empty physical data yields empty result for native widths; zero count ignores physical bytes. No feature gate."
+        ],
+        [
+          408,
+          440,
+          "Fixed cardinality supports64-bit raw u64 values with Xxh3Builder and128-bit raw u128 with fresh RandomState, both HLL precision4. Every physical typed value is hashed irrespective of logical count; random seed can change128-bit estimates between uncached computations. Wrong width unreachable. Output scalar cast estimate; no exactness/error bound promised."
+        ],
+        [
+          441,
+          477,
+          "Run-count comments describe adjacent equal values. Actual run_count returns[0] for declared count0; nested generic count_runs returns0 for empty physical slice, otherwise1+adjacent transitions. Dispatch begins unsigned8/16/32, so equality is physical bit equality, not original floating/null semantics."
+        ],
+        [
+          478,
+          503,
+          "Run-count dispatch includes64/128-bit unsigned physical words; unsupported widths return declared num_values as pessimistic no-runs estimate. Supported widths scan whole buffer independently of positive logical count. Signed-zero/NaN comparisons follow raw words if floating payloads are represented at these widths."
+        ],
+        [
+          504,
+          530,
+          "Byte-position entropy samples first min(num_values-as-usize,64) declared values using local SAMPLE_SIZE=64. Zero sample gives empty UInt64Array. For each floor(bits/8) byte position, count occurrences in256 u32 counters; missing physical positions are skipped rather than errors. One-bit boolean width has zero byte positions."
+        ],
+        [
+          531,
+          551,
+          "For each byte position compute Shannon -sum(p*log2(p)), dividing each count by declared sample count even if bytes were missing; multiply1000 and castu64. All positions share first64-row sample, not random/full scan. Malformed short data yields unnormalized frequencies; widths and allocation/cast arithmetic remain trusted."
+        ],
+        [
+          552,
+          578,
+          "Opaque and Struct get_stat require nonempty map then clone requested entry orNone. Dictionary returnsNone for every key regardless of contents. No fallback computes struct or opaque cardinality."
+        ],
+        [
+          579,
+          596,
+          "Struct compute takes data_size and sums each child expect_single_stat<UInt64Type>(MaxLength), then inserts DataSize/MaxLength. Does not compute children first; missing/wrong child stats panic. Sum unchecked, empty children produce zero stats. AllNull/Dictionary/Empty/Constant child MaxLength unavailable through dispatch."
+        ],
+        [
+          597,
+          619,
+          "Private cfg(test) module imports arrays, builders, ArrowData, seeded Xoshiro DEFAULT_SEED and random generation. Tests are source evidence only; no local entropy tests. Normal from_arrays computes stats before wrapping nullable values. (rust/lance-encoding/src/data.rs:2020-2030)"
+        ],
+        [
+          620,
+          706,
+          "Data-size test compares three Int32 batches and seeded random Binary against Arrow value-buffer sums, Struct against child own-buffer sums, Dictionary againstNone, and nullable Int32 against values buffers excluding null bitmap. Confirms payload accounting rather than total in-memory allocation."
+        ],
+        [
+          707,
+          770,
+          "Integer bit-width test starts Int8 cases [1,2,3]->2, max positive->7, lower masks->5 and negative->8, then begins Int16 cases. All use DataBlock::from_array to initialize stats and assert UInt64Array equality, without runtime evidence here."
+        ],
+        [
+          771,
+          850,
+          "Continues Int16 positive/boundary/negative cases and Int32 positive/boundary/negative cases. The helper operates on unsigned representation, so any negative signed input yields full width. Source appendix preserves every literal input and expected number."
+        ],
+        [
+          851,
+          930,
+          "Completes signed32/64 fixtures and starts unsigned8/16 cases. Repeated explicit fixtures test single chunks of small arrays, signed extremes and widening boundaries; no parameterized harness used locally."
+        ],
+        [
+          931,
+          1030,
+          "Completes unsigned16/32/64 fixtures including u64::MAX. All explicit integer tests compare whole BitWidth arrays. No direct zero-count, empty typed buffer, width1/128 fallback or mismatched declared-count test here."
+        ],
+        [
+          1031,
+          1060,
+          "Multi-chunk bit-width test concatenates1024 values3,1024 values8 and10 values-1 separately for signed8/16/32/64; expect[2,4,native width]. Covers1024 chunk boundaries and short tail using true physical lengths."
+        ],
+        [
+          1061,
+          1070,
+          "Random Binary three-value test confirms unsupported BitWidth returnsNone after ordinary construction; it does not test an uninitialized statistics map (which panics)."
+        ],
+        [
+          1071,
+          1125,
+          "Variable cardinality tests String and LargeString fixtures: two unique hello/world, three unique sentences and repeated Samuel/Saunders/Samuel produce2,3,2 respectively. Small exact expected estimates do not establish general HLL exactness. All values present, no null/empty malformed-buffer coverage."
+        ],
+        [
+          1126,
+          1171,
+          "Variable MaxLength tests String/LargeString hello/world, sentence lengths and String Samuel/Saunders/Samuel. All ASCII and present. Assertions use byte string len, not character counts; no direct zero-window/descending/sliced offset case."
+        ],
+        [
+          1172,
+          1215,
+          "RunCount test covers Int32 consecutive triples->3, five unique->5, mixed nine->5, five repeated42->1, UInt8 three pairs->3 and Int64 five values->3. Comment single value means one distinct value across five rows. No zero rows, boolean,128-bit, nonconsecutive equal raw floats or count mismatch."
+        ],
+        [
+          1216,
+          1230,
+          "Fixed lazy-cardinality test builds seven Int64[1,2,3,1,2,3,1], checks DataSize/BitWidth cached and Cardinality absent. Does not call cardinality getter."
+        ],
+        [
+          1231,
+          1246,
+          "Fixed on-demand test uses same Int64 fixture, invokes getter expecting scalar3 then asserts Cardinality now present. No repeat-get Arc identity or concurrent cache initialization check."
+        ],
+        [
+          1247,
+          1269,
+          "Variable lazy test String[a,b,a] checks DataSize/MaxLength present/Cardinality absent, calls getter for2, then checks cached. Ten test functions total; no direct BytePositionEntropy,128-bit HLL, poisoned locks, recomputation/stale-cache, invalid scalar-stat or NULL filtering regression tests."
+        ]
+      ]
+    }
+  ]
+}

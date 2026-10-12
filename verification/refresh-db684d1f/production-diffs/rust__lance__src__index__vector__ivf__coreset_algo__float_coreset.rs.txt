@@ -1,0 +1,175 @@
+@@ -0,0 +1,174 @@
+    1 +// SPDX-License-Identifier: Apache-2.0
+    2 +// SPDX-FileCopyrightText: Copyright The Lance Authors
+    3 +
+    4 +use arrow_array::FixedSizeListArray;
+    5 +use async_trait::async_trait;
+    6 +use lance_core::Result;
+    7 +use lance_linalg::distance::MetricType;
+    8 +
+    9 +use crate::dataset::Dataset;
+   10 +
+   11 +use super::super::{
+   12 +    FixedIvfTrainingRanges, FixedIvfTrainingSampler, KMeansProgressCallback,
+   13 +    StreamingFloatKMeansMetricPolicy, StreamingKMeansMetricPolicy, WeightedCoreset,
+   14 +    WeightedHierarchicalKMeansParams, append_local_coreset, cast_training_data_to_f32,
+   15 +    f32_fsl_from_values, refine_streaming_f32_kmeans_with_resampling,
+   16 +    refine_streaming_f32_kmeans_with_sampler, refine_weighted_f32_kmeans,
+   17 +    train_weighted_hierarchical_f32_kmeans,
+   18 +};
+   19 +use super::StreamingCoresetAlgorithm;
+   20 +
+   21 +pub(in crate::index::vector::ivf) struct FloatCoresetAlgorithm<'a> {
+   22 +    metric_policy: &'a dyn StreamingFloatKMeansMetricPolicy,
+   23 +}
+   24 +
+   25 +impl<'a> FloatCoresetAlgorithm<'a> {
+   26 +    pub(in crate::index::vector::ivf) fn new(
+   27 +        metric_policy: &'a dyn StreamingFloatKMeansMetricPolicy,
+   28 +    ) -> Self {
+   29 +        Self { metric_policy }
+   30 +    }
+   31 +}
+   32 +
+   33 +#[async_trait]
+   34 +impl StreamingCoresetAlgorithm for FloatCoresetAlgorithm<'_> {
+   35 +    type Coreset = WeightedCoreset;
+   36 +
+   37 +    fn metric_policy(&self) -> &dyn StreamingKMeansMetricPolicy {
+   38 +        self.metric_policy
+   39 +    }
+   40 +
+   41 +    fn prepare_sample(
+   42 +        &self,
+   43 +        training_data: FixedSizeListArray,
+   44 +        sampled_metric: MetricType,
+   45 +    ) -> Result<FixedSizeListArray> {
+   46 +        self.metric_policy.validate_sample_metric(sampled_metric)?;
+   47 +        cast_training_data_to_f32(training_data)
+   48 +    }
+   49 +
+   50 +    fn new_coreset(&self, dimension: usize, capacity: usize) -> Self::Coreset {
+   51 +        WeightedCoreset::new(dimension, capacity)
+   52 +    }
+   53 +
+   54 +    fn append_local_coreset(
+   55 +        &self,
+   56 +        coreset: &mut Self::Coreset,
+   57 +        data: &FixedSizeListArray,
+   58 +        local_k: usize,
+   59 +        max_iters: usize,
+   60 +        on_progress: KMeansProgressCallback,
+   61 +    ) -> Result<()> {
+   62 +        append_local_coreset(
+   63 +            coreset,
+   64 +            data,
+   65 +            self.metric_policy,
+   66 +            local_k,
+   67 +            max_iters,
+   68 +            on_progress,
+   69 +        )
+   70 +    }
+   71 +
+   72 +    fn append_coreset(&self, coreset: &mut Self::Coreset, other: Self::Coreset) -> Result<()> {
+   73 +        coreset.append(other);
+   74 +        Ok(())
+   75 +    }
+   76 +
+   77 +    fn reduce_coreset(
+   78 +        &self,
+   79 +        coreset: &mut Self::Coreset,
+   80 +        dimension: usize,
+   81 +        budget: usize,
+   82 +    ) -> Result<()> {
+   83 +        coreset.reduce_to_budget(dimension, budget, self.metric_policy)
+   84 +    }
+   85 +
+   86 +    fn coreset_len(&self, coreset: &Self::Coreset) -> usize {
+   87 +        coreset.len()
+   88 +    }
+   89 +
+   90 +    fn train_centroids(
+   91 +        &self,
+   92 +        coreset: Self::Coreset,
+   93 +        dimension: usize,
+   94 +        num_partitions: usize,
+   95 +        max_iters: usize,
+   96 +        on_progress: KMeansProgressCallback,
+   97 +    ) -> Result<FixedSizeListArray> {
+   98 +        let (coreset_data, coreset_weights, coreset_losses) = coreset.into_fsl_parts(dimension)?;
+   99 +        let mut centroids = {
+  100 +            let params = WeightedHierarchicalKMeansParams {
+  101 +                dimension,
+  102 +                target_k: num_partitions,
+  103 +                metric_policy: self.metric_policy,
+  104 +                max_iters,
+  105 +                on_progress: on_progress.clone(),
+  106 +            };
+  107 +            train_weighted_hierarchical_f32_kmeans(
+  108 +                &coreset_data,
+  109 +                &coreset_weights,
+  110 +                &coreset_losses,
+  111 +                &params,
+  112 +            )?
+  113 +        };
+  114 +        let refined = refine_weighted_f32_kmeans(
+  115 +            &coreset_data,
+  116 +            &coreset_weights,
+  117 +            &coreset_losses,
+  118 +            &centroids,
+  119 +            self.metric_policy,
+  120 +            3,
+  121 +            on_progress,
+  122 +        )?;
+  123 +        centroids = f32_fsl_from_values(refined.centroids, dimension)?;
+  124 +        Ok(centroids)
+  125 +    }
+  126 +
+  127 +    async fn refine_with_sampler(
+  128 +        &self,
+  129 +        sampler: &FixedIvfTrainingSampler<'_>,
+  130 +        streaming_sample_size: usize,
+  131 +        sample_ranges: &FixedIvfTrainingRanges,
+  132 +        initial_centroids: &FixedSizeListArray,
+  133 +        passes: usize,
+  134 +        on_progress: KMeansProgressCallback,
+  135 +    ) -> Result<FixedSizeListArray> {
+  136 +        refine_streaming_f32_kmeans_with_sampler(
+  137 +            sampler,
+  138 +            self.metric_policy.metric_type(),
+  139 +            streaming_sample_size,
+  140 +            sample_ranges,
+  141 +            initial_centroids,
+  142 +            passes,
+  143 +            on_progress,
+  144 +        )
+  145 +        .await
+  146 +    }
+  147 +
+  148 +    async fn refine_with_resampling(
+  149 +        &self,
+  150 +        dataset: &Dataset,
+  151 +        column: &str,
+  152 +        total_sample_rate: usize,
+  153 +        streaming_sample_rate: usize,
+  154 +        num_partitions: usize,
+  155 +        initial_centroids: &FixedSizeListArray,
+  156 +        fragment_ids: Option<&[u32]>,
+  157 +        passes: usize,
+  158 +        on_progress: KMeansProgressCallback,
+  159 +    ) -> Result<FixedSizeListArray> {
+  160 +        refine_streaming_f32_kmeans_with_resampling(
+  161 +            dataset,
+  162 +            column,
+  163 +            self.metric_policy.metric_type(),
+  164 +            total_sample_rate,
+  165 +            streaming_sample_rate,
+  166 +            num_partitions,
+  167 +            initial_centroids,
+  168 +            fragment_ids,
+  169 +            passes,
+  170 +            on_progress,
+  171 +        )
+  172 +        .await
+  173 +    }
+  174 +}

@@ -1,0 +1,397 @@
+{
+  "iteration": 75,
+  "files": [
+    {
+      "path": "rust/lance-encoding/src/encodings/physical/binary.rs",
+      "module": "L1-modules/rust-lance-encoding.md",
+      "role": "Current variable-width mini-block, block and per-value encoders/decoders, offset validation and tests. No IO or local unsafe; the block decoder retains a frozen old-header read branch.",
+      "reviewed": true,
+      "limits": "Every physical source line read in bounded untruncated ANALYZE75 outputs. No source build/test/lint/benchmark/generator or installation ran. Contextual dependencies remain partially read; potential failure paths are source deductions, not runtime reproductions.",
+      "ranges": [
+        [
+          1,
+          34,
+          "SPDX and imports connect Arrow offsets/types/builders, Lance buffers/monotonicity, BlockInfo, compression traits, MAX_MINIBLOCK_VALUES and protobuf helpers. Intro describes transparent binary encoding; nested Flat offset width still supplies necessary metadata. This module does not select file versions or own nullability."
+        ],
+        [
+          35,
+          56,
+          "Public Debug BinaryMiniBlockEncoder has private i64 minichunk_size. Default dereferences public LazyLock AIM_MINICHUNK_SIZE. Private DEFAULT_AIM_MINICHUNK_SIZE=4096; environment LANCE_BINARY_MINIBLOCK_CHUNK_SIZE missing/non-Unicode uses default string, failed i64 parsing falls back4096. Parsed zero or negative sizes are accepted; cached once process-wide."
+        ],
+        [
+          57,
+          80,
+          "Private generic chunk_offsets receives offsets, data, alignment and target size, and defines local Debug ChunkInfo(chunk_start_offset_in_orig_idx,chunk_last_offset_in_orig_idx,bytes_start_offset,padded_chunk_size). Number of values comes from offsets.len()-1, independently of DataBlock.num_values. Empty offset vector underflows; malformed signed/nonmonotone indices are not validated here."
+        ],
+        [
+          81,
+          113,
+          "Repeatedly choose next boundary using search_next_offset_idx, compute header bytes=(values+1)*sizeofN and referenced data span, align total size. Final chunk log0; others trailing_zeros(count), so positive logs denote powers of two. Record u32-cast size and aggregate output capacity; arithmetic and narrowing unchecked. Offsets with only one entry produce a zero-value chunk."
+        ],
+        [
+          114,
+          152,
+          "For each chunk allocate adjusted offset vector, subtract its initial offset and add header byte count. Append native typed offsets, then referenced original data range, then pad_to alignment using local PAD_BYTE=72(0x48). Return one concatenated LanceBuffer and chunk descriptors. Offsets point into the complete chunk including offset table; encoder copies payload and offsets. 32-bit chunks use alignment4,64-bit chunks8, contrary to uniform8-byte comments."
+        ],
+        [
+          153,
+          170,
+          "search_next_offset_idx is private generic and takes last position and i64 budget. Remaining<=1 returns offsets.len()-1. Otherwise initialize accepted count2 and candidate4; one-value nonfinal chunks cannot be represented because log0 denotes the final chunk. Budget is an aim, not a hard bound: the initial two values need not fit."
+        ],
+        [
+          171,
+          203,
+          "If candidate reaches/passes end, return full remainder when its data plus offset table fits; otherwise keep last accepted power of two. This tail-fit branch bypasses MAX_MINIBLOCK_VALUES. For a fitting normal candidate, check candidate*2>cached maximum BEFORE accepting candidate. Thus normal cap4096 can stop at2048; a fitting tail can exceed cap, and initial2 exceeds cap1. Alignment padding is outside the budget estimate; negative target still permits initial2. No Result validation or overflow guard."
+        ],
+        [
+          204,
+          247,
+          "new accepts Option<i64>, uses unwrap_or(*AIM_MINICHUNK_SIZE) so the lazy default is evaluated even for Some; no validation. chunk_data borrows signed i32/i64 offsets for width32/64 and calls chunk_offsets with alignment4/8. Other widths panic. Return original logical num_values, concatenated bytes/chunks and Variable(Flat(offsetwidth,None)) metadata; stats are ignored. Count/offset consistency is unchecked."
+        ],
+        [
+          248,
+          267,
+          "MiniBlockCompressor ignores context, accepts VariableWidth only, otherwise InvalidInputSource naming unexpected data. Encoding descriptor has raw offsets and no values compression. No asynchronous work or IO."
+        ],
+        [
+          268,
+          296,
+          "Public Debug BinaryMiniBlockDecompressor stores private u8 bits_per_offset. new asserts32or64. from_variable unwraps nested offsets/compression, requires Flat else panic, casts flat width u64 to u8 directly and does not call new. It ignores nested Flat optional data compression and Variable values compression; invalid or truncated widths may survive this alternative constructor."
+        ],
+        [
+          297,
+          319,
+          "Private chunk_offset_violation_error assumes nonempty unsigned offsets. First descending adjacent pair produces CorruptFile with mini-block name, position and values; otherwise report final offset beyond chunk bytes. The decoder checks first/table overlap separately."
+        ],
+        [
+          320,
+          364,
+          "Mini decode asserts exactly one buffer and unwraps it. Compute bytes_per_offset from configured width and reject nonmultiple total length as CorruptFile; malformed from_variable widths can cause zero divisor. Convert num_values to usize before checked add1, then require enough native words for requested offsets. A 32-bit target could truncate count before the check. Offset table count is external, not embedded."
+        ],
+        [
+          365,
+          410,
+          "64-bit branch borrows the entire chunk as u64, slices requested num_values+1 offsets, and requires first>=requested table bytes. Lower bound rather than equality permits decoding a prefix of a full chunk. Allocate rebased offsets with wrapping subtraction and use branchless monotonic scan; check final offset cast to usize<=chunk length. Invalid ordering/bounds returns contextual CorruptFile. Unrequested trailing offsets are not validated."
+        ],
+        [
+          411,
+          443,
+          "Every non64 width takes the32-bit branch. Same table-overlap, monotonicity and bounds checks precede slicing payload. Copy referenced bytes and new offsets into fresh VariableWidth block, correct branch width/count and empty BlockInfo. No UTF-8 validation, padding-byte validation or decoded_size override; zero requested rows still require one offset.64-bit offset-to-usize casts assume sufficiently wide platform."
+        ],
+        [
+          444,
+          465,
+          "Public Debug Default VariableEncoder is a unit-like empty struct for Variable block and per-value encoding. Block compress accepts VariableWidth else InvalidInput with BinaryBlockEncoder name; derives offset width from input. Comments describe self-contained metadata prefix."
+        ],
+        [
+          466,
+          492,
+          "32-bit block path borrows offsets as u32, reserves 8+offset bytes+all value bytes, writes u32LE32 and u32LE bytes_start=8+offset bytes, then original offset bytes and entire data buffer. Does not rebase offsets or reconcile num_values, offset count and payload length. Casts and size arithmetic unchecked."
+        ],
+        [
+          493,
+          535,
+          "64-bit path writes u64LE64 and u64LE bytes_start=16+offset bytes, followed by unchanged offsets/data in new owned allocation. Other widths InvalidInput. Return Some(buffer) and Variable(Flat(width,None)); empty logical data still needs valid offset/header representation for decode."
+        ],
+        [
+          536,
+          559,
+          "PerValueCompressor moves VariableWidth input unchanged into PerValueDataBlock with Variable(Flat(width,None)); unsupported variant panics, and no width/count/offset validation occurs. Public Debug Default VariableDecoder implements VariablePerValueDecompressor as an Ok passthrough, retaining buffers/stats unchanged."
+        ],
+        [
+          560,
+          593,
+          "Public Debug Default BinaryBlockDecompressor requires Some data even for zero count. Fewer than4 bytes CorruptFile. Any nonzero byte among positions1,2,3 selects frozen old format; otherwise standard format. The heuristic can misclassify old counts with low24bits zero. Legacy branch is a preserved read surface, not a basis for new feature design."
+        ],
+        [
+          594,
+          629,
+          "Old32 header length9: byte0 width32,u32LE encoded count1..5 (debug equality with external count asu32),u32LE bytes_start5..9,offsets start9. Old64 length17: byte0 width64,u64LE count1..9 debug-check,u64LE bytes_start9..17,offsets start17. Short headers CorruptFile; unsupported width InvalidInputSource. External count controls release behavior."
+        ],
+        [
+          630,
+          683,
+          "Standard path reads low32 width word and casts tou8;32 requires8 bytes with u32 data start,64 requires16 bytes with u64 data start. High bytes4..8 of the64-bit width word are not checked. Validate checked(count+1)*bytes_per_offset and that bytes_start is between offsets_start and total length, otherwise CorruptFile."
+        ],
+        [
+          684,
+          715,
+          "Require offset bytes exactly match expected count and first offset exactly zero, then return zero-copy shared offset/data slices with external count/fresh stats. Does not validate remaining offset monotonicity, terminal bounds or UTF-8 here. Those checks occur at mandatory VariableWidthBlock into_arrow conversion. Thus block decode success is not full Arrow validity. (rust/lance-encoding/src/data.rs:735-962; rust/lance-encoding/src/data.rs:1186-1227)"
+        ],
+        [
+          716,
+          741,
+          "Private cfg(test) module imports async/rstest harness, four encoding modes, binary/String arrays, encoding strategy and datagen. Tests are source evidence, not run by this KB task."
+        ],
+        [
+          742,
+          764,
+          "test_utf8_binary parameterizes3 structural modes,2 page maxima and2 slicing choices:12 configurations of nonnullable UTF-8. Uses harness to validate generic IO/ranges/takes, not a standalone mini-block byte fixture."
+        ],
+        [
+          765,
+          790,
+          "test_binary parameterizes forced mini/full layout, Utf8/Binary,4 modes,2 page limits,2 slicing choices:64 configurations with nullable data. Broad roundtrip coverage does not prove direct invalid-input behavior."
+        ],
+        [
+          791,
+          820,
+          "test_binary_fsst adds forced fsst for2layouts*2normaltypes*3modes*2pages*2slice=48 configurations. Nullable test uses default TestCases and references issue4783 TODO; no external issue status verified."
+        ],
+        [
+          821,
+          852,
+          "test_fsst_large_binary similarly uses LargeBinary/LargeUtf8 across48 combinations, with basic test cases. Expected FSST metadata/strategy goes through harness; does not cover malformed symbol tables here."
+        ],
+        [
+          853,
+          870,
+          "test_large_binary_types spans2types*4modes*2pages*2slice=32 configurations with nullable generated arrays and default cases."
+        ],
+        [
+          871,
+          904,
+          "test_small_strings builds user_ counter strings, parameterizes2layouts*4modes*2pages*2slice=32, and validates through harness. Explicit field metadata forces layout when requested."
+        ],
+        [
+          905,
+          933,
+          "test_simple_binary spans2layouts*2types, data abc,null,pqr,null,m. Adds ranges0..2,0..3,1..3 and take0,1,3,4. Covers nullable interior/end placement, not direct offset header corruption."
+        ],
+        [
+          934,
+          950,
+          "test_sliced_utf8 constructs abc,de,null,fgh and slices(1,3), exercising nonzero source offset/nullable strings with three ranges."
+        ],
+        [
+          951,
+          984,
+          "Oversized-value test places a2MiB string among four small/null values with1MiB page limit across4 modes. Verifies a value larger than max page target is handled by harness, not a hard allocation ceiling."
+        ],
+        [
+          985,
+          1010,
+          "Nondivisible page test makes90 values of45000 bytes, splits into4 source parts and uses1MiB page size across4 modes. Targets row partition/remainder handling rather than compression efficiency."
+        ],
+        [
+          1011,
+          1051,
+          "Empty-string test checks three permutations of abc,empty,null with takes0,1,2 and single-position takes, then repeats with batch size1. Also tests empty,null,empty with ranges/takes under default and batch1; empty values and nulls are distinct."
+        ],
+        [
+          1052,
+          1071,
+          "Ignored jumbo test creates5000 strings of1MiB in LargeString (>4GiB), uses no_validation harness. #[ignore] has no issue URL. Comment about lists of lists disagrees with actual string fixture. It is not active runtime evidence or established >4GiB correctness."
+        ],
+        [
+          1072,
+          1099,
+          "Dictionary test parameterizes nullability and dictionary sizes100,500,35000 (six cases),70000 rows and nullable every7th item, then exercises structural-mode harness. This is dictionary selection integration, not a local dictionary implementation."
+        ],
+        [
+          1100,
+          1129,
+          "Encoding verification requires variable encoding automatically for1000 random10-byte UTF-8 strings, and explicitly disables compression for2000 random50-byte strings. Uses structural cases and expected encoding name."
+        ],
+        [
+          1130,
+          1192,
+          "Misaligned32-bit decoder fixture prefixes1 byte, offsets12,15,20 and payloadABCXYZ plus two zeros. Assert pointer misalignment, decode2rows, and compare first6 bytes only. Does not assert full offsets or prove padding excluded; terminal20 includes the two trailing zero bytes in visible values."
+        ],
+        [
+          1193,
+          1245,
+          "Misaligned64 fixture prefixes3bytes, offsets24,29,40 and HelloWorld plus6zeros. Assert misalignment, rows2 and first10 bytes only. Entire visible decoded payload also includes zero padding selected by terminal40. Tests LanceBuffer typed-borrow alignment fallback indirectly."
+        ],
+        [
+          1246,
+          1305,
+          "Corrupt-mini test local chunk_u32 builds offset bytes/payload padded to8.32-bit cases terminal out-of-bounds, descending offsets, table overlap, insufficient offset count and nonmultiple total size; each requires CorruptFile and message substring. Valid alpha,beta,gamma case asserts entire payload and rebased offsets0,5,9,14."
+        ],
+        [
+          1306,
+          1345,
+          "Same test local chunk_u64 pads to8 and covers64-bit out-of-bounds and table overlap errors. Does not add64-bit descending, insufficient-table or nonmultiple cases here."
+        ],
+        [
+          1346,
+          1368,
+          "Private test helper encoded_binary_block accepts32/64, builds offsets0,5,9,14 for alphabetagamma count3 and returns output of VariableEncoder block compression. Other widths unreachable."
+        ],
+        [
+          1369,
+          1404,
+          "Four named parameter cases corrupt terminal32 to100000,terminal64 to15,or middle offset to4 for either width. BinaryBlockDecompressor must succeed; converting to Binary/LargeBinary Arrow with false still must return CorruptFile and expected substring. This explicitly locates full offset validation after block decompression."
+        ],
+        [
+          1405,
+          1436,
+          "Structure test rejects nonzero first offset5,external count4 against3-row data,and2-byte header, checking CorruptFile/message. Overall18 test functions,17 active and one ignored, plus helpers. No direct search budget/cap tests, zero-row decode, prefix decode, invalid from_variable widths or old-header regression appears locally; tests inspected only."
+        ]
+      ]
+    },
+    {
+      "path": "rust/lance-encoding/src/encodings/physical/fsst.rs",
+      "module": "L1-modules/rust-lance-encoding.md",
+      "role": "Current FSST wrappers for variable mini-block and per-value data; delegates symbol-table kernel and inner codec, owns allocation/metadata/error mapping. Kernel crate remains partially analyzed.",
+      "reviewed": true,
+      "limits": "Every physical source line read in bounded untruncated ANALYZE75 outputs. No source build/test/lint/benchmark/generator or installation ran. Contextual dependencies remain partially read; potential failure paths are source deductions, not runtime reproductions.",
+      "ranges": [
+        [
+          1,
+          35,
+          "SPDX/imports and design describe FSST symbol table per page, wrapping mini-block/per-value binary data. Per-chunk tables and multiple per-value tables are future ideas, not implemented. Imports dependency compress/decompress,TABLESIZE and Arrow offset trait; no local unsafe or IO."
+        ],
+        [
+          36,
+          47,
+          "Crate-internal map_fsst_error maps io InvalidData to CorruptFile named fsst and all other IO errors through ordinary Lance conversion. Private FsstCompressed owns VariableWidthBlock and Vec<u8> symbol_table. Encode calls do not use this mapping."
+        ],
+        [
+          48,
+          85,
+          "Private fsst_compress requires VariableWidth.32-bit offsets typed as i32, payload Arrow buffer; allocate offsets.len()*2 elements,values.len()*2 zero bytes and FSST table-size zero bytes. Call dependency compress with ? (ordinary IO conversion), then wrap actual resized outputs at32bits/original count/fresh BlockInfo. Multiplications unchecked; no savings check/normalization."
+        ],
+        [
+          86,
+          135,
+          "64-bit path mirrors with i64 offsets. Unsupported offset width panics; nonvariable input returns InvalidInputSource. Counts/nulls/offset validity are delegated or assumed. Kernel table has2312bytes; switch is off for input shorter than32768, preserving raw bytes/offsets with table metadata. (rust/compression/fsst/src/fsst.rs:22-56; rust/compression/fsst/src/fsst.rs:1115-1218)"
+        ],
+        [
+          136,
+          146,
+          "Public Debug Default FsstMiniBlockEncoder stores private Option<i64> minichunk_size; new just stores it. DefaultNone follows BinaryMiniBlockEncoder environment budget later."
+        ],
+        [
+          147,
+          170,
+          "Mini compression first FSST-compresses whole input, creates a boxed BinaryMiniBlockEncoder per call, forwards context and compresses transformed variable data. Wrap inner descriptor in Fsst with owned table. Boundaries use compressed byte sizes; no ratio comparison or fallback after FSST."
+        ],
+        [
+          171,
+          196,
+          "Public Debug FsstPerValueEncoder owns boxed dyn PerValueCompressor, supplied by new. Compress FSST first, invoke custom inner on transformed VariableWidth, then return inner data and Fsst(inner descriptor,symbol table). Custom inner may change representation; matching read strategy must honor it to roundtrip."
+        ],
+        [
+          197,
+          214,
+          "Public Debug FsstPerValueDecompressor owns LanceBuffer symbol table and boxed dyn VariablePerValueDecompressor. new stores both without validating table. Construction is infallible; corrupt-table classification is deferred."
+        ],
+        [
+          215,
+          259,
+          "Per-value decode calls inner then as_variable_width().unwrap; unexpected inner kind panics.32-bit branch allocates compressed_bytes*8 zero bytes and offsets.len() zero i32 entries, invokes dependency decompress with map_fsst_error, then truncates offsets to inner num_values+1. truncate only shrinks; count addition/cast unchecked, not a consistency validator."
+        ],
+        [
+          260,
+          298,
+          "64-bit per-value branch mirrors i64; unsupported width panics. Return dependency-resized data/offsets, original width/count and empty stats. Eightfold buffer allocation precedes dependency checked size validation; unchecked wrapper multiplication remains a failure boundary. No decoded-size estimator."
+        ],
+        [
+          299,
+          316,
+          "Public Debug FsstMiniBlockDecompressor stores table buffer and boxed dyn MiniBlockDecompressor. new clones symbol_table from descriptor and uses injected inner; does not validate table or independently interpret descriptor.values."
+        ],
+        [
+          317,
+          353,
+          "Mini decode passes external requested count to inner, requires VariableWidth else panic. If width64 use i64 offsets, allocate8x bytes plus zero offset entries, dependency-decode/error-map and truncate offsets to external count+1. No local null handling, IO or async."
+        ],
+        [
+          354,
+          388,
+          "Every non64 inner width uses i32 decoding, without asserting32; returned block retains original inner bits value and external count even for malformed width. Both paths reset stats. Default MiniBlockDecompressor decoded_size remainsNone; no whole-block FSST implementation here."
+        ],
+        [
+          389,
+          431,
+          "Private cfg(test) module: async test_fsst spans explicit false/true and3 structural modes (six configurations),5000 strings of100bytes and expected fsst name. Comments describe automatic maxlen>=5 and size>=32KiB, but complete policy also excludes binary types automatically and may select per-value compression first. (rust/lance-encoding/src/compression.rs:655-696; rust/lance-encoding/src/compression.rs:797-841)"
+        ],
+        [
+          432,
+          469,
+          "Corrupt-table test compresses a repeated sentence2048times directly through dependency, asserts header switch bit24/nonzero symbol count, changes first symbol length at8+nsyms*8 to9, then dependency-decodes with map_fsst_error. Requires CorruptFile and symbol-length substring. This checks kernel/error mapper, not both wrapper paths. Tests read, not executed; invalid table-size or magic/error kinds are not exhaustively covered."
+        ]
+      ]
+    },
+    {
+      "path": "rust/lance-encoding/src/encodings/physical/byte_stream_split.rs",
+      "module": "L1-modules/rust-lance-encoding.md",
+      "role": "Byte-position transposition of32/64-bit fixed values within mini-block chunks, inverse, entropy selector and three unit tests. Transform preserves length and relies on separate compression.",
+      "reviewed": true,
+      "limits": "Every physical source line read in bounded untruncated ANALYZE75 outputs. No source build/test/lint/benchmark/generator or installation ran. Contextual dependencies remain partially read; potential failure paths are source deductions, not runtime reproductions.",
+      "ranges": [
+        [
+          1,
+          57,
+          "Documentation illustrates f32[1,2,3,4] little-endian byte positions regrouped into four streams, and inverse. BSS is a lossless byte transpose, not itself byte compression. Claimed improved compression is motivation, not measured evidence; integer bit patterns can also be transformed."
+        ],
+        [
+          58,
+          82,
+          "Imports Arrow buffer, BlockInfo/statistics, BssMode and protobuf helper. Public Debug Clone ByteStreamSplitEncoder stores private usize bits_per_value. Local code has no IO/async/unsafe."
+        ],
+        [
+          83,
+          108,
+          "new asserts exactly32or64 bits. Private bytes_per_value is width/8; max_chunk_size returns1024 for32,512 for64, each4096 raw bytes. Hardcoded powers of two fit8186-byte upper framing budget; cached MAX_MINIBLOCK_VALUES and input context are not used."
+        ],
+        [
+          109,
+          133,
+          "Mini compress requires FixedWidth else InvalidInputSource. Uses configured width and input logical count without checking block width, exact data length or Arrow numeric type. Count0 returns no buffers/no chunks and BSS(Flat(configwidth,None)), discarding any provided bytes."
+        ],
+        [
+          134,
+          171,
+          "For positive count allocate count-as-usize*bytewidth zero bytes unchecked. For each chunk n up to hardcoded maximum, transpose input[(processed+i)*width+j] into output[chunk_offset+j*n+i]. Short input panics, extra input ignored; width disagreement can reinterpret/lose bytes. Runtime cost O(count*width), one full output allocation."
+        ],
+        [
+          172,
+          195,
+          "Record each payload size n*width; final chunk always log0 even when full, nonfinal log10/9. Return one concatenated buffer, metadata and original count. No local padding; nested Flat optional compressionNone and TODO for underlying compression. Every chunk must be separated before inverse."
+        ],
+        [
+          196,
+          215,
+          "Public Debug ByteStreamSplitDecompressor has same private width/new assertion and private bytes_per_value helper. Constructor takes metadata width, no own codec nesting parser."
+        ],
+        [
+          216,
+          239,
+          "Mini decode count0 returns empty FixedWidth before checking buffer count or bytes, so arbitrary input is discarded. Positive count computes unchecked expected count-as-usize*width, requires exactly one buffer or InvalidInputSource with actual count."
+        ],
+        [
+          240,
+          274,
+          "Require exact byte length or contextual InvalidInputSource; allocate full output and inverse out[i*width+j]=input[j*num_values+i]. Return configured bits/count/fresh stats. No maximum chunk count check: passing concatenated multi-chunk buffer with total count satisfies length but applies wrong inverse. decoded_size_bytes uses checked u64 count*width, returningNone on overflow, without allocation-capacity validation."
+        ],
+        [
+          275,
+          298,
+          "Public should_use_bss first rejects widths except32/64. Mode sensitivity Off0,On1,Auto0.5:Offfalse,Ontrue (even empty supported-width data),otherwise evaluate entropy. No floating Arrow type check; this selector is width-based."
+        ],
+        [
+          299,
+          325,
+          "Private evaluate_entropy_for_bss requests BytePositionEntropy statistic; missing Option yieldsfalse, wrong statistic kind panics, empty arrayfalse. Empty stats registry itself panics in get_stat before Option handling. Average=sum_u64(entropies)/len/1000.0; strict average<sensitivity*8, so Auto average<4bits. No entropy length/scale validation, sum overflow guards or measured savings threshold. (rust/lance-encoding/src/statistics.rs:311-354)"
+        ],
+        [
+          326,
+          379,
+          "Private cfg(test) f32 roundtrip uses eight values1,2.5,-3.7,4.2,+0,-0,+inf,-inf, constructsLE bytes and compares decoded numeric values. Only one chunk, no expected transpose bytes/metadata assertions. Numeric equality does not distinguish +0/-0 bit preservation; noNaN case."
+        ],
+        [
+          380,
+          429,
+          "f64 roundtrip mirrors same eight values and assertions at64bits, one chunk. Does not test multiple chunk boundaries, configured/input width mismatch, invalid buffers or entropy selection."
+        ],
+        [
+          430,
+          456,
+          "Empty32-bit test compresses count0 empty data, decodes zero with returned no buffers and asserts count/byte length zero. Three test functions inspected, not run. No Off/On/Auto decision tests or corruption/error cases local."
+        ]
+      ]
+    }
+  ]
+}

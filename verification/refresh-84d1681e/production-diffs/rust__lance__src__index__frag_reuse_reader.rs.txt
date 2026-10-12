@@ -1,0 +1,80 @@
+@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, HashMap};
+   13  use std::sync::Arc;
+   14  
+   15  mod cache;
+   16 -use cache::CachedMapping;
+   16 +pub(crate) use cache::{CachedMapping, open_mapping};
+   17  
+
+@@ -79,27 +79,9 @@ pub(super) async fn load_indices(
+   79                  continue;
+   80              }
+   81              if mapping.may_need_translation(index.fragment_bitmap.as_ref()) {
+   82 -                let can_remap = if super::segment_has_vector_details(index) {
+   83 -                    super::frag_reuse_remapping::vector_supports_batch_remapping(dataset, index)
+   84 -                        .await?
+   85 -                } else if index
+   86 -                    .index_details
+   87 -                    .as_ref()
+   88 -                    .is_some_and(|details| details.type_url.ends_with("InvertedIndexDetails"))
+   89 -                {
+   90 -                    super::frag_reuse_remapping::inverted_supports_batch_remapping(dataset, index)
+   91 -                        .await?
+   92 -                } else {
+   93 -                    index
+   94 -                        .index_details
+   95 -                        .as_ref()
+   96 -                        .and_then(|details| {
+   97 -                            super::scalar::SCALAR_INDEX_PLUGIN_REGISTRY
+   98 -                                .get_plugin_by_details(details)
+   99 -                                .ok()
+  100 -                        })
+  101 -                        .is_some_and(|plugin| plugin.supports_batch_row_id_remapping())
+  102 -                };
+   82 +                let can_remap = segment_supports_batch_remapping(dataset, index)
+   83 +                    .await?
+   84 +                    .unwrap_or(false);
+   85                  if index.fragment_bitmap.is_none() || !can_remap {
+   86                      continue;
+   87                  }
+
+@@ -134,6 +116,39 @@ pub(super) async fn load_indices(
+  116      Ok(Arc::new(result.into_iter().flatten().collect()))
+  117  }
+  118  
+  119 +impl FragmentReuseIndex {
+  120 +    /// Whether the history carries transitions this build cannot interpret.
+  121 +    pub(crate) fn has_unsupported_transitions(&self) -> bool {
+  122 +        self.ledger.has_unsupported_transitions()
+  123 +    }
+  124 +}
+  125 +
+  126 +/// Whether this build can translate `index`'s stored addresses in batches:
+  127 +/// `Some(true)` when its type has a batch remapper, `Some(false)` when it
+  128 +/// does not, `None` when its details are missing or cannot be interpreted.
+  129 +pub(super) async fn segment_supports_batch_remapping(
+  130 +    dataset: &Dataset,
+  131 +    index: &IndexMetadata,
+  132 +) -> Result<Option<bool>> {
+  133 +    let Some(details) = index.index_details.as_ref() else {
+  134 +        return Ok(None);
+  135 +    };
+  136 +    if super::segment_has_vector_details(index) {
+  137 +        return Ok(Some(
+  138 +            super::frag_reuse_remapping::vector_supports_batch_remapping(dataset, index).await?,
+  139 +        ));
+  140 +    }
+  141 +    if details.type_url.ends_with("InvertedIndexDetails") {
+  142 +        return Ok(Some(
+  143 +            super::frag_reuse_remapping::inverted_supports_batch_remapping(dataset, index).await?,
+  144 +        ));
+  145 +    }
+  146 +    Ok(super::scalar::SCALAR_INDEX_PLUGIN_REGISTRY
+  147 +        .get_plugin_by_details(details)
+  148 +        .ok()
+  149 +        .map(|plugin| plugin.supports_batch_row_id_remapping()))
+  150 +}
+  151 +
+  152  /// One segment's derived query-time inputs from the coverage backtrack.
+  153  #[derive(Clone, Debug, Default, PartialEq)]
+  154  pub struct SegmentPlanParts {

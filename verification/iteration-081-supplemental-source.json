@@ -1,0 +1,66 @@
+{
+  "iteration": 81,
+  "note": "Fresh contextual reads support sampled claims; no repository execution.",
+  "files": [
+    {
+      "path": "rust/lance-core/src/cache/mod.rs",
+      "ranges": [
+        {
+          "start": 48,
+          "end": 66,
+          "text": "48 | pub mod backend;\n49 | mod backend_uri;\n50 | pub mod codec;\n51 | mod entry_io;\n52 | mod key;\n53 | mod moka;\n54 | mod quick;\n55 | mod registry;\n56 | \n57 | pub use backend::{CacheBackend, CacheEntry};\n58 | pub use backend_uri::{build_from_uri, parse_backend_uri};\n59 | pub use codec::{\n60 |     CacheCodec, CacheCodecImpl, CacheDecode, CacheMissReason, MAGIC, has_cache_envelope,\n61 | };\n62 | pub use entry_io::{CacheEntryReader, CacheEntryWriter};\n63 | pub use key::{CACHE_KEY_FORMAT, CacheKeySchema, CacheNamespace, InternalCacheKey, KeyBuilder};\n64 | pub use moka::MokaCacheBackend;\n65 | pub use quick::{QuickCacheBackend, QuickCacheShardPolicy, recommended_cache_shards};\n66 | pub use registry::{BackendBuildFn, BackendConfig, build_from_config, register_backend};"
+        }
+      ]
+    },
+    {
+      "path": "rust/lance-file/src/reader.rs",
+      "ranges": [
+        {
+          "start": 1542,
+          "end": 1555,
+          "text": "1542 |     pub(crate) fn projection_matches_indexed_metadata(projection: &ReaderProjection) -> bool {\n1543 |         if projection.schema.fields.is_empty() {\n1544 |             return false;\n1545 |         }\n1546 | \n1547 |         projection\n1548 |             .schema\n1549 |             .fields\n1550 |             .iter()\n1551 |             .try_fold(0usize, |count, field| {\n1552 |                 count.checked_add(indexed_projection_column_count(field)?)\n1553 |             })\n1554 |             == Some(projection.column_indices.len())\n1555 |     }"
+        }
+      ]
+    },
+    {
+      "path": "rust/lance-table/src/system_index/frag_reuse/metadata.rs",
+      "ranges": [
+        {
+          "start": 92,
+          "end": 123,
+          "text": "92 |     #[test]\n93 |     fn tagged_requires_the_reserved_name_and_a_nonzero_version() {\n94 |         assert!(!is_tagged(&entry(FRAG_REUSE_INDEX_NAME, 0)));\n95 |         assert!(is_tagged(&entry(FRAG_REUSE_INDEX_NAME, 1)));\n96 |         assert!(is_tagged(&entry(FRAG_REUSE_INDEX_NAME, 2)));\n97 |         assert!(!is_tagged(&entry(\"user_idx\", 0)));\n98 |         assert!(!is_tagged(&entry(\"user_idx\", 1)));\n99 |     }\n100 | \n101 |     #[test]\n102 |     fn sticky_flag_or_tagged_entry_makes_the_table_tagged() {\n103 |         let mut flagged = crate::transaction::test_support::sample_manifest();\n104 |         flagged.reader_feature_flags |= FLAG_FRAGMENT_REUSE_INDEX;\n105 |         let unflagged = crate::transaction::test_support::sample_manifest();\n106 |         // The flag alone decides, entry present or not, v0 entry included.\n107 |         assert!(uses_tagged_fri(&flagged, None));\n108 |         assert!(uses_tagged_fri(\n109 |             &flagged,\n110 |             Some(&entry(FRAG_REUSE_INDEX_NAME, 0))\n111 |         ));\n112 |         // Without the flag, only a tagged entry does.\n113 |         assert!(uses_tagged_fri(\n114 |             &unflagged,\n115 |             Some(&entry(FRAG_REUSE_INDEX_NAME, 1))\n116 |         ));\n117 |         assert!(!uses_tagged_fri(\n118 |             &unflagged,\n119 |             Some(&entry(FRAG_REUSE_INDEX_NAME, 0))\n120 |         ));\n121 |         assert!(!uses_tagged_fri(&unflagged, None));\n122 |     }\n123 | }"
+        }
+      ]
+    },
+    {
+      "path": "rust/lance-table/src/system_index/frag_reuse/ledger.rs",
+      "ranges": [
+        {
+          "start": 477,
+          "end": 535,
+          "text": "477 |     let mut outgoing = vec![Vec::new(); transitions.len()];\n478 |     for (consumer, transition) in transitions.iter().enumerate() {\n479 |         for source in &transition.sources {\n480 |             if let Some(&(producer, physical_rows)) = producers.get(&source.id) {\n481 |                 if source.physical_rows != physical_rows {\n482 |                     return Err(corrupt(format!(\n483 |                         \"inconsistent physical_rows for fragment {}\",\n484 |                         source.id\n485 |                     )));\n486 |                 }\n487 |                 incoming[consumer] += 1;\n488 |                 outgoing[producer].push(consumer);\n489 |             }\n490 |         }\n491 |     }\n492 |     let mut ready: VecDeque<_> = incoming\n493 |         .iter()\n494 |         .enumerate()\n495 |         .filter_map(|(i, &n)| (n == 0).then_some(i))\n496 |         .collect();\n497 |     let mut ordered = Vec::with_capacity(transitions.len());\n498 |     let mut transitions: Vec<_> = transitions.into_iter().map(Some).collect();\n499 |     while let Some(index) = ready.pop_front() {\n500 |         // Each transition is queued once, when its incoming count reaches zero.\n501 |         let transition = transitions[index]\n502 |             .take()\n503 |             .ok_or_else(|| corrupt(\"lineage visited a transition twice\"))?;\n504 |         ordered.push(transition);\n505 |         for &consumer in &outgoing[index] {\n506 |             incoming[consumer] -= 1;\n507 |             if incoming[consumer] == 0 {\n508 |                 ready.push_back(consumer);\n509 |             }\n510 |         }\n511 |     }\n512 |     if ordered.len() != transitions.len() {\n513 |         return Err(corrupt(\"fragment lineage contains a cycle\"));\n514 |     }\n515 |     Ok(ordered)\n516 | }\n517 | \n518 | #[cfg(test)]\n519 | mod tests {\n520 |     use super::*;\n521 |     use crate::system_index::frag_reuse::{\n522 |         CompactFragReuseIndex, FragReuseGroup, FragReuseIndexDetails, FragReuseVersion,\n523 |     };\n524 |     use rstest::rstest;\n525 | \n526 |     fn digest(id: u64, rows: u64, deleted: u64) -> pb::FragmentDigest {\n527 |         pb::FragmentDigest {\n528 |             id,\n529 |             physical_rows: rows,\n530 |             num_deleted_rows: deleted,\n531 |         }\n532 |     }\n533 | \n534 |     fn partition(source: u64, destination: u64) -> pb::Transition {\n535 |         pb::Transition {"
+        }
+      ]
+    },
+    {
+      "path": "rust/lance-encoding/src/encodings/physical/packed.rs",
+      "ranges": [
+        {
+          "start": 834,
+          "end": 867,
+          "text": "834 |                 (\n835 |                     VariablePackedStructFieldDecoder {\n836 |                         kind:\n837 |                             VariablePackedStructFieldKind::Variable {\n838 |                                 bits_per_length,\n839 |                                 decompressor,\n840 |                             },\n841 |                     },\n842 |                     FieldAccumulator::Variable64 { builder, .. },\n843 |                 ) => {\n844 |                     let DataBlock::VariableWidth(mut block) = builder.finish() else {\n845 |                         panic!(\"Expected variable-width datablock from builder\");\n846 |                     };\n847 |                     debug_assert_eq!(block.bits_per_offset, 64);\n848 |                     block.bits_per_offset = (*bits_per_length) as u8;\n849 |                     let decoded = decompressor.decompress(block)?;\n850 |                     children.push(decoded);\n851 |                 }\n852 |                 _ => {\n853 |                     return Err(Error::invalid_input(\n854 |                         \"Packed struct accumulator mismatch during finalize\",\n855 |                     ));\n856 |                 }\n857 |             }\n858 |         }\n859 | \n860 |         Ok(DataBlock::Struct(StructDataBlock {\n861 |             children,\n862 |             block_info: BlockInfo::new(),\n863 |             validity: None,\n864 |         }))\n865 |     }\n866 | }\n867 | "
+        }
+      ]
+    },
+    {
+      "path": "rust/lance-file/src/reader/structural.rs",
+      "ranges": [
+        {
+          "start": 274,
+          "end": 296,
+          "text": "274 | fn children_share_parent_length(field: &Field) -> bool {\n275 |     field.logical_type.is_struct()\n276 | }\n277 | \n278 | fn validate_field_length<F: Fn(usize) -> Result<u64>>(\n279 |     field: &Field,\n280 |     comparable: bool,\n281 |     column_indices: &[u32],\n282 |     cursor: &mut usize,\n283 |     column_len: &F,\n284 | ) -> Result<u64> {\n285 |     let (contributes, recurse) = field_column_shape(field);\n286 |     let mut field_rows = None;\n287 |     if contributes {\n288 |         let column = *column_indices.get(*cursor).ok_or_else(|| {\n289 |             Error::invalid_input(format!(\n290 |                 \"projection supplied fewer column indices than its fields require (ran out at field '{}')\",\n291 |                 field.name\n292 |             ))\n293 |         })?;\n294 |         *cursor += 1;\n295 |         field_rows = Some(column_len(column as usize)?);\n296 |     }"
+        }
+      ]
+    }
+  ]
+}

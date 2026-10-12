@@ -1,0 +1,119 @@
+@@ -117,9 +117,9 @@ mod common {
+  117  
+  118      /// Get a JSON field or array element by key.
+  119      pub fn get_json_value_by_key(
+  120 -        raw_jsonb: &jsonb::RawJsonb,
+  120 +        raw_jsonb: &lance_jsonb::RawJsonb,
+  121          key: &str,
+  122 -    ) -> Result<Option<jsonb::OwnedJsonb>> {
+  122 +    ) -> Result<Option<lance_jsonb::OwnedJsonb>> {
+  123          if raw_jsonb.is_object().unwrap_or(false) {
+  124              raw_jsonb
+  125                  .get_by_name(key, false)
+
+@@ -137,13 +137,13 @@ mod common {
+  137      }
+  138  
+  139      /// Parse JSONPath with proper error handling (no false returns)
+  140 -    pub fn parse_json_path(path: &str) -> Result<jsonb::jsonpath::JsonPath<'_>> {
+  140 +    pub fn parse_json_path(path: &str) -> Result<lance_jsonb::jsonpath::JsonPath<'_>> {
+  141          lance_arrow::json::parse_json_path(path).map_err(|e| execution_error(e.to_string()))
+  142      }
+  143  }
+  144  
+  145  /// Convert JSONB value to string using jsonb's built-in serde (strict mode)
+  146 -fn json_value_to_string(value: jsonb::OwnedJsonb) -> Result<Option<String>> {
+  146 +fn json_value_to_string(value: lance_jsonb::OwnedJsonb) -> Result<Option<String>> {
+  147      let raw_jsonb = value.as_raw();
+  148  
+  149      // Check for null first
+
+@@ -162,7 +162,7 @@ fn json_value_to_string(value: jsonb::OwnedJsonb) -> Result<Option<String>> {
+  162  }
+  163  
+  164  /// Convert JSONB value to integer using jsonb's built-in serde (strict mode)
+  165 -fn json_value_to_int(value: jsonb::OwnedJsonb) -> Result<Option<i64>> {
+  165 +fn json_value_to_int(value: lance_jsonb::OwnedJsonb) -> Result<Option<i64>> {
+  166      let raw_jsonb = value.as_raw();
+  167  
+  168      // Check for null first
+
+@@ -181,7 +181,7 @@ fn json_value_to_int(value: jsonb::OwnedJsonb) -> Result<Option<i64>> {
+  181  }
+  182  
+  183  /// Convert JSONB value to float using jsonb's built-in serde (strict mode)
+  184 -fn json_value_to_float(value: jsonb::OwnedJsonb) -> Result<Option<f64>> {
+  184 +fn json_value_to_float(value: lance_jsonb::OwnedJsonb) -> Result<Option<f64>> {
+  185      let raw_jsonb = value.as_raw();
+  186  
+  187      // Check for null first
+
+@@ -200,7 +200,7 @@ fn json_value_to_float(value: jsonb::OwnedJsonb) -> Result<Option<f64>> {
+  200  }
+  201  
+  202  /// Convert JSONB value to boolean using jsonb's built-in serde (strict mode)
+  203 -fn json_value_to_bool(value: jsonb::OwnedJsonb) -> Result<Option<bool>> {
+  203 +fn json_value_to_bool(value: lance_jsonb::OwnedJsonb) -> Result<Option<bool>> {
+  204      let raw_jsonb = value.as_raw();
+  205  
+  206      // Check for null first
+
+@@ -375,7 +375,7 @@ fn extract_json_path_with_type(jsonb_bytes: &[u8], path: &str) -> Result<Option<
+  375                  JsonbType::Boolean
+  376              } else if raw.is_number().unwrap_or(false) {
+  377                  let is_float_storage =
+  378 -                    matches!(raw.as_number(), Ok(Some(jsonb::Number::Float64(_))));
+  378 +                    matches!(raw.as_number(), Ok(Some(lance_jsonb::Number::Float64(_))));
+  379                  if !is_float_storage && raw.is_i64().unwrap_or(false) {
+  380                      JsonbType::Int64
+  381                  } else {
+
+@@ -519,7 +519,7 @@ fn json_get_impl(args: &[ArrayRef]) -> Result<ArrayRef> {
+  519              builder.append_null();
+  520          } else if let Some(key) = common::get_string_value_at(key_array, i) {
+  521              let jsonb_bytes = jsonb_array.value(i);
+  522 -            let raw_jsonb = jsonb::RawJsonb::new(jsonb_bytes);
+  522 +            let raw_jsonb = lance_jsonb::RawJsonb::new(jsonb_bytes);
+  523  
+  524              match common::get_json_value_by_key(&raw_jsonb, key)? {
+  525                  Some(value) => builder.append_value(value.as_raw().as_ref()),
+
+@@ -572,7 +572,7 @@ fn json_get_string_impl(args: &[ArrayRef]) -> Result<ArrayRef> {
+  572              builder.append_null();
+  573          } else if let Some(key) = common::get_string_value_at(key_array, i) {
+  574              let jsonb_bytes = jsonb_array.value(i);
+  575 -            let raw_jsonb = jsonb::RawJsonb::new(jsonb_bytes);
+  575 +            let raw_jsonb = lance_jsonb::RawJsonb::new(jsonb_bytes);
+  576  
+  577              match common::get_json_value_by_key(&raw_jsonb, key)? {
+  578                  Some(value) => match json_value_to_string(value)? {
+
+@@ -628,7 +628,7 @@ fn json_get_int_impl(args: &[ArrayRef]) -> Result<ArrayRef> {
+  628              builder.append_null();
+  629          } else if let Some(key) = common::get_string_value_at(key_array, i) {
+  630              let jsonb_bytes = jsonb_array.value(i);
+  631 -            let raw_jsonb = jsonb::RawJsonb::new(jsonb_bytes);
+  631 +            let raw_jsonb = lance_jsonb::RawJsonb::new(jsonb_bytes);
+  632  
+  633              match common::get_json_value_by_key(&raw_jsonb, key)? {
+  634                  Some(value) => match json_value_to_int(value)? {
+
+@@ -684,7 +684,7 @@ fn json_get_float_impl(args: &[ArrayRef]) -> Result<ArrayRef> {
+  684              builder.append_null();
+  685          } else if let Some(key) = common::get_string_value_at(key_array, i) {
+  686              let jsonb_bytes = jsonb_array.value(i);
+  687 -            let raw_jsonb = jsonb::RawJsonb::new(jsonb_bytes);
+  687 +            let raw_jsonb = lance_jsonb::RawJsonb::new(jsonb_bytes);
+  688  
+  689              match common::get_json_value_by_key(&raw_jsonb, key)? {
+  690                  Some(value) => match json_value_to_float(value)? {
+
+@@ -740,7 +740,7 @@ fn json_get_bool_impl(args: &[ArrayRef]) -> Result<ArrayRef> {
+  740              builder.append_null();
+  741          } else if let Some(key) = common::get_string_value_at(key_array, i) {
+  742              let jsonb_bytes = jsonb_array.value(i);
+  743 -            let raw_jsonb = jsonb::RawJsonb::new(jsonb_bytes);
+  743 +            let raw_jsonb = lance_jsonb::RawJsonb::new(jsonb_bytes);
+  744  
+  745              match common::get_json_value_by_key(&raw_jsonb, key)? {
+  746                  Some(value) => match json_value_to_bool(value)? {

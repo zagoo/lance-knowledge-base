@@ -1,0 +1,955 @@
+{
+  "iteration": 50,
+  "files": [
+    {
+      "path": "rust/lance-core/src/cache/key.rs",
+      "module": "L1-modules/rust-lance-core-cache.md",
+      "reviewed": true,
+      "role": "Canonical cache identity primitives: deterministic hierarchical namespaces, versioned logical schemas, typed streaming key construction and opaque128-bit backend keys.",
+      "limits": "This is the local cache-key protocol, not a Lance data-file-format version. Its source explicitly describes stable framing and a cache identity rather than authentication. LanceCache namespace/type/schema selection is documented at rust/lance-core/src/cache/mod.rs:553-563; production persistence consumers remain pending. Tests are source evidence only, not executed. BLAKE3 dependency implementation is outside this file. (rust/lance-core/src/cache/key.rs:4-15; rust/lance-core/src/cache/key.rs:19-28; rust/lance-core/src/cache/key.rs:316-476)",
+      "ranges": [
+        [
+          1,
+          18,
+          "SPDX, module contract and fmt import. Fields use explicit tags, fixed-width little-endian integers and length framing for cross-process/platform/build stability. Namespace derivation keys are deterministic and public in effect, not secrets; docs state generic birthday resistance about64 bits for128-bit truncated digest and no FIPS mode. This is a design contract, not a cryptographic proof or external compliance assessment."
+        ],
+        [
+          19,
+          29,
+          "Public CACHE_KEY_FORMAT is exactly blake3-128-v1; persistent physical namespaces should include it so future protocols cold-miss. Private key-format version is u32=1. Root derivation context is exactly lance-format/lance 2026-07-17 cache namespace v1. Namespace and entry domains are the bytes lance-cache-namespace\\0 and lance-cache-entry\\0, including terminal NUL."
+        ],
+        [
+          30,
+          55,
+          "Private repr(u8), Clone/Copy FieldTag has exact tags U8=1,U16=2,U32=3,U64=4,I32=5,I64=6,Bool=7,Str=8,Bytes=9,FixedBytes=10,None=11,Some=12,Variant=13,Sequence=14. as_u8 is a direct cast. Changing these discriminants changes canonical hash input."
+        ],
+        [
+          56,
+          69,
+          "Public Clone/Copy/Debug/Eq/PartialEq CacheKeySchema stores private static id string and u32 version. The contract requires a stable globally unique logical-layout id and a version bump when emitted fields or meaning change. LEGACY_TEXT is id lance.cache.legacy-text/version1 for the documented default string bridge; the implemented defaults use this schema and write one framed string. (rust/lance-core/src/cache/mod.rs:128-138; rust/lance-core/src/cache/mod.rs:175-182)"
+        ],
+        [
+          70,
+          85,
+          "CacheKeySchema::new is const and stores id/version without validation; empty ids or version0 are accepted here and uniqueness is not enforced. Const by-value id() and version() return the two fields. No allocation is performed by these methods."
+        ],
+        [
+          86,
+          109,
+          "Public InternalCacheKey wraps private[16]u8 and derives Clone/Copy/Eq/Hash/Ord/PartialEq/PartialOrd. Canonical bytes are independent of integer endianness. Const from_bytes accepts arbitrary16 bytes without verification, as_bytes borrows the array and into_bytes consumes the copyable wrapper. No digest-to-logical-field decoder exists."
+        ],
+        [
+          110,
+          119,
+          "Manual Debug writes InternalCacheKey( followed by each byte as two lowercase hexadecimal digits, then ). Formatter errors propagate through ?. It exposes the entire digest, with no alternate formatting or redaction."
+        ],
+        [
+          120,
+          129,
+          "Public Clone/Copy/Debug CacheNamespace wraps private32 bytes; root recomputes blake3::derive_key with the fixed context and empty material on each call. No process randomness, secret input, memoization or raw-byte public constructor is declared here."
+        ],
+        [
+          130,
+          139,
+          "child consumes copyable namespace, initializes a keyed BLAKE3 hasher with its32 bytes, appends framed namespace domain, raw little-endian u32 key version, and framed UTF-8 segment, then retains all32 output bytes. A hierarchy is repeated keyed derivation, not slash concatenation. Empty segments are accepted and create a derived child rather than explicitly returning the parent."
+        ],
+        [
+          140,
+          165,
+          "KeyBuilder docs specify fixed-width LE integers and type-tagged length-prefixed variable fields, deliberately excluding usize to avoid target-width identity. The public example derives dataset namespace, uses type ID example.Page and CacheKeySchema::new(\"example.page-key\",1), with name and version separate, writes7u32 and values string, and asserts16-byte output. Struct contains a private BLAKE3 Hasher; example was read, not compiled."
+        ],
+        [
+          166,
+          181,
+          "KeyBuilder::new(namespace, stable_type_id:static str, schema) creates a keyed hasher, writes framed entry domain, raw LEu32 format version, framed UTF-8 stable value type id, framed schema id, then raw LEu32 schema version. It accepts empty or duplicate type/schema identifiers without validation; callers own logical uniqueness and field meanings."
+        ],
+        [
+          182,
+          205,
+          "write_u8 emits tag1 then one raw value byte. write_u16/write_u32 construct stack arrays3/5 bytes: tag2/3 plus fixed-width LE integer. These methods update the streaming hasher immediately and return unit. No textual formatting, payload-length prefix or heap buffer is introduced by these bodies."
+        ],
+        [
+          206,
+          232,
+          "write_u64/write_i32/write_i64 use stack arrays9/5/9 bytes, tags4/5/6 and respective to_le_bytes. Signed values preserve fixed-width signed bit representation; widths and signedness are distinguished by tags even if payload bytes match."
+        ],
+        [
+          233,
+          251,
+          "write_bool emits tag7 then u8::from(bool), i.e.0/1. write_str uses tag8 and UTF-8 bytes; write_bytes uses tag9. The latter two delegate to the shared variable writer whose framing is defined at298-302, so equal payloads have distinct types. No Unicode normalization occurs."
+        ],
+        [
+          252,
+          269,
+          "write_fixed_bytes<const N:usize> accepts a borrowed[u8;N], uses tag10 and the same length-prefix routine despite compile-time width. N=0 is valid. write_none/write_some emit only tag11/12; they do not enforce that a following value exists, that None has no payload, or that option nesting balances."
+        ],
+        [
+          270,
+          287,
+          "write_variant emits tag13 plus LEu32 ordinal in5 bytes; write_sequence_len emits tag14 plus LEu64 length in9 bytes. They do not inspect variant schema or count subsequent fields; sequence/option/enum grammar consistency is the caller's obligation."
+        ],
+        [
+          288,
+          304,
+          "finish consumes builder, finalizes BLAKE3, copies its first16 bytes into InternalCacheKey, discarding remaining hash bytes. Private write_variable appends one tag byte, encoded_len and payload in order. Digest collisions remain possible; no collision-resolution logical payload is retained here."
+        ],
+        [
+          305,
+          315,
+          "write_framed appends untagged8-byte length then bytes. encoded_len casts slice length to u64 and writes LE; it contains no checked conversion for a hypothetical wider-than64-bit usize. All current protocol fields must match exact UTF-8/raw payload bytes and order."
+        ],
+        [
+          316,
+          341,
+          "cfg(test) imports parent definitions, defines SCHEMA test.key/v1, builds namespace root.child(s3://bucket/dataset) and stable value type test.Value. key_with takes FnOnce(&mut KeyBuilder), writes fields and finishes. Fixed-size test asserts key16/namespace32/tag1 bytes."
+        ],
+        [
+          342,
+          355,
+          "Keyed-empty-hash fixture uses the32-byte key whats the Elvish word for friend and compares all32 bytes against92b2b75604ed3c761f9d6f62392c8a9227ad0ea3f09573e783f1498a4ed60d26. It is labeled official in source but no external vector was fetched."
+        ],
+        [
+          356,
+          397,
+          "A BTreeSet cardinality assertion distinguishes17 emitted sequences: ab+c versus a+bc strings; empty string/bytes/fixed bytes; six integer forms of1; both booleans; None/Some markers; variants0/1. Separate assertion distinguishes an explicit two-element sequence prefix from the same two u32 values without a sequence prefix. This checks examples, not injectivity of a finite digest or validation of caller grammar."
+        ],
+        [
+          398,
+          440,
+          "Domain-separation tests distinguish nested dataset/index from one dataset/index segment; stable value type, schema id and schema version changes; tenant-a versus tenant-b memory namespace; and same tenant memory versus persistent namespace. No path normalization or access-control assertion is made."
+        ],
+        [
+          441,
+          460,
+          "Little-endian test manually rebuilds a key preamble using the same framing helpers and a literal u32 payload04,03,02,01 after tag3; compares first16 reference hash bytes with KeyBuilder output. Shared helper use means it does not independently prove those helpers' framing."
+        ],
+        [
+          461,
+          476,
+          "Golden key fixture writes7u32,page string,Some marker,16 AB bytes under the test builder and expects c438ff22305530fc741638e97d45a568. This freezes the combined current protocol for one complete vector; no tests were run during extraction."
+        ]
+      ]
+    },
+    {
+      "path": "rust/lance-table/src/transaction/index_maintenance.rs",
+      "module": "L1-modules/rust-lance-table.md",
+      "reviewed": true,
+      "role": "Transaction index invalidation/retention and rewrite helpers;16 runtime methods plus30 local metadata tests. Public methods are reachable through Transaction despite private child module.",
+      "ranges": [
+        [
+          1,
+          26,
+          "SPDX and module documentation frame index coverage/retention rules; its statement that every rule has a unit test is intent, not complete branch coverage. Imports overlay staleness, metadata, tagged lineage/name recognition, system-index classifier, Transaction operations, Schema/Error, Roaring, maps/sets and UUID. All runtime helpers here are synchronous metadata transformations without physical file IO or unsafe blocks. Logs do not delete index files."
+        ],
+        [
+          27,
+          58,
+          "Transaction::register_pure_rewrite_rows_update_frags_in_indices is pub(super). Empty pure-update IDs return Ok before examining anything. For each index, skip row-address-domain metadata, then any indexed field in the caller preservation-exclusion set, then unknown coverage. Indexed i32 IDs use checked u32 conversion followed by unwrap: negative IDs can panic unless an earlier short circuit skips them. Field-set name refers to values updated; preserving coverage is allowed only for indices disjoint from that set."
+        ],
+        [
+          59,
+          93,
+          "Require every original fragment ID in the stored bitmap; empty originals pass vacuously and u64 IDs cast to u32 unchecked. Compute overlay staleness over the entire caller-supplied original_overlaid_frags map, not an intersection with original IDs here. Any stale fragment prevents extension. Otherwise insert every pure-update ID using unchecked as u32 into the existing bitmap. Does not update version, UUID or files; duplicates deduplicate. Fallible staleness evaluation can return after earlier indices were already mutated. No explicit system-index exemption."
+        ],
+        [
+          94,
+          141,
+          "Public rewritten_physical_columns classifies Update only when fields_modified nonempty, yielding every updated fragment with a cloned field list, independent of update mode. Merge delegates to merge_rewritten_fields. DataReplacement combines DataFile.schema(schema).field_ids with raw new_file.fields, keeps nonnegative IDs, sorts/deduplicates, and preserves a pair even if fields empty. All other operations return empty. This computes invalidation metadata; it neither rewrites bytes nor validates target existence."
+        ],
+        [
+          142,
+          181,
+          "Public withdraw_in_place_rewrites returns immediately for empty pairs. With Some lineage, expands every rewritten field through schema descendants then calls withdraw_rewritten_coverage. With None, builds temporary Fragment::new(id) per pair and calls direct prune_updated_fields_from_indices; that route does not expand descendants, reason about retired provenance or retire empty segments. It is therefore distinct from directly calling withdraw_rewritten_coverage with None."
+        ],
+        [
+          182,
+          218,
+          "Private expand_rewritten_fields maps all pairs preserving fragment order. with_descendants always includes each input u32; if convertible to i32 and found in schema, traverses its children using an explicit stack. Negative child IDs are skipped as outputs but their descendants still visited. Missing/out-of-range fields stay as original IDs; output sorted/deduplicated. Repeated ancestor inputs can repeat traversal before deduplication; no memoization or recursion."
+        ],
+        [
+          219,
+          258,
+          "Withdrawal documentation explains stored source provenance versus live coverage, transitive destinations including retired intermediates, and preserving unknown bitmap metadata. It states that surviving live-only coverage outside history cannot be handled by the translating reader after retired-source withdrawal, motivating whole-segment clearing. Reader/query/cleanup implementations remain outside this file; this rationale is documented without asserting their complete execution behavior. Callers must pre-expand rewritten fields."
+        ],
+        [
+          259,
+          301,
+          "Public withdraw_rewritten_coverage skips system indices and unknown coverage, converts nonnegative indexed fields into a set, and computes retired sources once as stored bitmap minus live fragments. For each overlapping rewritten field set, checked u64->u32 fragment conversion failing skips that pair. Add a directly covered ID. For each retired source, known destinations containing rewrite ID withdraw source; known destinations not containing it (including empty) leave it; unavailable lineage/walk withdraws every retired source conservatively. It does not require rewritten ID to be live. Repeated per-source/per-rewrite graph walks allocate; no cache here."
+        ],
+        [
+          302,
+          350,
+          "Subtract union of direct and retired IDs. Only if a retired source was withdrawn and something remains, decide whether reader translation can continue: any remaining retired ID suffices, otherwise any lineage.mentions(id) true or unknown suffices. If all remainder is live and known unmentioned, warn, include all remainder in withdrawn set and clear bitmap. Empty result records UUID; warn logs counts. After all indices, retire_emptied_segments handles metadata retirement. No Result/rollback; failures such as allocation panic could leave partial changes. With None lineage, mentions defaults true, so live remainder survives conservative retired withdrawal."
+        ],
+        [
+          351,
+          394,
+          "Private retire_emptied_segments finds first matching metadata name for each emptied UUID and marks it removable only if a different UUID with same name has unknown or nonempty bitmap. Compute all removable IDs before retaining; retain removes every matching UUID and logs info. If every same-name segment is empty, all remain; this does not select one oldest definition. Assumes UUID uniqueness without validating it; duplicates can affect first-name lookup/removal. Repeated linear searches and temporary Vecs cost proportional to emptied segments times indices, plus membership scans. No index-file deletion."
+        ],
+        [
+          395,
+          422,
+          "Public prune_updated_fields_from_indices returns on empty field list, otherwise any exact indexed-field overlap with a HashSet of references causes every updated fragment ID (unchecked as u32) to be removed from known bitmap. i32->u32 unwrap occurs before bitmap-option test and can panic on negative indexed fields; prior indices may already be changed. No descendant expansion, system exemption, lineage, retirement, logging or Result."
+        ],
+        [
+          423,
+          436,
+          "Private fragment_field_paths maps each nonnegative base-file field ID to its path string; later duplicate field occurrences overwrite earlier ones. Excludes overlays, base_id, column mappings, versions and cached sizes. Returned strings borrow fragment files. This deliberately narrower identity is not the full physical-file comparison used in validation."
+        ],
+        [
+          437,
+          466,
+          "Public merge_rewritten_fields indexes previous fragments by ID (last duplicate wins), then walks proposed order including duplicates. Only field IDs present in both old and new base-file maps whose path strings differ count; newly added/dropped fields and new fragments do not. Sort changed field IDs and omit empty pairs. Changes only to base_id/version/column indices/overlays are invisible to this classifier. Complete merge physical validation has separate broader checks."
+        ],
+        [
+          467,
+          516,
+          "Pub(super) prune_overlay_stale_fields_from_indices computes per-group maximum committed_version per nonnegative raw overlay field ID over all old fragments. Coverage emptiness and row membership do not affect the maximum. If any exact index field has overlay version greater than index dataset_version, remove all new group IDs (unchecked u64->u32) from known bitmap. Equality remains fresh. No ancestry expansion, key-only distinction, system skip, logging or empty-segment retirement; every index.fields value participates."
+        ],
+        [
+          517,
+          554,
+          "Pub(crate) retain_relevant_indices first drops indices with missing schema field IDs unless is_system_index; empty fields pass all(). Groups remaining indices by name except reserved fragment-reuse name, cloning names. Builds live-fragment bitmap with unchecked u64->u32 casts. System exemption applies to missing-field pruning; name/coverage retention is a separate subsequent rule. No file IO."
+        ],
+        [
+          555,
+          625,
+          "If any remaining entry satisfies is_tagged, retain every grouped UUID including empty/retired coverage; policy uses tagged entry recognition, not manifest reader flags here. Otherwise unknown None coverage is always retained. For >1 known segment, compare effective coverage (stored bitmap intersect live IDs): if all empty, stable-sort by dataset_version and keep oldest, first input wins ties; if some nonempty, keep all nonempty and remove empty. With exactly one known segment, keep it even if empty, independently of unknown siblings. Finally keep reserved frag-reuse name or selected UUIDs. Stored bitmaps remain unchanged. UUID collisions can retain extra entries; MemWAL/system names except FRI still undergo coverage pruning."
+        ],
+        [
+          626,
+          656,
+          "Pub(super) ordered_rewrite_groups clones all groups when reordered sources absent. Otherwise count old IDs in source bitmap using unchecked u64->u32 casts: zero overlap keeps group, complete overlap omits group, partial overlap returns InvalidInput. Empty-old groups have zero overlap and survive; no check that destinations/mappings match. Input unchanged on error; output copies fragment vectors."
+        ],
+        [
+          657,
+          690,
+          "Pub(super) recalculate_fragment_bitmap clones old bitmap, then evaluates each group membership against original old bitmap, not progressively updated result. All old covered removes all old IDs and adds new IDs; partial covered errors; none covered does nothing, including empty-old group even though all() vacuously true. Uses unchecked u64->u32. Input unchanged on error; group overlap/order assumptions are not validated and new IDs from prior groups can interact with later removals."
+        ],
+        [
+          691,
+          731,
+          "Pub(super) handle_rewrite_indices rejects repeated old UUIDs before lookup, even if missing from current indices. Missing current UUID is skipped. Found index must have Some bitmap; recalculate may error before this index assignment. On success replaces bitmap, UUID and files with new_index_files (None clears old list), but does not assign RewrittenIndex.new_index_details or new_index_version and does not change dataset version. Earlier indices remain modified on later error; changed UUIDs affect subsequent lookups. Duplicate new UUIDs not rejected."
+        ],
+        [
+          732,
+          769,
+          "Pub(super) handle_rewrite_fragments processes groups in order and uses old_fragments[0] unchecked: empty old group panics. Missing first old ID returns CommitConflict with manifest version. Contiguity loop accesses final_fragments[start_pos+i] without bounds check, so matching prefix past vector end panics. First mismatch selects noncontiguous fallback; absent later old IDs need not trigger a conflict. _next_row_id parameter unused. No upfront atomic validation of all groups."
+        ],
+        [
+          770,
+          792,
+          "Clone new fragments through fragments_with_ids, which assigns IDs only to zero placeholders and increments caller counter; preassigned IDs remain. Contiguous group splices in place. Noncontiguous group removes all entries matching any old ID then appends replacements, changing order and tolerating absent later old IDs. No uniqueness validation or metadata restamping here. Prior groups/counter remain changed after later error/panic. Allocates replacement Vec and may repeatedly scan retained fragments. Contextual assignment is rust/lance-table/src/transaction/manifest_build.rs:126-140."
+        ],
+        [
+          793,
+          837,
+          "cfg(test) module imports BTreeMap, Arrow schema types, fragment-reuse metadata helpers and parent internals. Ordered-group fixture has old0/1->10 and old2->11. None retains both; reordered sources0/1 excludes first; mixed old1/2 group errors. Mapping payload is not needed for this helper. These are metadata unit tests, not row-address remap execution."
+        ],
+        [
+          838,
+          888,
+          "Fragment rewrite test starts IDs0..9; contiguous1/2 replaced by15/16 and noncontiguous5/8 replaced by zero placeholder assigned20. Counter advances21; final order asserted0,15,16,3,4,6,7,9,20. Empty metadata fragments suffice. Does not cover empty groups, truncated contiguous suffix, missing later old IDs or rollback."
+        ],
+        [
+          889,
+          925,
+          "Missing-field retention test removes field99 and keeps fields1/2. System test preserves reserved FRI and MemWAL entries despite field99, removes ordinary invalid index. These exercise schema-field exemption, not arbitrary system coverage sibling cases."
+        ],
+        [
+          926,
+          981,
+          "Tests preserve fragment-reuse entry and a sole empty scalar or vector definition. Each fixture uses explicit bitmap state and schema IDs. Empty coverage is intentionally not equivalent to absent definition."
+        ],
+        [
+          982,
+          1026,
+          "Tests keep sole nonempty scalar/vector indices and sole unknown None bitmap scalar/vector indices. They assert metadata count/name/bitmap presence as appropriate; do not load index data or measure query correctness."
+        ],
+        [
+          1027,
+          1082,
+          "Unknown plus nonempty same-name sibling both survive. Separate scalar/vector all-empty multi-segment tests retain oldest dataset_version1. Versions differ, so stable-sort tie behavior is not covered. Unknown plus multiple empty known siblings is not directly tested here."
+        ],
+        [
+          1083,
+          1123,
+          "Mixed scalar empty/nonempty case keeps nonempty versions2/4; vector counterpart keeps version2. Uses live fragments to evaluate coverage, then checks retained versions. No tagged history in these cases."
+        ],
+        [
+          1124,
+          1178,
+          "Stored bitmap1/2/3/4 with live1/2 remains unchanged. Sole scalar/vector bitmap1/2/3 with live5/6 also survives, exercising single-definition retention despite no effective coverage. The former test comments discuss pruning but does not invoke multi-known-segment effective partitioning."
+        ],
+        [
+          1179,
+          1230,
+          "Different names are retained independently; empty indices Vec stays empty. Test named all_indices_removed actually retains both valid empty vector definitions (vec1 and vec2) while removing invalid-field metadata, so name overstates assertion. No disk cleanup tested."
+        ],
+        [
+          1231,
+          1290,
+          "Complex retention fixture has11 metadata entries across FRI and five names, mixed scalar/vector empties/live coverage and invalid field. Expects6: FRI, oldest idx_a1 and vec_b1, nonempty idx_c2/3, idx_d; invalid idx_e removed. Asserts per-name versions, not physical files or query output."
+        ],
+        [
+          1291,
+          1352,
+          "Missing rewritten-index test passes one RewrittenIndex absent from empty current list and no groups, expects Ok. Overlay test old fragment0 carries field1 overlay version5 into new7; index version2 loses7, equal version5 retains7, unrelated field2 retains7. Does not exercise descendant IDs, empty/sparse coverage or malformed negative index fields."
+        ],
+        [
+          1353,
+          1398,
+          "create_test_index generates random UUID, one field, empty covering_fields, chosen ScalarIndexDetails/VectorIndexDetails Any with empty value bytes, dataset version/bitmap from caller, index_version1 and optional metadata None. Legacy FRI helper builds system metadata then sets index_version0 to force untagged mode. These fixture type URLs classify metadata without valid physical index payloads."
+        ],
+        [
+          1399,
+          1432,
+          "Tagged-history test creates9 entries: FRI version1, retired and live idx_a segments, two retired vec_b segments, two empty idx_c definitions and invalid-field idx_e. Confirms FRI is_tagged, then retains8 entries—all except invalid field. Demonstrates tagged coverage retention does not bypass schema-field filtering."
+        ],
+        [
+          1433,
+          1474,
+          "create_system_index uses SystemIndexDetails type URL, random UUID, one arbitrary field, bitmap1/2 and version1. create_test_schema builds Arrow Int32 nonnullable field names then mutates generated IDs via repeated mut_field_by_id(i); collisions between requested IDs and later lookup IDs can retarget an earlier field. Tests rely on membership rather than position; fixture does not validate resulting schema. No production constructor behavior inferred from this helper."
+        ],
+        [
+          1475,
+          1498,
+          "Separate cfg(test) withdrawal module supplies segment helper from shared sample_index, field/bitmap override, inline lineage builder with double unwrap, and tagged history1/2->3->4 plus6->8. Unknown bitmap uses None. Helpers exercise metadata, not persisted files."
+        ],
+        [
+          1499,
+          1542,
+          "Withdrawal test rewriting live4 field0 removes retired sources1/2 from1/2/6, retaining6 and system entry unchanged. Next test1/2/9 clears all after retired-source withdrawal because surviving live9 is not mentioned by known history. Assert bitmap outcomes."
+        ],
+        [
+          1543,
+          1581,
+          "History-mentioned live8 remainder survives after1/2 withdrawal. Directly withdrawing only live4 from4/9 keeps9, because whole-segment fallback requires a retired source to have been withdrawn. Tests distinguish these two conditions."
+        ],
+        [
+          1582,
+          1622,
+          "Mixed retired intermediate3 and directlive4 both disappear. Separate fixture leaves unrelated retired6, index on unmodified field1 covering1/2, and field0 unknown None coverage unchanged. No local test verifies retirement with covered/unknown same-name siblings or descendant expansion."
+        ],
+        [
+          1623,
+          1639,
+          "Without a walkable ledger, rewrite4 withdraws retired6 conservatively but preserves live9 because mentions is unknown and defaults to translation eligibility. TaggedLineage::new(entry,None) is used directly. Across this file30 tests (23 main,7 withdrawal) inspect metadata only; no runtime test executed. Missing malformed/bounds/rollback cases are analysis deductions, not reproduced bugs."
+        ]
+      ],
+      "limits": "Every1639 physical lines read in seven bounded chunks. Consumer snippets in manifest_build/conflict_resolver are contextual only; full commit orchestration, actual reader translation and cleanup remain pending. Runtime panic/partial-mutation/performance properties are deductions from source; no source builds/tests/edits/network."
+    },
+    {
+      "path": "rust/lance-table/src/format.rs",
+      "module": "L1-modules/rust-lance-table.md",
+      "reviewed": true,
+      "role": "Public metadata facade, generated table bindings, manifest footer identifiers and UUID conversions.",
+      "ranges": [
+        [
+          1,
+          14,
+          "Imports Arrow byte-slice conversion and UUID. fragment, index, manifest, row_ids and transaction are private child modules, while key_existence and overlay are public. Visibility of reexported types is determined by the following explicit facade declarations."
+        ],
+        [
+          15,
+          30,
+          "Reexports the three row dataset-version types from rowids::version; every public fragment item; IndexFile/IndexMetadata/index_metadata_codec/list_index_files_with_sizes; the listed manifest/version/schema-reader helpers; external/inline row-id types and reserved field IDs; Transaction and operation_may_change_schema. Private-module paths themselves remain inaccessible externally. Fragment, manifest and row-ID/transaction wrappers are now covered in their L2 entries; index metadata is now covered; row-version implementation is now covered at rust/lance-table/src/rowids/version.rs:1-1134; nested row-ID codecs are now covered at rust/lance-table/src/rowids/serde.rs:1-884; segment operations are now covered at rust/lance-table/src/rowids/segment.rs:1-1624; full sequence operations are now covered at rust/lance-table/src/rowids.rs:1-2309; row-ID index is now covered at rust/lance-table/src/rowids/index.rs:1-1641; full stream and Dataset transaction consumers remain pending."
+        ],
+        [
+          31,
+          38,
+          "Uses core Error/Result. Public Index aliases IndexMetadata with deprecated(since=0.36.1, note=Use IndexMetadata instead); the preceding comment attributes the rename to trait-name conflicts. No wrapper object or conversion is introduced."
+        ],
+        [
+          39,
+          50,
+          "Public pb module includes OUT_DIR/lance.table.rs generated during the build. Generated code relaxes the named Clippy/naming/unused/improper_ctypes lints locally. The module contains no handwritten wire definitions."
+        ],
+        [
+          51,
+          56,
+          "Manifest footer identifiers are signed i16 MAJOR_VERSION=0, MINOR_VERSION=1 and four-byte MAGIC=LANC. These are table-manifest identifiers; this file does not specify footer byte order or data-file v2 version handling."
+        ],
+        [
+          57,
+          70,
+          "TryFrom<&pb::Uuid> for uuid::Uuid rejects lengths other than16 with InvalidInput text Protobuf UUID is malformed. Otherwise copies bytes into a stack [u8;16] and constructs Uuid::from_bytes. It validates length, not UUID version/variant semantics."
+        ],
+        [
+          71,
+          78,
+          "From<&Uuid> for pb::Uuid copies the UUID bytes into a new Vec field. Conversion is infallible and does not parse or format a textual UUID."
+        ]
+      ],
+      "limits": "Only this file is analyzed; imported implementations and downstream consumers remain pending unless separately listed in the manifest. No Rust build or test was run."
+    },
+    {
+      "path": "rust/lance-table/src/io/commit.rs",
+      "module": "L1-modules/rust-lance-table-commit.md",
+      "reviewed": true,
+      "role": "Manifest naming, listing/latest/version resolution, version-hint optimization, backend routing, commit policy extension traits and concrete unsafe/lease/rename/conditional publication. Owns single-version publication and resolver policy hooks; dataset operation conflict resolution, retry/cleanup, predecessor-capable external stores and underlying atomic IO remain separate.",
+      "ranges": [
+        [
+          1,
+          24,
+          "SPDX/module docs define commit as publication of next manifest exactly once across concurrent writers and introduce CommitHandler/CommitLock. Their default-handler statements are comments to compare against actual routing below, not independently current backend guarantees; full store atomicity is outside this file."
+        ],
+        [
+          25,
+          69,
+          "Imports async streams/futures, Arc/AtomicBool/local DirEntry, manifest body writer, ObjectWriter/WriteResult/get_etag, underlying object-store APIs, tracing/log and URL. Canonical footer constants come from lance_file::format, not table format facade. external_manifest module always public; dynamodb child and AWS credentials/config helpers gated on feature dynamodb."
+        ],
+        [
+          70,
+          90,
+          "Public VERSIONS_DIR is _versions. Private extension manifest, detached prefix d and hint filename latest_version_hint.json. Public Copy/Eq ManifestNamingScheme has V1 and V2. V2 doc says _manifests, but manifest_path below uses _versions for both; zero-padding/inversion optimize lexically ordered listing, distinct from Lance data-file format version."
+        ],
+        [
+          91,
+          113,
+          "Public manifest_path borrows scheme/base and accepts u64. Detached-bit versions always become base/_versions/d{version}.manifest independent of scheme; attached V1 uses decimal version, V2 uses u64MAX-version padded to20 digits. No IO or version allocation. Lexical detached separation is naming, not visibility/commit validation."
+        ],
+        [
+          114,
+          137,
+          "parse_version parses digits before first dot without checking remaining suffix; V1 returns raw number, V2 subtracts from u64MAX. d-prefixed names fail ordinary numeric parse. parse_detached_version requires leading d and parses number before first dot, but does not enforce extension or set/check detached mask despite doc saying returned number has mask. Malformed parse returnsNone."
+        ],
+        [
+          138,
+          164,
+          "detect_scheme returnsV2 for any leading d without validating suffix or digits; otherwise requires ends_with(manifest), classifies byte length20+1+extension length asV2 and every other length asV1. detect_scheme_staging uses character index20 equals dot elseV1, without parse/extension/mask validation. These are naming heuristics, not robust file validators."
+        ],
+        [
+          165,
+          186,
+          "Public async migrate_scheme_to_v2 docs require quiescent store and completion before other work; list underlying base/_versions and retain locations with filename classifiedV1. Does not validate numeric version during filtering or wrap operation in atomic directory transaction."
+        ],
+        [
+          187,
+          198,
+          "Migration processes retained entries concurrently up to object_store.io_parallelism, unwraps filename and V1 numeric parse, builds V2 path and calls unconditional inner.rename. Malformed classifier-accepted numeric name can panic; individual rename errors propagate after prior/concurrent renames may succeed. Idempotency documented for valid complete migration, not rollback of partial work; no hint or external-index update here."
+        ],
+        [
+          199,
+          230,
+          "Public ManifestWriter is higher-ranked fn borrowing ObjectStore/Manifest/Path and owning optional indices/transaction, returning BoxFuture<Result<WriteResult>> (not merely size as comment says). Public canonical write_manifest_file_to_path returns a boxed async future: await ObjectWriter construction, body serialization, footer using lance-file constants, shutdown, then audit create and return result. Body mutations/bytes precede later failures; no cleanup/arbitration in this writer."
+        ],
+        [
+          231,
+          264,
+          "Public Clone/Debug ManifestLocation exposes version,path,size,naming_scheme,e_tag,identity. Path doc says relative root but functions construct supplied-base-qualified paths. SizeNone means unknown. ETag is opaque physical generation, explicitly not content/logical/dataset incarnation identity; None proves no sameness. identity is a distinct optional external-store manifest-record incarnation token. Generic external workflow does not persist/validate ETag; the complete child implementation is covered at rust/lance-table/src/io/commit/external_manifest.rs:1-2553."
+        ],
+        [
+          265,
+          288,
+          "TryFrom<ObjectMeta> requires filename, detected scheme and numeric parse, mapping failures to Internal with filename context. Moves path/ETag, stores Some(size), sets identityNone. d-prefixed detached metadata fails numeric parse even though detect_scheme returnsV2; detached converter is separate. No manifest bytes or version field consistency is read."
+        ],
+        [
+          289,
+          314,
+          "Private async current_manifest_path first tries synchronous current_manifest_local only for direct local paths; only Ok(Some) returns, with errors/None silently falling through. Because hint is else-if, direct-local failure bypasses hint entirely. Other stores consult hint only if uses_version_hint; success returns, otherwise full listing. Local optimization does blocking filesystem work inline in async caller."
+        ],
+        [
+          315,
+          336,
+          "Private serde VersionHint contains u64version only. Environment name LANCE_USE_VERSION_HINT is parsed once process-wide via function-local OnceLock: trimmed ASCII-lowercased 0/false/off disable; all other strings or env errors (including non-Unicode) enable. Docs mention0/false but implementation alsooff. Changes after first lookup have no effect."
+        ],
+        [
+          337,
+          354,
+          "Public uses_version_hint combines cached global enable with !list_is_lexically_ordered; storage kind names are explanatory examples, not actual routing predicates. Private hint path is base/_versions/latest_version_hint.json."
+        ],
+        [
+          355,
+          372,
+          "Public async write_version_hint no-ops for detached or nonbenefiting stores. Serialize VersionHint toVec with expect, then ordinary object_store.put; write error logs warn and is swallowed. No monotonic CAS: concurrent/out-of-order commits can overwrite hint with older version. Correctness relies on verified upward probes and fallback assumptions, not hint durability. No Result return."
+        ],
+        [
+          373,
+          386,
+          "read_version_from_hint full inner.get plus bytes then serde parse, converting all GET/body/JSON errors toNone. Returns any decodedu64 without mask/range validation, HEAD or freshness checks; caller decides fallback. Entire small-but-unbounded object is buffered."
+        ],
+        [
+          387,
+          411,
+          "read_version_hint_and_probe reads hint, calls upward probe and suppresses every error/None. Pops last collected pair and constructs location with scheme-generated path, metadata size/ETag and identityNone. Latest lookup retains all probed metadata though only last needed; no hint refresh here."
+        ],
+        [
+          412,
+          443,
+          "MAX_HINT_PROBE_GAP=1000 gates the later since-version path, not all upward probing. Probe docs assume attached versions contiguous above start and cleanup removes only old versions; first missing ends history, errors invalidate result. Private async probe returns optional(latest,scheme,Vec(version,ObjectMeta)); no explicit bound/mask check in signature."
+        ],
+        [
+          444,
+          466,
+          "Probe HEADs V2 path at starting version, falls back toV1 only on NotFound, returnsNone only when both missing. Other errors propagate. Chosen scheme remains fixed for subsequent probes; if both schemes exist V2 wins and no mixed-scheme validation occurs. Detached input maps to same d path in both attempts."
+        ],
+        [
+          467,
+          489,
+          "Store initial metadata, then sequentially HEAD version+1 in chosen scheme until NotFound; success appends metadata and advances, other errors propagate discarding local collected result. Ordinary u64 increment may overflow; crossing attached/detached boundary not guarded. Work/memory linear in successful range; no concurrency or 1000 cap here. Gaps can hide later versions under documented contiguity assumption."
+        ],
+        [
+          490,
+          526,
+          "Private since-hint reader returnsNone if hint unavailable or hint.saturating_sub(since)>1000. Starts at hint if newer, otherwise since+1. Missing newer hint triggers listing fallback; missing since+1 yields Some(empty). Any probe error falls back. Ordinary since+1 unchecked, and threshold limits initial backward gap only, not stale-hint upward distance."
+        ],
+        [
+          527,
+          540,
+          "Map probed entries newer than since into locations carrying scheme-generated path, size/ETag and identityNone; retain a Vec of all observed metadata. No byte reads or commit identity resolution."
+        ],
+        [
+          541,
+          572,
+          "If hint>since+1, fill intervening versions by HEAD in chosen scheme with buffer_unordered(io_parallelism); any error including NotFound yieldsNone for full fallback. On success append gap locations then sort descendingversion. This materializes all results and repeats requests on fallback; no minimum1 normalization shown. Local no-missing assumption does not inspect unprobed other scheme."
+        ],
+        [
+          573,
+          593,
+          "resolve_version_from_listing lists base/_versions through wrapper and filters names using detect_scheme plus successful numeric parse, skipping detached and invalid names. filename unwrap assumes list entries always have filenames; listing errors propagate. Hint JSON/temp names filter out."
+        ],
+        [
+          594,
+          618,
+          "Take first valid manifest. If schemeV2 and store advertises lexical ordering, return immediately with actual listed path/size/ETag and identityNone. Deliberately avoids checking remaining pages/scheme uniformity, assuming all manifests useV2. Thus mixed-name validation is absent on this fast path and later listing errors are unobserved."
+        ],
+        [
+          619,
+          658,
+          "Otherwise scan every valid entry, requiring same naming scheme or Internal error with migration instruction. Track highest numericversion; equalversion preserves earlier metadata. Return stored actual path/size/ETag, identityNone; zero valid entries =>NotFound(base/_versions). Stream errors abort, not best-effort partial latest."
+        ],
+        [
+          659,
+          694,
+          "Private current_manifest_local converts base/_versions to local path, synchronously read_dir and scans entries without per-entry metadata initially. Lossy filename conversion then scheme detection; scheme consistency is checked before numeric parse, so even d-prefixed unparseable names can establish/conflict with scheme. Entry/read-dir or mixed-scheme errors propagate as io errors to caller, which may fall back to listing."
+        ],
+        [
+          695,
+          722,
+          "Local scan skips failed numeric parse, retains strictly largestversion, then loads metadata only for chosen entry. Returns scheme-generated path rather than observed filename path, Some(len), get_etag(metadata) and identityNone. No file-type check; classifier-accepted directory or noncanonical name can select a reconstructed path. Empty=>Ok(None); chosen metadata failure propagates."
+        ],
+        [
+          723,
+          738,
+          "Private list_manifests streams read_dir_all and silently drops metadata-to-location conversion errors by ok(), while storage errors survive transpose. Returned boxed stream is not sorted here, does not validate uniform naming or read bytes, and excludes detached numeric parse failures."
+        ],
+        [
+          739,
+          754,
+          "Private detached converter requires filename and parse_detached_version only, moves actualpath/ETag, sets Some(size), namingV2 and identityNone. Because parser only checks d+number+dot, neither extension nor detached mask is enforced."
+        ],
+        [
+          755,
+          771,
+          "Public list_detached_manifests streams read_dir_all, maps detached converter, drops unrecognized names while preserving store errors through transpose. No sorting, payload validation, deduplication, identity lookup or mask check beyond converter."
+        ],
+        [
+          772,
+          780,
+          "Crate-visible make_staging_manifest_path generates UUIDv4, appends hyphenUUID to supplied base string, parsesPath and maps parse error to IO source; no filesystem creation or reservation. Under dynamodb feature private URL query key is exactly ddbTableName. Following doc introduces object-store resolver boundary."
+        ],
+        [
+          781,
+          799,
+          "Crate-visible default_list_manifest_locations returns the underlying boxed stream immediately when sorted_descending is false. Nested sort_stream collects every entry, propagates the first error, sorts by Reverse(version), and emits an owned stream. Memory scales with metadata entries, not manifest bytes."
+        ],
+        [
+          800,
+          834,
+          "Sorted lexical stores peek the first result: V2 passes the remaining stream through; empty or error also selects this branch so the original error remains streamed. First V1 collects and sorts. Nonlexical stores always collect and sort. No mixed-scheme validation occurs here; the optimized order assumes the first scheme applies throughout."
+        ],
+        [
+          835,
+          866,
+          "Crate-visible since-version default without hints uses descending listing and try_take_while(version > since), stopping at the first older or equal version. With hints it clones the base into a lazy future, accepts Some locations or falls back to collecting all ordinary listings, filtering and sorting. Once/try_flatten exposes the resulting stream; IO errors propagate."
+        ],
+        [
+          867,
+          899,
+          "Public async_trait CommitHandler requires Debug + Send + Sync. All concurrent writers must use the same handler type by contract. Defaults are is_version_not_found_definitive=false and propagate_commit_error_after_success=true, protecting cleanup under delayed visibility and preserving custom-handler errors after matching readback. These hooks do not themselves implement readback."
+        ],
+        [
+          900,
+          916,
+          "Default async resolve_latest_location delegates current_manifest_path; resolve_version_location delegates default_resolve_version using the underlying store. Neither decodes manifest bytes. The exact-version resolver can return an unproven fallback path."
+        ],
+        [
+          917,
+          936,
+          "Default version_exists HEADs the path from the supplied scheme: success yields true, NotFound false, other errors propagate. Although documented for attached versions, it does not reject detached input. It does not try another naming scheme or external authority; such handlers must override it."
+        ],
+        [
+          937,
+          962,
+          "Default detached listing delegates the public detached stream in arbitrary order. Default attached listing delegates the sorted/unsorted helper. Returned streams borrow the store and own needed path state. There is no implicit external authority lookup."
+        ],
+        [
+          963,
+          993,
+          "Default list_manifest_locations_since delegates the hint-aware helper. Required commit mutably borrows Manifest, owns optional indices/transaction, and receives base/store/function-pointer writer/scheme. It returns Result<ManifestLocation, CommitError>; existing versions should produce CommitConflict by contract. The trait does not enforce atomicity or callback behavior."
+        ],
+        [
+          994,
+          1019,
+          "Predecessor hooks default to unsupported: supports_predecessor_condition=false; async latest and specific identity queries return Ok(None) without IO. None means no supplied identity, not a zero version or token."
+        ],
+        [
+          1020,
+          1056,
+          "commit_after requires reservation conditioned on predecessor identity, with mismatch PrerequisiteFailed rather than conflict. Its default returns OtherError(NotSupported) without invoking the writer. Default forget_version and delete are async no-ops; neither deletes manifest objects. Identity-conditional retirement is an implementer obligation."
+        ],
+        [
+          1057,
+          1075,
+          "For detached input, default_resolve_version returns a deterministic d path with V2 and unknown size/ETag/identity without any existence check. A successful location result does not prove an object exists."
+        ],
+        [
+          1076,
+          1102,
+          "For attached input, HEAD only the V2 path. Success returns size/ETag with identity None. V2 NotFound returns a V1 path with unknown size and ETag without HEADing V1; other errors propagate. Later byte reads establish fallback existence."
+        ],
+        [
+          1103,
+          1138,
+          "DynamoDB-only OSObjectStoreToAwsCredAdaptor implements ProvideCredentials. Each future fetches provider credentials, maps errors, and creates AWS credentials with copied key/secret, cloned token, artificial expiry now+600 seconds via checked_add.expect, and empty provider name. Actual provider expiry is not preserved here. No credential values are logged."
+        ],
+        [
+          1139,
+          1170,
+          "DynamoDB builder configures latest SDK behavior, supplied region/credentials, no identity cache because the provider owns caching, and standard retry max_attempts=5 including the initial request. An optional endpoint overrides the SDK endpoint. It builds a Client and awaits child new_external_store. Child schema validation, request construction and result/error handling are now covered at rust/lance-table/src/io/commit/dynamodb.rs:162-513; no remote service was exercised."
+        ],
+        [
+          1171,
+          1198,
+          "Public commit_handler_from_url chooses Rename locally on Windows and ConditionalPut otherwise. Parse failure or a Windows single-character scheme returns local. file/file-object-store use local; s3, gs, az, abfss, memory, oss, tos, shared-memory and goosefs use ConditionalPut; cos uses TencentCosCommitHandler. This contradicts the module default-handler comments. Routing does not probe backend atomicity."
+        ],
+        [
+          1199,
+          1226,
+          "s3+ddb without the feature returns InvalidInput. With the feature, require exactly one query pair, ddbTableName, nonempty value, and both strings Cow::Borrowed. Decoding that produces owned key/value strings fails this pattern even if decoded text matches. Wrong count/key/ownership use the query diagnostic; an empty borrowed value has its own error."
+        ],
+        [
+          1227,
+          1264,
+          "For accepted DDB input, clone/default ObjectStoreParams; extract raw storage options, endpoint, S3 options, optional region, accessor and provider scheme; await credential construction with refresh offset and optional supplied credentials. Build ExternalManifestCommitHandler using app name lancedb. Delegated errors propagate. Every other parsed scheme chooses UnsafeCommitHandler."
+        ],
+        [
+          1265,
+          1273,
+          "DynamoDB endpoint lookup prefers raw option dynamodb_endpoint, including an empty string, over DYNAMODB_ENDPOINT. Missing or non-Unicode environment values become None. This environment lookup happens per invocation, unlike the cached hint setting."
+        ],
+        [
+          1274,
+          1297,
+          "Public Debug CommitError has CommitConflict and OtherError(Error). Converting from core Error wraps it. Converting back unwraps OtherError, but turns CommitConflict into Internal with text Commit conflict, losing the dedicated discriminant. No Display/Error implementation appears locally."
+        ],
+        [
+          1298,
+          1316,
+          "Global AtomicBool WARNED_ON_UNSAFE_COMMIT starts false. Public UnsafeCommitHandler advertises definitive NotFound and suppressible errors after successful readback. Its separate relaxed load/store warning guard below is not atomic test-and-set, so concurrent first uses may log more than once."
+        ],
+        [
+          1317,
+          1358,
+          "Unsafe commit warns as needed, computes final path, awaits injected writer directly there, writes the best-effort hint, and returns writer size/ETag with current manifest version and identity None. No lock, condition, staging or readback. Writer error skips the hint. A custom writer may mutate Manifest; the path was computed before that callback. Debug prints the unit type name."
+        ],
+        [
+          1359,
+          1388,
+          "Public CommitLock: Debug associates a CommitLease and asynchronously locks a version. Docs require waiting and returning conflict if already committed, and recommend at least 30 seconds of timeout; the trait supplies no TTL or fencing. CommitLease: Send + Sync releases with a success flag and should tolerate repeated calls because cancellation can trigger a later release(false)."
+        ],
+        [
+          1389,
+          1423,
+          "Private LeaseGuard owns Option<L>. Its consuming explicit release keeps the lease inside the guard while awaiting, then clears the option even when release returns Err. Completed release errors get no background retry; cancellation while awaiting leaves ownership for Drop. The expect relies on private construction and the consuming method."
+        ],
+        [
+          1424,
+          1448,
+          "Drop takes the lease and, if a current Tokio handle exists, spawns release(false), ignoring its result without warning or join. Runtime shutdown may prevent completion. Without a runtime the lease is dropped; TTL recovery mentioned in comments is not enforced by the trait. Blanket CommitHandler for a Send+Sync CommitLock with static lease sets definitive NotFound=true but retains propagate-after-success=true."
+        ],
+        [
+          1449,
+          1483,
+          "Lock commit computes a path, awaits acquisition, then wraps the returned lease immediately. Under the lease, HEAD success releases(false) before returning conflict; NotFound proceeds; other HEAD errors release(false) before returning the error. Release failures take precedence through ?. Cancellation during acquisition has no guard yet and is the custom lock responsibility."
+        ],
+        [
+          1484,
+          1503,
+          "Await the writer under the lease and retain its Result. Release with res.is_ok() before unwrapping that result. A release error can mask a writer error or report failure after successful publication. Only successful write and release reach hint writing and the returned location. No renewal, fencing or CAS is implemented; safety depends on effective shared locking."
+        ],
+        [
+          1504,
+          1540,
+          "The Arc<T: CommitLock + Send + Sync> CommitHandler implementation forwards the definitive and propagation hooks plus commit arguments to the inner value. Other methods retain trait defaults. This is not a general Arc<dyn CommitHandler> adapter."
+        ],
+        [
+          1541,
+          1578,
+          "Public RenameCommitHandler requires atomic rename-if-absent by contract, sets definitive NotFound=true and propagate-after-success=false. Compute final and UUID staging paths, await the writer at staging, then invoke underlying rename_if_not_exists. Writer errors and cancellation have no cleanup guard here."
+        ],
+        [
+          1579,
+          1611,
+          "Rename success writes the hint and returns writer size but no ETag because renaming may change it. AlreadyExists tries deleting staging, ignores cleanup errors, and returns conflict. Other rename errors return OtherError without cleanup. Therefore the comment about cleaning up on failure is broader than implementation. Ambiguous transport outcomes need caller recovery. Debug prints the unit name."
+        ],
+        [
+          1612,
+          1647,
+          "Public ConditionalPutCommitHandler has definitive NotFound=true and propagate-after-success=false. It creates a fresh memory store, calls the injected writer at dummy, ignores its WriteResult, then reads all dummy bytes and derives actual size. Manifest mutations precede durable publication, and complete serialized bytes remain in memory. A callback that does not create dummy fails at readback."
+        ],
+        [
+          1648,
+          1678,
+          "Publish full bytes through inner.put_opts with PutMode::Create and default remaining options. AlreadyExists or Precondition maps to conflict; other errors map to OtherError. Success writes the hint and returns actual byte size and put ETag, identity None. No local retry, predecessor condition or incarnation protection. Atomicity depends on backend Create semantics; cancellation may leave an unknown outcome."
+        ],
+        [
+          1679,
+          1723,
+          "Conditional Debug prints its unit name. Private TencentCosCommitHandler documents bucket-versioning history as the reason conditional create is unsafe; this is source rationale, not live validation. It retains default reads/listings and definitive NotFound=true, while commit immediately returns NotSupported requesting a distributed Python commit_lock or custom Rust handler. No callback or storage invocation. Propagation policy remains the default true."
+        ],
+        [
+          1724,
+          1748,
+          "Public PredecessorIdentity derives Clone/Eq and stores version plus String identity; physical-incarnation uniqueness is a handler contract rather than type validation. Public CommitConfig has num_retries:u32 and skip_auto_cleanup:bool, defaulting to 20 and false. The isolation-level TODO has no field. This file declares configuration but does not run retry or cleanup loops."
+        ],
+        [
+          1749,
+          1781,
+          "Private test module imports synchronization counters, TempObjDir and ProxyObjectStore policy. Naming fixture checks attached versions 0/42 under V1 decimal and V2 inverted 20-digit filenames, both in base/_versions. No detached generation, staging detection or malformed names are tested here."
+        ],
+        [
+          1782,
+          1803,
+          "The naming fixture parses attached 0/42 and staged UUID-suffix variants under both schemes, detects ordinary V1/V2 names and rejects unrelated text. Parsing accepts suffix text after the first dot whereas detection is stricter. Mixed schemes and numeric overflow are not tested."
+        ],
+        [
+          1804,
+          1836,
+          "Migration memory fixture writes an irrelevant empty object, V1 version 0 and V2 version 1; its comment misstates the count/types. It migrates once and asserts the exact listed paths. No second invocation, concurrent rename, malformed name or collision case establishes idempotency or recovery."
+        ],
+        [
+          1837,
+          1872,
+          "Sorted-list matrix crosses lexical flag with V1/V2. Lexical uses memory; nonlexical uses a real local store and asserts its flag is false. Twelve empty manifest-named objects are written from 11 down to 0. Sorted handler listing must return exact paths in that order. No bytes are decoded."
+        ],
+        [
+          1873,
+          1899,
+          "Current-path matrix crosses lexical flag with V1/V2 but uses memory for both, avoiding the direct-local optimization. Shuffled versions 0 through 11 must resolve to version 11 with matching scheme/path. Changing the flag selects the algorithm without making memory listing physically unordered."
+        ],
+        [
+          1900,
+          1927,
+          "non_lexical_memory_store changes only the memory wrapper ordering flag. Hint-write fixture asserts no hint for lexical stores, then writes and reads 42 followed by 100 on the nonlexical wrapper. Tests depend on the cached global environment setting; no explicit override is installed."
+        ],
+        [
+          1928,
+          1948,
+          "Writing detached mask|7 must leave hint 100 unchanged. Replacing the hint with non-JSON bytes must read as None. Failed put warnings, backward overwrites, environment parsing and maximum version are not tested."
+        ],
+        [
+          1949,
+          1979,
+          "V1/V2 hint-probe matrix starts with missing hint None, creates versions 1 through 5, writes stale hint 3, and expects latest 5 with the chosen scheme. It assumes contiguous history and does not inject transport errors."
+        ],
+        [
+          1980,
+          1995,
+          "The probe fixture then writes hint 5 and expects latest 5; nonexistent future hint 10 returns None. It does not measure HEAD count or inspect generation tokens."
+        ],
+        [
+          1996,
+          2032,
+          "Since-hint fixture creates V2 versions 1 through 10. Missing hint returns None; hint 10 with since 10 gives Some(empty); since 7 gives descending [10,9,8], exercising gap filling. It asserts versions, not token values or concurrency limits."
+        ],
+        [
+          2033,
+          2051,
+          "The same since fixture writes stale hint 8 and still expects [10,9,8], then future hint 20 returns None. No threshold-above-1000, intermediate gap, hint-behind-since or overflow case appears here."
+        ],
+        [
+          2052,
+          2071,
+          "Nonlexical current-path fixture writes V2 versions 1 through 100 and hint 98, then expects version 100. This is memory-store simulation, not S3 Express performance or IO-count evidence."
+        ],
+        [
+          2072,
+          2089,
+          "Future-hint fallback fixture stores only V2 version 5 but hint 10; current_manifest_path must return 5. It does not count listing calls or inject HEAD/GET errors."
+        ],
+        [
+          2090,
+          2117,
+          "Detached parser fixture accepts d12345.manifest as Some(12345), explicitly without the detached mask, and also accepts d2^63. It rejects unprefixed decimal, ordinary V2 and a d-number with no dot. Thus parser/tests do not enforce the mask implied by documentation; alternate extensions and overflow remain untested."
+        ],
+        [
+          2118,
+          2143,
+          "Detached-list fixture writes regular V2 versions 1/2/3 and three d-prefixed versions mask|100/200/300 as empty objects. Detached names are constructed manually; no manifest payload is serialized."
+        ],
+        [
+          2144,
+          2162,
+          "Collect detached listing, require three results all marked V2, sort found and expected version vectors, then compare. Output order, paths, sizes, ETags and mask rejection are not asserted."
+        ],
+        [
+          2163,
+          2186,
+          "Nine URL cases memory/shared-memory/s3/gs/az/abfss/oss/tos/goosefs call the factory with no options and assert the ConditionalPutCommitHandler Debug name. They test routing only, not remote credentials, storage or atomic create. Local, unknown and DDB routing are absent from this fixture."
+        ],
+        [
+          2187,
+          2216,
+          "TrackingLock and TrackingLease share an AtomicBool. Lock returns immediately regardless of version; release ignores its success argument and stores true with SeqCst ordering. They track invocation but do not serialize writers or model TTL."
+        ],
+        [
+          2217,
+          2262,
+          "HangingReleaseLock/Lease share a call counter and released flag. The first release increments the counter then remains pending forever; later calls mark released. Success is ignored. This models cancellation during explicit release, not a real distributed lease."
+        ],
+        [
+          2263,
+          2292,
+          "succeeding_manifest_writer immediately returns default WriteResult without writing any object or mutating Manifest. test_manifest constructs nonnullable Int32 i, empty fragments/base paths and resolved Stable storage. The fake allows lease tests to reach release without proving publication."
+        ],
+        [
+          2293,
+          2319,
+          "COS fixture asserts factory Debug name, then calls commit with memory store, fake writer and V2. It requires OtherError(NotSupported) with distributed commit_lock in the message. It does not instrument callback invocation or qualify custom COS locking."
+        ],
+        [
+          2320,
+          2333,
+          "hanging_manifest_writer ignores every argument and returns a permanently pending future followed by unreachable code. No IO occurs; it models cancellation while the commit owns a lease."
+        ],
+        [
+          2334,
+          2363,
+          "First cancellation fixture creates TrackingLock and invokes commit with the hanging writer. A 50 ms timeout must expire. The missing-path HEAD precedes the writer, but no separate signal asserts which stage was reached."
+        ],
+        [
+          2364,
+          2376,
+          "After timeout, poll released up to 100 times with 10 ms sleeps and require true. This checks background release invocation under Tokio, not its success flag, TTL/fencing, no-runtime behavior or runtime shutdown."
+        ],
+        [
+          2377,
+          2409,
+          "Second cancellation fixture uses HangingReleaseLock and the successful fake writer, again requiring a 50 ms timeout. Explicit release(true) hangs on its first call; the fake writer has not actually published a manifest."
+        ],
+        [
+          2410,
+          2428,
+          "Poll the released flag up to 100 times at 10 ms and require exactly two release calls: one hung explicit call and one drop-path attempt. Completed release errors, background errors and cancellation before acquisition are not covered."
+        ],
+        [
+          2429,
+          2463,
+          "Lexical resolver regression has clean(false,1) and leftover_staging(true,2) cases. It writes V2 versions 0 through 9 and optionally a UUID staging name for version 10 that sorts before version 9. Comments relate pulled entries to billing, but this fixture counts metadata events, not cloud requests/pages/billing."
+        ],
+        [
+          2464,
+          2490,
+          "Proxy policy increments an AtomicUsize only for list metadata and passes entries unchanged. Resolve latest, assert version 9 and counts 1 or 2. This pins stopping at the first valid entry and staging-name filtering in memory. No concurrent write, error, mixed scheme or backend pagination case. All source tests were read, not run."
+        ]
+      ],
+      "limits": "All 2490 physical lines read in complete bounded outputs and assigned authored contiguous ranges, including every local test. No source builds/tests or remote storage calls performed. Cloud behavior claims are source contracts/rationale, not measured guarantees. ExternalManifestCommitHandler, DynamoDB implementation and complete Dataset commit orchestration remain pending."
+    }
+  ],
+  "corrections": [
+    {
+      "path": "rust/lance-core/src/cache/key.rs",
+      "range": [
+        342,
+        355
+      ],
+      "before": "92b2b75604ed3c761f9d6f62392c8a9227ad0ea3f09573e7f83f14980d6d0d26",
+      "after": "92b2b75604ed3c761f9d6f62392c8a9227ad0ea3f09573e783f1498a4ed60d26",
+      "reason": "Random claim 3: repair hexadecimal transcription to match all 32 source bytes."
+    },
+    {
+      "path": "rust/lance-table/src/transaction/index_maintenance.rs",
+      "range": [
+        1179,
+        1230
+      ],
+      "before": "actually retains the valid empty vector index while removing invalid-field metadata",
+      "after": "actually retains both valid empty vector definitions (vec1 and vec2) while removing invalid-field metadata",
+      "reason": "Random claim 12: make the retained count explicit; the test asserts two definitions survive."
+    },
+    {
+      "path": "rust/lance-table/src/format.rs",
+      "range": [
+        15,
+        30
+      ],
+      "before": "row-ID index, full stream and transaction consumers remain pending.",
+      "after": "row-ID index is now covered at rust/lance-table/src/rowids/index.rs:1-1641; full stream and Dataset transaction consumers remain pending.",
+      "reason": "Coverage-note refresh after ANALYZE50."
+    },
+    {
+      "path": "rust/lance-table/src/io/commit.rs",
+      "range": [
+        231,
+        264
+      ],
+      "before": "Generic external workflow promises not to persist/validate ETag; implementation is separate pending child.",
+      "after": "Generic external workflow does not persist/validate ETag; the complete child implementation is covered at rust/lance-table/src/io/commit/external_manifest.rs:1-2553.",
+      "reason": "Sampled declaration audit found a superseded child-coverage note."
+    },
+    {
+      "path": "rust/lance-table/src/io/commit.rs",
+      "range": [
+        1139,
+        1170
+      ],
+      "before": "Child schema and remote IO behavior remain pending.",
+      "after": "Child schema validation, request construction and result/error handling are now covered at rust/lance-table/src/io/commit/dynamodb.rs:162-513; no remote service was exercised.",
+      "reason": "Sampled declaration audit found a superseded DynamoDB-coverage note."
+    },
+    {
+      "path": "L1-modules/rust-lance-table-io.md",
+      "before": "while concrete backends and full Dataset retry/conflict remain pending.",
+      "after": "and the concrete DynamoDB store is covered in its supplement; namespace stores and full Dataset retry/conflict remain pending.",
+      "reason": "Coverage-note refresh after child analysis."
+    },
+    {
+      "path": "L1-modules/rust-lance-table-io.md",
+      "before": "Concrete backends and full Dataset integration remain pending.",
+      "after": "DynamoDB is covered in its supplement; namespace stores and full Dataset integration remain pending.",
+      "reason": "Coverage-note refresh after child analysis."
+    },
+    {
+      "path": "L1-modules/rust-lance-table.md",
+      "before": "commit arbitration and backends remain pending.",
+      "after": "local commit arbitration, generic external authority and DynamoDB are covered in their supplements; namespace authority and full Dataset orchestration remain pending.",
+      "reason": "Coverage-note refresh after child analysis."
+    },
+    {
+      "path": "L1-modules/rust-lance-table.md",
+      "before": "concrete backends and full Dataset conflict/retry/cleanup remain pending.",
+      "after": "DynamoDB is covered in its supplement; namespace authority and full Dataset conflict/retry/cleanup remain pending.",
+      "reason": "Coverage-note refresh after child analysis."
+    },
+    {
+      "path": "L4-crosscutting/scenarios.md",
+      "before": "Dataset conflict rebasing, retries, uncertain-outcome interpretation, concrete backends and cleanup still prevent a complete transaction acceptance answer.",
+      "after": "Dataset conflict rebasing, retries, uncertain-outcome interpretation, namespace authority and cleanup still prevent a complete transaction acceptance answer.",
+      "reason": "KB-only acceptance review found superseded backend-coverage wording."
+    },
+    {
+      "path": "L4-crosscutting/cookbook.md",
+      "before": "complete integration still requires concrete backend and Dataset retry/cleanup analysis.",
+      "after": "DynamoDB request/schema analysis is covered below, while namespace and full Dataset retry/cleanup integration remain pending.",
+      "reason": "KB-only acceptance review found superseded backend-coverage wording."
+    },
+    {
+      "path": "L4-crosscutting/cookbook.md",
+      "before": "Concrete backend schema and Dataset integration are still pending.",
+      "after": "DynamoDB schema is covered below; predecessor-capable namespace authority and full Dataset integration remain pending.",
+      "reason": "KB-only acceptance review found superseded backend-coverage wording."
+    }
+  ]
+}

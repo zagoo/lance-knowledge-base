@@ -1,0 +1,24 @@
+@@ -36,6 +36,8 @@
+   36  //! A [`TakeExec`] or row-stream [`FilteredReadExec`] in the chain (the
+   37  //! scanner's own late materialization behind a filter) is dropped: the take
+   38  //! above the sort fetches its columns instead.
+   39 +//! Row-stream reads with a physical row selection prevent the rewrite, since
+   40 +//! dropping them would remove a restriction that must apply before sorting.
+   41  
+   42  use std::collections::HashSet;
+   43  use std::fmt::{Debug, Formatter};
+
+@@ -165,8 +167,12 @@ impl TopKLateMaterialization {
+  167                  if read.row_stream_input().is_none() {
+  168                      break;
+  169                  }
+  170 +                if read.options().physical_row_addr_prefilter.is_some() {
+  171 +                    return Err("row-stream read has a physical row selection".into());
+  172 +                }
+  173                  // Row-stream reads take every input row: their constructor
+  169 -                // rejects filters, scan ranges, and deleted rows.
+  174 +                // rejects filters, scan ranges, and deleted rows, and the
+  175 +                // guard above excludes physical row selections.
+  176                  dropped_takes.push(read.dataset().clone());
+  177              } else if let Some(take) = current.downcast_ref::<TakeExec>() {
+  178                  dropped_takes.push(take.dataset().clone());
